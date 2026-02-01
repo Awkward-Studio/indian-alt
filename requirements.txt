@@ -1,0 +1,22 @@
+# Django Core
+Django==5.1.5
+djangorestframework==3.15.2
+
+# Database
+psycopg[binary]==3.2.3
+
+# JWT Authentication
+djangorestframework-simplejwt==5.3.1
+
+# API Documentation
+drf-spectacular==0.27.2
+
+# Environment Variables
+python-decouple==3.8
+
+# CORS (for frontend integration)
+django-cors-headers==4.4.0
+
+# Additional utilities
+django-extensions==3.2.3
+django-filter==24.3
