@@ -1,6 +1,6 @@
 # Django Core
 Django==5.1.5
-djangorestframework==3.15.2
+djangorestframework==3.16.1
 
 # Database
 psycopg[binary]==3.2.3
@@ -14,9 +14,21 @@ drf-spectacular==0.27.2
 # Environment Variables
 python-decouple==3.8
 
+# Database URL parsing (Railway provides DATABASE_URL)
+dj-database-url==2.2.0
+
 # CORS (for frontend integration)
 django-cors-headers==4.4.0
 
 # Additional utilities
 django-extensions==3.2.3
 django-filter==24.3
+
+# Production server + static files
+gunicorn==22.0.0
+whitenoise==6.7.0
+
+# Microsoft Graph API
+# Using requests 2.27.1 for compatibility with djangorestframework
+# (requests 2.28.0+ removed packages.urllib3 that DRF uses)
+requests==2.27.1

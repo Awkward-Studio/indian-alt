@@ -3,7 +3,8 @@ import uuid
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
@@ -12,6 +13,18 @@ from .models import Version
 from .serializers import VersionSerializer
 
 logger = logging.getLogger(__name__)
+
+
+class HealthCheckView(APIView):
+    """
+    Lightweight health check endpoint for deploy platforms (e.g., Railway).
+    Intentionally unauthenticated.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 @extend_schema_view(

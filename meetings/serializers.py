@@ -5,6 +5,18 @@ from contacts.serializers import ContactListSerializer
 from accounts.serializers import ProfileListSerializer
 
 
+def get_contact_queryset():
+    """Lazy import to avoid circular dependencies."""
+    from contacts.models import Contact
+    return Contact.objects.all()
+
+
+def get_profile_queryset():
+    """Lazy import to avoid circular dependencies."""
+    from accounts.models import Profile
+    return Profile.objects.all()
+
+
 class MeetingContactSerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(source='contact.name', read_only=True)
     contact_email = serializers.EmailField(source='contact.email', read_only=True)
@@ -32,26 +44,18 @@ class MeetingSerializer(serializers.ModelSerializer):
     # Write-only fields for accepting IDs during create/update
     contact_ids = serializers.PrimaryKeyRelatedField(
         many=True,
-        queryset=None,  # Set in __init__ to avoid circular imports
+        queryset=get_contact_queryset(),
         write_only=True,
         required=False,
         source='contacts'
     )
     profile_ids = serializers.PrimaryKeyRelatedField(
         many=True,
-        queryset=None,  # Set in __init__ to avoid circular imports
+        queryset=get_profile_queryset(),
         write_only=True,
         required=False,
         source='profiles'
     )
-    
-    def __init__(self, *args, **kwargs):
-        # Lazy import to avoid circular dependency issues
-        super().__init__(*args, **kwargs)
-        from contacts.models import Contact
-        from accounts.models import Profile
-        self.fields['contact_ids'].queryset = Contact.objects.all()
-        self.fields['profile_ids'].queryset = Profile.objects.all()
     
     class Meta:
         model = Meeting

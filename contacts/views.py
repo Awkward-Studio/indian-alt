@@ -1,10 +1,21 @@
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from drf_spectacular.utils import extend_schema_view
+from django_filters import FilterSet, CharFilter
+from drf_spectacular.utils import extend_schema_view, extend_schema
 from core.mixins import ErrorHandlingMixin
 from .models import Contact
 from .serializers import ContactSerializer, ContactListSerializer
+
+
+class ContactFilterSet(FilterSet):
+    """Custom filter set for Contact model to handle ArrayField."""
+    # Use 'contains' lookup for ArrayField instead of 'exact'
+    sector_coverage = CharFilter(field_name='sector_coverage', lookup_expr='contains')
+    
+    class Meta:
+        model = Contact
+        fields = ['bank', 'sector_coverage']
 
 
 @extend_schema_view(
@@ -47,7 +58,7 @@ class ContactViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     search_fields = ['name', 'email', 'designation', 'location']
     ordering_fields = ['name', 'email', 'created_at']
     ordering = ['-created_at']
-    filterset_fields = ['bank', 'sector_coverage']
+    filterset_class = ContactFilterSet
     
     def get_serializer_class(self):
         # Use lightweight serializer for list to reduce response size

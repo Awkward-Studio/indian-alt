@@ -3,7 +3,8 @@ from django.db import models
 from django.contrib.postgres.fields import ArrayField
 from banks.models import Bank
 from contacts.models import Contact
-from requests.models import Request
+# Use string reference to avoid import collision with HTTP requests library
+# Using string reference 'api_requests.Request' in ForeignKey to avoid circular imports
 
 
 class DealPriority(models.TextChoices):
@@ -50,7 +51,7 @@ class Deal(models.Model):
     business_proposal_stage = models.BooleanField(default=False)
     ic_stage = models.BooleanField(default=False)
     request = models.ForeignKey(
-        Request,
+        'api_requests.Request',  # String reference to avoid import collision
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

@@ -7,14 +7,9 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
 
-# Database - can use SQLite for local dev if needed
-# Uncomment to use SQLite instead of PostgreSQL
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
-#     }
-# }
+# Database
+# Base settings default to SQLite unless DATABASE_URL is provided.
+# For local Postgres, set DATABASE_URL in .env and USE_SQLITE=false.
 
 # Email backend for development
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
