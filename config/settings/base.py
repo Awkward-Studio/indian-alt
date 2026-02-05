@@ -40,6 +40,15 @@ INSTALLED_APPS = [
     'emails',
 ]
 
+def _csv_list(value: str):
+    items = [s.strip() for s in (value or "").split(",") if s.strip()]
+    return items
+
+def _allowed_hosts(value: str):
+    hosts = _csv_list(value)
+    # If ALLOWED_HOSTS is missing/empty, do not brick deploy healthchecks.
+    return hosts or ["*"]
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     # WhiteNoise for static files in production
@@ -165,6 +174,10 @@ CORS_ALLOWED_ORIGINS = config(
     cast=Csv()
 )
 CORS_ALLOW_CREDENTIALS = True
+
+# Hosts
+# Railway assigns the domain after first deploy, so default to '*' unless you set ALLOWED_HOSTS explicitly.
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=_allowed_hosts)
 
 # Database (will be overridden in local/production)
 #

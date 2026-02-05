@@ -5,6 +5,7 @@ from .base import *
 
 DEBUG = True
 
+# Local dev default; can still be overridden by ALLOWED_HOSTS env var (handled in base.py)
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
 
 # Database
