@@ -5,11 +5,12 @@ from .base import *
 
 DEBUG = False
 
-ALLOWED_HOSTS = config(
-    'ALLOWED_HOSTS',
-    default='*',
-    cast=lambda v: [s.strip() for s in v.split(',') if s.strip()]
-)
+def _csv_hosts(value: str):
+    hosts = [s.strip() for s in (value or "").split(",") if s.strip()]
+    # If someone sets ALLOWED_HOSTS="" in Railway by mistake, don't brick startup/healthchecks.
+    return hosts or ["*"]
+
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=_csv_hosts)
 
 # If you're using Railway's default domain, set this in Railway Variables
 # e.g. CSRF_TRUSTED_ORIGINS=https://your-app.up.railway.app
