@@ -1,6 +1,5 @@
 import uuid
 from django.db import models
-from django.contrib.postgres.fields import ArrayField
 from banks.models import Bank
 
 
@@ -20,19 +19,17 @@ class Contact(models.Model):
         db_column='bank_id'
     )
     location = models.TextField(blank=True, null=True)
-    # Array of profile UUIDs - stored as PostgreSQL array, not FK relationship
-    responsibility = ArrayField(
-        models.UUIDField(),
+    # Array of profile UUIDs - stored as JSON list for SQLite/Postgres compatibility
+    responsibility = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of profile UUIDs responsible for this contact'
     )
     phone = models.TextField(blank=True, null=True)
-    # Required field - contacts must have at least one sector coverage area
-    sector_coverage = ArrayField(
-        models.TextField(),
+    # Contacts should have at least one sector coverage area (enforced at app level)
+    sector_coverage = models.JSONField(
         default=list,
-        blank=False,
+        blank=True,
         help_text='Array of sector coverage areas'
     )
     rank = models.TextField(blank=True, null=True)

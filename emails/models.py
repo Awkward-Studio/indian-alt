@@ -3,7 +3,6 @@ Email models for storing email data from Microsoft Graph API.
 """
 import uuid
 from django.db import models
-from django.contrib.postgres.fields import ArrayField
 from django.core.validators import EmailValidator
 
 
@@ -69,7 +68,7 @@ class Email(models.Model):
         related_name='emails',
         help_text='Email account this email belongs to'
     )
-    
+
     # Graph API identifiers
     graph_id = models.CharField(
         max_length=255,
@@ -84,29 +83,27 @@ class Email(models.Model):
         db_index=True,
         help_text='Internet Message ID (unique email identifier)'
     )
-    
+
     # Core email fields
     subject = models.TextField(blank=True, null=True)
     from_email = models.EmailField(blank=True, null=True)
-    to_emails = ArrayField(
-        models.EmailField(),
+    # Stored as JSON lists for SQLite/Postgres compatibility
+    to_emails = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of recipient email addresses'
     )
-    cc_emails = ArrayField(
-        models.EmailField(),
+    cc_emails = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of CC email addresses'
     )
-    bcc_emails = ArrayField(
-        models.EmailField(),
+    bcc_emails = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of BCC email addresses'
     )
-    
+
     # Email body
     body_text = models.TextField(blank=True, null=True, help_text='Plain text email body')
     body_html = models.TextField(blank=True, null=True, help_text='HTML email body')
@@ -115,13 +112,13 @@ class Email(models.Model):
         null=True,
         help_text='Email body preview from Graph API'
     )
-    
+
     # Rich metadata from Graph API
     date_received = models.DateTimeField(null=True, blank=True)
     date_sent = models.DateTimeField(null=True, blank=True)
     created_date_time = models.DateTimeField(null=True, blank=True)
     last_modified_date_time = models.DateTimeField(null=True, blank=True)
-    
+
     importance = models.CharField(
         max_length=10,
         choices=EmailImportance.choices,
@@ -131,14 +128,13 @@ class Email(models.Model):
     )
     is_read = models.BooleanField(default=False)
     is_read_receipt_requested = models.BooleanField(default=False)
-    
+
     # Conversation threading
     conversation_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     conversation_index = models.TextField(blank=True, null=True)
-    
+
     # Categories and flags
-    categories = ArrayField(
-        models.CharField(max_length=100),
+    categories = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of email categories'
@@ -149,32 +145,32 @@ class Email(models.Model):
         null=True,
         help_text='Follow-up flag status from Graph API'
     )
-    
+
     # Attachments and links
     has_attachments = models.BooleanField(default=False)
     web_link = models.URLField(blank=True, null=True, help_text='Outlook web link')
-    
+
     # Extended metadata
     graph_metadata = models.JSONField(
         default=dict,
         blank=True,
         help_text='Additional Graph API fields stored as JSON'
     )
-    
+
     # Attachments metadata
     attachments = models.JSONField(
         default=list,
         blank=True,
         help_text='Attachment metadata from Graph API (filename, content_type, size, etc.)'
     )
-    
+
     # Status for AI processing
     is_processed = models.BooleanField(
         default=False,
         help_text='Whether email has been processed by AI'
     )
     processed_at = models.DateTimeField(null=True, blank=True)
-    
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

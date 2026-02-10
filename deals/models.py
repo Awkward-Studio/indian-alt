@@ -1,6 +1,5 @@
 import uuid
 from django.db import models
-from django.contrib.postgres.fields import ArrayField
 from banks.models import Bank
 from contacts.models import Contact
 # Use string reference to avoid import collision with HTTP requests library
@@ -58,9 +57,9 @@ class Deal(models.Model):
         related_name='deals',
         db_column='request_id'
     )
-    # Array of profile UUIDs - stored as PostgreSQL array, not FK relationship
-    responsibility = ArrayField(
-        models.UUIDField(),
+    # Originally: ArrayField(models.UUIDField(), ...) for Postgres.
+    # Now stored as JSON list for SQLite/Postgres compatibility.
+    responsibility = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of profile UUIDs responsible for this deal'
@@ -69,10 +68,10 @@ class Deal(models.Model):
     city = models.TextField(blank=True, null=True)
     state = models.TextField(blank=True, null=True)
     country = models.TextField(blank=True, null=True)
-    # Array of contact UUIDs - stored as PostgreSQL array, not FK relationship
-    # Used for additional contacts beyond the primary_contact
-    other_contacts = ArrayField(
-        models.UUIDField(),
+    # Originally: ArrayField(models.UUIDField(), ...) for Postgres.
+    # Used for additional contacts beyond the primary_contact.
+    # Now stored as JSON list for SQLite/Postgres compatibility.
+    other_contacts = models.JSONField(
         default=list,
         blank=True,
         null=True,
@@ -89,8 +88,9 @@ class Deal(models.Model):
     fund = models.TextField(default='FUND3')
     legacy_investment_bank = models.TextField(blank=True, null=True)
     priority_rationale = models.TextField(blank=True, null=True)
-    themes = ArrayField(
-        models.TextField(),
+    # Originally: ArrayField(models.TextField(), ...) for Postgres.
+    # Now stored as JSON list for SQLite/Postgres compatibility.
+    themes = models.JSONField(
         default=list,
         blank=True,
         help_text='Array of theme tags'
