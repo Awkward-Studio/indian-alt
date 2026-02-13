@@ -6,7 +6,7 @@ from .base import *
 DEBUG = True
 
 # Local dev default; can still be overridden by ALLOWED_HOSTS env var (handled in base.py)
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', '192.168.1.34']
 
 # Database
 # Base settings default to SQLite unless DATABASE_URL is provided.

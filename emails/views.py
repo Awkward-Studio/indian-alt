@@ -188,6 +188,20 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
                 required=False,
                 description='Only fetch emails received after this date (ISO format)'
             ),
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Search query for Graph API ($search)'
+            ),
+            OpenApiParameter(
+                name='return_emails',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Whether to return the list of fetched emails'
+            ),
         ],
         responses={200: EmailFetchSerializer},
     )
@@ -197,6 +211,8 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
         try:
             limit = request.query_params.get('limit')
             since_str = request.query_params.get('since')
+            search_query = request.query_params.get('search')
+            return_emails = request.query_params.get('return_emails', 'false').lower() == 'true'
             
             limit = int(limit) if limit else None
             since = None
@@ -215,7 +231,9 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
             email_reader = EmailReaderService()
             results = email_reader.fetch_all_active_accounts(
                 limit_per_account=limit,
-                since=since
+                since=since,
+                search_query=search_query,
+                return_emails=return_emails
             )
             
             serializer = EmailFetchSerializer(results)
@@ -234,6 +252,56 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
             return Response(
                 {
                     'error': 'Failed to fetch emails',
+                    'details': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Sync and return emails",
+        description="Fetch emails for all active accounts and return the fetched email objects.",
+        tags=["Email Fetching"],
+        parameters=[
+            OpenApiParameter(
+                name='limit',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Maximum number of emails to fetch per account'
+            ),
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Search query for Graph API ($search)'
+            ),
+        ],
+        responses={200: EmailFetchSerializer},
+    )
+    @action(detail=False, methods=['post'])
+    def sync(self, request):
+        """Trigger sync and return emails."""
+        try:
+            limit = request.query_params.get('limit')
+            search_query = request.query_params.get('search')
+            limit = int(limit) if limit else 50  # Default to 50 for sync
+            
+            email_reader = EmailReaderService()
+            results = email_reader.fetch_all_active_accounts(
+                limit_per_account=limit,
+                search_query=search_query,
+                return_emails=True
+            )
+            
+            serializer = EmailFetchSerializer(results)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in sync: {str(e)}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Failed to sync emails',
                     'details': str(e)
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -265,10 +333,24 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
                 required=False,
                 description='Only fetch emails received after this date (ISO format)'
             ),
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Search query for Graph API ($search)'
+            ),
+            OpenApiParameter(
+                name='return_emails',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Whether to return the list of fetched emails'
+            ),
         ],
         responses={200: EmailFetchSerializer},
     )
-    @action(detail=False, methods=['post'], url_path='fetch/(?P<email>[^/.]+)')
+    @action(detail=False, methods=['post'], url_path='fetch/(?P<email>[^/]+)')
     def fetch_account(self, request, email=None):
         """Fetch emails for a specific email account."""
         try:
@@ -294,6 +376,8 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
             
             limit = request.query_params.get('limit')
             since_str = request.query_params.get('since')
+            search_query = request.query_params.get('search')
+            return_emails = request.query_params.get('return_emails', 'false').lower() == 'true'
             
             limit = int(limit) if limit else None
             since = None
@@ -313,7 +397,9 @@ class EmailFetchViewSet(ErrorHandlingMixin, viewsets.ViewSet):
             result = email_reader.fetch_emails_for_account(
                 email_account=email_account,
                 limit=limit,
-                since=since
+                since=since,
+                search_query=search_query,
+                return_emails=return_emails
             )
             
             serializer = EmailFetchSerializer(result)

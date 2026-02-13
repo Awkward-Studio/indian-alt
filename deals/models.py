@@ -57,12 +57,12 @@ class Deal(models.Model):
         related_name='deals',
         db_column='request_id'
     )
-    # Originally: ArrayField(models.UUIDField(), ...) for Postgres.
-    # Now stored as JSON list for SQLite/Postgres compatibility.
-    responsibility = models.JSONField(
-        default=list,
+    # Responsible users for this deal
+    responsibility = models.ManyToManyField(
+        'accounts.Profile',
+        related_name='deals',
         blank=True,
-        help_text='Array of profile UUIDs responsible for this deal'
+        help_text='Profiles responsible for this deal'
     )
     reasons_for_passing = models.TextField(blank=True, null=True)
     city = models.TextField(blank=True, null=True)

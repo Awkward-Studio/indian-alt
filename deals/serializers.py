@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import Deal
+from accounts.models import Profile
 
 
 class DealSerializer(serializers.ModelSerializer):
@@ -9,6 +10,13 @@ class DealSerializer(serializers.ModelSerializer):
         read_only=True
     )
     request_status = serializers.CharField(source='request.status', read_only=True)
+    
+    # Allow passing a list of Profile IDs (UUIDs)
+    responsibility = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Profile.objects.all(),
+        required=False
+    )
     
     class Meta:
         model = Deal
@@ -28,6 +36,7 @@ class DealListSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'created_at',
             'deal_summary', 'industry', 'sector', 'primary_contact',
-            'primary_contact_name', 'fund', 'themes'
+            'primary_contact_name', 'fund', 'themes', 'responsibility',
+            'funding_ask', 'funding_ask_for'
         )
         read_only_fields = ('id', 'created_at')

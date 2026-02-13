@@ -11,10 +11,10 @@ class Profile(models.Model):
         related_name='profile',
         null=True,
         blank=True,
-        help_text='Link to Django User (optional, for compatibility)'
+        help_text='Link to Django User for authentication'
     )
     name = models.TextField(blank=True, null=True)
-    email = models.EmailField()
+    email = models.EmailField(unique=True)
     image_url = models.URLField(blank=True, null=True)
     is_admin = models.BooleanField(default=False)
     initials = models.CharField(max_length=10, blank=True, null=True)

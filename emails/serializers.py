@@ -66,8 +66,10 @@ class EmailListSerializer(serializers.ModelSerializer):
         model = Email
         fields = (
             'id', 'email_account', 'email_account_email', 'subject',
-            'from_email', 'date_received', 'date_sent', 'importance',
-            'is_read', 'has_attachments', 'body_preview', 'created_at'
+            'from_email', 'to_emails', 'cc_emails', 'bcc_emails',
+            'date_received', 'date_sent', 'importance', 'is_read',
+            'has_attachments', 'body_preview', 'body_text', 'body_html',
+            'created_at'
         )
         read_only_fields = ('id', 'created_at')
 
@@ -83,6 +85,7 @@ class EmailFetchSerializer(serializers.Serializer):
     count = serializers.IntegerField(required=False)
     new_count = serializers.IntegerField(required=False)
     updated_count = serializers.IntegerField(required=False)
+    emails = EmailListSerializer(many=True, required=False)
     errors = serializers.ListField(
         child=serializers.CharField(),
         required=False
