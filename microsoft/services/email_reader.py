@@ -31,27 +31,25 @@ class EmailReaderService:
     def _parse_email_addresses(self, recipients: List[Dict]) -> List[str]:
         """
         Parse email addresses from Graph API recipient format.
-        
-        Args:
-            recipients: List of recipient objects from Graph API
-            
-        Returns:
-            List of email address strings
         """
         if not recipients:
             return []
         
         emails = []
         for recipient in recipients:
+            logger.debug(f"Parsing recipient raw data: {recipient}")
             if isinstance(recipient, dict):
-                email = recipient.get('emailAddress', {}).get('address')
-                if email:
-                    emails.append(email)
+                # Try various possible nested structures from Graph API
+                email_obj = recipient.get('emailAddress') or recipient
+                if isinstance(email_obj, dict):
+                    email = email_obj.get('address') or email_obj.get('EmailAddress', {}).get('Address')
+                    if email:
+                        emails.append(email)
             elif isinstance(recipient, str):
                 emails.append(recipient)
         
         return emails
-    
+
     def _parse_email_body(self, body: Dict) -> tuple:
         """
         Parse email body from Graph API format.
@@ -69,10 +67,13 @@ class EmailReaderService:
         content_type = body.get('contentType', 'text')
         
         if content_type == 'html':
-            return '', content
+            # If we only have HTML, we return it as HTML
+            # We also return a plain version if possible, but for now we just 
+            # ensure both aren't empty if content exists
+            return content if not content.startswith('<') else '', content
         else:
             return content, ''
-    
+
     def _convert_graph_email_to_model(
         self,
         graph_email: Dict[str, Any],
@@ -80,18 +81,19 @@ class EmailReaderService:
     ) -> Dict[str, Any]:
         """
         Convert Graph API email response to Email model fields.
-        
-        Args:
-            graph_email: Email data from Graph API
-            email_account: EmailAccount instance
-            
-        Returns:
-            Dictionary of model field values
         """
+        # CRITICAL: Log the entire raw object for debugging
+        import json
+        logger.info(f"--- RAW GRAPH EMAIL OBJECT START ---")
+        logger.info(json.dumps(graph_email, indent=2))
+        logger.info(f"--- RAW GRAPH EMAIL OBJECT END ---")
+
         # Parse recipients
         to_emails = self._parse_email_addresses(graph_email.get('toRecipients', []))
         cc_emails = self._parse_email_addresses(graph_email.get('ccRecipients', []))
         bcc_emails = self._parse_email_addresses(graph_email.get('bccRecipients', []))
+        
+        logger.info(f"Parsed Recipients - To: {to_emails}, CC: {cc_emails}, BCC: {bcc_emails}")
         
         # Parse from email
         from_data = graph_email.get('from', {})
@@ -187,7 +189,9 @@ class EmailReaderService:
         self,
         email_account: EmailAccount,
         limit: Optional[int] = None,
-        since: Optional[datetime] = None
+        since: Optional[datetime] = None,
+        search_query: Optional[str] = None,
+        return_emails: bool = False
     ) -> Dict[str, Any]:
         """
         Fetch emails for a specific email account.
@@ -196,6 +200,8 @@ class EmailReaderService:
             email_account: EmailAccount instance to fetch emails for
             limit: Maximum number of emails to fetch (None = no limit)
             since: Only fetch emails received after this datetime
+            search_query: Optional search query for Graph API
+            return_emails: Whether to return the list of email objects
             
         Returns:
             Dictionary with fetch results (count, errors, etc.)
@@ -205,7 +211,11 @@ class EmailReaderService:
             return {
                 'success': False,
                 'error': 'Email account is not active',
-                'count': 0
+                'count': 0,
+                'new_count': 0,
+                'updated_count': 0,
+                'emails': [],
+                'errors': ['Email account is not active']
             }
         
         logger.info(f"Fetching emails for account: {email_account.email}")
@@ -215,6 +225,7 @@ class EmailReaderService:
             'count': 0,
             'new_count': 0,
             'updated_count': 0,
+            'emails': [],
             'errors': []
         }
         
@@ -237,7 +248,8 @@ class EmailReaderService:
                         user_email=email_account.email,
                         top=min(top, 100),  # Graph API max is 100
                         skip=skip,
-                        filter_query=filter_query
+                        filter_query=filter_query,
+                        search_query=search_query
                     )
                     
                     messages = response.get('value', [])
@@ -267,6 +279,9 @@ class EmailReaderService:
                                     result['new_count'] += 1
                                 else:
                                     result['updated_count'] += 1
+                                
+                                if return_emails:
+                                    result['emails'].append(email)
                                 
                                 result['count'] += 1
                                 total_fetched += 1
@@ -320,7 +335,9 @@ class EmailReaderService:
     def fetch_all_active_accounts(
         self,
         limit_per_account: Optional[int] = None,
-        since: Optional[datetime] = None
+        since: Optional[datetime] = None,
+        search_query: Optional[str] = None,
+        return_emails: bool = False
     ) -> Dict[str, Any]:
         """
         Fetch emails for all active email accounts.
@@ -328,6 +345,8 @@ class EmailReaderService:
         Args:
             limit_per_account: Maximum emails per account (None = no limit)
             since: Only fetch emails received after this datetime
+            search_query: Optional search query for Graph API
+            return_emails: Whether to return the list of email objects
             
         Returns:
             Dictionary with results for all accounts
@@ -337,10 +356,12 @@ class EmailReaderService:
         logger.info(f"Fetching emails for {active_accounts.count()} active accounts")
         
         results = {
+            'success': True,
             'total_accounts': active_accounts.count(),
             'successful_accounts': 0,
             'failed_accounts': 0,
             'total_emails': 0,
+            'emails': [],
             'account_results': {}
         }
         
@@ -348,10 +369,16 @@ class EmailReaderService:
             account_result = self.fetch_emails_for_account(
                 email_account=account,
                 limit=limit_per_account,
-                since=since
+                since=since,
+                search_query=search_query,
+                return_emails=return_emails
             )
             
-            results['account_results'][account.email] = account_result
+            # Copy result and remove emails list for the per-account summary
+            summary_result = account_result.copy()
+            account_emails = summary_result.pop('emails', [])
+            
+            results['account_results'][account.email] = summary_result
             
             if account_result['success']:
                 results['successful_accounts'] += 1
@@ -359,6 +386,8 @@ class EmailReaderService:
                 results['failed_accounts'] += 1
             
             results['total_emails'] += account_result['count']
+            if return_emails:
+                results['emails'].extend(account_emails)
         
         logger.info(
             f"Completed fetching for all accounts: "
@@ -368,3 +397,4 @@ class EmailReaderService:
         )
         
         return results
+

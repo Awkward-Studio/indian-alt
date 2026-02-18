@@ -214,6 +214,7 @@ class GraphAPIService:
         top: int = 100,
         skip: int = 0,
         filter_query: Optional[str] = None,
+        search_query: Optional[str] = None,
         order_by: str = 'receivedDateTime desc'
     ) -> Dict[str, Any]:
         """
@@ -224,6 +225,7 @@ class GraphAPIService:
             top: Maximum number of messages to return
             skip: Number of messages to skip
             filter_query: OData filter query (e.g., "receivedDateTime gt 2024-01-01T00:00:00Z")
+            search_query: Microsoft Graph search query (e.g., "subject:project")
             order_by: Order by clause (default: receivedDateTime desc)
             
         Returns:
@@ -245,6 +247,9 @@ class GraphAPIService:
         
         if filter_query:
             params['$filter'] = filter_query
+            
+        if search_query:
+            params['$search'] = f'"{search_query}"'
         
         return self._make_request('GET', endpoint, params=params)
     
