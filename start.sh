@@ -4,6 +4,9 @@
 
 set -e  # Exit on error
 
+echo "Fixing app label (one-time: emails -> microsoft)..."
+python manage.py fix_app_label
+
 echo "Running database migrations..."
 python manage.py migrate --noinput
 

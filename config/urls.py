@@ -41,5 +41,5 @@ urlpatterns = [
     path('api/meetings/', include('meetings.urls')),
     path('api/core/', include('core.urls')),
     path('api/accounts/', include('accounts.urls')),
-    path('api/emails/', include('emails.urls')),
+    path('api/microsoft/', include('microsoft.urls')),
 ]

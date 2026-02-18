@@ -66,7 +66,7 @@ class Migration(migrations.Migration):
                 ('processed_at', models.DateTimeField(blank=True, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('email_account', models.ForeignKey(help_text='Email account this email belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='emails', to='emails.emailaccount')),
+                ('email_account', models.ForeignKey(help_text='Email account this email belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='emails', to='microsoft.emailaccount')),
             ],
             options={
                 'verbose_name': 'Email',

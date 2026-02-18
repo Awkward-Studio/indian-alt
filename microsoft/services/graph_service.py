@@ -1,10 +1,11 @@
 """
-Microsoft Graph API service for authentication and email operations.
+Microsoft Graph API service for authentication, email, and OneDrive operations.
 
 This service handles:
 - OAuth 2.0 client credentials flow (Application permissions)
 - Token management and caching
 - Email fetching from Microsoft Graph API
+- OneDrive file/folder browsing
 - Error handling and retry logic
 """
 import logging
@@ -13,7 +14,7 @@ from typing import Optional, Dict, List, Any
 from django.conf import settings
 from django.core.cache import cache
 from decouple import config
-import requests  # HTTP requests library (fixed in emails/__init__.py)
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,19 @@ class GraphAPIService:
                     headers['Authorization'] = f'Bearer {token}'
                     continue
                 
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # Include the actual error body from Microsoft
+                    try:
+                        error_body = response.json()
+                        error_msg = error_body.get('error', {}).get('message', response.text)
+                    except Exception:
+                        error_msg = response.text
+                    logger.error(f"Graph API {response.status_code}: {error_msg}")
+                    raise requests.exceptions.HTTPError(
+                        f"{response.status_code}: {error_msg}",
+                        response=response,
+                    )
+
                 return response.json()
                 
             except requests.exceptions.Timeout:
@@ -190,7 +203,11 @@ class GraphAPIService:
                 raise Exception(f"Graph API request failed: {str(e)}")
         
         raise Exception(f"Failed to complete request after {retry_count} attempts")
-    
+
+    # ------------------------------------------------------------------ #
+    #                        Email Operations                             #
+    # ------------------------------------------------------------------ #
+
     def get_user_messages(
         self,
         user_email: str,
@@ -269,3 +286,85 @@ class GraphAPIService:
         endpoint = f"/users/{user_email}/messages/{message_id}/attachments"
         response = self._make_request('GET', endpoint)
         return response.get('value', [])
+
+    # ------------------------------------------------------------------ #
+    #                        OneDrive Operations                          #
+    # ------------------------------------------------------------------ #
+
+    def get_drive_root_children(
+        self,
+        user_email: str,
+        top: int = 100,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        List files and folders in a user's OneDrive root directory.
+
+        Args:
+            user_email: Email address (UPN) of the drive owner.
+            top: Maximum number of items to return.
+
+        Returns:
+            Graph API response containing drive items.
+        """
+        endpoint = f"/users/{user_email}/drive/root/children"
+        params = {
+            '$top': top,
+            '$select': (
+                'id,name,size,createdDateTime,lastModifiedDateTime,'
+                'webUrl,folder,file,parentReference'
+            ),
+        }
+        return self._make_request('GET', endpoint, params=params)
+
+    def get_drive_folder_children(
+        self,
+        user_email: str,
+        folder_id: str,
+        top: int = 100,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        List files and folders inside a specific OneDrive folder.
+
+        Args:
+            user_email: Email address (UPN) of the drive owner.
+            folder_id: Graph API item-id of the folder.
+            top: Maximum number of items to return.
+
+        Returns:
+            Graph API response containing drive items.
+        """
+        endpoint = f"/users/{user_email}/drive/items/{folder_id}/children"
+        params = {
+            '$top': top,
+            '$select': (
+                'id,name,size,createdDateTime,lastModifiedDateTime,'
+                'webUrl,folder,file,parentReference'
+            ),
+        }
+        return self._make_request('GET', endpoint, params=params)
+
+    def get_drive_item(
+        self,
+        user_email: str,
+        item_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Get metadata for a single drive item (file or folder).
+
+        Args:
+            user_email: Email address (UPN) of the drive owner.
+            item_id: Graph API item-id.
+
+        Returns:
+            Drive item metadata from Graph API.
+        """
+        endpoint = f"/users/{user_email}/drive/items/{item_id}"
+        params = {
+            '$select': (
+                'id,name,size,createdDateTime,lastModifiedDateTime,'
+                'webUrl,folder,file,parentReference'
+            ),
+        }
+        return self._make_request('GET', endpoint, params=params)

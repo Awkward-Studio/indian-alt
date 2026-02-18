@@ -37,7 +37,7 @@ INSTALLED_APPS = [
     'deals',
     'meetings',
     'api_requests',
-    'emails',
+    'microsoft',
 ]
 
 def _csv_list(value: str):

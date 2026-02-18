@@ -12,8 +12,8 @@ import logging
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from datetime import datetime, timedelta
-from emails.models import EmailAccount
-from emails.services.email_reader import EmailReaderService
+from microsoft.models import EmailAccount
+from microsoft.services.email_reader import EmailReaderService
 
 logger = logging.getLogger(__name__)
 
