@@ -5,10 +5,8 @@ from .base import *
 
 DEBUG = True
 
-# Local dev default; can still be overridden by ALLOWED_HOSTS env var (handled in base.py)
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', '192.168.1.34']
-
 # Database
+ALLOWED_HOSTS = ['*']
 # Base settings default to SQLite unless DATABASE_URL is provided.
 # For local Postgres, set DATABASE_URL in .env and USE_SQLITE=false.
 

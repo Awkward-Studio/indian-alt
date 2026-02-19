@@ -125,6 +125,57 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
         ],
         responses={200: EmailListSerializer(many=True)},
     )
+    
+    @extend_schema(
+        summary='Process contacts from all existing emails',
+        description='Iterate through all stored emails and create contacts from From/CC fields if they do not exist.',
+        tags=['Emails'],
+        responses={200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'count': {'type': 'integer'}}}}
+    )
+
+    @extend_schema(
+        summary='Process contacts from all existing emails',
+        description='Iterate through all stored emails and create contacts from From/CC fields if they do not exist.',
+        tags=['Emails'],
+        responses={200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'new_count': {'type': 'integer'}}}}
+    )
+    @action(detail=False, methods=['post'])
+    def process_contacts(self, request):
+        """Process all existing emails to extract contacts."""
+        try:
+            from contacts.models import Contact
+            emails = Email.objects.all()
+            new_count = 0
+            
+            for email in emails:
+                addresses = []
+                if email.from_email: addresses.append(email.from_email)
+                if email.cc_emails: addresses.extend(email.cc_emails)
+                
+                for addr in addresses:
+                    if not addr or '@' not in addr: continue
+                    addr_lower = addr.lower().strip()
+                    
+                    if not Contact.objects.filter(email__iexact=addr_lower).exists():
+                        try:
+                            Contact.objects.create(
+                                name=addr_lower.split('@')[0],
+                                email=addr_lower,
+                                designation='Auto-created from Archive'
+                            )
+                            new_count += 1
+                        except Exception as e:
+                            logger.error(f'Failed to auto-create contact {addr_lower}: {str(e)}')
+                    
+            return Response({'success': True, 'new_count': new_count}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f'Global error in process_contacts: {str(e)}')
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        except Exception as e:
+            logger.error(f'Global error in process_contacts: {str(e)}')
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=False, methods=['get'])
     def by_account(self, request):
         """Get emails for a specific email account."""
@@ -617,24 +668,54 @@ class OneDriveListView(APIView):
         # ---- call Graph API ----
         try:
             graph = GraphAPIService()
+            data = None
 
-            if folder_id:
-                data = graph.get_drive_folder_children(
-                    user_email=user_email,
-                    folder_id=folder_id,
-                    top=top,
-                    skip=skip,
-                )
-            else:
-                data = graph.get_drive_root_children(
-                    user_email=user_email,
-                    top=top,
-                    skip=skip,
-                )
+            try:
+                if folder_id:
+                    # If we have a folder_id, first try the standard user-based route
+                    data = graph.get_drive_folder_children(
+                        user_email=user_email,
+                        folder_id=folder_id,
+                        top=top,
+                        skip=skip,
+                    )
+                else:
+                    data = graph.get_drive_root_children(
+                        user_email=user_email,
+                        top=top,
+                        skip=skip,
+                    )
+            except Exception as e:
+                # Fallback: Try Team/Group drives if personal OneDrive not found or access denied
+                if 'mysite' in str(e) or 'not found' in str(e).lower() or '403' in str(e):
+                    try:
+                        user_obj = graph._make_request('GET', f'/users/{user_email}')
+                        user_id = user_obj.get('id')
+                        joined_teams = graph._make_request('GET', f'/users/{user_id}/joinedTeams')
+                        
+                        if joined_teams.get('value'):
+                            # Use the first team's drive
+                            team_id = joined_teams['value'][0]['id']
+                            drive = graph._make_request('GET', f'/groups/{team_id}/drive')
+                            drive_id = drive.get('id')
+                            
+                            if folder_id:
+                                # CRITICAL: When using a specific Drive ID, the folder ID must exist in THAT drive
+                                data = graph._make_request('GET', f'/drives/{drive_id}/items/{folder_id}/children', params={'': top, '': skip})
+                            else:
+                                data = graph._make_request('GET', f'/drives/{drive_id}/root/children', params={'': top, '': skip})
+                        else:
+                            raise e
+                    except Exception as fallback_err:
+                        logger.error(f'Fallback failed: {str(fallback_err)}')
+                        raise e
+                else:
+                    raise e
+
+            if not data:
+                raise Exception("Failed to retrieve drive data")
 
             items = data.get('value', [])
-
-            # Determine if there is a next page
             next_link = data.get('@odata.nextLink')
             next_skip = skip + top if next_link else None
 
@@ -652,6 +733,15 @@ class OneDriveListView(APIView):
             return Response(
                 {
                     'error': 'Configuration error',
+                    'details': str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as e:
+            logger.error(f"OneDrive list error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Failed to fetch OneDrive items',
                     'details': str(e),
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,

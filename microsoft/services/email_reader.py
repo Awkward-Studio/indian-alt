@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.db import transaction
 from .graph_service import GraphAPIService
 from ..models import EmailAccount, Email
+from contacts.models import Contact
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,14 @@ class EmailReaderService:
         
         emails = []
         for recipient in recipients:
-            logger.debug(f"Parsing recipient raw data: {recipient}")
             if isinstance(recipient, dict):
-                # Try various possible nested structures from Graph API
-                email_obj = recipient.get('emailAddress') or recipient
-                if isinstance(email_obj, dict):
-                    email = email_obj.get('address') or email_obj.get('EmailAddress', {}).get('Address')
-                    if email:
-                        emails.append(email)
+                # Graph API usually returns {'emailAddress': {'name': '...', 'address': '...'}}
+                email_addr_obj = recipient.get('emailAddress', {})
+                email = email_addr_obj.get('address')
+                if email:
+                    emails.append(email)
+                elif 'address' in recipient: # Direct address in dict
+                    emails.append(recipient['address'])
             elif isinstance(recipient, str):
                 emails.append(recipient)
         
@@ -70,7 +71,7 @@ class EmailReaderService:
             # If we only have HTML, we return it as HTML
             # We also return a plain version if possible, but for now we just 
             # ensure both aren't empty if content exists
-            return content if not content.startswith('<') else '', content
+            return content, content
         else:
             return content, ''
 
@@ -82,18 +83,10 @@ class EmailReaderService:
         """
         Convert Graph API email response to Email model fields.
         """
-        # CRITICAL: Log the entire raw object for debugging
-        import json
-        logger.info(f"--- RAW GRAPH EMAIL OBJECT START ---")
-        logger.info(json.dumps(graph_email, indent=2))
-        logger.info(f"--- RAW GRAPH EMAIL OBJECT END ---")
-
         # Parse recipients
         to_emails = self._parse_email_addresses(graph_email.get('toRecipients', []))
         cc_emails = self._parse_email_addresses(graph_email.get('ccRecipients', []))
         bcc_emails = self._parse_email_addresses(graph_email.get('bccRecipients', []))
-        
-        logger.info(f"Parsed Recipients - To: {to_emails}, CC: {cc_emails}, BCC: {bcc_emails}")
         
         # Parse from email
         from_data = graph_email.get('from', {})
@@ -185,6 +178,40 @@ class EmailReaderService:
         
         return model_data
     
+
+    def _process_contacts_from_email(self, graph_email: Dict[str, Any]):
+        """
+        Extract and create contacts from From and CC fields if they don't exist.
+        """
+        recipients = []
+        
+        # 1. Add From
+        from_data = graph_email.get('from', {})
+        if isinstance(from_data, dict):
+            recipients.append(from_data.get('emailAddress', {}))
+            
+        # 2. Add CCs
+        cc_data = graph_email.get('ccRecipients', [])
+        for cc in cc_data:
+            recipients.append(cc.get('emailAddress', {}))
+            
+        for r in recipients:
+            email = r.get('address')
+            name = r.get('name')
+            
+            if email and '@' in email:
+                # Check if contact already exists
+                if not Contact.objects.filter(email__iexact=email).exists():
+                    try:
+                        Contact.objects.create(
+                            name=name or email.split('@')[0],
+                            email=email.lower(),
+                            designation='Auto-created from Email'
+                        )
+                        logger.info(f'Auto-created contact: {email}')
+                    except Exception as e:
+                        logger.error(f'Failed to auto-create contact {email}: {str(e)}')
+
     def fetch_emails_for_account(
         self,
         email_account: EmailAccount,

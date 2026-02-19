@@ -373,3 +373,8 @@ class GraphAPIService:
             ),
         }
         return self._make_request('GET', endpoint, params=params)
+
+    def get_user_drives(self, user_email: str) -> Dict[str, Any]:
+        """List all drives a user has access to."""
+        endpoint = f"/users/{user_email}/drives"
+        return self._make_request('GET', endpoint)
