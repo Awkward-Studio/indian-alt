@@ -280,17 +280,18 @@ class GraphAPIService:
     def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict[str, Any]]:
         """
         Get attachments for a specific message.
-        
-        Args:
-            user_email: Email address of the user
-            message_id: Graph API message ID
-            
-        Returns:
-            List of attachment metadata
         """
         endpoint = f"/users/{user_email}/messages/{message_id}/attachments"
         response = self._make_request('GET', endpoint)
         return response.get('value', [])
+
+    def get_attachment_content(self, user_email: str, message_id: str, attachment_id: str) -> Dict[str, Any]:
+        """
+        Get the actual content of a specific attachment.
+        For file attachments, this includes the base64 contentBytes.
+        """
+        endpoint = f"/users/{user_email}/messages/{message_id}/attachments/{attachment_id}"
+        return self._make_request('GET', endpoint)
 
     # ------------------------------------------------------------------ #
     #                        OneDrive Operations                          #
@@ -373,6 +374,25 @@ class GraphAPIService:
             ),
         }
         return self._make_request('GET', endpoint, params=params)
+
+    def get_drive_item_content(
+        self,
+        user_email: str,
+        item_id: str,
+    ) -> bytes:
+        """
+        Download the content of a file from OneDrive.
+        
+        Returns:
+            Binary file content.
+        """
+        token = self.get_access_token()
+        endpoint = f"{self.graph_endpoint}/users/{user_email}/drive/items/{item_id}/content"
+        headers = {'Authorization': f'Bearer {token}'}
+        
+        response = requests.get(endpoint, headers=headers, timeout=120)
+        response.raise_for_status()
+        return response.content
 
     def get_user_drives(self, user_email: str) -> Dict[str, Any]:
         """List all drives a user has access to."""

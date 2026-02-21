@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'meetings',
     'api_requests',
     'microsoft',
+    'ai_orchestrator',
 ]
 
 def _csv_list(value: str):

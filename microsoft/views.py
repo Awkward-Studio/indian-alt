@@ -22,6 +22,8 @@ from .serializers import (
 )
 from .services.email_reader import EmailReaderService
 from .services.graph_service import GraphAPIService
+from ai_orchestrator.services.ai_processor import AIProcessorService
+from ai_orchestrator.services.document_processor import DocumentProcessorService
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,84 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             return EmailListSerializer
         return EmailSerializer
     
+    @extend_schema(
+        summary="Analyze an email with AI",
+        description="Process the content of a specific email using the AI orchestration service. Also processes attachments (PDF, Excel, Images) if present.",
+        tags=["Emails"],
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    @action(detail=True, methods=['post'])
+    def analyze(self, request, pk=None):
+        """Analyze a specific email with AI, including attachments."""
+        try:
+            email = self.get_object()
+            graph = GraphAPIService()
+            doc_processor = DocumentProcessorService()
+            
+            # 1. Base content from email body
+            content = email.body_html if email.body_html else email.body_text
+            metadata = {
+                'from_email': email.from_email,
+                'subject': email.subject,
+                'date_received': email.date_received.isoformat() if email.date_received else 'Unknown'
+            }
+            
+            # 2. Process Attachments if any
+            images = []
+            attachment_context = ""
+            
+            if email.has_attachments:
+                attachments = graph.get_message_attachments(email.email_account.email, email.graph_id)
+                for att in attachments:
+                    att_id = att.get('id')
+                    filename = att.get('name', 'attachment')
+                    content_type = att.get('contentType', '')
+                    
+                    # Fetch actual content
+                    full_att = graph.get_attachment_content(email.email_account.email, email.graph_id, att_id)
+                    content_bytes_b64 = full_att.get('contentBytes')
+                    
+                    if not content_bytes_b64:
+                        continue
+                        
+                    import base64
+                    content_bytes = base64.b64decode(content_bytes_b64)
+                    
+                    # If image, add to vision context
+                    if content_type.startswith('image/'):
+                        images.append(content_bytes_b64)
+                    else:
+                        # Extract text from document
+                        text = doc_processor.extract_text(content_bytes, filename)
+                        if text:
+                            attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
+            
+            # Combine body + attachment text
+            full_context = content + attachment_context
+            
+            # 3. Analyze with AI
+            ai_service = AIProcessorService()
+            result = ai_service.process_content(
+                content=full_context,
+                metadata=metadata,
+                source_id=str(email.id),
+                source_type="email",
+                images=images if images else None
+            )
+            
+            # Update email status if successful
+            if "error" not in result:
+                email.is_processed = True
+                from django.utils import timezone
+                email.processed_at = timezone.now()
+                email.save(update_fields=['is_processed', 'processed_at'])
+            
+            return Response(result, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error in analyze email: {str(e)}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @extend_schema(
         summary="Get emails for a specific account",
         description="Retrieve all emails for a specific email account.",
@@ -746,12 +826,58 @@ class OneDriveListView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        except Exception as e:
-            logger.error(f"OneDrive list error: {e}", exc_info=True)
-            return Response(
-                {
-                    'error': 'Failed to fetch OneDrive items',
-                    'details': str(e),
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+
+
+class AnalyzeOneDriveFileView(APIView):
+    """
+    Analyze a file from OneDrive using the AI Orchestrator.
+    Downloads the file, extracts text, and sends it to the LLM.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Analyze a OneDrive file with AI",
+        description="Downloads a specific file from OneDrive, extracts its text content, and analyzes it using the AI orchestration service.",
+        tags=["OneDrive"],
+        parameters=[
+            OpenApiParameter(name='user_email', type=OpenApiTypes.EMAIL, location=OpenApiParameter.QUERY, required=True),
+            OpenApiParameter(name='file_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+            OpenApiParameter(name='filename', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+        ],
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    def post(self, request):
+        user_email = request.query_params.get('user_email')
+        file_id = request.query_params.get('file_id')
+        filename = request.query_params.get('filename')
+
+        if not all([user_email, file_id, filename]):
+            return Response({'error': 'Missing required parameters: user_email, file_id, filename'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # 1. Download file content from Graph API
+            graph = GraphAPIService()
+            file_content = graph.get_drive_item_content(user_email, file_id)
+            
+            if not file_content:
+                return Response({'error': 'Failed to download file content'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # 2. Extract text from content
+            doc_processor = DocumentProcessorService()
+            extracted_text = doc_processor.extract_text(file_content, filename)
+            
+            # 3. Analyze with AI
+            ai_service = AIProcessorService()
+            result = ai_service.process_content(
+                content=extracted_text,
+                skill_name="document_analysis",
+                metadata={'filename': filename},
+                source_id=file_id,
+                source_type="onedrive_file"
             )
+            
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error analyzing OneDrive file: {str(e)}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

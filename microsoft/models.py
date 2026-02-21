@@ -169,6 +169,19 @@ class Email(models.Model):
         default=False,
         help_text='Whether email has been processed by AI'
     )
+    processing_status = models.CharField(
+        max_length=20,
+        default='idle',
+        choices=[
+            ('idle', 'Idle'),
+            ('pending', 'Pending'),
+            ('processing', 'Processing'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed'),
+        ],
+        help_text='Status of the background AI processing task'
+    )
+    processing_error = models.TextField(blank=True, null=True)
     processed_at = models.DateTimeField(null=True, blank=True)
 
     # Timestamps

@@ -6,10 +6,17 @@ All URLs are mounted at /api/microsoft/ in config/urls.py, giving:
     /api/microsoft/emails/emails/       — email list/detail (read-only)
     /api/microsoft/emails/fetch/        — email fetch triggers
     /api/microsoft/onedrive/files/      — OneDrive file/folder browsing
+    /api/microsoft/onedrive/analyze/    — OneDrive file analysis with AI
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import EmailAccountViewSet, EmailViewSet, EmailFetchViewSet, OneDriveListView
+from .views import (
+    EmailAccountViewSet, 
+    EmailViewSet, 
+    EmailFetchViewSet, 
+    OneDriveListView,
+    AnalyzeOneDriveFileView
+)
 
 # Email-related routers
 email_router = DefaultRouter()
@@ -23,4 +30,5 @@ urlpatterns = [
 
     # OneDrive endpoints: /api/microsoft/onedrive/...
     path('onedrive/files/', OneDriveListView.as_view(), name='onedrive-list'),
+    path('onedrive/analyze/', AnalyzeOneDriveFileView.as_view(), name='onedrive-analyze'),
 ]

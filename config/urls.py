@@ -42,4 +42,5 @@ urlpatterns = [
     path('api/core/', include('core.urls')),
     path('api/accounts/', include('accounts.urls')),
     path('api/microsoft/', include('microsoft.urls')),
+    path('api/ai/', include('ai_orchestrator.urls')),
 ]
