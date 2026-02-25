@@ -68,10 +68,11 @@ class EmailReaderService:
         content_type = body.get('contentType', 'text')
         
         if content_type == 'html':
-            # If we only have HTML, we return it as HTML
-            # We also return a plain version if possible, but for now we just 
-            # ensure both aren't empty if content exists
-            return content, content
+            # Strip HTML tags to produce a plain-text version for body_text
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            plain_text = soup.get_text(separator='\n', strip=True)
+            return plain_text, content
         else:
             return content, ''
 
@@ -257,12 +258,10 @@ class EmailReaderService:
         }
         
         try:
-            # Build filter query if since date provided
-            filter_query = None
+            # Format the since date as ISO string for the Graph API filter
+            since_str = None
             if since:
-                # Format for OData: receivedDateTime gt 2024-01-01T00:00:00Z
                 since_str = since.strftime('%Y-%m-%dT%H:%M:%SZ')
-                filter_query = f"receivedDateTime gt {since_str}"
             
             # Fetch emails from Graph API
             top = limit if limit else 100
@@ -271,12 +270,12 @@ class EmailReaderService:
             
             while True:
                 try:
-                    response = self.graph_service.get_user_messages(
+                    response = self.graph_service.get_messages(
                         user_email=email_account.email,
                         top=min(top, 100),  # Graph API max is 100
                         skip=skip,
-                        filter_query=filter_query,
-                        search_query=search_query
+                        since=since_str,
+                        search=search_query
                     )
                     
                     messages = response.get('value', [])

@@ -2,24 +2,32 @@
 Management command to list files and folders from OneDrive via Microsoft Graph API.
 
 Usage:
+    # Root of the DMS shared folder (default):
+    python manage.py list_onedrive --email dms-demo@india-alt.com
+
+    # Drill into a subfolder by item ID:
+    python manage.py list_onedrive --email dms-demo@india-alt.com --item-id ITEM_ID
+
+    # Custom drive / path:
+    python manage.py list_onedrive --email dms-demo@india-alt.com --drive-id DRIVE --path "My/Path"
+
+    # Access via sharing URL:
     python manage.py list_onedrive --email dms-demo@india-alt.com --shared-url "https://..."
-    python manage.py list_onedrive --email dms-demo@india-alt.com --drive-id DRIVE_ID --path "Desktop/DMS Update/..."
-    python manage.py list_onedrive --email dms-demo@india-alt.com --drive-id DRIVE_ID --item-id ITEM_ID
 """
 import json
 import logging
 from django.core.management.base import BaseCommand, CommandError
-from microsoft.services.graph_service import GraphAPIService
+from microsoft.services.graph_service import (
+    GraphAPIService,
+    DMS_DRIVE_ID,
+    DMS_FOLDER_PATH,
+)
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded known values for the DMS shared folder
-DMS_DRIVE_ID = 'b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg'
-DMS_FOLDER_PATH = 'Desktop/DMS Update/3. DMS Dataroom - shared folder'
-
 
 class Command(BaseCommand):
-    """Management command to list OneDrive files and folders."""
+    """List files and folders from OneDrive / SharePoint via Microsoft Graph API."""
 
     help = 'List files and folders from OneDrive/SharePoint via Microsoft Graph API'
 
@@ -55,6 +63,12 @@ class Command(BaseCommand):
             help='SharePoint/OneDrive sharing URL to access directly',
         )
         parser.add_argument(
+            '--limit',
+            type=int,
+            default=200,
+            help='Maximum number of items to fetch (default 200)',
+        )
+        parser.add_argument(
             '--json',
             action='store_true',
             dest='output_json',
@@ -72,6 +86,7 @@ class Command(BaseCommand):
         folder_path = options.get('path') or DMS_FOLDER_PATH
         item_id = options.get('item_id')
         shared_url = options.get('shared_url')
+        limit = options['limit']
         output_json = options.get('output_json', False)
 
         self.stdout.write(f'Fetching OneDrive items for {email} ...')
@@ -79,17 +94,21 @@ class Command(BaseCommand):
         try:
             if options.get('mock'):
                 from microsoft.views import ONEDRIVE_MOCK_DATA
-                items = ONEDRIVE_MOCK_DATA[:50]
+                items = ONEDRIVE_MOCK_DATA[:limit]
                 data = {'value': items}
             else:
                 graph = GraphAPIService()
 
                 if shared_url:
-                    data = graph.list_shared_folder(user_email=email, sharing_url=shared_url)
+                    data = graph.list_shared_folder(sharing_url=shared_url, user_email=email)
                 elif item_id:
-                    data = graph.get_drive_item_children(user_email=email, drive_id=drive_id, item_id=item_id)
+                    data = graph.get_drive_item_children(
+                        drive_id=drive_id, item_id=item_id, user_email=email, top=limit,
+                    )
                 else:
-                    data = graph.list_folder_by_drive_path(user_email=email, drive_id=drive_id, folder_path=folder_path)
+                    data = graph.list_folder_by_drive_path(
+                        drive_id=drive_id, folder_path=folder_path, user_email=email, top=limit,
+                    )
 
                 items = data.get('value', [])
 
@@ -119,7 +138,7 @@ class Command(BaseCommand):
                 name = item.get('name', '???')
                 size = item.get('size', 0)
                 modified = item.get('lastModifiedDateTime', '')[:19].replace('T', ' ')
-                item_id = item.get('id', '')
+                row_id = item.get('id', '')
 
                 # Format size
                 if is_folder:
@@ -132,19 +151,19 @@ class Command(BaseCommand):
                 else:
                     size_str = f'{size} B'
 
-                # Color based on type
+                # Colour based on type
                 type_display = self.style.WARNING(f'{item_type:<8}') if is_folder else f'{item_type:<8}'
 
                 self.stdout.write(
-                    f'{type_display} {name:<40} {size_str:<12} {modified:<22} {item_id}'
+                    f'{type_display} {name:<40} {size_str:<12} {modified:<22} {row_id}'
                 )
 
-            # Footer
+            # Footer — hint when more data exists
             next_link = data.get('@odata.nextLink')
             if next_link:
                 self.stdout.write(
                     self.style.NOTICE(
-                        f'\nMore items available. Use --limit {limit + 50} to see more.'
+                        f'\nMore items available. Use --limit {limit + 100} to see more.'
                     )
                 )
 

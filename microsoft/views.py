@@ -1,7 +1,11 @@
 """
 Views for Microsoft Graph API endpoints — email management and OneDrive.
 """
+import base64
 import logging
+from datetime import datetime, timedelta
+
+from django.utils import timezone
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -25,7 +29,6 @@ from .services.email_reader import EmailReaderService
 from .services.graph_service import GraphAPIService, DMS_USER_EMAIL, DMS_DRIVE_ID
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +130,8 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             graph = GraphAPIService()
             doc_processor = DocumentProcessorService()
             
-            # 1. Base content from email body
-            content = email.body_html if email.body_html else email.body_text
+            # 1. Base content from email body (guard against None)
+            content = email.body_html or email.body_text or ''
             metadata = {
                 'from_email': email.from_email,
                 'subject': email.subject,
@@ -152,8 +155,7 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
                     
                     if not content_bytes_b64:
                         continue
-                        
-                    import base64
+
                     content_bytes = base64.b64decode(content_bytes_b64)
                     
                     # If image, add to vision context
@@ -181,7 +183,6 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             # Update email status if successful
             if "error" not in result:
                 email.is_processed = True
-                from django.utils import timezone
                 email.processed_at = timezone.now()
                 email.save(update_fields=['is_processed', 'processed_at'])
             
@@ -192,33 +193,10 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @extend_schema(
-        summary="Get emails for a specific account",
-        description="Retrieve all emails for a specific email account.",
-        tags=["Emails"],
-        parameters=[
-            OpenApiParameter(
-                name='email',
-                type=OpenApiTypes.EMAIL,
-                location=OpenApiParameter.QUERY,
-                required=True,
-                description='Email address of the account'
-            ),
-        ],
-        responses={200: EmailListSerializer(many=True)},
-    )
-    
-    @extend_schema(
         summary='Process contacts from all existing emails',
         description='Iterate through all stored emails and create contacts from From/CC fields if they do not exist.',
         tags=['Emails'],
-        responses={200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'count': {'type': 'integer'}}}}
-    )
-
-    @extend_schema(
-        summary='Process contacts from all existing emails',
-        description='Iterate through all stored emails and create contacts from From/CC fields if they do not exist.',
-        tags=['Emails'],
-        responses={200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'new_count': {'type': 'integer'}}}}
+        responses={200: {'type': 'object', 'properties': {'success': {'type': 'boolean'}, 'new_count': {'type': 'integer'}}}},
     )
     @action(detail=False, methods=['post'])
     def process_contacts(self, request):
@@ -251,12 +229,30 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             return Response({'success': True, 'new_count': new_count}, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f'Global error in process_contacts: {str(e)}')
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {
+                    'error': 'Failed to process contacts',
+                    'details': str(e),
+                    'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        except Exception as e:
-            logger.error(f'Global error in process_contacts: {str(e)}')
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+    @extend_schema(
+        summary="Get emails for a specific account",
+        description="Retrieve all emails for a specific email account.",
+        tags=["Emails"],
+        parameters=[
+            OpenApiParameter(
+                name='email',
+                type=OpenApiTypes.EMAIL,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description='Email address of the account',
+            ),
+        ],
+        responses={200: EmailListSerializer(many=True)},
+    )
     @action(detail=False, methods=['get'])
     def by_account(self, request):
         """Get emails for a specific email account."""
@@ -647,10 +643,10 @@ class OneDriveListView(APIView):
     """
     Browse files and folders in the DMS shared folder on SharePoint/OneDrive.
 
-    - Omit `folder_id` → lists the root of the DMS shared folder.
-    - Supply `folder_id` → lists children of that specific folder.
-    - Use `top` / `skip` for pagination.
-    - Pass `mock=true` to get sample data without hitting Azure.
+    - Omit ``folder_id`` → lists the root of the DMS shared folder.
+    - Supply ``folder_id`` → lists children of that specific folder.
+    - Use ``top`` to limit results (Graph API handles its own cursor-based pagination).
+    - Pass ``mock=true`` to get sample data without hitting Azure.
     """
 
     permission_classes = [IsAuthenticated]
@@ -661,7 +657,7 @@ class OneDriveListView(APIView):
             "Browse the DMS shared folder via Microsoft Graph API.\n\n"
             "- Omit `folder_id` to list the **root** of the shared folder.\n"
             "- Supply `folder_id` to drill into a subfolder.\n"
-            "- Use `top` and `skip` for pagination.\n"
+            "- Use `top` to limit the number of items returned.\n"
             "- Pass `mock=true` for sample data."
         ),
         tags=["OneDrive"],
@@ -681,20 +677,6 @@ class OneDriveListView(APIView):
                 description='Maximum number of items to return (default 100)',
             ),
             OpenApiParameter(
-                name='skip',
-                type=OpenApiTypes.INT,
-                location=OpenApiParameter.QUERY,
-                required=False,
-                description='Number of items to skip for pagination',
-            ),
-            OpenApiParameter(
-                name='search',
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.QUERY,
-                required=False,
-                description='Search query to find files/folders by name',
-            ),
-            OpenApiParameter(
                 name='mock',
                 type=OpenApiTypes.BOOL,
                 location=OpenApiParameter.QUERY,
@@ -707,27 +689,28 @@ class OneDriveListView(APIView):
     def get(self, request):
         """List files and folders from the DMS shared folder."""
         folder_id = request.query_params.get('folder_id')
-        search_query = request.query_params.get('search')
         top = request.query_params.get('top', 100)
-        skip = request.query_params.get('skip', 0)
         use_mock = request.query_params.get('mock', '').lower() in ('true', '1', 'yes')
 
         try:
             top = int(top)
-            skip = int(skip)
         except (ValueError, TypeError):
             return Response(
-                {'error': 'Validation failed', 'details': {'top/skip': ['Must be valid integers']}},
+                {
+                    'error': 'Validation failed',
+                    'details': {'top': ['Must be a valid integer']},
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         # ---- mock mode ----
         if use_mock:
-            items = ONEDRIVE_MOCK_DATA[skip:skip + top]
+            items = ONEDRIVE_MOCK_DATA[:top]
             response_data = {
                 'count': len(items),
                 'items': items,
-                'next_skip': skip + top if skip + top < len(ONEDRIVE_MOCK_DATA) else None,
+                'next_skip': None,
             }
             serializer = OneDriveListResponseSerializer(response_data)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -736,30 +719,25 @@ class OneDriveListView(APIView):
         try:
             graph = GraphAPIService()
 
-            if search_query:
-                data = graph.search_drive(query=search_query)
-            elif folder_id:
+            if folder_id:
                 data = graph.get_drive_folder_children(
                     user_email=DMS_USER_EMAIL,
                     folder_id=folder_id,
                     top=top,
-                    skip=skip,
                 )
             else:
                 data = graph.get_drive_root_children(
                     user_email=DMS_USER_EMAIL,
                     top=top,
-                    skip=skip,
                 )
 
             items = data.get('value', [])
             next_link = data.get('@odata.nextLink')
-            next_skip = skip + top if next_link else None
 
             response_data = {
                 'count': len(items),
                 'items': items,
-                'next_skip': next_skip,
+                'next_skip': top if next_link else None,
             }
 
             serializer = OneDriveListResponseSerializer(response_data)
@@ -768,7 +746,11 @@ class OneDriveListView(APIView):
         except Exception as e:
             logger.error(f"OneDrive list error: {e}", exc_info=True)
             return Response(
-                {'error': 'Failed to fetch OneDrive items', 'details': str(e)},
+                {
+                    'error': 'Failed to fetch OneDrive items',
+                    'details': str(e),
+                    'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -788,9 +770,17 @@ class OneDriveFileDetailView(APIView):
         responses={200: DriveItemSerializer},
     )
     def get(self, request):
+        """Retrieve metadata for a single drive item."""
         item_id = request.query_params.get('item_id')
         if not item_id:
-            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    'error': 'Validation failed',
+                    'details': {'item_id': ['This query parameter is required']},
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             graph = GraphAPIService()
@@ -799,7 +789,14 @@ class OneDriveFileDetailView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"OneDrive detail error: {e}", exc_info=True)
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {
+                    'error': 'Failed to retrieve item details',
+                    'details': str(e),
+                    'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class OneDriveDownloadView(APIView):
@@ -817,51 +814,41 @@ class OneDriveDownloadView(APIView):
         responses={200: OpenApiTypes.OBJECT},
     )
     def get(self, request):
+        """Return a short-lived pre-authenticated download URL."""
         item_id = request.query_params.get('item_id')
         if not item_id:
-            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    'error': 'Validation failed',
+                    'details': {'item_id': ['This query parameter is required']},
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             graph = GraphAPIService()
             download_url = graph.get_drive_item_download_url(DMS_DRIVE_ID, item_id)
             if not download_url:
-                return Response({'error': 'Could not get download URL'}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {
+                        'error': 'Resource not found',
+                        'details': 'Could not obtain a download URL for this item',
+                        'status_code': status.HTTP_404_NOT_FOUND,
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             return Response({'download_url': download_url}, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"OneDrive download error: {e}", exc_info=True)
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-class OneDriveSearchView(APIView):
-    """Search for files/folders within the DMS shared drive."""
-
-    permission_classes = [IsAuthenticated]
-
-    @extend_schema(
-        summary="Search DMS shared drive",
-        description="Search for files and folders by name within the DMS shared folder.",
-        tags=["OneDrive"],
-        parameters=[
-            OpenApiParameter(name='q', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True,
-                             description='Search query'),
-        ],
-        responses={200: OneDriveListResponseSerializer},
-    )
-    def get(self, request):
-        query = request.query_params.get('q')
-        if not query:
-            return Response({'error': 'q (search query) is required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            graph = GraphAPIService()
-            data = graph.search_drive(query=query)
-            items = data.get('value', [])
-            response_data = {'count': len(items), 'items': items, 'next_skip': None}
-            serializer = OneDriveListResponseSerializer(response_data)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"OneDrive search error: {e}", exc_info=True)
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {
+                    'error': 'Failed to generate download URL',
+                    'details': str(e),
+                    'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class AnalyzeOneDriveFileView(APIView):
@@ -884,36 +871,59 @@ class AnalyzeOneDriveFileView(APIView):
         responses={200: OpenApiTypes.OBJECT},
     )
     def post(self, request):
+        """Download a file from the DMS drive, extract text, and run AI analysis."""
         file_id = request.query_params.get('file_id')
         filename = request.query_params.get('filename')
 
         if not all([file_id, filename]):
+            missing = [p for p in ('file_id', 'filename') if not request.query_params.get(p)]
             return Response(
-                {'error': 'Missing required parameters: file_id, filename'},
+                {
+                    'error': 'Validation failed',
+                    'details': {p: ['This query parameter is required'] for p in missing},
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
+            # 1. Download file bytes from OneDrive
             graph = GraphAPIService()
             file_content = graph.get_drive_item_content(DMS_USER_EMAIL, file_id)
-            
-            if not file_content:
-                return Response({'error': 'Failed to download file content'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+            if not file_content:
+                return Response(
+                    {
+                        'error': 'Download failed',
+                        'details': 'Graph API returned empty content for this file',
+                        'status_code': status.HTTP_502_BAD_GATEWAY,
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            # 2. Extract text from the document
             doc_processor = DocumentProcessorService()
             extracted_text = doc_processor.extract_text(file_content, filename)
-            
+
+            # 3. Analyse with LLM
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=extracted_text,
                 skill_name="document_analysis",
                 metadata={'filename': filename},
                 source_id=file_id,
-                source_type="onedrive_file"
+                source_type="onedrive_file",
             )
-            
+
             return Response(result, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"Error analyzing OneDrive file: {str(e)}", exc_info=True)
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {
+                    'error': 'Failed to analyze file',
+                    'details': str(e),
+                    'status_code': status.HTTP_500_INTERNAL_SERVER_ERROR,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

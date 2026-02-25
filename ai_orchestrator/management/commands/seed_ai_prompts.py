@@ -12,7 +12,8 @@ class Command(BaseCommand):
             defaults={
                 "description": "Senior decision maker at India Alternatives. Focused on strategic fit and ROI.",
                 "model_provider": "ollama",
-                "model_name": "llama3.1:latest",
+                "text_model_name": "llama3.1:latest",
+                "vision_model_name": "llava:latest",
                 "system_instructions": """You are an experienced Private Equity Managing Director at India Alternatives. 
 Your goal is to quickly assess investment opportunities. Be critical, look for high-level details, and flag potential issues.""",
                 "is_default": True
@@ -25,7 +26,8 @@ Your goal is to quickly assess investment opportunities. Be critical, look for h
             defaults={
                 "description": "Analyst capable of processing images, charts, and complex documents using Vision models.",
                 "model_provider": "ollama",
-                "model_name": "llava:latest",
+                "text_model_name": "llama3.1:latest",
+                "vision_model_name": "llava:latest",
                 "system_instructions": """You are a Private Equity Analyst specializing in visual data and complex documents. 
 Analyze both the text and any provided images (charts, tables, slides). 
 Extract key metrics and strategic insights.""",

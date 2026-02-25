@@ -237,8 +237,13 @@ class MicrosoftToken(models.Model):
 
     class Meta:
         db_table = 'microsoft_token'
+        ordering = ['-updated_at']
         verbose_name = 'Microsoft Token'
         verbose_name_plural = 'Microsoft Tokens'
+        indexes = [
+            models.Index(fields=['account_email']),
+            models.Index(fields=['token_type']),
+        ]
 
     def __str__(self):
         return f"Token for {self.account_email} ({self.token_type})"

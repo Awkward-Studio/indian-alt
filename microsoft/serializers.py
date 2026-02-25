@@ -85,6 +85,7 @@ class EmailFetchSerializer(serializers.Serializer):
     count = serializers.IntegerField(required=False)
     new_count = serializers.IntegerField(required=False)
     updated_count = serializers.IntegerField(required=False)
+    emails = EmailListSerializer(many=True, required=False)
     errors = serializers.ListField(
         child=serializers.CharField(),
         required=False
