@@ -180,6 +180,11 @@ CORS_ALLOW_CREDENTIALS = True
 # Railway assigns the domain after first deploy, so default to '*' unless you set ALLOWED_HOSTS explicitly.
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=_allowed_hosts)
 
+# AI Orchestrator Settings
+OLLAMA_URL = config('OLLAMA_URL', default='http://localhost:11434')
+OLLAMA_DEFAULT_TEXT_MODEL = config('OLLAMA_DEFAULT_TEXT_MODEL', default='llama3.1:latest')
+OLLAMA_DEFAULT_VISION_MODEL = config('OLLAMA_DEFAULT_VISION_MODEL', default='llava:latest')
+
 # Database (will be overridden in local/production)
 #
 # Railway-friendly defaults:

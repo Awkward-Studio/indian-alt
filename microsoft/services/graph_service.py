@@ -1,400 +1,235 @@
 """
 Microsoft Graph API service for authentication, email, and OneDrive operations.
-
-This service handles:
-- OAuth 2.0 client credentials flow (Application permissions)
-- Token management and caching
-- Email fetching from Microsoft Graph API
-- OneDrive file/folder browsing
-- Error handling and retry logic
 """
+import base64
 import logging
-import time
-from typing import Optional, Dict, List, Any
-from django.conf import settings
-from django.core.cache import cache
+from typing import Optional, Dict, Any, List
+from django.utils import timezone
+from datetime import timedelta
 from decouple import config
 import requests
+import msal
+
+from ..models import MicrosoftToken
 
 logger = logging.getLogger(__name__)
 
+# ─── Known DMS Shared Folder constants ────────────────────────────────
+DMS_DRIVE_ID = 'b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg'
+DMS_FOLDER_PATH = 'Desktop/DMS Update/3. DMS Dataroom - shared folder'
+DMS_USER_EMAIL = 'dms-demo@india-alt.com'
+
 
 class GraphAPIService:
-    """
-    Service for interacting with Microsoft Graph API.
-    
-    Uses Application permissions (client credentials flow) to access
-    any mailbox in the Azure AD tenant.
-    """
-    
-    # Cache key for access token
-    TOKEN_CACHE_KEY = 'graph_api_access_token'
-    TOKEN_CACHE_TIMEOUT = 3300  # 55 minutes (tokens expire in 1 hour)
-    
     def __init__(self):
-        """Initialize Graph API service with configuration from settings."""
         self.client_id = config('AZURE_CLIENT_ID', default='')
         self.client_secret = config('AZURE_CLIENT_SECRET', default='')
         self.tenant_id = config('AZURE_TENANT_ID', default='')
-        self.graph_endpoint = config(
-            'GRAPH_API_ENDPOINT',
-            default='https://graph.microsoft.com/v1.0'
+        self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+        self.graph_endpoint = config('GRAPH_API_ENDPOINT', default='https://graph.microsoft.com/v1.0')
+        
+        self.msal_app = msal.ConfidentialClientApplication(
+            self.client_id,
+            authority=self.authority,
+            client_credential=self.client_secret,
+        )
+
+    # ─── Auth ────────────────────────────────────────────────────────────
+
+    def get_access_token(self, user_email: str = DMS_USER_EMAIL) -> Optional[str]:
+        """Get a valid delegated token for the user, refreshing if needed. Falls back to app token."""
+        token_obj = MicrosoftToken.objects.filter(account_email=user_email, token_type='delegated').first()
+        
+        if token_obj and token_obj.expires_at > timezone.now() + timedelta(minutes=5):
+            return token_obj.access_token
+        
+        if token_obj and token_obj.refresh_token:
+            result = self.msal_app.acquire_token_by_refresh_token(
+                token_obj.refresh_token,
+                scopes=["https://graph.microsoft.com/Files.Read.All", "https://graph.microsoft.com/User.Read"]
+            )
+            if "access_token" in result:
+                token_obj.access_token = result["access_token"]
+                token_obj.refresh_token = result.get("refresh_token", token_obj.refresh_token)
+                token_obj.expires_at = timezone.now() + timedelta(seconds=result.get("expires_in", 3600))
+                token_obj.save()
+                return token_obj.access_token
+            else:
+                logger.warning(f"Token refresh failed for {user_email}: {result.get('error_description')}")
+
+        # Fallback to Application permissions
+        result = self.msal_app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        return result.get("access_token")
+
+    def authenticate_with_password(self, user_email: str, password: str) -> tuple[bool, str]:
+        """Direct password authentication (ROPC). No browser or redirect URI needed."""
+        result = self.msal_app.acquire_token_by_username_password(
+            username=user_email,
+            password=password,
+            scopes=[
+                "https://graph.microsoft.com/Files.Read.All",
+                "https://graph.microsoft.com/Files.ReadWrite.All",
+                "https://graph.microsoft.com/User.Read",
+            ]
         )
         
-        if not all([self.client_id, self.client_secret, self.tenant_id]):
-            logger.warning(
-                "Azure AD credentials not fully configured. "
-                "Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID in environment."
+        if "access_token" in result:
+            MicrosoftToken.objects.update_or_create(
+                account_email=user_email,
+                defaults={
+                    'token_type': 'delegated',
+                    'access_token': result['access_token'],
+                    'refresh_token': result.get('refresh_token'),
+                    'expires_at': timezone.now() + timedelta(seconds=result.get('expires_in', 3600))
+                }
             )
-    
-    def get_access_token(self) -> Optional[str]:
-        """
-        Get access token for Microsoft Graph API.
+            return True, "Success"
         
-        Uses client credentials flow (Application permissions).
-        Tokens are cached to avoid unnecessary requests.
-        
-        Returns:
-            Access token string, or None if authentication fails
-            
-        Raises:
-            Exception: If authentication fails after retries
-        """
-        # Check cache first
-        cached_token = cache.get(self.TOKEN_CACHE_KEY)
-        if cached_token:
-            logger.debug("Using cached access token")
-            return cached_token
-        
-        if not all([self.client_id, self.client_secret, self.tenant_id]):
-            logger.error("Azure AD credentials not configured")
-            raise ValueError(
-                "Azure AD credentials not configured. "
-                "Please set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID."
-            )
-        
-        # OAuth 2.0 token endpoint
-        token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
-        
-        token_data = {
-            'client_id': self.client_id,
-            'client_secret': self.client_secret,
-            'scope': 'https://graph.microsoft.com/.default',
-            'grant_type': 'client_credentials'
-        }
-        
-        try:
-            logger.info("Requesting new access token from Azure AD")
-            response = requests.post(
-                token_url,
-                data=token_data,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                timeout=30
-            )
-            response.raise_for_status()
-            
-            token_response = response.json()
-            access_token = token_response.get('access_token')
-            
-            if not access_token:
-                logger.error("No access token in response")
-                raise ValueError("Failed to obtain access token from Azure AD")
-            
-            # Cache the token
-            expires_in = token_response.get('expires_in', 3600)
-            cache_timeout = min(expires_in - 300, self.TOKEN_CACHE_TIMEOUT)  # Cache for slightly less than expiry
-            cache.set(self.TOKEN_CACHE_KEY, access_token, cache_timeout)
-            
-            logger.info("Successfully obtained and cached access token")
-            return access_token
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error requesting access token: {str(e)}")
-            raise Exception(f"Failed to authenticate with Azure AD: {str(e)}")
-        except Exception as e:
-            logger.error(f"Unexpected error during token acquisition: {str(e)}")
-            raise
-    
-    def _make_request(
-        self,
-        method: str,
-        endpoint: str,
-        params: Optional[Dict] = None,
-        retry_count: int = 3
-    ) -> Dict[str, Any]:
-        """
-        Make authenticated request to Microsoft Graph API.
-        
-        Args:
-            method: HTTP method (GET, POST, etc.)
-            endpoint: Graph API endpoint (e.g., '/users/{email}/messages')
-            params: Query parameters
-            retry_count: Number of retry attempts for rate limiting
-            
-        Returns:
-            JSON response from Graph API
-            
-        Raises:
-            Exception: If request fails after retries
-        """
-        token = self.get_access_token()
-        if not token:
-            raise Exception("Failed to obtain access token")
-        
-        url = f"{self.graph_endpoint}{endpoint}"
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': 'application/json'
-        }
-        
-        for attempt in range(retry_count):
-            try:
-                logger.debug(f"Making {method} request to {url} (attempt {attempt + 1})")
-                response = requests.request(
-                    method,
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=60
-                )
-                
-                # Handle rate limiting (429)
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Retrying after {retry_after} seconds")
-                    time.sleep(retry_after)
-                    continue
-                
-                # Handle token expiration (401)
-                if response.status_code == 401:
-                    logger.warning("Token expired, clearing cache and retrying")
-                    cache.delete(self.TOKEN_CACHE_KEY)
+        return False, result.get('error_description') or result.get('error') or "Unknown error"
+
+    # ─── HTTP helpers ────────────────────────────────────────────────────
+
+    def _make_request(self, method: str, endpoint: str, token: Optional[str] = None,
+                      params: Optional[Dict] = None) -> Dict[str, Any]:
+        """Make a request to Graph API. If no token given, gets one for the default user."""
+        if token is None:
+            token = self.get_access_token()
+        res = requests.request(
+            method, f"{self.graph_endpoint}{endpoint}",
+            headers={'Authorization': f'Bearer {token}'}, params=params, timeout=30
+        )
+        if not res.ok:
+            logger.error(f"Graph API {res.status_code}: {res.text[:500]}")
+        res.raise_for_status()
+        return res.json()
+
+    def _make_raw_request(self, method: str, endpoint: str, token: Optional[str] = None,
+                          params: Optional[Dict] = None) -> bytes:
+        """Make a request that returns raw bytes (for file downloads)."""
+        if token is None:
                     token = self.get_access_token()
-                    headers['Authorization'] = f'Bearer {token}'
-                    continue
-                
-                if response.status_code >= 400:
-                    # Include the actual error body from Microsoft
-                    try:
-                        error_body = response.json()
-                        error_msg = error_body.get('error', {}).get('message', response.text)
-                    except Exception:
-                        error_msg = response.text
-                    logger.error(f"Graph API {response.status_code}: {error_msg}")
-                    raise requests.exceptions.HTTPError(
-                        f"{response.status_code}: {error_msg}",
-                        response=response,
-                    )
+        res = requests.request(
+            method, f"{self.graph_endpoint}{endpoint}",
+            headers={'Authorization': f'Bearer {token}'}, params=params, timeout=60
+        )
+        if not res.ok:
+            logger.error(f"Graph API {res.status_code}: {res.text[:500]}")
+        res.raise_for_status()
+        return res.content
 
-                return response.json()
-                
-            except requests.exceptions.Timeout:
-                logger.error(f"Request timeout for {url}")
-                if attempt < retry_count - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                    continue
-                raise Exception(f"Request timeout after {retry_count} attempts")
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Request error for {url}: {str(e)}")
-                if attempt < retry_count - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise Exception(f"Graph API request failed: {str(e)}")
-        
-        raise Exception(f"Failed to complete request after {retry_count} attempts")
+    # ─── Email (Application permissions) ─────────────────────────────────
 
-    # ------------------------------------------------------------------ #
-    #                        Email Operations                             #
-    # ------------------------------------------------------------------ #
+    def get_messages(self, user_email: str, top: int = 50, skip: int = 0,
+                     since: Optional[str] = None, search: Optional[str] = None) -> Dict:
+        """Fetch emails for a user via application permissions."""
+        token = self.get_access_token(user_email)
+        params = {'$top': top, '$skip': skip, '$orderby': 'receivedDateTime desc'}
+        if since:
+            params['$filter'] = f"receivedDateTime ge {since}"
+        if search:
+            params['$search'] = f'"{search}"'
+        return self._make_request('GET', f"/users/{user_email}/messages", token, params)
 
-    def get_user_messages(
-        self,
-        user_email: str,
-        top: int = 100,
-        skip: int = 0,
-        filter_query: Optional[str] = None,
-        search_query: Optional[str] = None,
-        order_by: str = 'receivedDateTime desc'
-    ) -> Dict[str, Any]:
-        """
-        Get messages for a specific user.
-        
-        Args:
-            user_email: Email address of the user
-            top: Maximum number of messages to return
-            skip: Number of messages to skip
-            filter_query: OData filter query (e.g., "receivedDateTime gt 2024-01-01T00:00:00Z")
-            search_query: Microsoft Graph search query (e.g., "subject:project")
-            order_by: Order by clause (default: receivedDateTime desc)
-            
-        Returns:
-            Graph API response with messages
-        """
-        endpoint = f"/users/{user_email}/messages"
-        params = {
-            '$top': top,
-            '$skip': skip,
-            '$orderby': order_by,
-            '$select': (
-                'id,internetMessageId,subject,from,toRecipients,ccRecipients,'
-                'bccRecipients,body,bodyPreview,receivedDateTime,sentDateTime,'
-                'createdDateTime,lastModifiedDateTime,importance,isRead,'
-                'isReadReceiptRequested,conversationId,conversationIndex,'
-                'categories,flag,hasAttachments,webLink'
-            )
-        }
-        
-        if filter_query:
-            params['$filter'] = filter_query
-            
-        if search_query:
-            params['$search'] = f'"{search_query}"'
-        
-        return self._make_request('GET', endpoint, params=params)
-    
-    def get_message_details(self, user_email: str, message_id: str) -> Dict[str, Any]:
-        """
-        Get detailed information about a specific message.
-        
-        Args:
-            user_email: Email address of the user
-            message_id: Graph API message ID
-            
-        Returns:
-            Message details from Graph API
-        """
-        endpoint = f"/users/{user_email}/messages/{message_id}"
-        params = {
-            '$select': (
-                'id,internetMessageId,subject,from,toRecipients,ccRecipients,'
-                'bccRecipients,body,bodyPreview,receivedDateTime,sentDateTime,'
-                'createdDateTime,lastModifiedDateTime,importance,isRead,'
-                'isReadReceiptRequested,conversationId,conversationIndex,'
-                'categories,flag,hasAttachments,webLink'
-            )
-        }
-        
-        return self._make_request('GET', endpoint, params=params)
-    
-    def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict[str, Any]]:
-        """
-        Get attachments for a specific message.
-        """
-        endpoint = f"/users/{user_email}/messages/{message_id}/attachments"
-        response = self._make_request('GET', endpoint)
-        return response.get('value', [])
+    def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict]:
+        """Get attachments metadata for a specific email."""
+        token = self.get_access_token(user_email)
+        data = self._make_request('GET', f"/users/{user_email}/messages/{message_id}/attachments", token)
+        return data.get('value', [])
 
-    def get_attachment_content(self, user_email: str, message_id: str, attachment_id: str) -> Dict[str, Any]:
-        """
-        Get the actual content of a specific attachment.
-        For file attachments, this includes the base64 contentBytes.
-        """
-        endpoint = f"/users/{user_email}/messages/{message_id}/attachments/{attachment_id}"
-        return self._make_request('GET', endpoint)
+    def get_attachment_content(self, user_email: str, message_id: str, attachment_id: str) -> Dict:
+        """Get full attachment content (including contentBytes)."""
+        token = self.get_access_token(user_email)
+        return self._make_request('GET', f"/users/{user_email}/messages/{message_id}/attachments/{attachment_id}", token)
 
-    # ------------------------------------------------------------------ #
-    #                        OneDrive Operations                          #
-    # ------------------------------------------------------------------ #
+    # ─── OneDrive / SharePoint (Drive-based) ─────────────────────────────
 
-    def get_drive_root_children(
-        self,
-        user_email: str,
-        top: int = 100,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        List files and folders in a user's OneDrive root directory.
+    @staticmethod
+    def _encode_sharing_url(url: str) -> str:
+        """Encode a sharing URL for the /shares/ endpoint (Microsoft spec)."""
+        encoded = base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8').rstrip('=')
+        return f"u!{encoded}"
 
-        Args:
-            user_email: Email address (UPN) of the drive owner.
-            top: Maximum number of items to return.
+    def get_site_drive_id(self, site_host: str, site_path: str,
+                          user_email: str = DMS_USER_EMAIL) -> str:
+        """Get the drive ID for a SharePoint personal site."""
+        token = self.get_access_token(user_email)
+        site = self._make_request('GET', f"/sites/{site_host}:/{site_path}", token)
+        site_id = site['id']
+        drives = self._make_request('GET', f"/sites/{site_id}/drives", token)
+        if drives.get('value'):
+            return drives['value'][0]['id']
+        raise ValueError(f"No drives found on site {site_host}/{site_path}")
 
-        Returns:
-            Graph API response containing drive items.
-        """
-        endpoint = f"/users/{user_email}/drive/root/children"
-        params = {
-            '$top': top,
-            '$select': (
-                'id,name,size,createdDateTime,lastModifiedDateTime,'
-                'webUrl,folder,file,parentReference'
-            ),
-        }
-        return self._make_request('GET', endpoint, params=params)
+    # ── Folder listing ──
 
-    def get_drive_folder_children(
-        self,
-        user_email: str,
-        folder_id: str,
-        top: int = 100,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        List files and folders inside a specific OneDrive folder.
+    def list_folder_by_drive_path(self, drive_id: str = DMS_DRIVE_ID,
+                                  folder_path: str = DMS_FOLDER_PATH,
+                                  user_email: str = DMS_USER_EMAIL,
+                                  top: int = 100, skip: int = 0) -> Dict[str, Any]:
+        """List children of a folder by drive ID and path."""
+        token = self.get_access_token(user_email)
+        params = {'$top': top, '$skip': skip}
+        return self._make_request('GET', f"/drives/{drive_id}/root:/{folder_path}:/children", token, params)
 
-        Args:
-            user_email: Email address (UPN) of the drive owner.
-            folder_id: Graph API item-id of the folder.
-            top: Maximum number of items to return.
+    def get_drive_item_children(self, drive_id: str, item_id: str,
+                                user_email: str = DMS_USER_EMAIL,
+                                top: int = 100, skip: int = 0) -> Dict[str, Any]:
+        """List children of a specific item by drive ID and item ID."""
+        token = self.get_access_token(user_email)
+        params = {'$top': top, '$skip': skip}
+        return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}/children", token, params)
 
-        Returns:
-            Graph API response containing drive items.
-        """
-        endpoint = f"/users/{user_email}/drive/items/{folder_id}/children"
-        params = {
-            '$top': top,
-            '$select': (
-                'id,name,size,createdDateTime,lastModifiedDateTime,'
-                'webUrl,folder,file,parentReference'
-            ),
-        }
-        return self._make_request('GET', endpoint, params=params)
+    def get_drive_root_children(self, user_email: str, top: int = 100, skip: int = 0) -> Dict[str, Any]:
+        """List root of the DMS shared folder (default entry point)."""
+        return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top, skip)
 
-    def get_drive_item(
-        self,
-        user_email: str,
-        item_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Get metadata for a single drive item (file or folder).
+    def get_drive_folder_children(self, user_email: str, folder_id: str,
+                                  top: int = 100, skip: int = 0) -> Dict[str, Any]:
+        """List children of a folder by its item ID within the DMS drive."""
+        return self.get_drive_item_children(DMS_DRIVE_ID, folder_id, user_email, top, skip)
 
-        Args:
-            user_email: Email address (UPN) of the drive owner.
-            item_id: Graph API item-id.
+    # ── Item metadata ──
 
-        Returns:
-            Drive item metadata from Graph API.
-        """
-        endpoint = f"/users/{user_email}/drive/items/{item_id}"
-        params = {
-            '$select': (
-                'id,name,size,createdDateTime,lastModifiedDateTime,'
-                'webUrl,folder,file,parentReference'
-            ),
-        }
-        return self._make_request('GET', endpoint, params=params)
+    def get_drive_item(self, drive_id: str, item_id: str,
+                       user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
+        """Get metadata for a specific drive item."""
+        token = self.get_access_token(user_email)
+        return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}", token)
 
-    def get_drive_item_content(
-        self,
-        user_email: str,
-        item_id: str,
-    ) -> bytes:
-        """
-        Download the content of a file from OneDrive.
-        
-        Returns:
-            Binary file content.
-        """
-        token = self.get_access_token()
-        endpoint = f"{self.graph_endpoint}/users/{user_email}/drive/items/{item_id}/content"
-        headers = {'Authorization': f'Bearer {token}'}
-        
-        response = requests.get(endpoint, headers=headers, timeout=120)
-        response.raise_for_status()
-        return response.content
+    # ── File download ──
 
-    def get_user_drives(self, user_email: str) -> Dict[str, Any]:
-        """List all drives a user has access to."""
-        endpoint = f"/users/{user_email}/drives"
-        return self._make_request('GET', endpoint)
+    def get_drive_item_content(self, user_email: str, file_id: str,
+                               drive_id: str = DMS_DRIVE_ID) -> bytes:
+        """Download the raw content of a file from a drive."""
+        token = self.get_access_token(user_email)
+        return self._make_raw_request('GET', f"/drives/{drive_id}/items/{file_id}/content", token)
+
+    def get_drive_item_download_url(self, drive_id: str, item_id: str,
+                                    user_email: str = DMS_USER_EMAIL) -> str:
+        """Get a short-lived download URL for a file."""
+        token = self.get_access_token(user_email)
+        item = self._make_request('GET', f"/drives/{drive_id}/items/{item_id}", token,
+                                  params={'select': '@microsoft.graph.downloadUrl,name,size'})
+        return item.get('@microsoft.graph.downloadUrl', '')
+
+    # ── Sharing link based access ──
+
+    def list_shared_folder(self, sharing_url: str, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
+        """Access a shared folder directly via its sharing URL."""
+        token = self.get_access_token(user_email)
+        encoded = self._encode_sharing_url(sharing_url)
+        return self._make_request('GET', f"/shares/{encoded}/driveItem/children", token)
+
+    def get_shared_folder_info(self, sharing_url: str, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
+        """Get metadata about a shared folder via its sharing URL."""
+        token = self.get_access_token(user_email)
+        encoded = self._encode_sharing_url(sharing_url)
+        return self._make_request('GET', f"/shares/{encoded}/driveItem", token)
+
+    # ── Search ──
+
+    def search_drive(self, query: str, drive_id: str = DMS_DRIVE_ID,
+                     user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
+        """Search for files/folders within a drive."""
+        token = self.get_access_token(user_email)
+        return self._make_request('GET', f"/drives/{drive_id}/root/search(q='{query}')", token)

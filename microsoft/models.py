@@ -206,3 +206,39 @@ class Email(models.Model):
 
     def __str__(self):
         return f"{self.subject or 'No Subject'} - {self.from_email or 'Unknown'}"
+
+
+class MicrosoftToken(models.Model):
+    """
+    Stores OAuth 2.0 tokens for Microsoft Graph API.
+    Supports both Application and Delegated permissions.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account_email = models.EmailField(
+        unique=True,
+        help_text='The email address this token is for (e.g. dms-demo@india-alt.com)'
+    )
+    token_type = models.CharField(
+        max_length=20,
+        choices=[('application', 'Application'), ('delegated', 'Delegated')],
+        default='application'
+    )
+    
+    # Encrypted or plain? For now plain as per project style, but in prod should be encrypted.
+    access_token = models.TextField()
+    refresh_token = models.TextField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    
+    # Store the full token cache if using MSAL
+    token_cache = models.TextField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'microsoft_token'
+        verbose_name = 'Microsoft Token'
+        verbose_name_plural = 'Microsoft Tokens'
+
+    def __str__(self):
+        return f"Token for {self.account_email} ({self.token_type})"

@@ -5,8 +5,11 @@ All URLs are mounted at /api/microsoft/ in config/urls.py, giving:
     /api/microsoft/emails/accounts/     — email account CRUD
     /api/microsoft/emails/emails/       — email list/detail (read-only)
     /api/microsoft/emails/fetch/        — email fetch triggers
-    /api/microsoft/onedrive/files/      — OneDrive file/folder browsing
-    /api/microsoft/onedrive/analyze/    — OneDrive file analysis with AI
+    /api/microsoft/onedrive/files/      — browse DMS shared folder (root or subfolder)
+    /api/microsoft/onedrive/detail/     — get metadata for a specific item
+    /api/microsoft/onedrive/download/   — get download URL for a file
+    /api/microsoft/onedrive/search/     — search within the DMS shared drive
+    /api/microsoft/onedrive/analyze/    — analyze a file with AI
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
@@ -15,7 +18,10 @@ from .views import (
     EmailViewSet, 
     EmailFetchViewSet, 
     OneDriveListView,
-    AnalyzeOneDriveFileView
+    OneDriveFileDetailView,
+    OneDriveDownloadView,
+    OneDriveSearchView,
+    AnalyzeOneDriveFileView,
 )
 
 # Email-related routers
@@ -30,5 +36,8 @@ urlpatterns = [
 
     # OneDrive endpoints: /api/microsoft/onedrive/...
     path('onedrive/files/', OneDriveListView.as_view(), name='onedrive-list'),
+    path('onedrive/detail/', OneDriveFileDetailView.as_view(), name='onedrive-detail'),
+    path('onedrive/download/', OneDriveDownloadView.as_view(), name='onedrive-download'),
+    path('onedrive/search/', OneDriveSearchView.as_view(), name='onedrive-search'),
     path('onedrive/analyze/', AnalyzeOneDriveFileView.as_view(), name='onedrive-analyze'),
 ]

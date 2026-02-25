@@ -2,9 +2,9 @@
 Management command to list files and folders from OneDrive via Microsoft Graph API.
 
 Usage:
-    python manage.py list_onedrive --email dms-demo@india-alt.com
-    python manage.py list_onedrive --email dms-demo@india-alt.com --folder-id FOLDER_ID
-    python manage.py list_onedrive --email dms-demo@india-alt.com --limit 20
+    python manage.py list_onedrive --email dms-demo@india-alt.com --shared-url "https://..."
+    python manage.py list_onedrive --email dms-demo@india-alt.com --drive-id DRIVE_ID --path "Desktop/DMS Update/..."
+    python manage.py list_onedrive --email dms-demo@india-alt.com --drive-id DRIVE_ID --item-id ITEM_ID
 """
 import json
 import logging
@@ -13,30 +13,46 @@ from microsoft.services.graph_service import GraphAPIService
 
 logger = logging.getLogger(__name__)
 
+# Hardcoded known values for the DMS shared folder
+DMS_DRIVE_ID = 'b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg'
+DMS_FOLDER_PATH = 'Desktop/DMS Update/3. DMS Dataroom - shared folder'
+
 
 class Command(BaseCommand):
     """Management command to list OneDrive files and folders."""
 
-    help = 'List files and folders from a user\'s OneDrive via Microsoft Graph API'
+    help = 'List files and folders from OneDrive/SharePoint via Microsoft Graph API'
 
     def add_arguments(self, parser):
         parser.add_argument(
             '--email',
             type=str,
             required=True,
-            help='Email address (UPN) of the OneDrive owner (e.g. dms-demo@india-alt.com)',
+            help='Email address used for authentication (e.g. dms-demo@india-alt.com)',
         )
         parser.add_argument(
-            '--folder-id',
+            '--drive-id',
             type=str,
             default=None,
-            help='ID of a specific folder to list (omit for root)',
+            help='Drive ID (defaults to the known DMS drive)',
         )
         parser.add_argument(
-            '--limit',
-            type=int,
-            default=50,
-            help='Maximum number of items to return (default 50)',
+            '--path',
+            type=str,
+            default=None,
+            help='Folder path within the drive (defaults to the DMS shared folder)',
+        )
+        parser.add_argument(
+            '--item-id',
+            type=str,
+            default=None,
+            help='Item ID to list children of (overrides --path)',
+        )
+        parser.add_argument(
+            '--shared-url',
+            type=str,
+            default=None,
+            help='SharePoint/OneDrive sharing URL to access directly',
         )
         parser.add_argument(
             '--json',
@@ -52,34 +68,28 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         email = options['email']
-        folder_id = options.get('folder_id')
-        limit = options['limit']
+        drive_id = options.get('drive_id') or DMS_DRIVE_ID
+        folder_path = options.get('path') or DMS_FOLDER_PATH
+        item_id = options.get('item_id')
+        shared_url = options.get('shared_url')
         output_json = options.get('output_json', False)
 
-        location = f'folder {folder_id}' if folder_id else 'root'
-        self.stdout.write(
-            f'Fetching OneDrive items for {email} ({location}) ...'
-        )
+        self.stdout.write(f'Fetching OneDrive items for {email} ...')
 
         try:
             if options.get('mock'):
                 from microsoft.views import ONEDRIVE_MOCK_DATA
-                items = ONEDRIVE_MOCK_DATA[:limit]
+                items = ONEDRIVE_MOCK_DATA[:50]
                 data = {'value': items}
             else:
                 graph = GraphAPIService()
 
-                if folder_id:
-                    data = graph.get_drive_folder_children(
-                        user_email=email,
-                        folder_id=folder_id,
-                        top=limit,
-                    )
+                if shared_url:
+                    data = graph.list_shared_folder(user_email=email, sharing_url=shared_url)
+                elif item_id:
+                    data = graph.get_drive_item_children(user_email=email, drive_id=drive_id, item_id=item_id)
                 else:
-                    data = graph.get_drive_root_children(
-                        user_email=email,
-                        top=limit,
-                    )
+                    data = graph.list_folder_by_drive_path(user_email=email, drive_id=drive_id, folder_path=folder_path)
 
                 items = data.get('value', [])
 

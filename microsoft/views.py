@@ -18,10 +18,11 @@ from .serializers import (
     EmailSerializer,
     EmailListSerializer,
     EmailFetchSerializer,
+    DriveItemSerializer,
     OneDriveListResponseSerializer,
 )
 from .services.email_reader import EmailReaderService
-from .services.graph_service import GraphAPIService
+from .services.graph_service import GraphAPIService, DMS_USER_EMAIL, DMS_DRIVE_ID
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from datetime import datetime, timedelta
@@ -644,13 +645,12 @@ ONEDRIVE_MOCK_DATA = [
 
 class OneDriveListView(APIView):
     """
-    Browse files and folders in a user's OneDrive via Microsoft Graph API.
+    Browse files and folders in the DMS shared folder on SharePoint/OneDrive.
 
-    Pass a `user_email` to specify whose OneDrive to browse.
-    Optionally pass a `folder_id` to list the contents of a specific folder
-    (defaults to the root directory).
-
-    Add `mock=true` to get sample data without hitting Azure (for testing).
+    - Omit `folder_id` → lists the root of the DMS shared folder.
+    - Supply `folder_id` → lists children of that specific folder.
+    - Use `top` / `skip` for pagination.
+    - Pass `mock=true` to get sample data without hitting Azure.
     """
 
     permission_classes = [IsAuthenticated]
@@ -658,27 +658,20 @@ class OneDriveListView(APIView):
     @extend_schema(
         summary="List OneDrive files and folders",
         description=(
-            "Fetch files and folders from a user's OneDrive via Microsoft Graph API.\n\n"
-            "- Omit `folder_id` to list the **root** directory.\n"
-            "- Supply `folder_id` to list the contents of a specific folder.\n"
+            "Browse the DMS shared folder via Microsoft Graph API.\n\n"
+            "- Omit `folder_id` to list the **root** of the shared folder.\n"
+            "- Supply `folder_id` to drill into a subfolder.\n"
             "- Use `top` and `skip` for pagination.\n"
-            "- Pass `mock=true` to return sample data (for testing without Azure)."
+            "- Pass `mock=true` for sample data."
         ),
         tags=["OneDrive"],
         parameters=[
-            OpenApiParameter(
-                name='user_email',
-                type=OpenApiTypes.EMAIL,
-                location=OpenApiParameter.QUERY,
-                required=True,
-                description='Email address (UPN) of the OneDrive owner',
-            ),
             OpenApiParameter(
                 name='folder_id',
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='ID of the folder to list (omit for root)',
+                description='ID of a subfolder to list (omit for root of DMS shared folder)',
             ),
             OpenApiParameter(
                 name='top',
@@ -695,42 +688,36 @@ class OneDriveListView(APIView):
                 description='Number of items to skip for pagination',
             ),
             OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Search query to find files/folders by name',
+            ),
+            OpenApiParameter(
                 name='mock',
                 type=OpenApiTypes.BOOL,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                description='Return sample mock data instead of calling Azure (for testing)',
+                description='Return sample mock data instead of calling Azure',
             ),
         ],
         responses={200: OneDriveListResponseSerializer},
     )
     def get(self, request):
-        """List files and folders from OneDrive."""
-        user_email = request.query_params.get('user_email')
+        """List files and folders from the DMS shared folder."""
         folder_id = request.query_params.get('folder_id')
+        search_query = request.query_params.get('search')
         top = request.query_params.get('top', 100)
         skip = request.query_params.get('skip', 0)
         use_mock = request.query_params.get('mock', '').lower() in ('true', '1', 'yes')
-
-        # ---- validation ----
-        if not user_email:
-            return Response(
-                {
-                    'error': 'Validation failed',
-                    'details': {'user_email': ['This query parameter is required']},
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         try:
             top = int(top)
             skip = int(skip)
         except (ValueError, TypeError):
             return Response(
-                {
-                    'error': 'Validation failed',
-                    'details': {'top/skip': ['Must be valid integers']},
-                },
+                {'error': 'Validation failed', 'details': {'top/skip': ['Must be valid integers']}},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -748,52 +735,22 @@ class OneDriveListView(APIView):
         # ---- call Graph API ----
         try:
             graph = GraphAPIService()
-            data = None
 
-            try:
-                if folder_id:
-                    # If we have a folder_id, first try the standard user-based route
-                    data = graph.get_drive_folder_children(
-                        user_email=user_email,
-                        folder_id=folder_id,
-                        top=top,
-                        skip=skip,
-                    )
-                else:
-                    data = graph.get_drive_root_children(
-                        user_email=user_email,
-                        top=top,
-                        skip=skip,
-                    )
-            except Exception as e:
-                # Fallback: Try Team/Group drives if personal OneDrive not found or access denied
-                if 'mysite' in str(e) or 'not found' in str(e).lower() or '403' in str(e):
-                    try:
-                        user_obj = graph._make_request('GET', f'/users/{user_email}')
-                        user_id = user_obj.get('id')
-                        joined_teams = graph._make_request('GET', f'/users/{user_id}/joinedTeams')
-                        
-                        if joined_teams.get('value'):
-                            # Use the first team's drive
-                            team_id = joined_teams['value'][0]['id']
-                            drive = graph._make_request('GET', f'/groups/{team_id}/drive')
-                            drive_id = drive.get('id')
-                            
-                            if folder_id:
-                                # CRITICAL: When using a specific Drive ID, the folder ID must exist in THAT drive
-                                data = graph._make_request('GET', f'/drives/{drive_id}/items/{folder_id}/children', params={'': top, '': skip})
-                            else:
-                                data = graph._make_request('GET', f'/drives/{drive_id}/root/children', params={'': top, '': skip})
-                        else:
-                            raise e
-                    except Exception as fallback_err:
-                        logger.error(f'Fallback failed: {str(fallback_err)}')
-                        raise e
-                else:
-                    raise e
-
-            if not data:
-                raise Exception("Failed to retrieve drive data")
+            if search_query:
+                data = graph.search_drive(query=search_query)
+            elif folder_id:
+                data = graph.get_drive_folder_children(
+                    user_email=DMS_USER_EMAIL,
+                    folder_id=folder_id,
+                    top=top,
+                    skip=skip,
+                )
+            else:
+                data = graph.get_drive_root_children(
+                    user_email=DMS_USER_EMAIL,
+                    top=top,
+                    skip=skip,
+                )
 
             items = data.get('value', [])
             next_link = data.get('@odata.nextLink')
@@ -808,65 +765,144 @@ class OneDriveListView(APIView):
             serializer = OneDriveListResponseSerializer(response_data)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
-        except ValueError as e:
-            logger.error(f"OneDrive config error: {e}")
-            return Response(
-                {
-                    'error': 'Configuration error',
-                    'details': str(e),
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
         except Exception as e:
             logger.error(f"OneDrive list error: {e}", exc_info=True)
             return Response(
-                {
-                    'error': 'Failed to fetch OneDrive items',
-                    'details': str(e),
-                },
+                {'error': 'Failed to fetch OneDrive items', 'details': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class OneDriveFileDetailView(APIView):
+    """Get metadata for a specific file/folder in the DMS shared drive."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Get file/folder details",
+        description="Returns metadata (name, size, dates, download URL) for a specific item.",
+        tags=["OneDrive"],
+        parameters=[
+            OpenApiParameter(name='item_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+        ],
+        responses={200: DriveItemSerializer},
+    )
+    def get(self, request):
+        item_id = request.query_params.get('item_id')
+        if not item_id:
+            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            graph = GraphAPIService()
+            item = graph.get_drive_item(DMS_DRIVE_ID, item_id)
+            serializer = DriveItemSerializer(item)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"OneDrive detail error: {e}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class OneDriveDownloadView(APIView):
+    """Get a temporary download URL for a file in the DMS shared drive."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Get file download URL",
+        description="Returns a short-lived pre-authenticated download URL for a file.",
+        tags=["OneDrive"],
+        parameters=[
+            OpenApiParameter(name='item_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+        ],
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    def get(self, request):
+        item_id = request.query_params.get('item_id')
+        if not item_id:
+            return Response({'error': 'item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            graph = GraphAPIService()
+            download_url = graph.get_drive_item_download_url(DMS_DRIVE_ID, item_id)
+            if not download_url:
+                return Response({'error': 'Could not get download URL'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'download_url': download_url}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"OneDrive download error: {e}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class OneDriveSearchView(APIView):
+    """Search for files/folders within the DMS shared drive."""
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="Search DMS shared drive",
+        description="Search for files and folders by name within the DMS shared folder.",
+        tags=["OneDrive"],
+        parameters=[
+            OpenApiParameter(name='q', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True,
+                             description='Search query'),
+        ],
+        responses={200: OneDriveListResponseSerializer},
+    )
+    def get(self, request):
+        query = request.query_params.get('q')
+        if not query:
+            return Response({'error': 'q (search query) is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            graph = GraphAPIService()
+            data = graph.search_drive(query=query)
+            items = data.get('value', [])
+            response_data = {'count': len(items), 'items': items, 'next_skip': None}
+            serializer = OneDriveListResponseSerializer(response_data)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"OneDrive search error: {e}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class AnalyzeOneDriveFileView(APIView):
     """
-    Analyze a file from OneDrive using the AI Orchestrator.
+    Analyze a file from the DMS shared drive using the AI Orchestrator.
     Downloads the file, extracts text, and sends it to the LLM.
     """
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
         summary="Analyze a OneDrive file with AI",
-        description="Downloads a specific file from OneDrive, extracts its text content, and analyzes it using the AI orchestration service.",
+        description="Downloads a file from the DMS shared drive, extracts text, and analyzes it with AI.",
         tags=["OneDrive"],
         parameters=[
-            OpenApiParameter(name='user_email', type=OpenApiTypes.EMAIL, location=OpenApiParameter.QUERY, required=True),
-            OpenApiParameter(name='file_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
-            OpenApiParameter(name='filename', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+            OpenApiParameter(name='file_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True,
+                             description='The item ID of the file to analyze'),
+            OpenApiParameter(name='filename', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True,
+                             description='Original filename (used for text extraction)'),
         ],
         responses={200: OpenApiTypes.OBJECT},
     )
     def post(self, request):
-        user_email = request.query_params.get('user_email')
         file_id = request.query_params.get('file_id')
         filename = request.query_params.get('filename')
 
-        if not all([user_email, file_id, filename]):
-            return Response({'error': 'Missing required parameters: user_email, file_id, filename'}, status=status.HTTP_400_BAD_REQUEST)
+        if not all([file_id, filename]):
+            return Response(
+                {'error': 'Missing required parameters: file_id, filename'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            # 1. Download file content from Graph API
             graph = GraphAPIService()
-            file_content = graph.get_drive_item_content(user_email, file_id)
+            file_content = graph.get_drive_item_content(DMS_USER_EMAIL, file_id)
             
             if not file_content:
                 return Response({'error': 'Failed to download file content'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 2. Extract text from content
             doc_processor = DocumentProcessorService()
             extracted_text = doc_processor.extract_text(file_content, filename)
             
-            # 3. Analyze with AI
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=extracted_text,
