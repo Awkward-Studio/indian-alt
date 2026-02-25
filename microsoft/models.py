@@ -165,6 +165,19 @@ class Email(models.Model):
     )
 
     # Status for AI processing
+    deal = models.ForeignKey(
+        'deals.Deal',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='emails',
+        help_text='The deal this email is associated with'
+    )
+    extracted_text = models.TextField(
+        blank=True, 
+        null=True, 
+        help_text='Full cleaned text from body and attachments for AI chat context'
+    )
     is_processed = models.BooleanField(
         default=False,
         help_text='Whether email has been processed by AI'

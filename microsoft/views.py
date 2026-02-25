@@ -167,7 +167,11 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             # Combine body + attachment text
             full_context = content + attachment_context
             
-            # 3. Analyze with AI
+            # 3. Save extracted text for future Chat context
+            email.extracted_text = full_context
+            email.save(update_fields=['extracted_text'])
+            
+            # 4. Analyze with AI
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=full_context,
