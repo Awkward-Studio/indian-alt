@@ -68,6 +68,75 @@ class DealChatView(APIView):
             logger.error(f"Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+class UniversalChatView(APIView):
+    """
+    Agentic view to chat with the AI about the entire deal pipeline.
+    Pass 1: Extract intent/filters.
+    Pass 2: Execute Django ORM query.
+    Pass 3: Synthesize conversational answer.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user_message = request.data.get('message')
+        if not user_message:
+            return Response({"error": "message is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        ai_service = AIProcessorService()
+
+        try:
+            # --- PASS 1: Identify Search Filters ---
+            intent_result = ai_service.process_content(
+                content=f"USER MESSAGE: {user_message}\n\nTask: Identify search filters. If no filters needed, return empty search_query.",
+                skill_name="universal_chat",
+                source_type="universal_chat_intent"
+            )
+
+            search_query = intent_result.get("search_query", {})
+            deal_data = []
+
+            # --- PASS 2: Execute Django ORM Query ---
+            if any(search_query.values()):
+                queryset = Deal.objects.all()
+                
+                if search_query.get("sector"):
+                    queryset = queryset.filter(sector__icontains=search_query["sector"])
+                if search_query.get("industry"):
+                    queryset = queryset.filter(industry__icontains=search_query["industry"])
+                if search_query.get("priority"):
+                    queryset = queryset.filter(priority=search_query["priority"])
+                
+                # Fetch limited results to keep context focused
+                limit = search_query.get("limit", 10)
+                deals = queryset.order_by('-created_at')[:limit]
+                
+                for d in deals:
+                    deal_data.append({
+                        "id": str(d.id),
+                        "title": d.title,
+                        "sector": d.sector,
+                        "priority": d.priority,
+                        "ask": d.funding_ask,
+                        "summary": d.deal_summary[:200]
+                    })
+
+            # --- PASS 3: Synthesize Final Answer ---
+            context_payload = f"USER MESSAGE: {user_message}\n\nDATABASE RESULTS (deal_data): {json.dumps(deal_data)}"
+            final_result = ai_service.process_content(
+                content=context_payload,
+                skill_name="universal_chat",
+                source_type="universal_chat_final"
+            )
+
+            # Inject search query for frontend transparency
+            final_result["applied_filters"] = search_query
+
+            return Response(final_result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 class AISettingsView(APIView):
     """
     View to manage AI Orchestrator settings.
