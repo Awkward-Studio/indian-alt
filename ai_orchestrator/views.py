@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
-from .models import AIPersonality
+from .models import AIPersonality, AISkill
 from .services.ai_processor import AIProcessorService
 from deals.models import Deal
 
@@ -277,4 +277,33 @@ class AISettingsView(APIView):
 
         except Exception as e:
             logger.error(f"Error updating AI settings: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class AISkillsView(APIView):
+    """
+    View to retrieve all AI skills and their prompt templates.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="List all AI skills",
+        description="Returns a list of all configured AI skills, their descriptions, and exact prompt templates.",
+        tags=["AI Settings"],
+    )
+    def get(self, request):
+        try:
+            skills = AISkill.objects.all().order_by('name')
+            data = [
+                {
+                    "id": str(skill.id),
+                    "name": skill.name,
+                    "description": skill.description,
+                    "prompt_template": skill.prompt_template,
+                    "input_schema": skill.input_schema,
+                    "output_schema": skill.output_schema
+                } for skill in skills
+            ]
+            return Response(data, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error fetching AI skills: {str(e)}")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
