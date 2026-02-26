@@ -7,6 +7,7 @@ DEBUG = True
 
 # Database
 ALLOWED_HOSTS = ['*']
+CORS_ALLOW_ALL_ORIGINS = True
 # Base settings default to SQLite unless DATABASE_URL is provided.
 # For local Postgres, set DATABASE_URL in .env and USE_SQLITE=false.
 

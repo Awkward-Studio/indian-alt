@@ -123,11 +123,13 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
         """Analyze a specific email with AI, including attachments."""
         try:
             email = self.get_object()
+            print(f"\n[EMAIL ANALYSIS] Starting AI pipeline for email: {email.subject}")
             graph = GraphAPIService()
             doc_processor = DocumentProcessorService()
             
             # 1. Base content from email body
-            content = email.body_html if email.body_html else email.body_text
+            # FIX: Ensure content is not None to avoid concatenation errors
+            content = email.body_html or email.body_text or ""
             metadata = {
                 'from_email': email.from_email,
                 'subject': email.subject,
@@ -139,6 +141,7 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             attachment_context = ""
             
             if email.has_attachments:
+                print(f"[EMAIL ANALYSIS] Fetching attachments from Graph API...")
                 attachments = graph.get_message_attachments(email.email_account.email, email.graph_id)
                 for att in attachments:
                     att_id = att.get('id')
@@ -160,18 +163,21 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
                         images.append(content_bytes_b64)
                     else:
                         # Extract text from document
+                        print(f"[EMAIL ANALYSIS] Extracting text from document: {filename}")
                         text = doc_processor.extract_text(content_bytes, filename)
                         if text:
                             attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
             
             # Combine body + attachment text
             full_context = content + attachment_context
+            print(f"[EMAIL ANALYSIS] Total context length: {len(full_context)} characters.")
             
             # 3. Save extracted text for future Chat context
             email.extracted_text = full_context
             email.save(update_fields=['extracted_text'])
             
             # 4. Analyze with AI
+            print(f"[EMAIL ANALYSIS] Sending content to AI Orchestrator...")
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=full_context,
@@ -860,17 +866,21 @@ class AnalyzeOneDriveFileView(APIView):
 
         try:
             # 1. Download file content from Graph API
+            print(f"\n[ONEDRIVE ANALYSIS] Starting pipeline for file: {filename}")
             graph = GraphAPIService()
             file_content = graph.get_drive_item_content(user_email, file_id)
             
             if not file_content:
+                print(f"[ONEDRIVE ANALYSIS] ERROR: Failed to download file content for {filename}")
                 return Response({'error': 'Failed to download file content'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             # 2. Extract text from content
+            print(f"[ONEDRIVE ANALYSIS] Extracting text from downloaded bytes...")
             doc_processor = DocumentProcessorService()
             extracted_text = doc_processor.extract_text(file_content, filename)
             
             # 3. Analyze with AI
+            print(f"[ONEDRIVE ANALYSIS] Sending {len(extracted_text)} chars to AI Orchestrator...")
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=extracted_text,

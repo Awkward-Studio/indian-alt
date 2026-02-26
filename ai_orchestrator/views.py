@@ -1,4 +1,5 @@
 import logging
+import json
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -79,54 +80,124 @@ class UniversalChatView(APIView):
 
     def post(self, request):
         user_message = request.data.get('message')
+        history = request.data.get('history', []) # Array of {role: 'user', content: '...'}
+        
         if not user_message:
             return Response({"error": "message is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         ai_service = AIProcessorService()
 
         try:
+            import sys
+            
+            # Format history for the prompt
+            history_context = ""
+            for msg in history[-5:]: # Last 5 messages for context
+                role = "User" if msg.get('role') == 'user' else "Assistant"
+                history_context += f"{role}: {msg.get('content')}\n"
+
             # --- PASS 1: Identify Search Filters ---
+            print(f"\n[UNIVERSAL CHAT] PASS 1: Extracting Intent...", flush=True)
+            
+            # STRENGHTENED PROMPT for Pass 1 to prevent hallucination
+            pass1_content = f"""CHAT HISTORY:
+{history_context}
+
+CURRENT USER MESSAGE: {user_message}
+
+TASK: You are a query parser. 
+- Analyze the user message in context of the history.
+- If the user says 'these' or 'them', refer to previous assistant messages.
+- If the user asks about 'how many' or 'list' deals, you MUST return a search_query with limit: 20.
+- Do NOT try to answer the question.
+- Return ONLY JSON."""
+
             intent_result = ai_service.process_content(
-                content=f"USER MESSAGE: {user_message}\n\nTask: Identify search filters. If no filters needed, return empty search_query.",
+                content=pass1_content,
                 skill_name="universal_chat",
                 source_type="universal_chat_intent"
             )
+            
+            # DEBUG: What did the AI actually think?
+            print(f"[DEBUG] AI Intent Response: {json.dumps(intent_result)}", flush=True)
 
             search_query = intent_result.get("search_query", {})
+            if not isinstance(search_query, dict):
+                search_query = {}
+                
             deal_data = []
 
             # --- PASS 2: Execute Django ORM Query ---
-            if any(search_query.values()):
-                queryset = Deal.objects.all()
-                
-                if search_query.get("sector"):
-                    queryset = queryset.filter(sector__icontains=search_query["sector"])
-                if search_query.get("industry"):
-                    queryset = queryset.filter(industry__icontains=search_query["industry"])
-                if search_query.get("priority"):
-                    queryset = queryset.filter(priority=search_query["priority"])
-                
-                # Fetch limited results to keep context focused
-                limit = search_query.get("limit", 10)
-                deals = queryset.order_by('-created_at')[:limit]
-                
-                for d in deals:
-                    deal_data.append({
-                        "id": str(d.id),
-                        "title": d.title,
-                        "sector": d.sector,
-                        "priority": d.priority,
-                        "ask": d.funding_ask,
-                        "summary": d.deal_summary[:200]
-                    })
+            # If the user is asking a general question, we should fetch some deals anyway
+            # rather than sending an empty list to the AI.
+            queryset = Deal.objects.all()
+            has_filters = False
+            
+            if search_query.get("sector") and search_query.get("sector") != "null":
+                queryset = queryset.filter(sector__icontains=search_query["sector"])
+                has_filters = True
+            if search_query.get("industry") and search_query.get("industry") != "null":
+                queryset = queryset.filter(industry__icontains=search_query["industry"])
+                has_filters = True
+            if search_query.get("priority") and search_query.get("priority") != "null":
+                queryset = queryset.filter(priority=search_query["priority"])
+                has_filters = True
+            
+            print(f"[UNIVERSAL CHAT] PASS 2: Executing Query (Filters: {has_filters})...", flush=True)
+            
+            # Fetch results (either filtered or just the latest 10 for context)
+            limit = 20 # Increased limit to ensure we don't miss any
+            try:
+                limit = int(search_query.get("limit", 20))
+            except: pass
+            
+            deals = queryset.order_by('-created_at')[:limit]
+            
+            deal_data = []
+            for d in deals:
+                deal_data.append({
+                    "title": d.title or "Untitled Deal",
+                    "sector": d.sector,
+                    "industry": d.industry,
+                    "priority": d.priority,
+                    "ask": d.funding_ask,
+                    "summary": d.deal_summary[:150] if d.deal_summary else ""
+                })
+            
+            print(f"[UNIVERSAL CHAT] PASS 2: Database returned {len(deal_data)} deals.", flush=True)
+            print(f"[DEBUG] Titles in database results: {[d['title'] for d in deal_data]}", flush=True)
 
             # --- PASS 3: Synthesize Final Answer ---
-            context_payload = f"USER MESSAGE: {user_message}\n\nDATABASE RESULTS (deal_data): {json.dumps(deal_data)}"
+            print(f"[UNIVERSAL CHAT] PASS 3: Synthesizing final answer...", flush=True)
+            
+            # Use a more compact dump for logging
+            deal_data_json = json.dumps(deal_data)
+            
+            # IMPORTANT: We inject the context directly into the 'content' because 
+            # the prompt template might be failing to resolve the variables properly
+            context_payload = f"""DATABASE RESULTS (deal_data): {deal_data_json}
+
+CHAT HISTORY:
+{history_context}
+
+CURRENT USER MESSAGE: {user_message}
+
+INSTRUCTIONS: 
+1. Use the 'deal_data' and 'CHAT HISTORY' above to answer the user conversationally and intelligently.
+2. If the user refers to 'these', 'them', or 'top deals', use the CHAT HISTORY to identify which deals they are talking about.
+3. FORMATTING: Use Markdown (bolding, bullet points) to make the response easy to read. 
+4. Be professional, clinical, yet approachable—like a Head of Deal Flow.
+5. Provide a summary count at the end if applicable."""
+
+            print(f"[DEBUG] Final Prompt sent to AI: {context_payload}", flush=True)
+            
             final_result = ai_service.process_content(
                 content=context_payload,
                 skill_name="universal_chat",
                 source_type="universal_chat_final"
             )
+
+
 
             # Inject search query for frontend transparency
             final_result["applied_filters"] = search_query

@@ -196,6 +196,14 @@ class AIProcessorService:
         if images:
             payload["images"] = images
         
+        # LOGGING: Clear, non-fluffy debug info
+        print(f"\n[AI VM HIT] --- START REQUEST ---")
+        print(f"[AI VM HIT] Phase: {source_type} | Model: {selected_model}")
+        # Print a clean version of the payload (excluding potentially massive images)
+        log_payload = {k: v for k, v in payload.items() if k != 'images'}
+        print(f"[AI VM HIT] Payload: {json.dumps(log_payload, indent=2)}")
+        print(f"[AI VM HIT] --- END REQUEST ---\n", flush=True)
+        
         audit_log = AIAuditLog(
             source_type=source_type,
             source_id=source_id,
@@ -214,6 +222,7 @@ class AIProcessorService:
             data = response.json()
             
             raw_response = data.get("response", "")
+            print(f"[AI VM RESPONSE] Raw Output: {raw_response}", flush=True)
             audit_log.raw_response = raw_response
             
             try:
