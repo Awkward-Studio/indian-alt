@@ -60,6 +60,34 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return DealListSerializer
         return DealSerializer
     
+    def perform_create(self, serializer):
+        # Extract source_email_id before saving
+        source_email_id = self.request.data.get('source_email_id')
+        deal = serializer.save()
+        
+        if source_email_id:
+            try:
+                from microsoft.models import Email
+                from ai_orchestrator.services.embedding_processor import EmbeddingService
+                
+                email = Email.objects.get(id=source_email_id)
+                email.deal = deal
+                email.save(update_fields=['deal'])
+                
+                # Copy extracted text to deal if empty
+                if not deal.extracted_text and email.extracted_text:
+                    deal.extracted_text = email.extracted_text
+                    deal.save(update_fields=['extracted_text'])
+                
+                # Trigger Vectorization for both Deal and Email
+                embed_service = EmbeddingService()
+                embed_service.vectorize_deal(deal)
+                embed_service.vectorize_email(email)
+                
+                print(f"[DEAL CREATION] Successfully linked email {source_email_id} and vectorized.")
+            except Exception as e:
+                logger.error(f"Failed to link/vectorize deal from email: {str(e)}")
+
     @extend_schema(
         summary="Get deals grouped by priority",
         description="Retrieve all deals grouped by their priority level.",
