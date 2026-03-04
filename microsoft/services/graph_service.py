@@ -31,11 +31,17 @@ class GraphAPIService:
     """
 
     def __init__(self):
-        self.client_id = config('AZURE_CLIENT_ID', default='')
-        self.client_secret = config('AZURE_CLIENT_SECRET', default='')
-        self.tenant_id = config('AZURE_TENANT_ID', default='')
+        # Prefer os.environ for compatibility with the project's env loading style
+        import os
+        self.client_id = os.environ.get('AZURE_CLIENT_ID') or config('AZURE_CLIENT_ID', default='')
+        self.client_secret = os.environ.get('AZURE_CLIENT_SECRET') or config('AZURE_CLIENT_SECRET', default='')
+        self.tenant_id = os.environ.get('AZURE_TENANT_ID') or config('AZURE_TENANT_ID', default='')
+        
+        if not self.tenant_id:
+            logger.error("AZURE_TENANT_ID is missing from environment!")
+            
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
-        self.graph_endpoint = config('GRAPH_API_ENDPOINT', default='https://graph.microsoft.com/v1.0')
+        self.graph_endpoint = os.environ.get('GRAPH_API_ENDPOINT') or config('GRAPH_API_ENDPOINT', default='https://graph.microsoft.com/v1.0')
         
         self.msal_app = msal.ConfidentialClientApplication(
             self.client_id,

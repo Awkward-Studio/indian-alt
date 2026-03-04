@@ -182,6 +182,10 @@ class Email(models.Model):
         default=False,
         help_text='Whether email has been processed by AI'
     )
+    is_indexed = models.BooleanField(
+        default=False,
+        help_text='Whether this email and its attachments have been vectorized'
+    )
     processing_status = models.CharField(
         max_length=20,
         default='idle',

@@ -1,6 +1,7 @@
 import uuid
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from pgvector.django import VectorField
 
 class AIPersonality(models.Model):
     """
@@ -107,3 +108,48 @@ class AIAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.source_type} {self.source_id} - {self.created_at}"
+
+class DocumentChunk(models.Model):
+    """
+    Stores individual chunks of documents with their vector embeddings for RAG.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        'deals.Deal',
+        on_delete=models.CASCADE,
+        related_name='chunks',
+        help_text='The deal this chunk belongs to'
+    )
+    
+    # Provenance
+    source_type = models.CharField(
+        max_length=50, 
+        choices=[
+            ('email', 'Email Body'),
+            ('attachment', 'Email Attachment'),
+            ('onedrive', 'OneDrive File'),
+            ('deal_summary', 'Deal Summary'),
+        ]
+    )
+    source_id = models.CharField(max_length=255, help_text="Original ID of the source (Email ID, File ID, etc.)")
+    
+    # Content & Vector
+    content = models.TextField()
+    # nomic-embed-text uses 768 dimensions
+    embedding = VectorField(dimensions=768)
+    
+    # Extra context (e.g., filename, page number, chunk index)
+    metadata = models.JSONField(default=dict, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Document Chunk"
+        verbose_name_plural = "Document Chunks"
+        indexes = [
+            models.Index(fields=['deal', 'source_type']),
+            # Vector search index is usually created via SQL, but pgvector supports it
+        ]
+
+    def __str__(self):
+        return f"Chunk for Deal {self.deal_id} ({self.source_type})"

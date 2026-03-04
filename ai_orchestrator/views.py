@@ -8,6 +8,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from .models import AIPersonality, AISkill
 from .services.ai_processor import AIProcessorService
+from .services.embedding_processor import EmbeddingService
 from deals.models import Deal
 
 logger = logging.getLogger(__name__)
@@ -35,31 +36,47 @@ class DealChatView(APIView):
             return Response({"error": "deal_id and message are required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            deal = Deal.objects.prefetch_related('emails').get(id=deal_id)
+            deal = Deal.objects.get(id=deal_id)
             
-            # 1. Assemble Deal Context
-            deal_info = f"DEAL: {deal.title}\nSECTOR: {deal.sector}\nASK: {deal.funding_ask}\nSUMMARY: {deal.deal_summary}\n"
-            
-            # 2. Add all extracted email text
-            email_context = ""
-            for email in deal.emails.all():
-                if email.extracted_text:
-                    email_context += f"\n--- EMAIL FROM {email.from_email} (Date: {email.date_received}) ---\n"
-                    email_context += email.extracted_text + "\n"
+            # 0. STRUCTURED CONTEXT: Get the actual DB record as a dictionary
+            # We exclude large text fields that will be covered by RAG chunks
+            from django.forms.models import model_to_dict
+            structured_data = model_to_dict(deal, exclude=['deal_summary', 'deal_details', 'comments', 'extracted_text'])
+            structured_data_str = json.dumps(structured_data, default=str)
 
-            # 3. Build full prompt
-            full_context = f"{deal_info}\n{email_context}"
+            # 1. RETRIEVAL PHASE: Fetch relevant chunks from Vector DB
+            print(f"[DEAL CHAT] Querying Vector Store for relevant context...")
+            embed_service = EmbeddingService()
+            chunks = embed_service.search_similar_chunks(user_message, deal, limit=8)
             
-            # 4. Call AI with Deal context
+            # 2. Assemble context from chunks
+            rag_context = f"CURRENT DEAL DATABASE RECORD: {structured_data_str}\n\nDOCUMENT CHUNKS (Most Relevant):\n"
+            data_points = []
+            
+            if chunks:
+                for chunk in chunks:
+                    source_name = chunk.metadata.get('filename', chunk.metadata.get('subject', chunk.source_type))
+                    rag_context += f"\n--- SOURCE: {source_name} ---\n{chunk.content}\n"
+                    if source_name not in data_points:
+                        data_points.append(source_name)
+            else:
+                # FALLBACK: If no vectors exist yet, use the old basic context
+                print(f"[DEAL CHAT] WARNING: No vector chunks found. Falling back to basic deal info.")
+                rag_context = f"DEAL: {deal.title}\nSECTOR: {deal.sector}\nASK: {deal.funding_ask}\nSUMMARY: {deal.deal_summary}\n"
+
+            # 3. Call AI with retrieved context
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=user_message,
-                personality_name="default", # Using MD personality
-                skill_name="deal_chat", # New skill we will seed
-                metadata={'deal_context': full_context},
+                personality_name="default",
+                skill_name="deal_chat",
+                metadata={'deal_context': rag_context},
                 source_id=str(deal.id),
                 source_type="deal_chat"
             )
+
+            # Add source attribution to the response
+            result["data_points"] = data_points
 
             return Response(result, status=status.HTTP_200_OK)
 
@@ -96,21 +113,27 @@ class UniversalChatView(APIView):
                 role = "User" if msg.get('role') == 'user' else "Assistant"
                 history_context += f"{role}: {msg.get('content')}\n"
 
-            # --- PASS 1: Identify Search Filters ---
+            # --- PASS 1: Advanced Intent Extraction ---
             print(f"\n[UNIVERSAL CHAT] PASS 1: Extracting Intent...", flush=True)
+            deal_fields = [f.name for f in Deal._meta.get_fields() if not f.is_relation]
             
-            # STRENGHTENED PROMPT for Pass 1 to prevent hallucination
-            pass1_content = f"""CHAT HISTORY:
-{history_context}
+            pass1_content = f"""USER MESSAGE: {user_message}
+CHAT HISTORY: {history_context}
 
-CURRENT USER MESSAGE: {user_message}
+TASK: Parse intent into tools.
+AVAILABLE FIELDS (DB): {', '.join(deal_fields)}
 
-TASK: You are a query parser. 
-- Analyze the user message in context of the history.
-- If the user says 'these' or 'them', refer to previous assistant messages.
-- If the user asks about 'how many' or 'list' deals, you MUST return a search_query with limit: 20.
-- Do NOT try to answer the question.
-- Return ONLY JSON."""
+TOOLS:
+1. "db_filters": Search structured data (e.g. Sector='Fintech').
+2. "global_rag": Search document text (e.g. 'ESG strategy', 'patents').
+3. "get_stats": User wants counts/summary of pipeline.
+
+Return JSON:
+{{
+  "db_filters": {{ "sector": "...", "limit": 10 }},
+  "global_rag": "query string if needed",
+  "get_stats": true/false
+}}"""
 
             intent_result = ai_service.process_content(
                 content=pass1_content,
@@ -118,90 +141,57 @@ TASK: You are a query parser.
                 source_type="universal_chat_intent"
             )
             
-            # DEBUG: What did the AI actually think?
-            print(f"[DEBUG] AI Intent Response: {json.dumps(intent_result)}", flush=True)
-
-            search_query = intent_result.get("search_query", {})
-            if not isinstance(search_query, dict):
-                search_query = {}
+            # --- PASS 2: Multi-Source Execution ---
+            context_data = {}
+            
+            # Tool A: DB Search
+            db_filters = intent_result.get("db_filters", {})
+            if db_filters:
+                from django.db.models import Q
+                q_obj = Q()
+                for f, v in db_filters.items():
+                    if f in deal_fields and v: q_obj &= Q(**{f"{f}__icontains": v})
                 
-            deal_data = []
+                deals = Deal.objects.filter(q_obj).order_by('-created_at')[:10]
+                context_data["database_results"] = [
+                    {"title": d.title, "sector": d.sector, "priority": d.priority, "summary": d.deal_summary[:100]} 
+                    for d in deals
+                ]
 
-            # --- PASS 2: Execute Django ORM Query ---
-            # If the user is asking a general question, we should fetch some deals anyway
-            # rather than sending an empty list to the AI.
-            queryset = Deal.objects.all()
-            has_filters = False
-            
-            if search_query.get("sector") and search_query.get("sector") != "null":
-                queryset = queryset.filter(sector__icontains=search_query["sector"])
-                has_filters = True
-            if search_query.get("industry") and search_query.get("industry") != "null":
-                queryset = queryset.filter(industry__icontains=search_query["industry"])
-                has_filters = True
-            if search_query.get("priority") and search_query.get("priority") != "null":
-                queryset = queryset.filter(priority=search_query["priority"])
-                has_filters = True
-            
-            print(f"[UNIVERSAL CHAT] PASS 2: Executing Query (Filters: {has_filters})...", flush=True)
-            
-            # Fetch results (either filtered or just the latest 10 for context)
-            limit = 20 # Increased limit to ensure we don't miss any
-            try:
-                limit = int(search_query.get("limit", 20))
-            except: pass
-            
-            deals = queryset.order_by('-created_at')[:limit]
-            
-            deal_data = []
-            for d in deals:
-                deal_data.append({
-                    "title": d.title or "Untitled Deal",
-                    "sector": d.sector,
-                    "industry": d.industry,
-                    "priority": d.priority,
-                    "ask": d.funding_ask,
-                    "summary": d.deal_summary[:150] if d.deal_summary else ""
-                })
-            
-            print(f"[UNIVERSAL CHAT] PASS 2: Database returned {len(deal_data)} deals.", flush=True)
-            print(f"[DEBUG] Titles in database results: {[d['title'] for d in deal_data]}", flush=True)
+            # Tool B: Global Semantic Search
+            rag_query = intent_result.get("global_rag")
+            if rag_query:
+                embed_service = EmbeddingService()
+                chunks = embed_service.search_global_chunks(rag_query, limit=10)
+                context_data["document_insights"] = [
+                    {"deal": c.deal.title, "text": c.content, "source": c.source_type} 
+                    for c in chunks
+                ]
 
-            # --- PASS 3: Synthesize Final Answer ---
+            # Tool C: Analytics Summary
+            if intent_result.get("get_stats"):
+                from django.db.models import Count
+                stats = Deal.objects.values('sector', 'priority').annotate(count=Count('id'))
+                context_data["pipeline_stats"] = list(stats)
+
+            # --- PASS 3: Synthesis ---
             print(f"[UNIVERSAL CHAT] PASS 3: Synthesizing final answer...", flush=True)
-            
-            # Use a more compact dump for logging
-            deal_data_json = json.dumps(deal_data)
-            
-            # IMPORTANT: We inject the context directly into the 'content' because 
-            # the prompt template might be failing to resolve the variables properly
-            context_payload = f"""DATABASE RESULTS (deal_data): {deal_data_json}
+            context_payload = f"""SYSTEM CONTEXT: {json.dumps(context_data)}
+CHAT HISTORY: {history_context}
+USER MESSAGE: {user_message}
 
-CHAT HISTORY:
-{history_context}
+INSTRUCTIONS:
+1. Use the provided SYSTEM CONTEXT to answer.
+2. If document_insights are present, mention which deals they come from.
+3. If pipeline_stats are present, provide a high-level overview.
+4. If no data is found, be honest and suggest what to search for.
+5. Use Markdown (bolding, tables) for readability."""
 
-CURRENT USER MESSAGE: {user_message}
-
-INSTRUCTIONS: 
-1. Use the 'deal_data' and 'CHAT HISTORY' above to answer the user conversationally and intelligently.
-2. If the user refers to 'these', 'them', or 'top deals', use the CHAT HISTORY to identify which deals they are talking about.
-3. FORMATTING: Use Markdown (bolding, bullet points) to make the response easy to read. 
-4. Be professional, clinical, yet approachable—like a Head of Deal Flow.
-5. Provide a summary count at the end if applicable."""
-
-            print(f"[DEBUG] Final Prompt sent to AI: {context_payload}", flush=True)
-            
             final_result = ai_service.process_content(
                 content=context_payload,
                 skill_name="universal_chat",
                 source_type="universal_chat_final"
             )
-
-
-
-            # Inject search query for frontend transparency
-            final_result["applied_filters"] = search_query
-
             return Response(final_result, status=status.HTTP_200_OK)
 
         except Exception as e:

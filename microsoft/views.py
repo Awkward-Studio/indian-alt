@@ -29,6 +29,7 @@ from .services.email_reader import EmailReaderService
 from .services.graph_service import GraphAPIService, DMS_USER_EMAIL, DMS_DRIVE_ID
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
+from ai_orchestrator.services.embedding_processor import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,15 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
                 source_type="email",
                 images=images if images else None
             )
+            
+            # 5. Vectorize for RAG if linked to a deal
+            if email.deal:
+                print(f"[EMAIL ANALYSIS] Triggering vectorization for RAG...")
+                try:
+                    embed_service = EmbeddingService()
+                    embed_service.vectorize_email(email)
+                except Exception as ve:
+                    logger.error(f"Vectorization failed: {str(ve)}")
             
             # Update email status if successful
             if "error" not in result:
@@ -876,6 +886,8 @@ class AnalyzeOneDriveFileView(APIView):
                              description='The item ID of the file to analyze'),
             OpenApiParameter(name='filename', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True,
                              description='Original filename (used for text extraction)'),
+            OpenApiParameter(name='deal_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False,
+                             description='The Deal ID to link and vectorize this file to'),
         ],
         responses={200: OpenApiTypes.OBJECT},
     )
@@ -883,6 +895,7 @@ class AnalyzeOneDriveFileView(APIView):
         """Download a file from the DMS drive, extract text, and run AI analysis."""
         file_id = request.query_params.get('file_id')
         filename = request.query_params.get('filename')
+        deal_id = request.query_params.get('deal_id')
 
         if not all([file_id, filename]):
             missing = [p for p in ('file_id', 'filename') if not request.query_params.get(p)]
@@ -927,6 +940,25 @@ class AnalyzeOneDriveFileView(APIView):
                 source_id=file_id,
                 source_type="onedrive_file",
             )
+            
+            # 4. Vectorize for RAG if Deal ID is provided
+            if deal_id:
+                try:
+                    from deals.models import Deal
+                    deal = Deal.objects.get(id=deal_id)
+                    print(f"[ONEDRIVE ANALYSIS] Vectorizing for Deal: {deal.title}")
+                    embed_service = EmbeddingService()
+                    embed_service.chunk_and_embed(
+                        text=extracted_text,
+                        deal=deal,
+                        source_type='onedrive',
+                        source_id=file_id,
+                        metadata={'filename': filename}
+                    )
+                except Deal.DoesNotExist:
+                    print(f"[ONEDRIVE ANALYSIS] Deal {deal_id} not found, skipping vectorization.")
+                except Exception as ve:
+                    logger.error(f"OneDrive Vectorization failed: {str(ve)}")
 
             return Response(result, status=status.HTTP_200_OK)
 

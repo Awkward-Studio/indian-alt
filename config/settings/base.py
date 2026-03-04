@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_extensions',
     'django_filters',
+    'pgvector',
     
     # Local apps
     'accounts',

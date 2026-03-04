@@ -99,22 +99,40 @@ class AIProcessorService:
         """
         Autonomous routing logic:
         - If images are present -> Vision Model
-        - If skill involves documents or complex tables -> Vision Model (Qwen2.5-VL)
-        - If content mentions complex visual structures -> Vision Model
+        - If content contains complex tables or charts -> Vision Model
+        - Otherwise, use fast Text-only model (Mistral Nemo)
         """
         if images:
             return "vision"
         
-        if skill_name in ["document_analysis", "deal_extraction"]:
-            # Even for deal extraction, if we have markdown from Docling, 
-            # a vision-capable or high-context model is better.
-            return "vision"
-            
-        vision_keywords = ['chart', 'table', 'graph', 'diagram', 'image', 'screenshot', '|---|'] # |---| for markdown tables
+        # Look for explicit visual markers
+        vision_keywords = ['[IMAGE]', 'chart', 'graph', 'diagram', '|---|'] 
         if any(keyword in content.lower() for keyword in vision_keywords):
             return "vision"
             
         return "text"
+
+    def _extract_json(self, text: str) -> str:
+        """
+        Attempts to extract a JSON block from a string that might contain 
+        conversational filler or markdown code blocks.
+        """
+        if not text:
+            return "{}"
+            
+        # 1. Look for markdown code blocks: ```json ... ```
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            return json_match.group(1)
+            
+        # 2. Look for the first { and last }
+        first_brace = text.find('{')
+        last_brace = text.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1:
+            return text[first_brace:last_brace + 1]
+            
+        return text
 
     def process_content(
         self,
@@ -129,12 +147,10 @@ class AIProcessorService:
     ) -> Dict[str, Any]:
         """
         Orchestrates the LLM processing pipeline. 
-        If model_override is provided, it attempts to use that specific model.
         """
-        # Refresh available models
+        # ... [Keep existing initialization code] ...
         self.available_models = self.get_available_models()
 
-        # 1. Fetch Personality and Skill
         try:
             if personality_name == "default":
                 personality = AIPersonality.objects.get(is_default=True)
@@ -148,10 +164,8 @@ class AIProcessorService:
         except AISkill.DoesNotExist:
             skill = None
 
-        # 2. Routing Decision
         route = self.route_request(images, skill_name, content)
         
-        # 3. Model Selection
         if model_override and model_override in self.available_models:
             selected_model = model_override
         else:
@@ -159,26 +173,29 @@ class AIProcessorService:
         
         model_provider = "ollama"
 
-        # 4. Clean content
         cleaned_text = self.clean_html(content)
         cleaned_text = self.strip_signatures(cleaned_text)
         
-        # 5. Smart Truncation
         max_chars = 96000
         if len(cleaned_text) > max_chars:
             cleaned_text = cleaned_text[:60000] + "\n\n[... TRUNCATED ...]\n\n" + cleaned_text[-36000:]
 
-        # 6. Construct Prompts
         system_instructions = personality.system_instructions if personality else "You are a Private Equity analyst."
+        # Add global formatting instruction
+        system_instructions += "\n\nIMPORTANT: You must return ONLY a valid JSON object. Do not include any text before or after the JSON. Do not use markdown bolding on keys."
+        
         prompt_template = skill.prompt_template if skill else "Analyze this content."
         
+        user_prompt = prompt_template
         if metadata:
             for key, value in metadata.items():
-                prompt_template = prompt_template.replace(f"{{{{ {key} }}}}", str(value))
+                pattern = re.compile(r'\{\{\s*' + re.escape(key) + r'\s*\}\}')
+                user_prompt = pattern.sub(str(value), user_prompt)
         
-        user_prompt = f"{prompt_template}\n\nCONTENT:\n{cleaned_text}"
+        user_prompt = re.sub(r'\{\{\s*content\s*\}\}', cleaned_text, user_prompt)
+        if cleaned_text not in user_prompt:
+            user_prompt = f"{user_prompt}\n\nCONTENT:\n{cleaned_text}"
         
-        # 7. Call LLM
         start_time = time.time()
         payload = {
             "model": selected_model,
@@ -186,7 +203,7 @@ class AIProcessorService:
             "system": system_instructions,
             "stream": False,
             "format": "json",
-            "keep_alive": "30m", # Keep model in VRAM for 30 mins to avoid re-loads
+            "keep_alive": "30m",
             "options": {
                 "num_ctx": 32768,
                 "temperature": 0.1
@@ -196,12 +213,8 @@ class AIProcessorService:
         if images:
             payload["images"] = images
         
-        # LOGGING: Clear, non-fluffy debug info
         print(f"\n[AI VM HIT] --- START REQUEST ---")
         print(f"[AI VM HIT] Phase: {source_type} | Model: {selected_model}")
-        # Print a clean version of the payload (excluding potentially massive images)
-        log_payload = {k: v for k, v in payload.items() if k != 'images'}
-        print(f"[AI VM HIT] Payload: {json.dumps(log_payload, indent=2)}")
         print(f"[AI VM HIT] --- END REQUEST ---\n", flush=True)
         
         audit_log = AIAuditLog(
@@ -216,24 +229,26 @@ class AIProcessorService:
         )
         
         try:
-            # Increased timeout to 180s to allow for model loading/swapping
-            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=180)
+            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=300)
             response.raise_for_status()
             data = response.json()
             
             raw_response = data.get("response", "")
-            print(f"[AI VM RESPONSE] Raw Output: {raw_response}", flush=True)
+            print(f"[AI VM RESPONSE] Raw Output Length: {len(raw_response)} chars", flush=True)
             audit_log.raw_response = raw_response
             
+            # EXTRACT JSON ROBUSTLY
+            clean_json_str = self._extract_json(raw_response)
+            
             try:
-                parsed_json = json.loads(raw_response)
+                parsed_json = json.loads(clean_json_str)
                 audit_log.parsed_json = parsed_json
                 audit_log.is_success = True
-                # Return both parsed and raw for full visibility
                 parsed_json["_raw_response"] = raw_response
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as jde:
+                logger.error(f"JSON Decode Error: {str(jde)}. Str: {clean_json_str[:200]}...")
                 audit_log.is_success = False
-                audit_log.error_message = "JSON parsing error"
+                audit_log.error_message = f"JSON parsing error: {str(jde)}"
                 parsed_json = {"error": "JSON parsing error", "raw": raw_response}
                 
         except Exception as e:

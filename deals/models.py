@@ -95,6 +95,10 @@ class Deal(models.Model):
         blank=True,
         help_text='Array of theme tags'
     )
+    is_indexed = models.BooleanField(
+        default=False,
+        help_text='Whether this deal data has been vectorized and stored in the vector database'
+    )
 
     class Meta:
         db_table = 'deal'
