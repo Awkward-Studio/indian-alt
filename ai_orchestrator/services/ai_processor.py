@@ -192,11 +192,24 @@ class AIProcessorService:
                 pattern = re.compile(r'\{\{\s*' + re.escape(key) + r'\s*\}\}')
                 user_prompt = pattern.sub(str(value), user_prompt)
         
-        user_prompt = re.sub(r'\{\{\s*content\s*\}\}', cleaned_text, user_prompt)
+        # Replace {{ content }} robustly using a lambda to avoid backslash escaping issues
+        user_prompt = re.sub(r'\{\{\s*content\s*\}\}', lambda _: cleaned_text, user_prompt)
+        
         if cleaned_text not in user_prompt:
             user_prompt = f"{user_prompt}\n\nCONTENT:\n{cleaned_text}"
-        
+        # 7. Call LLM
         start_time = time.time()
+
+        # LOGGING: VRAM Check
+        try:
+            ps_res = requests.get(f"{self.ollama_url}/api/ps", timeout=2)
+            if ps_res.status_code == 200:
+                loaded = ps_res.json().get('models', [])
+                print(f"[AI VM DIAGNOSTIC] Currently Loaded Models: {[m['name'] for m in loaded]}")
+                for m in loaded:
+                    print(f" -> {m['name']}: {m['size_vram'] / 1e9:.2f} GB VRAM")
+        except: pass
+
         payload = {
             "model": selected_model,
             "prompt": user_prompt,
@@ -209,13 +222,16 @@ class AIProcessorService:
                 "temperature": 0.1
             }
         }
-        
+
         if images:
+            print(f"[AI VM HIT] Sending {len(images)} images to Vision model...")
             payload["images"] = images
-        
+
         print(f"\n[AI VM HIT] --- START REQUEST ---")
         print(f"[AI VM HIT] Phase: {source_type} | Model: {selected_model}")
+        print(f"[AI VM HIT] Prompt Length: {len(user_prompt)} chars")
         print(f"[AI VM HIT] --- END REQUEST ---\n", flush=True)
+
         
         audit_log = AIAuditLog(
             source_type=source_type,

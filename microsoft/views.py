@@ -151,26 +151,27 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
                     att_id = att.get('id')
                     filename = att.get('name', 'attachment')
                     content_type = att.get('contentType', '')
-                    
+
                     # Fetch actual content
                     full_att = graph.get_attachment_content(email.email_account.email, email.graph_id, att_id)
                     content_bytes_b64 = full_att.get('contentBytes')
-                    
+
                     if not content_bytes_b64:
                         continue
 
                     content_bytes = base64.b64decode(content_bytes_b64)
-                    
-                    # If image, add to vision context
-                    if content_type.startswith('image/'):
-                        images.append(content_bytes_b64)
-                    else:
-                        # Extract text from document
-                        print(f"[EMAIL ANALYSIS] Extracting text from document: {filename}")
-                        text = doc_processor.extract_text(content_bytes, filename)
-                        if text:
-                            attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
-            
+
+                    # 1. Extract Text
+                    print(f"[EMAIL ANALYSIS] Extracting text from: {filename}")
+                    text = doc_processor.extract_text(content_bytes, filename)
+                    if text:
+                        attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
+
+                    # 2. Extract Visuals (PDF pages as images, or standalone images)
+                    print(f"[EMAIL ANALYSIS] Extracting visuals from: {filename}")
+                    visuals = doc_processor.extract_visuals(content_bytes, filename)
+                    if visuals:
+                        images.extend(visuals)
             # Combine body + attachment text
             full_context = content + attachment_context
             print(f"[EMAIL ANALYSIS] Total context length: {len(full_context)} characters.")

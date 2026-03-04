@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.contrib.auth.models import User
 from django.utils.translation import gettext_lazy as _
 from pgvector.django import VectorField
 
@@ -108,6 +109,43 @@ class AIAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.source_type} {self.source_id} - {self.created_at}"
+
+class AIConversation(models.Model):
+    """
+    Stores a persistent chat session between a user and the AI.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_conversations')
+    title = models.CharField(max_length=255, default="New Conversation")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.title} ({self.user.username})"
+
+class AIMessage(models.Model):
+    """
+    Stores individual messages within a conversation.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(AIConversation, on_delete=models.CASCADE, related_name='messages')
+    role = models.CharField(max_length=20, choices=[('user', 'User'), ('assistant', 'Assistant')])
+    content = models.TextField()
+    
+    # Metadata for the UI
+    data_points = models.JSONField(default=list, blank=True)
+    applied_filters = models.JSONField(default=dict, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.role} - {self.created_at}"
 
 class DocumentChunk(models.Model):
     """

@@ -292,13 +292,35 @@ class EmailReaderService:
                                     logger.warning("Message missing ID, skipping")
                                     continue
                                 
+                                # Check for attachments and fetch metadata
+                                attachments_list = []
+                                if message_data.get('hasAttachments'):
+                                    try:
+                                        att_resp = self.graph_service.get_message_attachments(
+                                            email_account.email, 
+                                            graph_id
+                                        )
+                                        for att in att_resp:
+                                            attachments_list.append({
+                                                'id': att.get('id'),
+                                                'name': att.get('name'),
+                                                'contentType': att.get('contentType'),
+                                                'size': att.get('size'),
+                                                'isInline': att.get('isInline', False)
+                                            })
+                                    except Exception as att_err:
+                                        logger.warning(f"Failed to fetch attachments for {graph_id}: {str(att_err)}")
+
+                                model_fields = self._convert_graph_email_to_model(
+                                    message_data,
+                                    email_account
+                                )
+                                model_fields['attachments'] = attachments_list
+
                                 email, created = Email.objects.update_or_create(
                                     graph_id=graph_id,
                                     email_account=email_account,
-                                    defaults=self._convert_graph_email_to_model(
-                                        message_data,
-                                        email_account
-                                    )
+                                    defaults=model_fields
                                 )
                                 
                                 if created:

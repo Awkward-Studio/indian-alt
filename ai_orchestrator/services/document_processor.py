@@ -2,6 +2,7 @@ import os
 import logging
 import tempfile
 import io
+import base64
 from io import BytesIO
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
@@ -19,6 +20,8 @@ class DocumentProcessorService:
     """
     Advanced Service for extracting structured Markdown from various document formats
     using Docling, with fallbacks for specialized types like Outlook .msg.
+    
+    Includes Vision capabilities to render PDF pages as images for LLM analysis.
     """
 
     def __init__(self):
@@ -27,8 +30,7 @@ class DocumentProcessorService:
 
     def extract_text(self, file_content: bytes, filename: str, depth: int = 0) -> str:
         """
-        Main entry point. Uses Docling for high-fidelity Markdown,
-        specialized parsers for types like .msg, and basic extraction as fallback.
+        Main entry point for text extraction. Uses Docling for high-fidelity Markdown.
         """
         if depth > 5: # Prevent infinite recursion
             return "[Error: Maximum nesting depth reached]"
@@ -50,7 +52,6 @@ class DocumentProcessorService:
                 return self._extract_with_docling(file_content, filename)
             except Exception as e:
                 logger.error(f"Docling failed for {filename}, falling back: {str(e)}")
-                # Fall through to legacy methods
 
         # 3. Legacy / Manual Fallbacks
         try:
@@ -65,11 +66,37 @@ class DocumentProcessorService:
             elif ext in ['.txt', '.csv']:
                 return file_content.decode('utf-8', errors='ignore')
             else:
-                logger.warning(f"Unsupported file extension: {ext}")
-                return f"[Unsupported format: {ext}]"
+                return f"[Unsupported text format: {ext}]"
         except Exception as e:
             logger.error(f"Error extracting text from {filename}: {str(e)}")
             return f"[Error extracting text: {str(e)}]"
+
+    def extract_visuals(self, file_content: bytes, filename: str) -> list:
+        """
+        Converts document pages or images into a list of Base64 strings for Vision AI.
+        Returns first few pages of PDFs as images.
+        """
+        ext = os.path.splitext(filename)[1].lower()
+        images_b64 = []
+
+        try:
+            # 1. Standalone Images
+            if ext in ['.png', '.jpg', '.jpeg', '.webp']:
+                images_b64.append(base64.b64encode(file_content).decode('utf-8'))
+
+            # 2. Render PDF pages as images (Critical for Charts/Tables)
+            elif ext == '.pdf':
+                with fitz.open(stream=file_content, filetype="pdf") as doc:
+                    # Render first 2 pages to keep context window manageable
+                    for i in range(min(len(doc), 2)):
+                        page = doc.load_page(i)
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Good balance of res/size
+                        img_bytes = pix.tobytes("png")
+                        images_b64.append(base64.b64encode(img_bytes).decode('utf-8'))
+        except Exception as e:
+            logger.error(f"Visual extraction failed for {filename}: {str(e)}")
+
+        return images_b64
 
     def _extract_from_msg(self, content: bytes, depth: int = 0) -> str:
         """Parses Outlook .msg files and its internal attachments."""
@@ -84,32 +111,22 @@ class DocumentProcessorService:
                     name = getattr(a, 'filename', getattr(a, 'longFilename', 'unnamed_attachment'))
                     if not name:
                         continue
-                    
-                    try:
-                        # Extract-msg specific: get bytes or nested msg
-                        a_data = getattr(a, 'data', None)
-                        if a_data:
-                            # Recurse with incremented depth
-                            a_text = self.extract_text(a_data, name, depth=depth+1)
-                            attachment_context += f"\n\n--- INTERNAL ATTACHMENT: {name} ---\n{a_text}\n"
-                    except Exception as ae:
-                        logger.error(f"Failed internal attachment {name}: {str(ae)}")
-                
+                    a_data = getattr(a, 'data', None)
+                    if a_data:
+                        a_text = self.extract_text(a_data, name, depth=depth+1)
+                        attachment_context += f"\n\n--- INTERNAL ATTACHMENT: {name} ---\n{a_text}\n"
             return metadata + body + attachment_context
         except Exception as e:
             logger.error(f"Inner msg parsing error: {str(e)}")
             return f"[Error parsing .msg body: {str(e)}]"
 
     def _extract_with_docling(self, content: bytes, filename: str) -> str:
-        """Converts document to Markdown using Docling."""
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
-
         try:
             result = self.converter.convert(tmp_path)
-            markdown_content = result.document.export_to_markdown()
-            return markdown_content
+            return result.document.export_to_markdown()
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
