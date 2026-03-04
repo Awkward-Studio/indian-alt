@@ -11,6 +11,9 @@ class DealSerializer(serializers.ModelSerializer):
     )
     request_status = serializers.CharField(source='request.status', read_only=True)
     
+    # Write-only field for linking email during creation
+    source_email_id = serializers.UUIDField(write_only=True, required=False)
+    
     # Allow passing a list of Profile IDs (UUIDs)
     responsibility = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -37,6 +40,6 @@ class DealListSerializer(serializers.ModelSerializer):
             'id', 'title', 'bank', 'bank_name', 'priority', 'created_at',
             'deal_summary', 'industry', 'sector', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
-            'funding_ask', 'funding_ask_for'
+            'funding_ask', 'funding_ask_for', 'extracted_text'
         )
         read_only_fields = ('id', 'created_at')

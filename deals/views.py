@@ -61,8 +61,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         return DealSerializer
     
     def perform_create(self, serializer):
-        # Extract source_email_id before saving
-        source_email_id = self.request.data.get('source_email_id')
+        # source_email_id is part of validated_data but not a model field
+        source_email_id = serializer.validated_data.pop('source_email_id', None)
         deal = serializer.save()
         
         if source_email_id:
@@ -79,14 +79,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     deal.extracted_text = email.extracted_text
                     deal.save(update_fields=['extracted_text'])
                 
-                # Trigger Vectorization for both Deal and Email
+                # Trigger Vectorization
                 embed_service = EmbeddingService()
                 embed_service.vectorize_deal(deal)
                 embed_service.vectorize_email(email)
                 
-                print(f"[DEAL CREATION] Successfully linked email {source_email_id} and vectorized.")
+                print(f"[DEAL CREATION] Linked email {source_email_id} and vectorized.")
             except Exception as e:
-                logger.error(f"Failed to link/vectorize deal from email: {str(e)}")
+                logger.error(f"Failed to link email: {str(e)}")
 
     @extend_schema(
         summary="Get deals grouped by priority",

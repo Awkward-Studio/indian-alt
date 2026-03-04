@@ -13,24 +13,19 @@ logger = logging.getLogger(__name__)
 
 class AIProcessorService:
     """
-    Service for processing emails and other content using an LLM.
-    Handles dynamic model selection based on available models in Ollama.
+    Orchestrated Forensic Pipeline:
+    1. OCR PASS: GLM-OCR transcribes all images/PDF pages into high-fidelity text.
+    2. REASONING PASS: Qwen 3.5 analyzes combined Email + OCR text for deal signals.
+    3. Persists full context for RAG indexing.
     """
 
     def __init__(self):
-        # Configure the default Ollama settings
         self.ollama_url = getattr(settings, 'OLLAMA_URL', 'http://52.172.249.12:11434')
         self.available_models = self.get_available_models()
-        
-        # Priority list for T4 GPU (16GB VRAM)
-        self.text_priority = ['mistral-nemo:latest', 'qwen2.5:7b', 'llama3.1:8b', 'gemma3:4b']
-        # Priority list for Vision/Complex models
-        self.vision_priority = ['qwen2.5vl:7b', 'llama3.2-vision:latest', 'llava:latest']
+        self.text_priority = ['qwen3.5:latest']
+        self.vision_priority = ['qwen3.5:latest']
 
     def get_available_models(self) -> List[str]:
-        """
-        Fetches the list of available models from the Ollama API.
-        """
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             response.raise_for_status()
@@ -40,99 +35,52 @@ class AIProcessorService:
             logger.error(f"Error fetching Ollama models: {str(e)}")
             return []
 
-    def select_best_model(self, model_type: str = "text") -> str:
-        """
-        Selects the best available model based on a priority list.
-        """
-        priority_list = self.vision_priority if model_type == "vision" else self.text_priority
-        
-        for model in priority_list:
-            if model in self.available_models:
-                return model
-        
-        # Fallback to whatever is available if priority list fails
-        if self.available_models:
-            return self.available_models[0]
-            
-        return "llama3.1:latest" # Absolute fallback
-
     def clean_html(self, html_content: str) -> str:
-        if not html_content:
-            return ""
+        if not html_content: return ""
         soup = BeautifulSoup(html_content, "html.parser")
         for script_or_style in soup(["script", "style"]):
             script_or_style.decompose()
         text = soup.get_text()
-        
-        # Remove noisy artifacts from Docling/OCR
-        # 1. Remove <!-- image ... --> tags
-        text = re.sub(r'<!-- image .*? -->', '', text, flags=re.DOTALL)
-        # 2. Remove long base64-like blocks or random binary noise (strings > 100 chars without spaces)
-        text = re.sub(r'[A-Za-z0-9+/=]{100,}', ' [DATA BLOCK] ', text)
-        # 3. Aggressive Markdown Cleanup: Remove table borders and repetitive symbols that confuse smaller models
-        text = text.replace('|---|', ' ').replace('|', ' ')
-        text = re.sub(r'#{2,}', ' ', text) # Remove multiple hashtags
-        text = re.sub(r'[\-\*\_]{3,}', ' ', text) # Remove long separators
-        # 4. Collapse whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        return '\n'.join(chunk for chunk in chunks if chunk)
-
-    def strip_signatures(self, text: str) -> str:
-        if not text:
-            return ""
-        signature_markers = [
-            r'--\s*$', r'^Best regards,', r'^Regards,', r'^Sincerely,', 
-            r'^Thanks,', r'^Warm regards,', r'^Kind regards,',
-            r'^Sent from my iPhone', r'^Sent from my Android',
-        ]
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            for marker in signature_markers:
-                if re.search(marker, line, re.IGNORECASE):
-                    return '\n'.join(lines[:i]).strip()
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        text = re.sub(r' +', ' ', text)
         return text.strip()
 
-    def route_request(self, images: list, skill_name: str, content: str) -> str:
-        """
-        Autonomous routing logic:
-        - If images are present -> Vision Model
-        - If content contains complex tables or charts -> Vision Model
-        - Otherwise, use fast Text-only model (Mistral Nemo)
-        """
-        if images:
-            return "vision"
-        
-        # Look for explicit visual markers
-        vision_keywords = ['[IMAGE]', 'chart', 'graph', 'diagram', '|---|'] 
-        if any(keyword in content.lower() for keyword in vision_keywords):
-            return "vision"
-            
-        return "text"
-
     def _extract_json(self, text: str) -> str:
-        """
-        Attempts to extract a JSON block from a string that might contain 
-        conversational filler or markdown code blocks.
-        """
-        if not text:
-            return "{}"
-            
-        # 1. Look for markdown code blocks: ```json ... ```
+        if not text: return "{}"
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if json_match:
-            return json_match.group(1)
-            
-        # 2. Look for the first { and last }
-        first_brace = text.find('{')
-        last_brace = text.rfind('}')
-        
-        if first_brace != -1 and last_brace != -1:
-            return text[first_brace:last_brace + 1]
-            
+        if json_match: return json_match.group(1)
+        try:
+            last_brace = text.rfind('}')
+            if last_brace != -1:
+                depth = 0
+                for i in range(last_brace, -1, -1):
+                    if text[i] == '}': depth += 1
+                    if text[i] == '{': depth -= 1
+                    if depth == 0: return text[i:last_brace + 1]
+        except: pass
         return text
+
+    def ocr_transcribe(self, images: list) -> str:
+        """Step 1: Specialized OCR using GLM-OCR specialist model."""
+        if not images: return ""
+        print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via GLM-OCR...")
+        transcription = ""
+        for i, img in enumerate(images):
+            payload = {
+                "model": "glm-ocr:latest",
+                "prompt": "Extract all text and tabular data from this document page exactly. Output Markdown.",
+                "images": [img],
+                "stream": False,
+                "keep_alive": "2h"
+            }
+            try:
+                resp = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=120)
+                if resp.status_code == 200:
+                    page_text = resp.json().get("response", "")
+                    transcription += f"\n\n--- PDF PAGE {i+1} TRANSCRIPTION ---\n{page_text}"
+            except Exception as e:
+                logger.error(f"OCR Phase failed on page {i+1}: {str(e)}")
+        return transcription
 
     def process_content(
         self,
@@ -143,138 +91,133 @@ class AIProcessorService:
         source_id: Optional[str] = None,
         source_type: str = "email",
         images: Optional[list] = None,
-        model_override: Optional[str] = None
-    ) -> Dict[str, Any]:
+        model_override: Optional[str] = None,
+        stream: bool = False
+    ) -> Any:
         """
-        Orchestrates the LLM processing pipeline. 
+        Orchestrates the multi-model forensic analysis.
         """
-        # ... [Keep existing initialization code] ...
-        self.available_models = self.get_available_models()
+        # PHASE 1: OCR (if images exist)
+        ocr_context = ""
+        if images and skill_name == "deal_extraction":
+            ocr_context = self.ocr_transcribe(images)
+            # We add this high-fidelity transcription to our prompt context
+            content = f"{content}\n\n[HIGH-FIDELITY DOCUMENT OCR]:\n{ocr_context}"
+            # Images are cleared to prevent double-processing and token bloat in Qwen
+            images = None 
 
+        # PHASE 2: REASONING (Qwen 3.5)
+        print(f"[AI-PIPELINE] Phase 2: Orchestrating Forensic Logic with Qwen 3.5...")
+        
         try:
             if personality_name == "default":
                 personality = AIPersonality.objects.get(is_default=True)
             else:
                 personality = AIPersonality.objects.get(name=personality_name)
-        except AIPersonality.DoesNotExist:
-            personality = None
+        except: personality = None
 
         try:
-            skill = AISkill.objects.get(name=skill_name)
-        except AISkill.DoesNotExist:
-            skill = None
-
-        route = self.route_request(images, skill_name, content)
-        
-        if model_override and model_override in self.available_models:
-            selected_model = model_override
-        else:
-            selected_model = self.select_best_model(route)
-        
-        model_provider = "ollama"
+            skill = AISkill.objects.get(name=skill_name) if skill_name else None
+        except: skill = None
 
         cleaned_text = self.clean_html(content)
-        cleaned_text = self.strip_signatures(cleaned_text)
-        
-        max_chars = 96000
+        max_chars = 160000 
         if len(cleaned_text) > max_chars:
-            cleaned_text = cleaned_text[:60000] + "\n\n[... TRUNCATED ...]\n\n" + cleaned_text[-36000:]
+            cleaned_text = cleaned_text[:100000] + "\n\n[... TRUNCATED ...]\n\n" + cleaned_text[-60000:]
 
-        system_instructions = personality.system_instructions if personality else "You are a Private Equity analyst."
-        # Add global formatting instruction
-        system_instructions += "\n\nIMPORTANT: You must return ONLY a valid JSON object. Do not include any text before or after the JSON. Do not use markdown bolding on keys."
+        system_instructions = personality.system_instructions if personality else "You are a PE analyst."
+        if not stream:
+            system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."
         
         prompt_template = skill.prompt_template if skill else "Analyze this content."
-        
         user_prompt = prompt_template
         if metadata:
             for key, value in metadata.items():
-                pattern = re.compile(r'\{\{\s*' + re.escape(key) + r'\s*\}\}')
-                user_prompt = pattern.sub(str(value), user_prompt)
+                user_prompt = re.sub(r'\{\{\s*' + re.escape(key) + r'\s*\}\}', str(value), user_prompt)
         
-        # Replace {{ content }} robustly using a lambda to avoid backslash escaping issues
         user_prompt = re.sub(r'\{\{\s*content\s*\}\}', lambda _: cleaned_text, user_prompt)
-        
         if cleaned_text not in user_prompt:
             user_prompt = f"{user_prompt}\n\nCONTENT:\n{cleaned_text}"
-        # 7. Call LLM
-        start_time = time.time()
 
-        # LOGGING: VRAM Check
-        try:
-            ps_res = requests.get(f"{self.ollama_url}/api/ps", timeout=2)
-            if ps_res.status_code == 200:
-                loaded = ps_res.json().get('models', [])
-                print(f"[AI VM DIAGNOSTIC] Currently Loaded Models: {[m['name'] for m in loaded]}")
-                for m in loaded:
-                    print(f" -> {m['name']}: {m['size_vram'] / 1e9:.2f} GB VRAM")
-        except: pass
+        audit_log = AIAuditLog.objects.create(
+            source_type=source_type, source_id=source_id,
+            personality=personality, skill=skill,
+            model_used='qwen3.5:latest', system_prompt=system_instructions, user_prompt=user_prompt
+        )
 
         payload = {
-            "model": selected_model,
+            "model": 'qwen3.5:latest',
             "prompt": user_prompt,
             "system": system_instructions,
-            "stream": False,
-            "format": "json",
-            "keep_alive": "30m",
+            "stream": stream,
+            "keep_alive": "2h",
             "options": {
-                "num_ctx": 32768,
-                "temperature": 0.1
+                "num_ctx": 65536,
+                "temperature": 0.1,
+                "num_gpu": 99
             }
         }
 
-        if images:
-            print(f"[AI VM HIT] Sending {len(images)} images to Vision model...")
-            payload["images"] = images
-
-        print(f"\n[AI VM HIT] --- START REQUEST ---")
-        print(f"[AI VM HIT] Phase: {source_type} | Model: {selected_model}")
-        print(f"[AI VM HIT] Prompt Length: {len(user_prompt)} chars")
-        print(f"[AI VM HIT] --- END REQUEST ---\n", flush=True)
-
+        if stream:
+            return self._stream_response(payload, audit_log)
         
-        audit_log = AIAuditLog(
-            source_type=source_type,
-            source_id=source_id,
-            personality=personality,
-            skill=skill,
-            model_provider=model_provider,
-            model_used=selected_model,
-            system_prompt=system_instructions,
-            user_prompt=user_prompt
-        )
-        
+        result = self._standard_response(payload, audit_log)
+        # We attach the full combined context (Email + OCR) to the result 
+        # so the backend view can save it for RAG
+        result["_full_context"] = cleaned_text
+        return result
+
+    def _stream_response(self, payload: dict, audit_log: AIAuditLog):
+        try:
+            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=300)
+            response.raise_for_status()
+            full_response = ""
+            for line in response.iter_lines():
+                if line:
+                    # Yield raw line so frontend can parse both 'response' and 'thinking'
+                    yield line.decode('utf-8') + "\n"
+                    
+                    chunk = json.loads(line)
+                    text = chunk.get("response") or chunk.get("thinking", "")
+                    full_response += text
+                    if chunk.get("done"): break
+            audit_log.raw_response = full_response
+            audit_log.is_success = True
+            audit_log.save()
+        except Exception as e:
+            yield json.dumps({"response": f"Error: {str(e)}", "done": True})
+
+    def _standard_response(self, payload: dict, audit_log: AIAuditLog) -> Dict[str, Any]:
+        start_time = time.time()
         try:
             response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=300)
             response.raise_for_status()
             data = response.json()
             
-            raw_response = data.get("response", "")
-            print(f"[AI VM RESPONSE] Raw Output Length: {len(raw_response)} chars", flush=True)
+            raw_response = data.get("response") or data.get("thinking", "")
+            thinking = data.get("thinking", "")
+            
             audit_log.raw_response = raw_response
-            
-            # EXTRACT JSON ROBUSTLY
             clean_json_str = self._extract_json(raw_response)
-            
             try:
                 parsed_json = json.loads(clean_json_str)
+                if "deal_model_data" not in parsed_json: parsed_json["deal_model_data"] = {}
+                if "metadata" not in parsed_json: parsed_json["metadata"] = {"ambiguous_points": [], "missing_fields": []}
+                if "analyst_report" not in parsed_json: parsed_json["analyst_report"] = raw_response
+                
+                # Include thinking in the parsed response for the UI
+                parsed_json["thinking"] = thinking
+                
                 audit_log.parsed_json = parsed_json
                 audit_log.is_success = True
                 parsed_json["_raw_response"] = raw_response
-            except json.JSONDecodeError as jde:
-                logger.error(f"JSON Decode Error: {str(jde)}. Str: {clean_json_str[:200]}...")
+            except:
                 audit_log.is_success = False
-                audit_log.error_message = f"JSON parsing error: {str(jde)}"
-                parsed_json = {"error": "JSON parsing error", "raw": raw_response}
-                
+                parsed_json = {"error": "JSON parsing error", "raw": raw_response, "thinking": thinking}
         except Exception as e:
-            logger.error(f"Error calling LLM: {str(e)}")
             audit_log.is_success = False
-            audit_log.error_message = str(e)
             parsed_json = {"error": str(e)}
-            
         finally:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
-            
         return parsed_json

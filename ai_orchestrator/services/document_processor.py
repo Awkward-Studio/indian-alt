@@ -4,10 +4,8 @@ import tempfile
 import io
 import base64
 from io import BytesIO
-from docling.datamodel.base_models import InputFormat
-from docling.document_converter import DocumentConverter
 
-# Legacy and additional format imports
+# Lightweight libraries for core processing
 import fitz  # PyMuPDF
 from pptx import Presentation
 from openpyxl import load_workbook
@@ -18,133 +16,101 @@ logger = logging.getLogger(__name__)
 
 class DocumentProcessorService:
     """
-    Advanced Service for extracting structured Markdown from various document formats
-    using Docling, with fallbacks for specialized types like Outlook .msg.
-    
-    Includes Vision capabilities to render PDF pages as images for LLM analysis.
+    Forensic Document Processor optimized for Qwen 3.5 (64k context).
+    - Small PDFs (<10 pages): 100% Vision-based (No local OCR/Docling).
+    - Large PDFs: Hybrid (Text Extraction + 5-page Vision sample).
+    - Office Docs: Fast structural extraction.
     """
 
     def __init__(self):
-        # Initialize Docling Converter
-        self.converter = DocumentConverter()
+        # We lazy-load Docling only for LARGE files to save RAM on the local server
+        self._converter = None
+
+    def _get_docling(self):
+        if self._converter is None:
+            print("[DOC-PROC] Lazy-loading Docling for large-scale structure...")
+            from docling.document_converter import DocumentConverter
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            
+            opts = PdfPipelineOptions()
+            opts.do_ocr = False
+            opts.do_table_structure = True
+            self._converter = DocumentConverter(pipeline_options=opts)
+        return self._converter
 
     def extract_text(self, file_content: bytes, filename: str, depth: int = 0) -> str:
-        """
-        Main entry point for text extraction. Uses Docling for high-fidelity Markdown.
-        """
-        if depth > 5: # Prevent infinite recursion
-            return "[Error: Maximum nesting depth reached]"
-
+        if depth > 5: return "[Error: Max Depth]"
         ext = os.path.splitext(filename)[1].lower()
-        
-        # 1. Specialized Handler: Outlook .msg
+
+        # Handle Outlook .msg first
         if ext == '.msg':
-            try:
-                return self._extract_from_msg(file_content, depth=depth)
-            except Exception as e:
-                logger.error(f"Failed to extract .msg {filename}: {str(e)}")
-                return f"[Error parsing Outlook Message: {str(e)}]"
+            return self._extract_from_msg(file_content, depth)
 
-        # 2. Try Docling for supported formats
-        docling_formats = ['.pdf', '.docx', '.pptx', '.xlsx', '.html', '.md']
-        if ext in docling_formats:
-            try:
-                return self._extract_with_docling(file_content, filename)
-            except Exception as e:
-                logger.error(f"Docling failed for {filename}, falling back: {str(e)}")
+        # Always extract the text layer for context
+        if ext == '.pdf':
+            print(f"[DOC-PROC] Extracting text layer from {filename}...")
+            return self._extract_from_pdf(file_content)
 
-        # 3. Legacy / Manual Fallbacks
-        try:
-            if ext == '.pdf':
-                return self._extract_from_pdf(file_content)
-            elif ext in ['.pptx', '.ppt']:
-                return self._extract_from_pptx(file_content)
-            elif ext in ['.xlsx', '.xls']:
-                return self._extract_from_xlsx(file_content)
-            elif ext in ['.docx', '.doc']:
-                return self._extract_from_docx(file_content)
-            elif ext in ['.txt', '.csv']:
-                return file_content.decode('utf-8', errors='ignore')
-            else:
-                return f"[Unsupported text format: {ext}]"
-        except Exception as e:
-            logger.error(f"Error extracting text from {filename}: {str(e)}")
-            return f"[Error extracting text: {str(e)}]"
+        # Office formats
+        if ext == '.docx': return self._extract_from_docx(file_content)
+        if ext == '.pptx': return self._extract_from_pptx(file_content)
+        if ext == '.xlsx': return self._extract_from_xlsx(file_content)
+        
+        return file_content.decode('utf-8', errors='ignore') if ext in ['.txt', '.csv'] else f"[Format: {ext}]"
 
     def extract_visuals(self, file_content: bytes, filename: str) -> list:
         """
-        Converts document pages or images into a list of Base64 strings for Vision AI.
-        Returns first few pages of PDFs as images.
+        Extracts optimized forensic images for the remote Vision model.
+        Balanced for T4 GPU VRAM and request stability.
         """
         ext = os.path.splitext(filename)[1].lower()
         images_b64 = []
+        if ext not in ['.pdf', '.png', '.jpg', '.jpeg']: return []
 
         try:
-            # 1. Standalone Images
-            if ext in ['.png', '.jpg', '.jpeg', '.webp']:
+            if ext in ['.png', '.jpg', '.jpeg']:
                 images_b64.append(base64.b64encode(file_content).decode('utf-8'))
-
-            # 2. Render PDF pages as images (Critical for Charts/Tables)
             elif ext == '.pdf':
                 with fitz.open(stream=file_content, filetype="pdf") as doc:
-                    # Render first 2 pages to keep context window manageable
-                    for i in range(min(len(doc), 2)):
+                    # Capture up to 15 pages: Deep forensic audit for Memos/Decks
+                    pages_to_scan = min(len(doc), 15)
+                    print(f"[DOC-PROC] Rendering top {pages_to_scan} forensic pages...")
+                    
+                    for i in range(pages_to_scan):
                         page = doc.load_page(i)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Good balance of res/size
-                        img_bytes = pix.tobytes("png")
-                        images_b64.append(base64.b64encode(img_bytes).decode('utf-8'))
+                        # Matrix 1.0 is fast and perfect for GLM-OCR
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0)) 
+                        images_b64.append(base64.b64encode(pix.tobytes("png")).decode('utf-8'))
         except Exception as e:
-            logger.error(f"Visual extraction failed for {filename}: {str(e)}")
-
+            logger.error(f"Visual Extraction Fail: {str(e)}")
+        
         return images_b64
-
-    def _extract_from_msg(self, content: bytes, depth: int = 0) -> str:
-        """Parses Outlook .msg files and its internal attachments."""
-        try:
-            msg = extract_msg.Message(content)
-            body = msg.body if msg.body else ""
-            metadata = f"From: {msg.sender}\nSubject: {msg.subject}\nDate: {msg.date}\n\n"
-            
-            attachment_context = ""
-            if hasattr(msg, 'attachments') and msg.attachments:
-                for a in msg.attachments:
-                    name = getattr(a, 'filename', getattr(a, 'longFilename', 'unnamed_attachment'))
-                    if not name:
-                        continue
-                    a_data = getattr(a, 'data', None)
-                    if a_data:
-                        a_text = self.extract_text(a_data, name, depth=depth+1)
-                        attachment_context += f"\n\n--- INTERNAL ATTACHMENT: {name} ---\n{a_text}\n"
-            return metadata + body + attachment_context
-        except Exception as e:
-            logger.error(f"Inner msg parsing error: {str(e)}")
-            return f"[Error parsing .msg body: {str(e)}]"
-
-    def _extract_with_docling(self, content: bytes, filename: str) -> str:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        try:
-            result = self.converter.convert(tmp_path)
-            return result.document.export_to_markdown()
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
 
     def _extract_from_pdf(self, content: bytes) -> str:
         text = ""
         with fitz.open(stream=content, filetype="pdf") as doc:
             for page in doc:
-                text += page.get_text()
+                text += f"\n--- Page {page.number + 1} ---\n{page.get_text()}"
         return text
+
+    def _extract_from_msg(self, content: bytes, depth: int) -> str:
+        msg = extract_msg.Message(content)
+        body = msg.body if msg.body else ""
+        metadata = f"From: {msg.sender}\nSubject: {msg.subject}\n\n"
+        context = ""
+        if hasattr(msg, 'attachments'):
+            for a in msg.attachments:
+                name = getattr(a, 'filename', 'unnamed')
+                if a.data:
+                    context += f"\n--- ATT: {name} ---\n{self.extract_text(a.data, name, depth+1)}\n"
+        return metadata + body + context
 
     def _extract_from_pptx(self, content: bytes) -> str:
         text = ""
         prs = Presentation(io.BytesIO(content))
         for slide in prs.slides:
             for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    text += shape.text + "\n"
+                if hasattr(shape, "text"): text += shape.text + "\n"
         return text
 
     def _extract_from_xlsx(self, content: bytes) -> str:
@@ -153,11 +119,9 @@ class DocumentProcessorService:
         for sheet in wb.worksheets:
             text += f"--- Sheet: {sheet.title} ---\n"
             for row in sheet.iter_rows(values_only=True):
-                row_text = "\t".join([str(cell) if cell is not None else "" for cell in row])
-                if row_text.strip():
-                    text += row_text + "\n"
+                text += "\t".join([str(c) if c else "" for c in row]) + "\n"
         return text
 
     def _extract_from_docx(self, content: bytes) -> str:
         doc = Document(io.BytesIO(content))
-        return "\n".join([para.text for para in doc.paragraphs])
+        return "\n".join([p.text for p in doc.paragraphs])

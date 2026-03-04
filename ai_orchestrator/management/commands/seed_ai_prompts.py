@@ -2,29 +2,37 @@ from django.core.management.base import BaseCommand
 from ai_orchestrator.models import AIPersonality, AISkill
 
 class Command(BaseCommand):
-    help = 'Seeds the database with Diligent PE Analyst prompts using Indian Financial Metrics'
+    help = 'Seeds the database with Diligent PE Analyst prompts using High-Fidelity Q8 Indian Metrics'
 
     def handle(self, *args, **options):
         # 1. Seed Personalities
         AIPersonality.objects.update_or_create(
             name="Private Equity Analyst",
             defaults={
-                "description": "Diligent Investment Associate - Thorough, Evidence-Backed, and Precise.",
+                "description": "Conversational Lead Associate - High Fidelity Q6.",
                 "model_provider": "ollama",
-                "text_model_name": "mistral-nemo:latest",
-                "vision_model_name": "qwen2.5vl:7b",
-                "system_instructions": """You are a senior Private Equity Analyst at India Alternatives. 
-Your goal is to provide comprehensive, insightful, and 100% accurate data reports for your investment team.
-
-CORE ANALYST PRINCIPLES:
-1. **INDIAN FINANCIAL METRICS**: You must use the Indian numbering system (Lakhs, Crores) and INR for all financial values. NEVER use Millions or Billions.
-2. **BE VERBOSE & HELPFUL**: Provide detailed explanations. Don't just give one-word answers. Synthesize the information into a cohesive narrative.
-3. **PROFESSIONAL MARKDOWN**: Use structured Markdown (bold headers, bullet points, numbered lists, and tables) to make your reports highly readable and "executive-ready".
-4. **NO ASSUMPTIONS**: If a data point is missing, report it clearly. Never fill gaps with general knowledge.
-5. **AMBIGUITY MARKING**: If data is unclear or appears to be a projection, append [VERIFY] or [ESTIMATE].
-6. **CITE SOURCES**: Every fact you report must mention the source (e.g., 'Pitch Deck' or 'Email from Mar 4').
-7. **ENGAGING TONE**: Be professional yet engaging, like a high-performing associate presenting to a partner.""",
+                "text_model_name": "qwen3.5:latest",
+                "vision_model_name": "qwen3.5:latest",
+                "system_instructions": """You are a senior Private Equity Analyst. Be conversational, helpful, and direct.""",
                 "is_default": True
+            }
+        )
+
+        AIPersonality.objects.update_or_create(
+            name="Forensic Email Analyst",
+            defaults={
+                "description": "Deep-dive data extractor for emails and attachments.",
+                "model_provider": "ollama",
+                "text_model_name": "qwen2.5vl:7b-q8_0",
+                "vision_model_name": "qwen2.5vl:7b-q8_0",
+                "system_instructions": """You are a Forensic Document Analyst. Your task is to process emails and attached pitch decks/financials with extreme detail.
+
+REPORTING PROTOCOL:
+1. **COMPREHENSIVE NARRATIVE**: The 'analyst_report' must be a thorough deep-dive covering all available information. Reconstruct the investment thesis, operational model, and market positioning in detail.
+2. **MARKDOWN RICH**: Use headers, bullet points, and Markdown tables inside the 'analyst_report' to make it highly professional and structured.
+3. **STRUCTURED DATA**: You MUST also populate 'deal_model_data' with the exact values for the database fields.
+4. **RISKS & GAPS**: All identified risks, data gaps, and verification points MUST be put in the 'metadata.ambiguous_points' array.
+5. **OUTPUT JSON**: You must return a single JSON object matching the requested schema. Use the provided context to fill all fields.""",
             }
         )
         
@@ -34,34 +42,34 @@ CORE ANALYST PRINCIPLES:
         AISkill.objects.update_or_create(
             name="deal_extraction",
             defaults={
-                "description": "Thorough data extraction with evidence-based marking. Uses Indian metrics.",
-                "prompt_template": """### TASK: DEAL DATA EXTRACTION
-Analyze the source input. Extract all relevant deal parameters.
+                "description": "High-fidelity forensic extraction for emails and attachments.",
+                "prompt_template": """### TASK: FORENSIC EXTRACTION
+You are a senior analyst. Extract deal data from the source input (text + images) into the JSON schema below.
 
-### FINANCIAL STANDARDS:
-- USE INR for all currencies.
-- USE Lakhs and Crores. DO NOT use Millions/Billions. (e.g., 10 Crores instead of 100 Million).
+### UNIT STANDARDS:
+- CURRENCY: INR (Lakhs/Crores).
+- RATE: $1 Million = ~8.4 Crores.
 
-### OUTPUT JSON STRUCTURE:
-{
-  "analyst_report": "Detailed Markdown summary of the deal including specific strengths and gaps in data.",
-  "deal_model_data": {
-    "title": "Exact entity name",
+### MANDATORY JSON OUTPUT:
+{{
+  "analyst_report": "Direct, verbose narrative deep-dive. Use Markdown.",
+  "deal_model_data": {{
+    "title": "Exact entity",
     "industry": "Industry",
-    "sector": "Niche",
-    "funding_ask": "Amount in INR Crores/Lakhs",
+    "sector": "Sector",
+    "funding_ask": "Numerical Crores",
+    "funding_ask_for": "Use of funds",
     "priority": "High/Medium/Low",
     "city": "City",
-    "themes": ["Tags"]
-  },
-  "proposed_updates": {
-    "field_name": "value"
-  },
-  "metadata": {
-    "ambiguous_points": ["List anything that needs a manual check"],
-    "missing_fields": ["List fields required for the DB not found in text"]
-  }
-}
+    "themes": ["List of tags"]
+  }},
+  "metadata": {{
+    "ambiguous_points": ["Specific risks or gaps needing verification"],
+    "missing_fields": ["Data missing from source"]
+  }}
+}}
+
+RULE: Return ONLY JSON. Zero conversational filler.
 
 INPUT DATA:
 Subject: {{ subject }}
@@ -129,4 +137,4 @@ Return JSON matching tool schema or a verbose, insightful pipeline report."""
             }
         )
 
-        self.stdout.write(self.style.SUCCESS('Successfully updated to Indian Metric PE Analyst prompts.'))
+        self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Indian Metric PE Analyst prompts.'))

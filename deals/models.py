@@ -99,6 +99,7 @@ class Deal(models.Model):
         default=False,
         help_text='Whether this deal data has been vectorized and stored in the vector database'
     )
+    extracted_text = models.TextField(blank=True, null=True, help_text='Combined text from linked source (Email/Files) for RAG context')
 
     class Meta:
         db_table = 'deal'

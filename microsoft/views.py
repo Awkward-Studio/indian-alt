@@ -143,53 +143,74 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             # 2. Process Attachments if any
             images = []
             attachment_context = ""
+            extracted_sources = {
+                "Email Body": content[:2000] + "..." if len(content) > 2000 else content
+            }
             
             if email.has_attachments:
-                print(f"[EMAIL ANALYSIS] Fetching attachments from Graph API...")
+                print(f"[EMAIL ANALYSIS] Step 2: Fetching attachments from Graph API...")
                 attachments = graph.get_message_attachments(email.email_account.email, email.graph_id)
+                print(f"[EMAIL ANALYSIS] Found {len(attachments)} attachments.")
+                
                 for att in attachments:
                     att_id = att.get('id')
                     filename = att.get('name', 'attachment')
-                    content_type = att.get('contentType', '')
-
-                    # Fetch actual content
+                    print(f" -> Processing attachment: {filename}...")
+                    
                     full_att = graph.get_attachment_content(email.email_account.email, email.graph_id, att_id)
                     content_bytes_b64 = full_att.get('contentBytes')
-
-                    if not content_bytes_b64:
+                    if not content_bytes_b64: 
+                        print(f"    [!] Skipping {filename}: No content data found.")
                         continue
-
+                    
                     content_bytes = base64.b64decode(content_bytes_b64)
 
                     # 1. Extract Text
-                    print(f"[EMAIL ANALYSIS] Extracting text from: {filename}")
+                    print(f"    [PROC] Extracting text from {filename}...")
                     text = doc_processor.extract_text(content_bytes, filename)
                     if text:
+                        print(f"    [OK] Extracted {len(text)} characters of text.")
                         attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
+                        extracted_sources[filename] = text[:2000] + "..." if len(text) > 2000 else text
+                    else:
+                        print(f"    [!] No text could be extracted from {filename}.")
 
-                    # 2. Extract Visuals (PDF pages as images, or standalone images)
-                    print(f"[EMAIL ANALYSIS] Extracting visuals from: {filename}")
+                    # 2. Extract Visuals
+                    print(f"    [PROC] Extracting visuals for Vision AI from {filename}...")
                     visuals = doc_processor.extract_visuals(content_bytes, filename)
                     if visuals:
+                        print(f"    [OK] Extracted {len(visuals)} pages as images.")
                         images.extend(visuals)
-            # Combine body + attachment text
+                    else:
+                        print(f"    [OK] No visual components needed for {filename}.")
+
             full_context = content + attachment_context
-            print(f"[EMAIL ANALYSIS] Total context length: {len(full_context)} characters.")
-            
-            # 3. Save extracted text for future Chat context
+            print(f"[EMAIL ANALYSIS] Step 3: Saving full context ({len(full_context)} chars) to database.")
             email.extracted_text = full_context
             email.save(update_fields=['extracted_text'])
             
             # 4. Analyze with AI
-            print(f"[EMAIL ANALYSIS] Sending content to AI Orchestrator...")
+            print(f"[EMAIL ANALYSIS] Step 4: Orchestrating AI Reasoning...")
             ai_service = AIProcessorService()
             result = ai_service.process_content(
                 content=full_context,
+                personality_name="Forensic Email Analyst",
                 metadata=metadata,
                 source_id=str(email.id),
                 source_type="email",
                 images=images if images else None
             )
+            
+            # ATTACH RAW SOURCES
+            result["extracted_sources"] = extracted_sources
+            
+            # CRITICAL: Use the high-fidelity context (including OCR) for RAG
+            # The AIProcessor returns the final text it used in "_full_context"
+            final_rag_context = result.pop("_full_context", full_context)
+            email.extracted_text = final_rag_context
+            email.save(update_fields=['extracted_text'])
+            
+            print(f"[EMAIL ANALYSIS] Step 5: AI Reasoning Complete. Forensic context saved.")
             
             # 5. Vectorize for RAG if linked to a deal
             if email.deal:
@@ -204,7 +225,11 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             if "error" not in result:
                 email.is_processed = True
                 email.processed_at = timezone.now()
-                email.save(update_fields=['is_processed', 'processed_at'])
+                # If we have extracted text, save it again just in case
+                if full_context:
+                    email.extracted_text = full_context
+                email.save() # Save everything
+                print(f"[EMAIL ANALYSIS] Success! Marked email {email.id} as processed.")
             
             return Response(result, status=status.HTTP_200_OK)
             
