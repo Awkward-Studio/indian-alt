@@ -1,17 +1,17 @@
 #!/bin/bash
 # Startup script for Railway deployment
-# Runs migrations, creates default superuser, then starts the server
+# Release tasks (migrations, fix_app_label) now run in releaseCommand (release.sh)
+# This script only starts the server.
 
 set -e  # Exit on error
 
-echo "Fixing app label (one-time: emails -> microsoft)..."
-python manage.py fix_app_label
+echo "Starting Gunicorn server on port $PORT..."
+# Using gunicorn directly with optimized settings for container
+exec gunicorn config.wsgi:application \
+    --bind 0.0.0.0:$PORT \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level info \
+    --timeout 120 \
+    --workers 3
 
-echo "Running database migrations..."
-python manage.py migrate --noinput
-
-echo "Creating/updating default superuser..."
-python manage.py create_default_superuser
-
-echo "Starting Gunicorn server..."
-exec python -m gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --access-logfile - --error-logfile - --log-level info

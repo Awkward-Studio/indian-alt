@@ -20,6 +20,19 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         with connection.cursor() as cursor:
+            # Check if django_migrations exists first to avoid crashing on fresh DBs
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'django_migrations'
+                )
+            """)
+            if not cursor.fetchone()[0]:
+                self.stdout.write(
+                    self.style.WARNING("django_migrations table not found. Skipping fix_app_label.")
+                )
+                return
+
             # Check if there are any old 'emails' rows
             cursor.execute(
                 "SELECT COUNT(*) FROM django_migrations WHERE app = 'emails'"

@@ -24,7 +24,21 @@ class HealthCheckView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({"status": "ok"}, status=status.HTTP_200_OK)
+        health_status = {"status": "ok", "checks": {}}
+        
+        # Check Database
+        try:
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+            health_status["checks"]["database"] = "ok"
+        except Exception as e:
+            logger.error(f"Health check database failure: {str(e)}")
+            health_status["status"] = "error"
+            health_status["checks"]["database"] = str(e)
+            
+        status_code = status.HTTP_200_OK if health_status["status"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE
+        return Response(health_status, status=status_code)
 
 
 @extend_schema_view(

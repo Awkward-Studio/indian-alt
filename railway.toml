@@ -1,9 +1,10 @@
-[build]
-# Railway will detect Python; this ensures static files are built
-cmd = "python manage.py collectstatic --noinput"
-
 [deploy]
-# Startup script runs migrations, creates default superuser, then starts server
-startCommand = "bash start.sh"
+# Health check for deployment
 healthcheckPath = "/api/core/health/"
-healthcheckTimeout = 100
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Release command runs migrations and one-time fixes BEFORE the web container starts.
+# This prevents long-running migrations from causing health check timeouts.
+releaseCommand = "bash release.sh"

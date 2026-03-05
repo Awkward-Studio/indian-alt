@@ -26,14 +26,15 @@ COPY . /app/
 
 # Create a non-root user and switch to it
 RUN useradd -m myuser && chown -R myuser:myuser /app
-USER myuser
 
-# Make start.sh executable
-# Note: we do this before switching to user or ensure permissions are right
-# Since we copied everything, we might need to fix permissions
+# Switch to root to ensure scripts are executable and collectstatic works
 USER root
-RUN chmod +x /app/start.sh
+RUN chmod +x /app/start.sh /app/release.sh
+
+# Run collectstatic during build as myuser to avoid doing it on every boot
+# We set a dummy SECRET_KEY to avoid decoupling issues if not provided
 USER myuser
+RUN SECRET_KEY=build-time-only-secret python manage.py collectstatic --noinput
 
 # Expose port
 EXPOSE 8000
