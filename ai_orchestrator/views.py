@@ -52,14 +52,34 @@ class DealChatView(APIView):
             return Response({"error": "deal_id and message are required"}, status=400)
         try:
             deal = Deal.objects.get(id=deal_id)
-            structured_data = model_to_dict(deal, exclude=['deal_summary', 'deal_details', 'comments', 'extracted_text'])
+            
+            # Create a rich, structured representation of the deal's forensic data
+            structured_data = {
+                "title": deal.title,
+                "industry": deal.industry,
+                "sector": deal.sector,
+                "funding_ask": deal.funding_ask,
+                "priority": deal.priority,
+                "themes": deal.themes if isinstance(deal.themes, list) else [],
+                "ambiguities": deal.ambiguities if isinstance(deal.ambiguities, list) else [],
+                "forensic_summary": deal.deal_summary,
+                "status_flags": {
+                    "female_led": deal.is_female_led,
+                    "management_meeting": deal.management_meeting,
+                    "proposal_stage": deal.business_proposal_stage,
+                    "ic_stage": deal.ic_stage
+                }
+            }
+            
             embed_service = EmbeddingService()
             chunks = embed_service.search_similar_chunks(user_message, deal, limit=8)
             
-            rag_context = f"DEAL DB RECORD: {json.dumps(structured_data, default=str)}\n\nDOC CHUNKS (MOST RELEVANT):\n"
+            rag_context = f"DEAL FORENSIC RECORD:\n{json.dumps(structured_data, default=str, indent=2)}\n\nRAW DOCUMENT CHUNKS (MOST RELEVANT TO QUERY):\n"
             if chunks:
                 for chunk in chunks:
                     rag_context += f"\n--- {chunk.metadata.get('filename', 'Source')} ---\n{chunk.content}\n"
+            else:
+                rag_context += "No specific raw document chunks matched this query."
             
             ai_service = AIProcessorService()
             result = ai_service.process_content(
@@ -128,7 +148,16 @@ Example: {{"global_rag": "Urban Harvest CM1 margins"}}
                 deals = query_set.filter(q_obj)[:10]
             else: deals = query_set.order_by('-created_at')[:5]
 
-            context_data["deals"] = [{"title": d.title, "industry": d.industry, "ask": d.funding_ask, "summary": d.deal_summary[:300]} for d in deals]
+            # EXPOSE RICH FORENSIC DATA TO UNIVERSAL CHAT
+            context_data["deals"] = [{
+                "title": d.title, 
+                "industry": d.industry, 
+                "sector": d.sector,
+                "ask": d.funding_ask, 
+                "themes": d.themes if isinstance(d.themes, list) else [],
+                "ambiguities": d.ambiguities if isinstance(d.ambiguities, list) else [],
+                "summary": d.deal_summary[:500] + "..." if d.deal_summary and len(d.deal_summary) > 500 else d.deal_summary
+            } for d in deals]
 
             rag_query = intent_result.get("global_rag")
             if rag_query:

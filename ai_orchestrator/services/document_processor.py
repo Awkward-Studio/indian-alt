@@ -72,11 +72,16 @@ class DocumentProcessorService:
                 images_b64.append(base64.b64encode(file_content).decode('utf-8'))
             elif ext == '.pdf':
                 with fitz.open(stream=file_content, filetype="pdf") as doc:
-                    # Capture up to 15 pages: Deep forensic audit for Memos/Decks
-                    pages_to_scan = min(len(doc), 15)
-                    print(f"[DOC-PROC] Rendering top {pages_to_scan} forensic pages...")
+                    total_pages = len(doc)
+                    pages_to_scan = min(total_pages, 15)
+                    
+                    if total_pages > 15:
+                        print(f"[DOC-PROC] WARNING: PDF contains {total_pages} pages. Truncating to top 15 pages for forensic audit.")
+                    else:
+                        print(f"[DOC-PROC] Processing all {total_pages} pages of PDF.")
                     
                     for i in range(pages_to_scan):
+                        print(f"    [DOC-PROC] Rendering PDF Page {i+1} of {total_pages}...")
                         page = doc.load_page(i)
                         # Matrix 1.0 is fast and perfect for GLM-OCR
                         pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0)) 

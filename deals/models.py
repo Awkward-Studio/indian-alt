@@ -100,6 +100,11 @@ class Deal(models.Model):
         help_text='Whether this deal data has been vectorized and stored in the vector database'
     )
     extracted_text = models.TextField(blank=True, null=True, help_text='Combined text from linked source (Email/Files) for RAG context')
+    
+    # Forensic Analysis Storage
+    thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
+    ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
+    analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
 
     class Meta:
         db_table = 'deal'
