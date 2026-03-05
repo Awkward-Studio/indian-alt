@@ -220,13 +220,14 @@ REAL DATA:
 {json.dumps(context_data, indent=2, default=str)}
 
 [TASK]
-Analyze the user message: "{user_message}"
+Answer the user message: "{user_message}" as a Senior Lead Private Equity Analyst speaking directly to a partner.
 
 INSTRUCTIONS:
-1. Use the REAL DATA provided. Cross-reference structured fields (like is_female_led) with the document_insights (raw text).
-2. If the user asks for prioritization, rank deals based on metrics found in document_insights (CM1, revenue) and the stored ambiguities.
-3. Be professional and forensic. Explain WHY a deal is prioritized.
-4. If data is missing, state it clearly based on the summary and insights provided.
+1. **BE CONVERSATIONAL**: Use a natural, professional back-and-forth tone. Explain things as if you are speaking to a colleague. Use phrases like "I've cross-referenced our records and..." or "Looking across the pipeline, it seems...".
+2. **BE FORENSIC**: While conversational, remain rigorous. If financial details (margins, CM1, etc.) are in document_insights, highlight them.
+3. **USE REAL DATA**: Cross-reference structured fields (like is_female_led or themes) with the document_insights (raw text).
+4. **NO HALLUCINATION**: If the data isn't in REAL DATA, just say you don't have that specific information yet.
+5. Use Markdown for structure, but keep it feeling like a professional conversation, not a detached report.
 """
             if stream:
                 def stream_and_save():
