@@ -66,6 +66,7 @@ class AIProcessorService:
         print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via GLM-OCR...")
         transcription = ""
         for i, img in enumerate(images):
+            print(f"    [AI-PIPELINE] Phase 1: Transcribing page {i+1} of {len(images)} via GLM-OCR...")
             payload = {
                 "model": "glm-ocr:latest",
                 "prompt": "Extract all text and tabular data from this document page exactly. Output Markdown.",
@@ -152,7 +153,7 @@ class AIProcessorService:
             "stream": stream,
             "keep_alive": "2h",
             "options": {
-                "num_ctx": 65536,
+                "num_ctx": 32768,
                 "temperature": 0.1,
                 "num_gpu": 99
             }
