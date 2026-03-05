@@ -134,6 +134,7 @@ class AIMessage(models.Model):
     conversation = models.ForeignKey(AIConversation, on_delete=models.CASCADE, related_name='messages')
     role = models.CharField(max_length=20, choices=[('user', 'User'), ('assistant', 'Assistant')])
     content = models.TextField()
+    thinking = models.TextField(blank=True, null=True)
     
     # Metadata for the UI
     data_points = models.JSONField(default=list, blank=True)

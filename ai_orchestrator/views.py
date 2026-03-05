@@ -87,8 +87,10 @@ class UniversalChatView(APIView):
 
         try:
             if conversation_id:
-                try: conversation = AIConversation.objects.get(id=conversation_id, user=request.user)
-                except: conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
+                try: 
+                    conversation = AIConversation.objects.get(id=conversation_id, user=request.user)
+                except: 
+                    conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
             else:
                 conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
             
@@ -159,17 +161,47 @@ INSTRUCTIONS:
             if stream:
                 def stream_and_save():
                     full_text = ""
-                    for chunk in ai_service.process_content(content=synthesis_prompt, skill_name=None, stream=True):
-                        full_text += chunk
-                        yield chunk
-                    AIMessage.objects.create(conversation=conversation, role='assistant', content=full_text)
+                    full_thinking = ""
+                    # First chunk contains the conversation ID for the frontend to save
+                    yield json.dumps({"conversation_id": str(conversation.id)}) + "\n"
+                    
+                    for chunk_str in ai_service.process_content(content=synthesis_prompt, skill_name=None, stream=True):
+                        try:
+                            chunk = json.loads(chunk_str)
+                            full_text += chunk.get("response", "")
+                            full_thinking += chunk.get("thinking", "")
+                        except:
+                            pass
+                        yield chunk_str
+                    
+                    AIMessage.objects.create(
+                        conversation=conversation, 
+                        role='assistant', 
+                        content=full_text,
+                        thinking=full_thinking
+                    )
                     conversation.save()
                 return StreamingHttpResponse(stream_and_save(), content_type='text/event-stream')
             
             final_result = ai_service.process_content(content=synthesis_prompt, skill_name=None, stream=False)
-            AIMessage.objects.create(conversation=conversation, role='assistant', content=final_result.get("_raw_response", ""))
+            raw_content = final_result.get("_raw_response", "")
+            thinking = final_result.get("thinking", "")
+            
+            AIMessage.objects.create(
+                conversation=conversation, 
+                role='assistant', 
+                content=raw_content,
+                thinking=thinking
+            )
             conversation.save()
-            return Response({"response": final_result.get("_raw_response", "")})
+            return Response({
+                "response": raw_content,
+                "thinking": thinking,
+                "conversation_id": str(conversation.id)
+            })
+        except Exception as e:
+            logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
+            return Response({"error": str(e)}, status=500)
         except Exception as e:
             logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
