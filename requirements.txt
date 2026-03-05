@@ -29,6 +29,7 @@ pymupdf
 python-pptx
 openpyxl
 python-docx
+extract-msg
 
 # Production server + static files
 gunicorn
@@ -43,7 +44,6 @@ pgvector
 langchain
 langchain-community
 langchain-ollama
-extract-msg
 
 # Azure Management
 azure-mgmt-compute

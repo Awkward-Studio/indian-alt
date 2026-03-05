@@ -6,11 +6,43 @@ import uuid
 from django.db import migrations, models
 
 
-def create_vector_extension(apps, schema_editor):
-    """Create the vector extension if it doesn't exist."""
-    if schema_editor.connection.vendor == 'postgresql':
-        with schema_editor.connection.cursor() as cursor:
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+def create_vector_extension_and_table(apps, schema_editor):
+    """Create vector extension + DocumentChunk table, skip entirely if pgvector not on server."""
+    if schema_editor.connection.vendor != 'postgresql':
+        return
+
+    with schema_editor.connection.cursor() as cursor:
+        # Check if vector extension is available on this server
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'vector'"
+        )
+        available = cursor.fetchone()[0] > 0
+
+        if not available:
+            import logging
+            logging.getLogger(__name__).warning(
+                "pgvector extension not available on this PostgreSQL server. "
+                "Skipping DocumentChunk table creation."
+            )
+            return
+
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_orchestrator_documentchunk (
+                id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+                source_type varchar(50) NOT NULL,
+                source_id varchar(255) NOT NULL,
+                content text NOT NULL,
+                embedding vector(768) NOT NULL,
+                metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+                created_at timestamp with time zone NOT NULL DEFAULT now(),
+                deal_id uuid NOT NULL REFERENCES deals_deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+            );
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS ai_orchestr_deal_id_be209e_idx
+            ON ai_orchestrator_documentchunk (deal_id, source_type);
+        """)
 
 
 class Migration(migrations.Migration):
@@ -22,25 +54,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(
-            create_vector_extension,
+            create_vector_extension_and_table,
             reverse_code=migrations.RunPython.noop,
-        ),
-        migrations.CreateModel(
-            name='DocumentChunk',
-            fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('source_type', models.CharField(choices=[('email', 'Email Body'), ('attachment', 'Email Attachment'), ('onedrive', 'OneDrive File'), ('deal_summary', 'Deal Summary')], max_length=50)),
-                ('source_id', models.CharField(help_text='Original ID of the source (Email ID, File ID, etc.)', max_length=255)),
-                ('content', models.TextField()),
-                ('embedding', pgvector.django.vector.VectorField(dimensions=768)),
-                ('metadata', models.JSONField(blank=True, default=dict)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('deal', models.ForeignKey(help_text='The deal this chunk belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='deals.deal')),
-            ],
-            options={
-                'verbose_name': 'Document Chunk',
-                'verbose_name_plural': 'Document Chunks',
-                'indexes': [models.Index(fields=['deal', 'source_type'], name='ai_orchestr_deal_id_be209e_idx')],
-            },
         ),
     ]
