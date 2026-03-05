@@ -1,10 +1,16 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "python manage.py collectstatic --noinput"
+
 [deploy]
-# Health check for deployment
-healthcheckPath = "/api/core/health/"
-healthcheckTimeout = 120
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
+# Nixpacks will use this start command
+startCommand = "bash start.sh"
 
 # Release command runs migrations and one-time fixes BEFORE the web container starts.
 # This prevents long-running migrations from causing health check timeouts.
 releaseCommand = "bash release.sh"
+
+healthcheckPath = "/api/core/health/"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
