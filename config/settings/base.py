@@ -186,27 +186,37 @@ OLLAMA_URL = config('OLLAMA_URL', default='http://localhost:11434')
 OLLAMA_DEFAULT_TEXT_MODEL = config('OLLAMA_DEFAULT_TEXT_MODEL', default='llama3.1:latest')
 OLLAMA_DEFAULT_VISION_MODEL = config('OLLAMA_DEFAULT_VISION_MODEL', default='llava:latest')
 
-# Database (will be overridden in local/production)
+# Database Configuration
+# 
+# Railway-friendly setup:
+# - Local: Uses SQLite by default (no DATABASE_URL needed)
+# - Railway: Automatically uses PostgreSQL when DATABASE_URL is provided
+# 
+# To use PostgreSQL locally:
+#   1. Install PostgreSQL locally
+#   2. Create a database
+#   3. Set DATABASE_URL in .env: postgresql://user:password@localhost:5432/dbname
 #
-# Railway-friendly defaults:
-# - Default to SQLite (easy local + quick deploy)
-# - If DATABASE_URL is set, use it (Railway Postgres provides DATABASE_URL)
-# - You can force SQLite even in production by setting USE_SQLITE=true
-USE_SQLITE = config('USE_SQLITE', default=True, cast=bool)
+# Railway automatically provides DATABASE_URL when you add a PostgreSQL service.
 DATABASE_URL = config('DATABASE_URL', default='')
 
-if USE_SQLITE or not DATABASE_URL:
+if DATABASE_URL:
+    # Use PostgreSQL (Railway or local if DATABASE_URL is set)
+    DATABASES = {
+        'default': dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
+            # Railway Postgres requires SSL, but allow override for local dev
+            ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
+        )
+    }
+    # Enable pgvector extension for PostgreSQL
+    # This will be run via migrations or manually
+else:
+    # Default to SQLite for local development
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
         }
-    }
-else:
-    DATABASES = {
-        'default': dj_database_url.parse(
-            DATABASE_URL,
-            conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
-            ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
-        )
     }

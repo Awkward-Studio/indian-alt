@@ -67,11 +67,20 @@ Edit `.env` with your database credentials and other settings.
 
 ### 5. Database Setup
 
-Make sure PostgreSQL is running and create a database:
+**Local Development (SQLite - Default):**
+- No setup needed! SQLite is used automatically when `DATABASE_URL` is not set
+- Database file will be created at `db.sqlite3`
 
-```sql
-CREATE DATABASE indian_alt;
-```
+**Optional: Use PostgreSQL Locally**
+- Install PostgreSQL locally
+- Create a database: `CREATE DATABASE indian_alt;`
+- Set in `.env`: `DATABASE_URL=postgresql://user:password@localhost:5432/indian_alt`
+- Set: `DB_SSL_REQUIRE=false` (local PostgreSQL usually doesn't use SSL)
+
+**Railway Production:**
+- See [RAILWAY_DEPLOY.md](./RAILWAY_DEPLOY.md) for detailed setup
+- Add PostgreSQL service in Railway (automatic `DATABASE_URL`)
+- See [RAILWAY_POSTGRES_SETUP.md](./RAILWAY_POSTGRES_SETUP.md) for PostgreSQL-specific instructions
 
 ### 6. Run Migrations
 
@@ -173,12 +182,24 @@ python manage.py migrate
 
 ## Production Deployment
 
+### Railway (Recommended)
+
+See **[RAILWAY_DEPLOY.md](./RAILWAY_DEPLOY.md)** for complete Railway deployment guide.
+
+Quick steps:
+1. Create Railway project and connect GitHub repo
+2. Add PostgreSQL service (automatic `DATABASE_URL`)
+3. Set environment variables (see `env.example`)
+4. Deploy - migrations run automatically via `start.sh`
+
+### Manual Deployment
+
 1. Set `DJANGO_ENVIRONMENT=production` in your `.env`
 2. Set `DEBUG=False`
 3. Configure proper `ALLOWED_HOSTS`
 4. Set up SSL/HTTPS
-5. Use a production database
-6. Set up static file serving (e.g., WhiteNoise, S3, etc.)
+5. Use a production database (PostgreSQL recommended)
+6. Set up static file serving (WhiteNoise is already configured)
 
 ## Notes
 

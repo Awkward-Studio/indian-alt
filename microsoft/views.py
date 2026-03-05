@@ -788,6 +788,17 @@ class OneDriveListView(APIView):
             serializer = OneDriveListResponseSerializer(response_data)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
+        except ValueError as e:
+            # Authentication/permission errors
+            logger.error(f"OneDrive authentication error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Authentication required',
+                    'details': str(e),
+                    'status_code': status.HTTP_401_UNAUTHORIZED,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         except Exception as e:
             logger.error(f"OneDrive list error: {e}", exc_info=True)
             return Response(
@@ -832,6 +843,17 @@ class OneDriveFileDetailView(APIView):
             item = graph.get_drive_item(DMS_DRIVE_ID, item_id)
             serializer = DriveItemSerializer(item)
             return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValueError as e:
+            # Authentication/permission errors
+            logger.error(f"OneDrive authentication error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Authentication required',
+                    'details': str(e),
+                    'status_code': status.HTTP_401_UNAUTHORIZED,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         except Exception as e:
             logger.error(f"OneDrive detail error: {e}", exc_info=True)
             return Response(
@@ -884,6 +906,17 @@ class OneDriveDownloadView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
             return Response({'download_url': download_url}, status=status.HTTP_200_OK)
+        except ValueError as e:
+            # Authentication/permission errors
+            logger.error(f"OneDrive authentication error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Authentication required',
+                    'details': str(e),
+                    'status_code': status.HTTP_401_UNAUTHORIZED,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         except Exception as e:
             logger.error(f"OneDrive download error: {e}", exc_info=True)
             return Response(
@@ -988,6 +1021,17 @@ class AnalyzeOneDriveFileView(APIView):
 
             return Response(result, status=status.HTTP_200_OK)
 
+        except ValueError as e:
+            # Authentication/permission errors
+            logger.error(f"OneDrive authentication error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Authentication required',
+                    'details': str(e),
+                    'status_code': status.HTTP_401_UNAUTHORIZED,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         except Exception as e:
             logger.error(f"Error analyzing OneDrive file: {str(e)}", exc_info=True)
             return Response(

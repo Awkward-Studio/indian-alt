@@ -51,14 +51,25 @@ class GraphAPIService:
 
     # ─── Auth ────────────────────────────────────────────────────────────
 
-    def get_access_token(self, user_email: str = DMS_USER_EMAIL) -> Optional[str]:
+    def get_access_token(self, user_email: str = DMS_USER_EMAIL, require_delegated: bool = False) -> Optional[str]:
         """
         Get a valid access token for the given user.
 
         Resolution order:
         1. Cached delegated token (if still valid for > 5 min).
         2. Refresh the delegated token via MSAL.
-        3. Fallback to application-level client-credentials token.
+        3. Fallback to application-level client-credentials token (unless require_delegated=True).
+
+        Args:
+            user_email: Email address for the token
+            require_delegated: If True, raise an error instead of falling back to application permissions.
+                              Use this for OneDrive operations which require delegated permissions.
+
+        Returns:
+            Access token string, or None if no token available and require_delegated=False
+
+        Raises:
+            ValueError: If require_delegated=True and no valid delegated token is available
         """
         token_obj = MicrosoftToken.objects.filter(account_email=user_email, token_type='delegated').first()
         
@@ -77,10 +88,34 @@ class GraphAPIService:
                 token_obj.save()
                 return token_obj.access_token
             else:
-                logger.warning(f"Token refresh failed for {user_email}: {result.get('error_description')}")
+                error_desc = result.get('error_description') or result.get('error', 'Unknown error')
+                logger.warning(f"Token refresh failed for {user_email}: {error_desc}")
+                if require_delegated:
+                    raise ValueError(
+                        f"Failed to refresh delegated token for {user_email}. "
+                        f"Error: {error_desc}. "
+                        f"Please re-authenticate using: python manage.py authenticate_ms_graph"
+                    )
 
-        # Fallback to Application permissions
+        # Check if we need delegated permissions
+        if require_delegated:
+            if not token_obj:
+                raise ValueError(
+                    f"No delegated token found for {user_email}. "
+                    f"OneDrive operations require delegated permissions. "
+                    f"Please authenticate using: python manage.py authenticate_ms_graph"
+                )
+            else:
+                raise ValueError(
+                    f"Delegated token for {user_email} is expired and refresh failed. "
+                    f"Please re-authenticate using: python manage.py authenticate_ms_graph"
+                )
+
+        # Fallback to Application permissions (for email operations)
         result = self.msal_app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        if "access_token" not in result:
+            logger.error(f"Failed to acquire application token: {result.get('error_description')}")
+            return None
         return result.get("access_token")
 
     def authenticate_with_password(self, user_email: str, password: str) -> Tuple[bool, str]:
@@ -210,7 +245,7 @@ class GraphAPIService:
                                   user_email: str = DMS_USER_EMAIL,
                                   top: int = 200) -> Dict[str, Any]:
         """List children of a folder by drive ID and path."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
         return self._make_request('GET', f"/drives/{drive_id}/root:/{folder_path}:/children", token, params)
 
@@ -218,7 +253,7 @@ class GraphAPIService:
                                 user_email: str = DMS_USER_EMAIL,
                                 top: int = 200) -> Dict[str, Any]:
         """List children of a specific item by drive ID and item ID."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
         return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}/children", token, params)
 
@@ -237,7 +272,7 @@ class GraphAPIService:
     def get_drive_item(self, drive_id: str, item_id: str,
                        user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
         """Get metadata for a specific drive item."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}", token)
 
     # ── File download ──
@@ -245,13 +280,13 @@ class GraphAPIService:
     def get_drive_item_content(self, user_email: str, file_id: str,
                                drive_id: str = DMS_DRIVE_ID) -> bytes:
         """Download the raw content of a file from a drive."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         return self._make_raw_request('GET', f"/drives/{drive_id}/items/{file_id}/content", token)
 
     def get_drive_item_download_url(self, drive_id: str, item_id: str,
                                     user_email: str = DMS_USER_EMAIL) -> str:
         """Get a short-lived download URL for a file."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         item = self._make_request('GET', f"/drives/{drive_id}/items/{item_id}", token,
                                   params={'select': '@microsoft.graph.downloadUrl,name,size'})
         return item.get('@microsoft.graph.downloadUrl', '')
@@ -260,13 +295,13 @@ class GraphAPIService:
 
     def list_shared_folder(self, sharing_url: str, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
         """Access a shared folder directly via its sharing URL."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         encoded = self._encode_sharing_url(sharing_url)
         return self._make_request('GET', f"/shares/{encoded}/driveItem/children", token)
 
     def get_shared_folder_info(self, sharing_url: str, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
         """Get metadata about a shared folder via its sharing URL."""
-        token = self.get_access_token(user_email)
+        token = self.get_access_token(user_email, require_delegated=True)
         encoded = self._encode_sharing_url(sharing_url)
         return self._make_request('GET', f"/shares/{encoded}/driveItem", token)
 
