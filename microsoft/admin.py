@@ -2,7 +2,7 @@
 Admin interface for email models.
 """
 from django.contrib import admin
-from .models import EmailAccount, Email
+from .models import EmailAccount, Email, MicrosoftToken
 
 
 @admin.register(EmailAccount)
@@ -79,5 +79,30 @@ class EmailAdmin(admin.ModelAdmin):
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+
+@admin.register(MicrosoftToken)
+class MicrosoftTokenAdmin(admin.ModelAdmin):
+    """Admin interface for MicrosoftToken (Graph tokens)."""
+
+    list_display = ('account_email', 'token_type', 'expires_at', 'updated_at')
+    list_filter = ('token_type', 'expires_at', 'updated_at')
+    search_fields = ('account_email',)
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    fieldsets = (
+        ('Identity', {
+            'fields': ('id', 'account_email', 'token_type'),
+        }),
+        ('Tokens', {
+            'fields': ('access_token', 'refresh_token'),
+        }),
+        ('Expiry', {
+            'fields': ('expires_at',),
+        }),
+        ('Meta', {
+            'fields': ('token_cache', 'created_at', 'updated_at'),
+            'classes': ('collapse',),
         }),
     )

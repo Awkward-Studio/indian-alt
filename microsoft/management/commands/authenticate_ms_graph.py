@@ -60,4 +60,14 @@ class Command(BaseCommand):
                         "Ask the client to add 'http://localhost' as a Redirect URI instead."
                     )
                 )
+            if "AADSTS65001" in message:
+                self.stdout.write(
+                    self.style.WARNING(
+                        "\nConsent is required for this app (AADSTS65001).\n"
+                        "Fastest fix: run the interactive device-code flow instead:\n"
+                        "  python manage.py authenticate_ms_graph_device --email dms-demo@india-alt.com\n"
+                        "\nOr have the tenant admin grant consent in Entra ID -> App registrations -> "
+                        "API permissions -> Grant admin consent."
+                    )
+                )
             raise CommandError(f"Authentication failed: {message}")

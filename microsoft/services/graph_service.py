@@ -48,6 +48,11 @@ class GraphAPIService:
             authority=self.authority,
             client_credential=self.client_secret,
         )
+        # Device-code flow uses a public client (interactive in browser, no redirect URI required)
+        self.msal_public_app = msal.PublicClientApplication(
+            self.client_id,
+            authority=self.authority,
+        )
 
     # ─── Auth ────────────────────────────────────────────────────────────
 
@@ -151,6 +156,81 @@ class GraphAPIService:
             return True, "Success"
         
         return False, result.get('error_description') or result.get('error') or "Unknown error"
+
+    def authenticate_with_device_code(self, user_email: str) -> Tuple[bool, str]:
+        """
+        Authenticate using the Device Code flow (interactive).
+
+        This is the most reliable way to get a delegated token when:
+        - MFA is enabled, or
+        - Admin/user consent is required (AADSTS65001), or
+        - ROPC is blocked by tenant policy.
+
+        Returns:
+            (True, message) on success, (False, error_description) on failure.
+        """
+        # Use v2-style scopes (no resource prefix) – required for device-code flow.
+        # Graph permissions:
+        # - User.Read            -> basic profile
+        # - Files.Read.All       -> read files
+        # - Files.ReadWrite.All  -> read/write files (for future use)
+        # MSAL forbids passing reserved scopes (openid/profile/offline_access) into device-flow initiation.
+        # This still yields an access token suitable for OneDrive browsing.
+        scopes = ["User.Read", "Files.Read.All", "Files.ReadWrite.All"]
+
+        flow = self.msal_public_app.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            return False, flow.get("error_description") or flow.get("error") or "Failed to start device flow"
+
+        # MSAL returns a human-friendly instruction string in `message` (includes URL + code).
+        message = f"{flow.get('message')}"
+
+        result = self.msal_public_app.acquire_token_by_device_flow(flow)
+        if "access_token" not in result:
+            return False, result.get("error_description") or result.get("error") or "Device flow failed"
+
+        MicrosoftToken.objects.update_or_create(
+            account_email=user_email,
+            defaults={
+                "token_type": "delegated",
+                "access_token": result["access_token"],
+                "refresh_token": result.get("refresh_token"),
+                "expires_at": timezone.now() + timedelta(seconds=result.get("expires_in", 3600)),
+            },
+        )
+        return True, message
+
+    def start_device_code_flow(self) -> Tuple[bool, dict, str]:
+        """
+        Start a device-code flow and return the flow dict + human-friendly message.
+
+        Returns:
+            (True, flow, message) on success, (False, {}, error) on failure.
+        """
+        scopes = ["User.Read", "Files.Read.All", "Files.ReadWrite.All"]
+        flow = self.msal_public_app.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            return False, {}, flow.get("error_description") or flow.get("error") or "Failed to start device flow"
+        return True, flow, f"{flow.get('message')}"
+
+    def finish_device_code_flow(self, user_email: str, flow: dict) -> Tuple[bool, str]:
+        """
+        Poll the device-code flow until completion and persist the delegated token.
+        """
+        result = self.msal_public_app.acquire_token_by_device_flow(flow)
+        if "access_token" not in result:
+            return False, result.get("error_description") or result.get("error") or "Device flow failed"
+
+        MicrosoftToken.objects.update_or_create(
+            account_email=user_email,
+            defaults={
+                "token_type": "delegated",
+                "access_token": result["access_token"],
+                "refresh_token": result.get("refresh_token"),
+                "expires_at": timezone.now() + timedelta(seconds=result.get("expires_in", 3600)),
+            },
+        )
+        return True, "Success"
 
     # ─── HTTP helpers ────────────────────────────────────────────────────
 
