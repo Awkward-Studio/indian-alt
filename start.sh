@@ -2,29 +2,38 @@
 # Startup script for Railway deployment
 set -e  # Exit on error
 
-echo "--- Startup Diagnostics ---"
-echo "Port: $PORT"
+echo "=== STARTUP DIAGNOSTICS ==="
+echo "Port: ${PORT:-8000}"
+echo "Python: $(python --version)"
+echo "Working directory: $(pwd)"
+
+# Check database connection
 if [ -n "$DATABASE_URL" ]; then
-    echo "DATABASE_URL is set (PostgreSQL)"
+    echo "DATABASE_URL: PRESENT (PostgreSQL)"
 else
-    echo "DATABASE_URL is NOT set (Defaulting to SQLite)"
+    echo "DATABASE_URL: MISSING (Will default to SQLite)"
+    exit 1
 fi
 
-# Safety net: Run migrations here too if releaseCommand was skipped
-echo "Running migrations (safety check)..."
+echo ""
+echo "=== RUNNING MIGRATIONS ==="
 python manage.py migrate --noinput
 
-echo "Ensuring default superuser exists..."
+echo ""
+echo "=== CREATING/UPDATING SUPERUSER ==="
 python manage.py create_default_superuser
 
-echo "Starting Gunicorn server on port $PORT..."
-# Using gunicorn directly with optimized settings
+echo ""
+echo "=== CHECKING TABLES ==="
+python manage.py shell -c "from django.db import connection; cursor = connection.cursor(); cursor.execute('SELECT COUNT(*) FROM django_migrations'); print(f'Migrations applied: {cursor.fetchone()[0]}');"
+
+echo ""
+echo "=== STARTING GUNICORN ON PORT ${PORT:-8000} ==="
 exec gunicorn config.wsgi:application \
-    --bind 0.0.0.0:$PORT \
+    --bind 0.0.0.0:${PORT:-8000} \
+    --workers 3 \
+    --timeout 120 \
     --access-logfile - \
     --error-logfile - \
-    --log-level info \
-    --timeout 120 \
-    --workers 3
-
-
+    --log-level debug \
+    --capture-output

@@ -2,9 +2,15 @@
 
 import django.db.models.deletion
 import pgvector.django.vector
-from pgvector.django import VectorExtension
 import uuid
 from django.db import migrations, models
+
+
+def create_vector_extension(apps, schema_editor):
+    """Create the vector extension if it doesn't exist."""
+    if schema_editor.connection.vendor == 'postgresql':
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
 
 class Migration(migrations.Migration):
@@ -15,7 +21,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        VectorExtension(),
+        migrations.RunPython(
+            create_vector_extension,
+            reverse_code=migrations.RunPython.noop,
+        ),
         migrations.CreateModel(
             name='DocumentChunk',
             fields=[

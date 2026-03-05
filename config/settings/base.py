@@ -202,16 +202,22 @@ DATABASE_URL = config('DATABASE_URL', default='')
 
 if DATABASE_URL:
     # Use PostgreSQL (Railway or local if DATABASE_URL is set)
-    DATABASES = {
-        'default': dj_database_url.parse(
-            DATABASE_URL,
-            conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
-            # Railway Postgres requires SSL, but allow override for local dev
-            ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
-        )
-    }
-    # Enable pgvector extension for PostgreSQL
-    # This will be run via migrations or manually
+    parsed_config = dj_database_url.parse(
+        DATABASE_URL,
+        conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
+        # Railway Postgres requires SSL, but allow override for local dev
+        ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
+    )
+    
+    # Add connection options for Railway Postgres
+    if 'OPTIONS' not in parsed_config:
+        parsed_config['OPTIONS'] = {}
+    
+    # Ensure proper SSL settings for Railway
+    if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
+        parsed_config['OPTIONS']['sslmode'] = 'require'
+    
+    DATABASES = {'default': parsed_config}
 else:
     # Default to SQLite for local development
     DATABASES = {
