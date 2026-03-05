@@ -123,19 +123,24 @@ class UniversalChatView(APIView):
 
             # PASS 1: Intent
             pass1_prompt = f"""[SYSTEM] Determine tools for: "{user_message}"
-DATABASE FIELDS YOU CAN FILTER BY:
-- title (icontains)
-- industry (icontains)
-- sector (icontains)
+DATABASE FIELDS (Use for structured filtering):
+- title, industry, sector, city, state, country (text icontains)
 - priority (Exact: New, High, Medium, Low)
+- is_female_led (bool)
+- management_meeting (bool)
+- business_proposal_stage, ic_stage (bool)
+- funding_ask (Use numeric filters only if sure)
 
 TOOLS: 
-- db_filters: {{'title': '...', 'industry': '...'}}
-- global_rag: "search query for document text"
+- db_filters: {{'industry': 'Logistics', 'is_female_led': true}}
+- global_rag: "Specific semantic search for document text (e.g. CM1 margins, revenue run-rate, risk factors)"
 - get_stats: true/false
 
-RULES: Return ONLY JSON. If the user asks for prioritization or a list of deals, DO NOT apply strict numeric filters (like margin > 20) in db_filters; use global_rag instead.
-Example: {{"global_rag": "high margin logistics deals"}}
+RULES: 
+1. Use db_filters for hard criteria (Industry, Stages, Female Led).
+2. Use global_rag for deep metrics (Margins, CM1, etc.) or qualitative traits.
+3. You can use BOTH tools simultaneously for maximum precision.
+4. Return ONLY JSON.
 """
             intent_result = ai_service.process_content(content=pass1_prompt, skill_name=None, stream=False)
             print(f"[AGENT] Intent: {intent_result}")
@@ -145,45 +150,66 @@ Example: {{"global_rag": "high margin logistics deals"}}
             db_filters = intent_result.get("db_filters", {})
             query_set = Deal.objects.all()
             
-            deals = query_set.none()
+            deals = query_set.all()
             if db_filters:
                 q_obj = Q()
                 for f, v in db_filters.items():
-                    if v and v != "null" and v != "{}" and v != []:
+                    if v is not None and v != "null" and v != "{}" and v != []:
+                        # Handle booleans
+                        if isinstance(v, bool):
+                            if hasattr(Deal, f): q_obj &= Q(**{f: v})
                         # Handle potential list values from AI
-                        val = v[0] if isinstance(v, list) and len(v) > 0 else v
-                        if f == 'query': q_obj |= Q(title__icontains=val) | Q(deal_summary__icontains=val)
-                        elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": str(val)})
-                deals = query_set.filter(q_obj)[:50]
-
-            # FALLBACK: If filters returned nothing, but user asked a general question, give them the recent deals
-            if deals.count() == 0:
-                print("[AGENT] Strict filters returned 0 results. Falling back to recent deals.")
+                        else:
+                            val = v[0] if isinstance(v, list) and len(v) > 0 else v
+                            if f == 'query': q_obj |= Q(title__icontains=val) | Q(deal_summary__icontains=val)
+                            elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": str(val)})
+                
+                filtered_deals = query_set.filter(q_obj)
+                # Fallback if strict filters are TOO specific
+                if filtered_deals.count() > 0:
+                    deals = filtered_deals[:50]
+                else:
+                    print(f"[AGENT] Strict filters {db_filters} returned 0. Using recent deals.")
+                    deals = query_set.order_by('-created_at')[:50]
+            else:
                 deals = query_set.order_by('-created_at')[:50]
 
-            # Provide a complete summary of pipeline stats first
+            # Provide a complete summary of pipeline stats
             total_deals = query_set.count()
-            context_data["pipeline_overview"] = f"Total deals in system: {total_deals}. Showing details for {deals.count()} deals."
+            context_data["pipeline_overview"] = f"Total deals in system: {total_deals}. Context provided for {deals.count()} deals."
 
-            # EXPOSE RICH FORENSIC DATA TO UNIVERSAL CHAT
+            # EXPOSE RICH FORENSIC DATA
             context_data["deals"] = [{
                 "title": d.title, 
                 "industry": d.industry, 
                 "sector": d.sector,
-                "ask": d.funding_ask, 
+                "ask": d.funding_ask,
+                "city": d.city,
+                "priority": d.priority,
+                "is_female_led": d.is_female_led,
+                "management_met": d.management_meeting,
                 "themes": d.themes if isinstance(d.themes, list) else [],
                 "ambiguities": d.ambiguities if isinstance(d.ambiguities, list) else [],
-                "summary": d.deal_summary[:500] + "..." if d.deal_summary and len(d.deal_summary) > 500 else d.deal_summary
+                "summary": d.deal_summary[:1000] if d.deal_summary else ""
             } for d in deals]
 
             rag_query = intent_result.get("global_rag")
             if rag_query:
                 embed_service = EmbeddingService()
-                chunks = embed_service.search_global_chunks(rag_query, limit=10)
+                # If we have specific deals filtered, prioritize chunks from those deals
+                if db_filters and filtered_deals.count() > 0:
+                    chunks = DocumentChunk.objects.filter(deal__in=filtered_deals).annotate(distance=CosineDistance('embedding', embed_service._get_embedding(rag_query))).order_by('distance')[:15]
+                else:
+                    chunks = embed_service.search_global_chunks(rag_query, limit=15)
+                
                 context_data["document_insights"] = [{"deal": c.deal.title, "text": c.content} for c in chunks]
 
             if intent_result.get("get_stats"):
-                context_data["pipeline_stats"] = {"total": query_set.count(), "sectors": list(query_set.values('industry').annotate(count=Count('id')))}
+                context_data["pipeline_stats"] = {
+                    "total": query_set.count(), 
+                    "female_led_count": query_set.filter(is_female_led=True).count(),
+                    "sectors": list(query_set.values('industry').annotate(count=Count('id')))
+                }
 
             # PASS 3: Synthesis
             synthesis_prompt = f"""[CONTEXT]
@@ -191,18 +217,16 @@ CHAT HISTORY:
 {history_context}
 
 REAL DATA:
-{json.dumps(context_data, indent=2)}
+{json.dumps(context_data, indent=2, default=str)}
 
 [TASK]
-Answer the USER MESSAGE: "{user_message}" as a Senior Lead Analyst.
+Analyze the user message: "{user_message}"
 
 INSTRUCTIONS:
-1. **BE CONVERSATIONAL**: Use a natural back-and-forth tone. Explain things as if you are speaking to a partner. Use "I checked the records and..." or "Looking at the Urban Harvest documents...".
-2. **BE DIRECT**: Answer the specific question immediately. Do not use generic headers like "Pipeline Analytics".
-3. **USE REAL DATA**: If financial details (margins, CM1, etc.) are in document_insights, highlight them.
-4. **RESOLVE CONTEXT**: Use CHAT HISTORY to understand which deal is being discussed.
-5. **NO HALLUCINATION**: If the data isn't in REAL DATA, just say you don't have that specific information yet.
-6. Use Markdown for structure, but keep it feeling like a conversation.
+1. Use the REAL DATA provided. Cross-reference structured fields (like is_female_led) with the document_insights (raw text).
+2. If the user asks for prioritization, rank deals based on metrics found in document_insights (CM1, revenue) and the stored ambiguities.
+3. Be professional and forensic. Explain WHY a deal is prioritized.
+4. If data is missing, state it clearly based on the summary and insights provided.
 """
             if stream:
                 def stream_and_save():
