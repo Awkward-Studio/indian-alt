@@ -123,13 +123,19 @@ class UniversalChatView(APIView):
 
             # PASS 1: Intent
             pass1_prompt = f"""[SYSTEM] Determine tools for: "{user_message}"
+DATABASE FIELDS YOU CAN FILTER BY:
+- title (icontains)
+- industry (icontains)
+- sector (icontains)
+- priority (Exact: New, High, Medium, Low)
+
 TOOLS: 
 - db_filters: {{'title': '...', 'industry': '...'}}
 - global_rag: "search query for document text"
 - get_stats: true/false
 
-RULES: Return ONLY JSON. 
-Example: {{"global_rag": "Urban Harvest CM1 margins"}}
+RULES: Return ONLY JSON. If the user asks for prioritization or a list of deals, DO NOT apply strict numeric filters (like margin > 20) in db_filters; use global_rag instead.
+Example: {{"global_rag": "high margin logistics deals"}}
 """
             intent_result = ai_service.process_content(content=pass1_prompt, skill_name=None, stream=False)
             print(f"[AGENT] Intent: {intent_result}")
@@ -139,16 +145,21 @@ Example: {{"global_rag": "Urban Harvest CM1 margins"}}
             db_filters = intent_result.get("db_filters", {})
             query_set = Deal.objects.all()
             
+            deals = query_set.none()
             if db_filters:
                 q_obj = Q()
                 for f, v in db_filters.items():
-                    if v and v != "null" and v != "{}":
-                        if f == 'query': q_obj |= Q(title__icontains=v) | Q(deal_summary__icontains=v)
-                        elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": v})
-                deals = query_set.filter(q_obj)[:50] # Allow up to 50 filtered deals
-            else: 
-                # If no specific filter, return a broader set of recent deals (up to 50)
-                deals = query_set.order_by('-created_at')[:50] 
+                    if v and v != "null" and v != "{}" and v != []:
+                        # Handle potential list values from AI
+                        val = v[0] if isinstance(v, list) and len(v) > 0 else v
+                        if f == 'query': q_obj |= Q(title__icontains=val) | Q(deal_summary__icontains=val)
+                        elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": str(val)})
+                deals = query_set.filter(q_obj)[:50]
+
+            # FALLBACK: If filters returned nothing, but user asked a general question, give them the recent deals
+            if deals.count() == 0:
+                print("[AGENT] Strict filters returned 0 results. Falling back to recent deals.")
+                deals = query_set.order_by('-created_at')[:50]
 
             # Provide a complete summary of pipeline stats first
             total_deals = query_set.count()
