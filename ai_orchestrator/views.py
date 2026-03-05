@@ -145,8 +145,14 @@ Example: {{"global_rag": "Urban Harvest CM1 margins"}}
                     if v and v != "null" and v != "{}":
                         if f == 'query': q_obj |= Q(title__icontains=v) | Q(deal_summary__icontains=v)
                         elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": v})
-                deals = query_set.filter(q_obj)[:10]
-            else: deals = query_set.order_by('-created_at')[:5]
+                deals = query_set.filter(q_obj)[:50] # Allow up to 50 filtered deals
+            else: 
+                # If no specific filter, return a broader set of recent deals (up to 50)
+                deals = query_set.order_by('-created_at')[:50] 
+
+            # Provide a complete summary of pipeline stats first
+            total_deals = query_set.count()
+            context_data["pipeline_overview"] = f"Total deals in system: {total_deals}. Showing details for {deals.count()} deals."
 
             # EXPOSE RICH FORENSIC DATA TO UNIVERSAL CHAT
             context_data["deals"] = [{
