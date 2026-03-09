@@ -708,6 +708,13 @@ class OneDriveListView(APIView):
         tags=["OneDrive"],
         parameters=[
             OpenApiParameter(
+                name='user_email',
+                type=OpenApiTypes.EMAIL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Microsoft account email to use for delegated OneDrive access (defaults to DMS account)',
+            ),
+            OpenApiParameter(
                 name='folder_id',
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
@@ -733,6 +740,7 @@ class OneDriveListView(APIView):
     )
     def get(self, request):
         """List files and folders from the DMS shared folder."""
+        user_email = request.query_params.get('user_email') or DMS_USER_EMAIL
         folder_id = request.query_params.get('folder_id')
         top = request.query_params.get('top', 100)
         use_mock = request.query_params.get('mock', '').lower() in ('true', '1', 'yes')
@@ -766,13 +774,13 @@ class OneDriveListView(APIView):
 
             if folder_id:
                 data = graph.get_drive_folder_children(
-                    user_email=DMS_USER_EMAIL,
+                    user_email=user_email,
                     folder_id=folder_id,
                     top=top,
                 )
             else:
                 data = graph.get_drive_root_children(
-                    user_email=DMS_USER_EMAIL,
+                    user_email=user_email,
                     top=top,
                 )
 

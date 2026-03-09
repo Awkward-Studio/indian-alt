@@ -11,7 +11,6 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('deals', '0003_deal_is_indexed'),
     ]
 
     operations = [
@@ -32,27 +31,6 @@ class Migration(migrations.Migration):
                 'db_table': 'email_account',
                 'ordering': ['email'],
                 'indexes': [models.Index(fields=['email'], name='email_accou_email_4269b0_idx'), models.Index(fields=['is_active'], name='email_accou_is_acti_507bbb_idx'), models.Index(fields=['-last_synced'], name='email_accou_last_sy_1083cd_idx')],
-            },
-        ),
-        migrations.CreateModel(
-            name='MicrosoftToken',
-            fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('account_email', models.EmailField(help_text='The email address this token is for (e.g. dms-demo@india-alt.com)', max_length=254, unique=True)),
-                ('token_type', models.CharField(choices=[('application', 'Application'), ('delegated', 'Delegated')], default='application', max_length=20)),
-                ('access_token', models.TextField()),
-                ('refresh_token', models.TextField(blank=True, null=True)),
-                ('expires_at', models.DateTimeField()),
-                ('token_cache', models.TextField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-            ],
-            options={
-                'verbose_name': 'Microsoft Token',
-                'verbose_name_plural': 'Microsoft Tokens',
-                'db_table': 'microsoft_token',
-                'ordering': ['-updated_at'],
-                'indexes': [models.Index(fields=['account_email'], name='microsoft_t_account_ca22d8_idx'), models.Index(fields=['token_type'], name='microsoft_t_token_t_046e64_idx')],
             },
         ),
         migrations.CreateModel(
@@ -84,15 +62,10 @@ class Migration(migrations.Migration):
                 ('web_link', models.URLField(blank=True, help_text='Outlook web link', null=True)),
                 ('graph_metadata', models.JSONField(blank=True, default=dict, help_text='Additional Graph API fields stored as JSON')),
                 ('attachments', models.JSONField(blank=True, default=list, help_text='Attachment metadata from Graph API (filename, content_type, size, etc.)')),
-                ('extracted_text', models.TextField(blank=True, help_text='Full cleaned text from body and attachments for AI chat context', null=True)),
                 ('is_processed', models.BooleanField(default=False, help_text='Whether email has been processed by AI')),
-                ('is_indexed', models.BooleanField(default=False, help_text='Whether this email and its attachments have been vectorized')),
-                ('processing_status', models.CharField(choices=[('idle', 'Idle'), ('pending', 'Pending'), ('processing', 'Processing'), ('completed', 'Completed'), ('failed', 'Failed')], default='idle', help_text='Status of the background AI processing task', max_length=20)),
-                ('processing_error', models.TextField(blank=True, null=True)),
                 ('processed_at', models.DateTimeField(blank=True, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('deal', models.ForeignKey(blank=True, help_text='The deal this email is associated with', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='emails', to='deals.deal')),
                 ('email_account', models.ForeignKey(help_text='Email account this email belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='emails', to='microsoft.emailaccount')),
             ],
             options={

@@ -168,6 +168,9 @@ class DocumentChunk(models.Model):
             ('attachment', 'Email Attachment'),
             ('onedrive', 'OneDrive File'),
             ('deal_summary', 'Deal Summary'),
+            ('ai_thinking', 'AI Reasoning Logic'),
+            ('ai_ambiguities', 'AI Identified Ambiguities'),
+            ('extracted_source', 'Raw Extracted Text'),
         ]
     )
     source_id = models.CharField(max_length=255, help_text="Original ID of the source (Email ID, File ID, etc.)")
@@ -175,7 +178,7 @@ class DocumentChunk(models.Model):
     # Content & Vector
     content = models.TextField()
     # nomic-embed-text uses 768 dimensions
-    embedding = VectorField(dimensions=768)
+    embedding = VectorField(dimensions=768, blank=True, null=True)
     
     # Extra context (e.g., filename, page number, chunk index)
     metadata = models.JSONField(default=dict, blank=True)

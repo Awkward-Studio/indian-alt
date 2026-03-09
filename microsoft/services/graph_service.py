@@ -8,6 +8,7 @@ from django.utils import timezone
 from datetime import timedelta
 from decouple import config
 import requests
+from requests import HTTPError
 import msal
 
 from ..models import MicrosoftToken
@@ -329,6 +330,14 @@ class GraphAPIService:
         params = {'$top': top}
         return self._make_request('GET', f"/drives/{drive_id}/root:/{folder_path}:/children", token, params)
 
+    def list_drive_root_children(self, drive_id: str = DMS_DRIVE_ID,
+                                 user_email: str = DMS_USER_EMAIL,
+                                 top: int = 200) -> Dict[str, Any]:
+        """List children directly from the drive root."""
+        token = self.get_access_token(user_email, require_delegated=True)
+        params = {'$top': top}
+        return self._make_request('GET', f"/drives/{drive_id}/root/children", token, params)
+
     def get_drive_item_children(self, drive_id: str, item_id: str,
                                 user_email: str = DMS_USER_EMAIL,
                                 top: int = 200) -> Dict[str, Any]:
@@ -339,8 +348,21 @@ class GraphAPIService:
 
     def get_drive_root_children(self, user_email: str = DMS_USER_EMAIL,
                                 top: int = 200, **kwargs) -> Dict[str, Any]:
-        """List root of the DMS shared folder (default entry point)."""
-        return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
+        """
+        List the configured DMS folder, falling back to the drive root if that path no longer exists.
+        """
+        try:
+            return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
+        except HTTPError as exc:
+            response = getattr(exc, "response", None)
+            if response is not None and response.status_code == 404:
+                logger.warning(
+                    "Configured DMS folder path '%s' was not found in drive %s. Falling back to drive root.",
+                    DMS_FOLDER_PATH,
+                    DMS_DRIVE_ID,
+                )
+                return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
+            raise
 
     def get_drive_folder_children(self, user_email: str = DMS_USER_EMAIL,
                                   folder_id: str = '', top: int = 200, **kwargs) -> Dict[str, Any]:
