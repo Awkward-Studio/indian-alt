@@ -53,8 +53,32 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(
-            create_vector_extension_and_table,
-            reverse_code=migrations.RunPython.noop,
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(
+                    create_vector_extension_and_table,
+                    reverse_code=migrations.RunPython.noop,
+                ),
+            ],
+            state_operations=[
+                migrations.CreateModel(
+                    name='DocumentChunk',
+                    fields=[
+                        ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                        ('source_type', models.CharField(choices=[('email', 'Email Body'), ('attachment', 'Email Attachment'), ('onedrive', 'OneDrive File'), ('deal_summary', 'Deal Summary')], max_length=50)),
+                        ('source_id', models.CharField(help_text='Original ID of the source (Email ID, File ID, etc.)', max_length=255)),
+                        ('content', models.TextField()),
+                        ('embedding', pgvector.django.vector.VectorField(dimensions=768)),
+                        ('metadata', models.JSONField(blank=True, default=dict)),
+                        ('created_at', models.DateTimeField(auto_now_add=True)),
+                        ('deal', models.ForeignKey(help_text='The deal this chunk belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='deals.deal')),
+                    ],
+                    options={
+                        'verbose_name': 'Document Chunk',
+                        'verbose_name_plural': 'Document Chunks',
+                        'indexes': [models.Index(fields=['deal', 'source_type'], name='ai_orchestr_deal_id_be209e_idx')],
+                    },
+                ),
+            ]
         ),
     ]
