@@ -5,6 +5,8 @@ from django.db import models
 class Bank(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.TextField(blank=True, null=True)
+    website_domain = models.TextField(blank=True, null=True, help_text='Primary domain (e.g., avendus.com) for deduplication')
+    description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

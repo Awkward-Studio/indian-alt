@@ -33,6 +33,9 @@ class Contact(models.Model):
         help_text='Array of sector coverage areas'
     )
     rank = models.TextField(blank=True, null=True)
+    linkedin_url = models.URLField(blank=True, null=True)
+    twitter_handle = models.TextField(blank=True, null=True)
+    source_count = models.IntegerField(default=0, help_text='Total deals sourced from this contact')
 
     class Meta:
         db_table = 'contact'

@@ -15,6 +15,8 @@ class DealSerializer(serializers.ModelSerializer):
     
     # Write-only field for linking email during creation
     source_email_id = serializers.UUIDField(write_only=True, required=False)
+    contact_discovery = serializers.JSONField(write_only=True, required=False)
+    analysis_json = serializers.JSONField(write_only=True, required=False)
     
     # Allow passing a list of Profile IDs (UUIDs)
     responsibility = serializers.PrimaryKeyRelatedField(
