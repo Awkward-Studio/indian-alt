@@ -119,3 +119,46 @@ class Deal(models.Model):
 
     def __str__(self):
         return self.title or f'Deal {self.id}'
+
+
+class DocumentType(models.TextChoices):
+    PITCH_DECK = 'Pitch Deck', 'Pitch Deck'
+    FINANCIALS = 'Financials', 'Financials'
+    LEGAL = 'Legal', 'Legal'
+    TERM_SHEET = 'Term Sheet', 'Term Sheet'
+    KYC = 'KYC', 'KYC'
+    MEMO = 'Memo', 'Memo'
+    OTHER = 'Other', 'Other'
+
+
+class DealDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='documents'
+    )
+    title = models.TextField()
+    document_type = models.CharField(
+        max_length=50,
+        choices=DocumentType.choices,
+        default=DocumentType.OTHER
+    )
+    onedrive_id = models.TextField(blank=True, null=True)
+    file_url = models.URLField(blank=True, null=True)
+    extracted_text = models.TextField(blank=True, null=True)
+    is_indexed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    uploaded_by = models.ForeignKey(
+        'accounts.Profile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
+    class Meta:
+        db_table = 'deal_document'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.document_type}: {self.title}"

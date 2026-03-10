@@ -1,8 +1,18 @@
 from rest_framework import serializers
-from .models import Deal
+from .models import Deal, DealDocument
 from accounts.models import Profile
 from api_requests.serializers import RequestSerializer
 from ai_orchestrator.models import AIAuditLog
+
+
+class DealDocumentSerializer(serializers.ModelSerializer):
+    deal_title = serializers.CharField(source='deal.title', read_only=True)
+    uploaded_by_name = serializers.CharField(source='uploaded_by.name', read_only=True)
+    
+    class Meta:
+        model = DealDocument
+        fields = '__all__'
+        read_only_fields = ('id', 'created_at')
 
 
 class DealSerializer(serializers.ModelSerializer):

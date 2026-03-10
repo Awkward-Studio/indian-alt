@@ -127,6 +127,26 @@ class AIProcessorService:
             cleaned_text = cleaned_text[:100000] + "\n\n[... TRUNCATED ...]\n\n" + cleaned_text[-60000:]
 
         system_instructions = personality.system_instructions if personality else "You are a PE analyst."
+        
+        # --- DYNAMIC PROTOCOL INJECTION ---
+        from ..models import AnalysisProtocol
+        from .forex_service import ForexService
+        
+        protocol = AnalysisProtocol.objects.filter(is_active=True).first()
+        if protocol and protocol.directives:
+            forex = ForexService()
+            live_rate = forex.get_crore_string()
+            
+            directives_text = "\n### INSTITUTIONAL ANALYSIS DIRECTIVES:\n"
+            for d in protocol.directives:
+                # If the directive mentions currency, append the live rate
+                if any(word in d.lower() for word in ['currency', 'inr', 'crore', '$']):
+                    directives_text += f"- {d} (CURRENT LIVE RATE: 1M USD = {live_rate})\n"
+                else:
+                    directives_text += f"- {d}\n"
+            system_instructions += directives_text
+        # ----------------------------------
+
         if not stream:
             system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."
         

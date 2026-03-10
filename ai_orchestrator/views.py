@@ -281,34 +281,99 @@ class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         try:
+            from .models import AnalysisProtocol
+            from .serializers import AIPersonalitySerializer, AISkillSerializer, AnalysisProtocolSerializer
+            
             ai_service = AIProcessorService()
             vm_service = VMControlService()
-            available_models = ai_service.get_available_models()
-            try:
-                personality = AIPersonality.objects.get(is_default=True)
-                current_settings = {"text_model_name": personality.text_model_name, "vision_model_name": personality.vision_model_name, "model_provider": personality.model_provider}
-            except: current_settings = None
+            
+            personalities = AIPersonality.objects.all()
+            skills = AISkill.objects.all()
+            protocols = AnalysisProtocol.objects.all()
+            
+            # Fast Check for VM Connectivity
+            vm_online = False
+            available_models = []
             telemetry = {"loaded_models": []}
+            
             try:
-                ps_resp = requests.get(f"{ai_service.ollama_url}/api/ps", timeout=2)
-                if ps_resp.status_code == 200:
-                    for model in ps_resp.json().get('models', []):
-                        vram_gb = model.get('size_vram', 0) / 1e9
-                        total_size_gb = model.get('size', 0) / 1e9
-                        telemetry["loaded_models"].append({"name": model.get('name'), "vram_gb": round(vram_gb, 2), "gpu_percent": round(min((vram_gb/total_size_gb)*100 if total_size_gb > 0 else 0, 100), 1)})
-            except: pass
-            return Response({"available_models": available_models, "current_settings": current_settings, "telemetry": telemetry, "vm_status": vm_service.get_status()})
-        except Exception as e: return Response({"error": str(e)}, status=500)
+                # Use a very short timeout for the initial ping
+                tags_resp = requests.get(f"{ai_service.ollama_url}/api/tags", timeout=1.5)
+                if tags_resp.status_code == 200:
+                    vm_online = True
+                    available_models = [m['name'] for m in tags_resp.json().get('models', [])]
+                    
+                    # If online, try fetching telemetry
+                    ps_resp = requests.get(f"{ai_service.ollama_url}/api/ps", timeout=1.5)
+                    if ps_resp.status_code == 200:
+                        for model in ps_resp.json().get('models', []):
+                            vram_gb = model.get('size_vram', 0) / 1e9
+                            telemetry["loaded_models"].append({
+                                "name": model.get('name'), 
+                                "vram_gb": round(vram_gb, 2)
+                            })
+            except:
+                logger.warning("Neural Engine (Ollama VM) is unreachable.")
+
+            # Live Forex
+            from .services.forex_service import ForexService
+            forex = ForexService()
+            live_rate = forex.get_crore_string()
+
+            return Response({
+                "personalities": AIPersonalitySerializer(personalities, many=True).data,
+                "skills": AISkillSerializer(skills, many=True).data,
+                "protocols": AnalysisProtocolSerializer(protocols, many=True).data,
+                "available_models": available_models,
+                "telemetry": telemetry,
+                "vm_online": vm_online,
+                "vm_status": vm_service.get_status(),
+                "live_rate": live_rate
+            })
+        except Exception as e: 
+            return Response({"error": str(e)}, status=500)
 
     def post(self, request):
+        """
+        Update settings for personalities, skills, or protocols.
+        """
         try:
-            personality = AIPersonality.objects.get(is_default=True)
-            personality.text_model_name = request.data.get("text_model_name", personality.text_model_name)
-            personality.vision_model_name = request.data.get("vision_model_name", personality.vision_model_name)
-            personality.model_provider = request.data.get("model_provider", personality.model_provider)
-            personality.save()
+            from .models import AnalysisProtocol
+            
+            target_type = request.data.get("type") # 'personality', 'skill', 'protocol'
+            target_id = request.data.get("id")
+            updates = request.data.get("updates", {})
+            action = updates.get('action')
+            
+            if target_type == 'personality':
+                if target_id == 'new':
+                    AIPersonality.objects.create(
+                        name=updates.get('name', 'New Personality'),
+                        description=updates.get('description', ''),
+                        system_instructions=updates.get('system_instructions', 'You are...'),
+                        is_default=False
+                    )
+                elif action == 'delete':
+                    obj = AIPersonality.objects.get(id=target_id)
+                    if not obj.is_default:
+                        obj.delete()
+                else:
+                    obj = AIPersonality.objects.get(id=target_id)
+                    for k, v in updates.items(): setattr(obj, k, v)
+                    obj.save()
+            elif target_type == 'skill':
+                obj = AISkill.objects.get(id=target_id)
+                for k, v in updates.items(): setattr(obj, k, v)
+                obj.save()
+            elif target_type == 'protocol':
+                obj = AnalysisProtocol.objects.get(id=target_id)
+                for k, v in updates.items(): setattr(obj, k, v)
+                obj.save()
+                
             return Response({"success": True})
-        except Exception as e: return Response({"error": str(e)}, status=500)
+        except Exception as e: 
+            logger.error(f"Error in AISettingsView.post: {str(e)}")
+            return Response({"error": str(e)}, status=500)
 
 class AISkillsView(APIView):
     permission_classes = [IsAuthenticated]

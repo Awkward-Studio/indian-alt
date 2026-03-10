@@ -72,6 +72,24 @@ class EmbeddingService:
             deal.save(update_fields=['is_indexed'])
         return success
 
+    def vectorize_document(self, doc: DocumentChunk) -> bool:
+        """Vectorizes a specific deal document artifact."""
+        from deals.models import DealDocument
+        if not isinstance(doc, DealDocument) or not doc.extracted_text:
+            return False
+            
+        success = self.chunk_and_embed(
+            text=doc.extracted_text, 
+            deal=doc.deal, 
+            source_type='document', 
+            source_id=str(doc.id), 
+            metadata={"title": doc.title, "type": doc.document_type}
+        )
+        if success:
+            doc.is_indexed = True
+            doc.save(update_fields=['is_indexed'])
+        return success
+
     def search_similar_chunks(self, query: str, deal: Deal, limit: int = 5) -> List[DocumentChunk]:
         """Hybrid Search: Vector for Postgres, Ranked Keyword for SQLite."""
         if self.is_sqlite:

@@ -1,5 +1,20 @@
 from rest_framework import serializers
-from .models import AIConversation, AIMessage
+from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol
+
+class AIPersonalitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIPersonality
+        fields = '__all__'
+
+class AISkillSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AISkill
+        fields = '__all__'
+
+class AnalysisProtocolSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AnalysisProtocol
+        fields = '__all__'
 
 class AIMessageSerializer(serializers.ModelSerializer):
     class Meta:

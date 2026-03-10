@@ -67,6 +67,45 @@ class AISkill(models.Model):
         return self.name
 
 
+class AnalysisProtocol(models.Model):
+    """
+    Stores institutional rules for deal analysis. 
+    This decouples the "Style" and "Logic" from the code.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    
+    # Forensic Directives (The "Institutional Style")
+    directives = models.JSONField(
+        default=list, 
+        help_text="List of rules: ['Find all forensic risks', 'Convert units to INR']"
+    )
+    
+    # Output Control
+    output_schema = models.JSONField(
+        default=dict, 
+        help_text="Mandatory JSON structure for the AI response"
+    )
+    
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Analysis Protocol"
+        verbose_name_plural = "Analysis Protocols"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if self.is_active:
+            AnalysisProtocol.objects.filter(is_active=True).update(is_active=False)
+        super().save(*args, **kwargs)
+
+
 class AIAuditLog(models.Model):
     """
     Logs every interaction with the LLM for transparency and debugging.
@@ -175,7 +214,7 @@ class DocumentChunk(models.Model):
     # Content & Vector
     content = models.TextField()
     # nomic-embed-text uses 768 dimensions
-    embedding = VectorField(dimensions=768)
+    embedding = VectorField(dimensions=768, null=True, blank=True)
     
     # Extra context (e.g., filename, page number, chunk index)
     metadata = models.JSONField(default=dict, blank=True)

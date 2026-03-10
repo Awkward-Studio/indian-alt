@@ -6,10 +6,76 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
-from .models import Deal
-from .serializers import DealSerializer, DealListSerializer
+from .models import Deal, DealDocument
+from .serializers import DealSerializer, DealListSerializer, DealDocumentSerializer
 
 logger = logging.getLogger(__name__)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List all deal documents",
+        description="Retrieve a list of all documents associated with deals.",
+        tags=["Deal Documents"],
+    ),
+)
+class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
+    queryset = DealDocument.objects.all()
+    serializer_class = DealDocumentSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['title', 'extracted_text']
+    filterset_fields = ['deal', 'document_type', 'is_indexed']
+    ordering_fields = ['created_at', 'title', 'document_type']
+    ordering = ['-created_at']
+
+    def perform_create(self, serializer):
+        if hasattr(self.request.user, 'profile'):
+            serializer.save(uploaded_by=self.request.user.profile)
+        else:
+            serializer.save()
+
+    @action(detail=False, methods=['post'])
+    def search(self, request):
+        """
+        Semantic search/RAG across all indexed documents.
+        """
+        query = request.data.get('query')
+        deal_id = request.data.get('deal_id') # Optional filter
+        
+        if not query:
+            return Response({"error": "query is required"}, status=400)
+            
+        try:
+            from ai_orchestrator.services.ai_processor import AIProcessorService
+            
+            # 1. Fetch relevant documents
+            docs = DealDocument.objects.filter(is_indexed=True)
+            if deal_id:
+                docs = docs.filter(deal_id=deal_id)
+                
+            if not docs.exists():
+                return Response({"response": "No indexed documents found to search through."}, status=200)
+                
+            context = "\n\n".join([f"--- DOC: {d.title} (Deal: {d.deal.title}) ---\n{d.extracted_text[:2000]}..." for d in docs])
+
+            # 2. Use AI for search
+            ai_service = AIProcessorService()
+            prompt = f"Using the following institutional documents as context, answer: {query}\n\nCONTEXT:\n{context}"
+            
+            result = ai_service.process_content(
+                content=prompt,
+                skill_name="deal_extraction",
+                source_type="global_search"
+            )
+            
+            return Response({
+                "query": query,
+                "response": result.get('_raw_response', 'No answer generated.'),
+                "thinking": result.get('thinking', '')
+            })
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
 
 
 @extend_schema_view(
@@ -145,6 +211,38 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                             conversation_id=source_email.conversation_id
                         ).update(deal=deal)
                         print(f"[THREADING] Linked entire thread {source_email.conversation_id} to deal")
+
+                    # 3. Create DealDocument records for attachments
+                    if source_email.attachments:
+                        from .models import DealDocument, DocumentType
+                        for att in source_email.attachments:
+                            # Avoid duplicates
+                            if not DealDocument.objects.filter(deal=deal, title=att.get('name')).exists():
+                                # Determine type from filename
+                                name = att.get('name', '').lower()
+                                doc_type = DocumentType.OTHER
+                                if 'financial' in name or 'mis' in name or 'model' in name: doc_type = DocumentType.FINANCIALS
+                                elif 'legal' in name or 'sha' in name or 'ssa' in name: doc_type = DocumentType.LEGAL
+                                elif 'teaser' in name or 'deck' in name or 'pitch' in name: doc_type = DocumentType.PITCH_DECK
+                                
+                                DealDocument.objects.create(
+                                    deal=deal,
+                                    title=att.get('name'),
+                                    document_type=doc_type,
+                                    onedrive_id=att.get('id'),
+                                    uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
+                                )
+                                print(f"[DOCUMENT] Created DealDocument artifact: {att.get('name')}")
+                                
+                                # 4. Semantic Indexing for the Document
+                                try:
+                                    # Since we don't have the text yet (it needs download/OCR),
+                                    # the document processor will usually handle this later.
+                                    # BUT, if we want to trigger it, we need text.
+                                    # For now, we've registered the intent.
+                                    pass
+                                except Exception as e:
+                                    logger.error(f"Doc indexing failed: {str(e)}")
 
                     # Copy extracted text to deal if empty
                     if not deal.extracted_text and source_email.extracted_text:
