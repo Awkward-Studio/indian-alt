@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 DMS_DRIVE_ID = 'b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg'
 DMS_FOLDER_PATH = 'Desktop/DMS Update/3. DMS Dataroom - shared folder'
 DMS_USER_EMAIL = 'dms-demo@india-alt.com'
+DMS_SHARED_FOLDER_URL = config(
+    'DMS_SHARED_FOLDER_URL',
+    default='https://indiaalt-my.sharepoint.com/:f:/g/personal/amish_agrawal_india-alt_com/IgBg1HZEXGaLSqMaaGJCvy7aAYLO83nsqRgRSXAg9erYlrI?e=RZ8uaJ',
+)
 
 
 class GraphAPIService:
@@ -349,8 +353,24 @@ class GraphAPIService:
     def get_drive_root_children(self, user_email: str = DMS_USER_EMAIL,
                                 top: int = 200, **kwargs) -> Dict[str, Any]:
         """
-        List the configured DMS folder, falling back to the drive root if that path no longer exists.
+        List the DMS shared folder.
+
+        Resolution order:
+        1. Shared-folder URL (most reliable for shared access)
+        2. Legacy drive path
+        3. Drive root
         """
+        if DMS_SHARED_FOLDER_URL:
+            try:
+                return self.list_shared_folder(DMS_SHARED_FOLDER_URL, user_email)
+            except HTTPError as exc:
+                response = getattr(exc, "response", None)
+                status_code = response.status_code if response is not None else "unknown"
+                logger.warning(
+                    "Shared DMS folder URL failed with status %s. Falling back to legacy drive path.",
+                    status_code,
+                )
+
         try:
             return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
         except HTTPError as exc:
