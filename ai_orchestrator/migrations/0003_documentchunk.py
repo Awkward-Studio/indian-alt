@@ -7,7 +7,28 @@ from django.db import migrations, models
 
 
 def create_vector_extension_and_table(apps, schema_editor):
-    """Create vector extension + DocumentChunk table, skip entirely if pgvector not on server."""
+    """Create the DocumentChunk table for supported databases."""
+    if schema_editor.connection.vendor == 'sqlite':
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_orchestrator_documentchunk (
+                    id char(32) NOT NULL PRIMARY KEY,
+                    source_type varchar(50) NOT NULL,
+                    source_id varchar(255) NOT NULL,
+                    content text NOT NULL,
+                    embedding vector(768) NOT NULL,
+                    metadata text NOT NULL DEFAULT '{}',
+                    created_at datetime NOT NULL,
+                    deal_id char(32) NOT NULL
+                        REFERENCES deal(id) DEFERRABLE INITIALLY DEFERRED
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS ai_orchestr_deal_id_be209e_idx
+                ON ai_orchestrator_documentchunk (deal_id, source_type);
+            """)
+        return
+
     if schema_editor.connection.vendor != 'postgresql':
         return
 

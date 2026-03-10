@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('microsoft', '0001_initial'),
+        ('microsoft', '0004_email_deal_extracted_text_is_indexed'),
     ]
 
     operations = [

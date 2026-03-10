@@ -186,6 +186,11 @@ class Email(models.Model):
         default=False,
         help_text='Whether this email and its attachments have been vectorized'
     )
+    analysis_result = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Stores the full JSON output of the background AI reasoning task'
+    )
     processing_status = models.CharField(
         max_length=20,
         default='idle',
