@@ -18,6 +18,18 @@ class DealPriority(models.TextChoices):
     LOW = 'Low', 'Low'
 
 
+class DealPhase(models.TextChoices):
+    ORIGINATION = 'Origination', 'Origination'
+    SCREENING = 'Screening', 'Screening'
+    MGMT_MEETING = 'Management Meeting', 'Management Meeting'
+    DUE_DILIGENCE = 'Due Diligence', 'Due Diligence'
+    IC_APPROVAL = 'IC Approval', 'IC Approval'
+    TERM_SHEET = 'Term Sheet', 'Term Sheet'
+    EXECUTION = 'Execution', 'Execution'
+    PORTFOLIO = 'Portfolio', 'Portfolio'
+    PASSED = 'Passed', 'Passed'
+
+
 class Deal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.TextField(blank=True, null=True)
@@ -35,6 +47,11 @@ class Deal(models.Model):
         blank=True,
         null=True,
         db_column='priority'
+    )
+    current_phase = models.CharField(
+        max_length=50,
+        choices=DealPhase.choices,
+        default=DealPhase.ORIGINATION
     )
     created_at = models.DateTimeField(auto_now_add=True)
     deal_summary = models.TextField(blank=True, null=True)
@@ -119,6 +136,32 @@ class Deal(models.Model):
 
     def __str__(self):
         return self.title or f'Deal {self.id}'
+
+
+class DealPhaseLog(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='phase_logs'
+    )
+    from_phase = models.CharField(max_length=50, choices=DealPhase.choices, null=True)
+    to_phase = models.CharField(max_length=50, choices=DealPhase.choices)
+    rationale = models.TextField(blank=True, null=True)
+    changed_at = models.DateTimeField(auto_now_add=True)
+    changed_by = models.ForeignKey(
+        'accounts.Profile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+
+    class Meta:
+        db_table = 'deal_phase_log'
+        ordering = ['-changed_at']
+
+    def __str__(self):
+        return f"{self.deal.title}: {self.from_phase} -> {self.to_phase}"
 
 
 class DocumentType(models.TextChoices):

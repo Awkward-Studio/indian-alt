@@ -6,8 +6,11 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
-from .models import Deal, DealDocument
-from .serializers import DealSerializer, DealListSerializer, DealDocumentSerializer
+from .models import Deal, DealDocument, DealPhaseLog
+from .serializers import (
+    DealSerializer, DealListSerializer, DealDetailSerializer, 
+    DealDocumentSerializer, DealPhaseLogSerializer
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         # Use lightweight serializer for list views to reduce payload size
         if self.action == 'list':
             return DealListSerializer
+        if self.action == 'retrieve':
+            return DealDetailSerializer
         return DealSerializer
     
     def perform_create(self, serializer):
@@ -287,3 +292,36 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=True, methods=['post'])
+    def transition_phase(self, request, pk=None):
+        """
+        Transitions a deal to a new phase and logs the rationale.
+        """
+        deal = self.get_object()
+        to_phase = request.data.get('to_phase')
+        rationale = request.data.get('rationale')
+        
+        if not to_phase:
+            return Response({"error": "to_phase is required"}, status=400)
+            
+        from_phase = getattr(deal, 'current_phase', None)
+        
+        # 1. Update the Deal
+        deal.current_phase = to_phase
+        deal.save(update_fields=['current_phase'])
+        
+        # 2. Log the transition
+        DealPhaseLog.objects.create(
+            deal=deal,
+            from_phase=from_phase,
+            to_phase=to_phase,
+            rationale=rationale,
+            changed_by=request.user.profile if hasattr(request.user, 'profile') else None
+        )
+        
+        return Response({
+            "status": "success",
+            "from_phase": from_phase,
+            "to_phase": to_phase
+        })
