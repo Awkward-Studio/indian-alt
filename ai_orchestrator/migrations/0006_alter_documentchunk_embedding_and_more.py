@@ -40,7 +40,7 @@ def ensure_documentchunk_table(apps, schema_editor):
                 embedding vector(768) NULL,
                 metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
                 created_at timestamp with time zone NOT NULL DEFAULT now(),
-                deal_id uuid NOT NULL REFERENCES deals_deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                deal_id uuid NOT NULL REFERENCES deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
             );
         """)
         cursor.execute("""

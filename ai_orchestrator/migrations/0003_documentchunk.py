@@ -50,14 +50,14 @@ def create_vector_extension_and_table(apps, schema_editor):
         cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ai_orchestrator_documentchunk (
-                id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+                id uuid NOT NULL PRIMARY KEY,
                 source_type varchar(50) NOT NULL,
                 source_id varchar(255) NOT NULL,
                 content text NOT NULL,
                 embedding vector(768) NOT NULL,
                 metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
                 created_at timestamp with time zone NOT NULL DEFAULT now(),
-                deal_id uuid NOT NULL REFERENCES deals_deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                deal_id uuid NOT NULL REFERENCES deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
             );
         """)
         cursor.execute("""
