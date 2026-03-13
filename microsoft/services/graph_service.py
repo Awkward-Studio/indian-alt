@@ -3,6 +3,7 @@ Microsoft Graph API service for authentication, email, and OneDrive operations.
 """
 import base64
 import logging
+import os
 from typing import Optional, Dict, Any, List, Tuple
 from django.utils import timezone
 from datetime import timedelta
@@ -16,12 +17,21 @@ from ..models import MicrosoftToken
 logger = logging.getLogger(__name__)
 
 # ─── Known DMS Shared Folder constants ────────────────────────────────
-DMS_DRIVE_ID = 'b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg'
-DMS_FOLDER_PATH = 'Desktop/DMS Update/3. DMS Dataroom - shared folder'
-DMS_USER_EMAIL = 'dms-demo@india-alt.com'
+DMS_DRIVE_ID = os.environ.get('DMS_DRIVE_ID') or config(
+    'DMS_DRIVE_ID',
+    default='b!3S_Fhil_uEKQVZnv_LhVSs0jBzTo-59CpDghDEe3hAZpHh-zpeg8QbO1VWqjQeKg',
+)
+DMS_FOLDER_PATH = os.environ.get('DMS_FOLDER_PATH') or config(
+    'DMS_FOLDER_PATH',
+    default='Documents/1. Advanced Stage Deals - DMS',
+)
+DMS_USER_EMAIL = os.environ.get('DMS_USER_EMAIL') or config(
+    'DMS_USER_EMAIL',
+    default='dms-demo@india-alt.com',
+)
 DMS_SHARED_FOLDER_URL = config(
     'DMS_SHARED_FOLDER_URL',
-    default='https://indiaalt-my.sharepoint.com/:f:/g/personal/amish_agrawal_india-alt_com/IgBg1HZEXGaLSqMaaGJCvy7aAYLO83nsqRgRSXAg9erYlrI?e=RZ8uaJ',
+    default=os.environ.get('DMS_SHARED_FOLDER_URL', ''),
 )
 
 
@@ -36,8 +46,6 @@ class GraphAPIService:
     """
 
     def __init__(self):
-        # Prefer os.environ for compatibility with the project's env loading style
-        import os
         self.client_id = os.environ.get('AZURE_CLIENT_ID') or config('AZURE_CLIENT_ID', default='')
         self.client_secret = os.environ.get('AZURE_CLIENT_SECRET') or config('AZURE_CLIENT_SECRET', default='')
         self.tenant_id = os.environ.get('AZURE_TENANT_ID') or config('AZURE_TENANT_ID', default='')
@@ -371,18 +379,27 @@ class GraphAPIService:
                     status_code,
                 )
 
-        try:
-            return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
-        except HTTPError as exc:
-            response = getattr(exc, "response", None)
-            if response is not None and response.status_code == 404:
-                logger.warning(
-                    "Configured DMS folder path '%s' was not found in drive %s. Falling back to drive root.",
-                    DMS_FOLDER_PATH,
-                    DMS_DRIVE_ID,
-                )
-                return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
-            raise
+        if DMS_DRIVE_ID and DMS_FOLDER_PATH:
+            try:
+                return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
+            except HTTPError as exc:
+                response = getattr(exc, "response", None)
+                if response is not None and response.status_code == 404:
+                    logger.warning(
+                        "Configured DMS folder path '%s' was not found in drive %s. Falling back to drive root.",
+                        DMS_FOLDER_PATH,
+                        DMS_DRIVE_ID,
+                    )
+                    return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
+                raise
+
+        if DMS_DRIVE_ID:
+            logger.warning("DMS_FOLDER_PATH is empty. Falling back to drive root for drive %s.", DMS_DRIVE_ID)
+            return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
+
+        raise ValueError(
+            "OneDrive is not configured. Set DMS_SHARED_FOLDER_URL or DMS_DRIVE_ID in the environment."
+        )
 
     def get_drive_folder_children(self, user_email: str = DMS_USER_EMAIL,
                                   folder_id: str = '', top: int = 200, **kwargs) -> Dict[str, Any]:

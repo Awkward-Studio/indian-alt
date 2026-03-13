@@ -3,8 +3,14 @@ Production settings.
 """
 from .base import *
 import sys
+from django.core.exceptions import ImproperlyConfigured
 
 DEBUG = False
+
+if DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql":
+    raise ImproperlyConfigured(
+        "Production must use PostgreSQL. Set DATABASE_URL for the production environment."
+    )
 
 # Enable detailed logging for Railway troubleshooting
 LOGGING = {

@@ -21,6 +21,7 @@ from microsoft.services.graph_service import (
     GraphAPIService,
     DMS_DRIVE_ID,
     DMS_FOLDER_PATH,
+    DMS_SHARED_FOLDER_URL,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class Command(BaseCommand):
         drive_id = options.get('drive_id') or DMS_DRIVE_ID
         folder_path = options.get('path') or DMS_FOLDER_PATH
         item_id = options.get('item_id')
-        shared_url = options.get('shared_url')
+        shared_url = options.get('shared_url') or DMS_SHARED_FOLDER_URL
         limit = options['limit']
         output_json = options.get('output_json', False)
 
@@ -105,6 +106,8 @@ class Command(BaseCommand):
                     data = graph.get_drive_item_children(
                         drive_id=drive_id, item_id=item_id, user_email=email, top=limit,
                     )
+                elif not options.get('drive_id') and not options.get('path'):
+                    data = graph.get_drive_root_children(user_email=email, top=limit)
                 else:
                     data = graph.list_folder_by_drive_path(
                         drive_id=drive_id, folder_path=folder_path, user_email=email, top=limit,
