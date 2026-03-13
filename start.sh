@@ -16,6 +16,10 @@ else
 fi
 
 echo ""
+echo "=== ENSURING PGVECTOR ==="
+python manage.py ensure_pgvector
+
+echo ""
 echo "=== RUNNING MIGRATIONS ==="
 python manage.py migrate --noinput
 

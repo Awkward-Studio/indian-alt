@@ -4,6 +4,51 @@ import pgvector.django.vector
 from django.db import migrations, models
 
 
+def ensure_documentchunk_table(apps, schema_editor):
+    """
+    Repair broken migration state on PostgreSQL.
+
+    A previous migration could mark DocumentChunk as created in Django state
+    while skipping the actual table creation when pgvector was unavailable.
+    If the extension is now available, create the table before AlterField runs.
+    """
+    if schema_editor.connection.vendor != 'postgresql':
+        return
+
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass('public.ai_orchestrator_documentchunk')")
+        if cursor.fetchone()[0]:
+            return
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'vector'"
+        )
+        available = cursor.fetchone()[0] > 0
+        if not available:
+            raise RuntimeError(
+                "pgvector extension is not available on this PostgreSQL server. "
+                "DocumentChunk table cannot be created."
+            )
+
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cursor.execute("""
+            CREATE TABLE ai_orchestrator_documentchunk (
+                id uuid NOT NULL PRIMARY KEY,
+                source_type varchar(50) NOT NULL,
+                source_id varchar(255) NOT NULL,
+                content text NOT NULL,
+                embedding vector(768) NULL,
+                metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+                created_at timestamp with time zone NOT NULL DEFAULT now(),
+                deal_id uuid NOT NULL REFERENCES deals_deal(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+            );
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS ai_orchestr_deal_id_be209e_idx
+            ON ai_orchestrator_documentchunk (deal_id, source_type);
+        """)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -11,6 +56,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            ensure_documentchunk_table,
+            reverse_code=migrations.RunPython.noop,
+        ),
         migrations.AlterField(
             model_name='documentchunk',
             name='embedding',
