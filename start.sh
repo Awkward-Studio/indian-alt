@@ -32,6 +32,10 @@ echo "=== CHECKING TABLES ==="
 python manage.py shell -c "from django.db import connection; cursor = connection.cursor(); cursor.execute('SELECT COUNT(*) FROM django_migrations'); print(f'Migrations applied: {cursor.fetchone()[0]}');"
 
 echo ""
+echo "=== COLLECTING STATIC FILES ==="
+python manage.py collectstatic --noinput
+
+echo ""
 echo "=== STARTING GUNICORN ON PORT ${PORT:-8000} ==="
 exec gunicorn config.wsgi:application \
     --bind 0.0.0.0:${PORT:-8000} \
