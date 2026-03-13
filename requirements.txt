@@ -24,7 +24,6 @@ django-cors-headers
 django-extensions
 django-filter
 beautifulsoup4
-docling
 pymupdf
 python-pptx
 openpyxl
