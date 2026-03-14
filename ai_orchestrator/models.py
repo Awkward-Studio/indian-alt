@@ -115,6 +115,7 @@ class AIAuditLog(models.Model):
     # For now, let's keep it simple with text fields for the source.
     source_type = models.CharField(max_length=50, default="email")
     source_id = models.CharField(max_length=255, blank=True, null=True)
+    context_label = models.CharField(max_length=500, blank=True, null=True, help_text='Descriptive label (Folder Name, Email Subject, etc.)')
     
     personality = models.ForeignKey(AIPersonality, on_delete=models.SET_NULL, null=True)
     skill = models.ForeignKey(AISkill, on_delete=models.SET_NULL, null=True)
@@ -126,14 +127,31 @@ class AIAuditLog(models.Model):
     system_prompt = models.TextField()
     user_prompt = models.TextField()
     raw_response = models.TextField()
+    raw_thinking = models.TextField(blank=True, null=True, help_text='Real-time thinking trace')
     parsed_json = models.JSONField(null=True, blank=True)
     
     # Performance
     request_duration_ms = models.IntegerField(null=True, blank=True)
     tokens_used = models.IntegerField(null=True, blank=True)
     
+    # Context Preservation
+    source_metadata = models.JSONField(null=True, blank=True, help_text='Extra context like file trees or drive IDs')
+    celery_task_id = models.CharField(max_length=255, null=True, blank=True, help_text='ID of the associated Celery task')
+    
     error_message = models.TextField(blank=True, null=True)
     is_success = models.BooleanField(default=True)
+    
+    status = models.CharField(
+        max_length=20, 
+        default='PENDING',
+        choices=[
+            ('PENDING', 'Pending'),
+            ('PROCESSING', 'Processing'),
+            ('COMPLETED', 'Completed'),
+            ('FAILED', 'Failed'),
+        ],
+        null=True, blank=True
+    )
     
     created_at = models.DateTimeField(auto_now_add=True)
 

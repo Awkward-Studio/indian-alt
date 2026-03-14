@@ -122,6 +122,27 @@ class Deal(models.Model):
     thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
     ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
     analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
+    
+    source_onedrive_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text='The OneDrive/SharePoint folder ID this deal was created from'
+    )
+
+    # Background Processing Tracking
+    processing_status = models.CharField(
+        max_length=20,
+        default='idle',
+        choices=[
+            ('idle', 'Idle'),
+            ('processing', 'Processing Background Files'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed'),
+        ],
+        help_text='Status of background file processing from OneDrive'
+    )
+    processing_error = models.TextField(blank=True, null=True)
 
     class Meta:
         db_table = 'deal'

@@ -8,17 +8,77 @@ from django.forms.models import model_to_dict
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
 from rest_framework import status, viewsets
 from django.http import StreamingHttpResponse
 
-from .models import AIPersonality, AISkill, AIConversation, AIMessage
-from .serializers import AIConversationSerializer, AIMessageSerializer
+from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog
+from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
 from .services.ai_processor import AIProcessorService
 from .services.embedding_processor import EmbeddingService
 from .services.vm_service import VMControlService
 from deals.models import Deal
 
 logger = logging.getLogger(__name__)
+
+class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing AI Audit Logs.
+    """
+    queryset = AIAuditLog.objects.all().order_by('-created_at')
+    serializer_class = AIAuditLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def retrieve(self, request, *args, **kwargs):
+        # We want to include raw fields in detail view
+        instance = self.get_object()
+        data = self.get_serializer(instance).data
+        data.update({
+            'system_prompt': instance.system_prompt,
+            'user_prompt': instance.user_prompt,
+            'raw_response': instance.raw_response,
+            'raw_thinking': instance.raw_thinking,
+            'parsed_json': instance.parsed_json,
+        })
+        return Response(data)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """
+        Attempts to cancel a running task using its stored Celery ID.
+        Also attempts to clear the Ollama VM state if possible.
+        """
+        log = self.get_object()
+        task_id = log.celery_task_id
+        
+        # 1. Kill the Celery worker thread immediately
+        if task_id:
+            from config.celery import celery_app
+            celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')
+            
+        # 2. Force-clear Ollama VM (send a tiny request to interrupt long generation)
+        try:
+            from .services.ai_processor import AIProcessorService
+            ai = AIProcessorService()
+            # Most LLM servers interrupt the previous request if a new one comes in with specific flags,
+            # or we just ensure the connection is closed.
+            # For Ollama, the best way to free VRAM/Process is to load a tiny model or 
+            # send a request with num_predict: 1
+            requests.post(f"{ai.ollama_url}/api/generate", json={
+                "model": log.model_used,
+                "prompt": "stop",
+                "options": {"num_predict": 1},
+                "stream": False
+            }, timeout=5)
+        except:
+            pass
+
+        # 3. Update the log status
+        log.status = 'FAILED'
+        log.error_message = "Task manually terminated by forensic user."
+        log.save()
+        
+        return Response({"status": "cancelled", "task_id": task_id})
 
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer
@@ -142,7 +202,13 @@ RULES:
 3. You can use BOTH tools simultaneously for maximum precision.
 4. Return ONLY JSON.
 """
-            intent_result = ai_service.process_content(content=pass1_prompt, skill_name=None, stream=False)
+            intent_result = ai_service.process_content(
+                content=pass1_prompt, 
+                skill_name=None, 
+                stream=False,
+                source_type="universal_chat_intent",
+                source_id=str(conversation.id)
+            )
             print(f"[AGENT] Intent: {intent_result}")
 
             # PASS 2: Multi-Source Execution
@@ -195,9 +261,12 @@ RULES:
 
             rag_query = intent_result.get("global_rag")
             if rag_query:
+                from .models import DocumentChunk
+                from pgvector.django import CosineDistance
+                
                 embed_service = EmbeddingService()
                 # If we have specific deals filtered, prioritize chunks from those deals
-                if db_filters and filtered_deals.count() > 0:
+                if db_filters and 'filtered_deals' in locals() and filtered_deals.count() > 0:
                     chunks = DocumentChunk.objects.filter(deal__in=filtered_deals).annotate(distance=CosineDistance('embedding', embed_service._get_embedding(rag_query))).order_by('distance')[:15]
                 else:
                     chunks = embed_service.search_global_chunks(rag_query, limit=15)
@@ -223,38 +292,42 @@ REAL DATA:
 Answer the user message: "{user_message}" as a Senior Lead Private Equity Analyst speaking directly to a partner.
 
 INSTRUCTIONS:
-1. **BE CONVERSATIONAL**: Use a natural, professional back-and-forth tone. Explain things as if you are speaking to a colleague. Use phrases like "I've cross-referenced our records and..." or "Looking across the pipeline, it seems...".
-2. **BE FORENSIC**: While conversational, remain rigorous. If financial details (margins, CM1, etc.) are in document_insights, highlight them.
-3. **USE REAL DATA**: Cross-reference structured fields (like is_female_led or themes) with the document_insights (raw text).
+1. **BE CONVERSATIONAL**: Use a professional tone. Use phrases like "I've cross-referenced our records...".
+2. **BE FORENSIC**: If financial details (margins, CM1, etc.) are in document_insights, highlight them.
+3. **USE REAL DATA**: Cross-reference structured fields with document_insights.
 4. **NO HALLUCINATION**: If the data isn't in REAL DATA, just say you don't have that specific information yet.
-5. Use Markdown for structure, but keep it feeling like a professional conversation, not a detached report.
 """
             if stream:
                 def stream_and_save():
                     full_text = ""
                     full_thinking = ""
-                    # First chunk contains the conversation ID for the frontend to save
                     yield json.dumps({"conversation_id": str(conversation.id)}) + "\n"
                     
-                    for chunk_str in ai_service.process_content(content=synthesis_prompt, skill_name=None, stream=True):
+                    for chunk_str in ai_service.process_content(
+                        content=synthesis_prompt, 
+                        skill_name=None, 
+                        stream=True,
+                        source_type="universal_chat",
+                        source_id=str(conversation.id)
+                    ):
                         try:
                             chunk = json.loads(chunk_str)
                             full_text += chunk.get("response", "")
                             full_thinking += chunk.get("thinking", "")
-                        except:
-                            pass
+                        except: pass
                         yield chunk_str
                     
-                    AIMessage.objects.create(
-                        conversation=conversation, 
-                        role='assistant', 
-                        content=full_text,
-                        thinking=full_thinking
-                    )
+                    AIMessage.objects.create(conversation=conversation, role='assistant', content=full_text, thinking=full_thinking)
                     conversation.save()
                 return StreamingHttpResponse(stream_and_save(), content_type='text/event-stream')
             
-            final_result = ai_service.process_content(content=synthesis_prompt, skill_name=None, stream=False)
+            final_result = ai_service.process_content(
+                content=synthesis_prompt, 
+                skill_name=None, 
+                stream=False,
+                source_type="universal_chat",
+                source_id=str(conversation.id)
+            )
             raw_content = final_result.get("_raw_response", "")
             thinking = final_result.get("thinking", "")
             

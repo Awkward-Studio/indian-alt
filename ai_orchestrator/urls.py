@@ -1,9 +1,14 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import AISettingsView, DealChatView, UniversalChatView, AISkillsView, AIConversationViewSet, VMControlView
+from .views import (
+    AISettingsView, DealChatView, UniversalChatView, 
+    AISkillsView, AIConversationViewSet, VMControlView,
+    AIAuditLogViewSet
+)
 
 router = DefaultRouter()
 router.register(r'conversations', AIConversationViewSet, basename='ai-conversation')
+router.register(r'history', AIAuditLogViewSet, basename='ai-history')
 
 urlpatterns = [
     path('', include(router.urls)),

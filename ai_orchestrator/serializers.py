@@ -1,5 +1,18 @@
 from rest_framework import serializers
-from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol
+from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog
+
+class AIAuditLogSerializer(serializers.ModelSerializer):
+    personality_name = serializers.CharField(source='personality.name', read_only=True)
+    skill_name = serializers.CharField(source='skill.name', read_only=True)
+    
+    class Meta:
+        model = AIAuditLog
+        fields = [
+            'id', 'source_type', 'source_id', 'context_label', 'personality', 'personality_name', 
+            'skill', 'skill_name', 'model_provider', 'model_used', 
+            'request_duration_ms', 'tokens_used', 'is_success', 'status',
+            'celery_task_id', 'created_at', 'error_message'
+        ]
 
 class AIPersonalitySerializer(serializers.ModelSerializer):
     class Meta:

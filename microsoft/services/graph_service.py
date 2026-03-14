@@ -69,32 +69,31 @@ class GraphAPIService:
 
     # ─── Auth ────────────────────────────────────────────────────────────
 
-    def get_access_token(self, user_email: str = DMS_USER_EMAIL, require_delegated: bool = False) -> Optional[str]:
+    def get_access_token(self, user_email: str = DMS_USER_EMAIL, 
+                         require_delegated: bool = False,
+                         prefer_application: bool = False) -> Optional[str]:
         """
         Get a valid access token for the given user.
 
         Resolution order:
-        1. Cached delegated token (if still valid for > 5 min).
-        2. Refresh the delegated token via MSAL.
-        3. Fallback to application-level client-credentials token (unless require_delegated=True).
-
-        Args:
-            user_email: Email address for the token
-            require_delegated: If True, raise an error instead of falling back to application permissions.
-                              Use this for OneDrive operations which require delegated permissions.
-
-        Returns:
-            Access token string, or None if no token available and require_delegated=False
-
-        Raises:
-            ValueError: If require_delegated=True and no valid delegated token is available
+        1. If prefer_application=True, try application token first.
+        2. Cached delegated token (if still valid for > 5 min).
+        3. Refresh the delegated token via MSAL.
+        4. Fallback to application-level client-credentials token (unless require_delegated=True).
         """
+        if prefer_application:
+             app_token = self._get_application_token()
+             if app_token:
+                 return app_token
+
         token_obj = MicrosoftToken.objects.filter(account_email=user_email, token_type='delegated').first()
         
         if token_obj and token_obj.expires_at > timezone.now() + timedelta(minutes=5):
             return token_obj.access_token
         
         if token_obj and token_obj.refresh_token:
+            # Only request file and user scopes for delegated tokens.
+            # Mail.Read is handled via application permissions.
             result = self.msal_app.acquire_token_by_refresh_token(
                 token_obj.refresh_token,
                 scopes=["https://graph.microsoft.com/Files.Read.All", "https://graph.microsoft.com/User.Read"]
@@ -107,8 +106,8 @@ class GraphAPIService:
                 return token_obj.access_token
             else:
                 error_desc = result.get('error_description') or result.get('error', 'Unknown error')
-                logger.warning(f"Token refresh failed for {user_email}: {error_desc}")
                 if require_delegated:
+                    logger.warning(f"Token refresh failed for {user_email}: {error_desc}")
                     raise ValueError(
                         f"Failed to refresh delegated token for {user_email}. "
                         f"Error: {error_desc}. "
@@ -129,7 +128,11 @@ class GraphAPIService:
                     f"Please re-authenticate using: python manage.py authenticate_ms_graph"
                 )
 
-        # Fallback to Application permissions (for email operations)
+        # Fallback to Application permissions
+        return self._get_application_token()
+
+    def _get_application_token(self) -> Optional[str]:
+        """Acquire an application-level token."""
         result = self.msal_app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
         if "access_token" not in result:
             logger.error(f"Failed to acquire application token: {result.get('error_description')}")
@@ -288,8 +291,8 @@ class GraphAPIService:
 
     def get_messages(self, user_email: str, top: int = 50, skip: int = 0,
                      since: Optional[str] = None, search: Optional[str] = None) -> Dict:
-        """Fetch emails for a user via application permissions."""
-        token = self.get_access_token(user_email)
+        """Fetch emails for a user. Prefers application permissions for reliability."""
+        token = self.get_access_token(user_email, prefer_application=True)
         params = {'$top': top, '$skip': skip, '$orderby': 'receivedDateTime desc'}
         if since:
             params['$filter'] = f"receivedDateTime ge {since}"
@@ -298,14 +301,14 @@ class GraphAPIService:
         return self._make_request('GET', f"/users/{user_email}/messages", token, params)
 
     def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict]:
-        """Get attachments metadata for a specific email."""
-        token = self.get_access_token(user_email)
+        """Get attachments metadata for a specific email. Prefers application permissions."""
+        token = self.get_access_token(user_email, prefer_application=True)
         data = self._make_request('GET', f"/users/{user_email}/messages/{message_id}/attachments", token)
         return data.get('value', [])
 
     def get_attachment_content(self, user_email: str, message_id: str, attachment_id: str) -> Dict:
-        """Get full attachment content (including contentBytes)."""
-        token = self.get_access_token(user_email)
+        """Get full attachment content (including contentBytes). Prefers application permissions."""
+        token = self.get_access_token(user_email, prefer_application=True)
         return self._make_request('GET', f"/users/{user_email}/messages/{message_id}/attachments/{attachment_id}", token)
 
     # ─── OneDrive / SharePoint (Drive-based) ─────────────────────────────
@@ -358,6 +361,28 @@ class GraphAPIService:
         params = {'$top': top}
         return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}/children", token, params)
 
+    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL) -> List[Dict[str, Any]]:
+        """Recursively fetch all files inside a given folder ID."""
+        all_files = []
+        
+        def traverse(current_item_id):
+            children_data = self.get_drive_item_children(drive_id, current_item_id, user_email=user_email, top=999)
+            items = children_data.get('value', [])
+            
+            for item in items:
+                # Explicitly attach the current drive_id to the item so background tasks know where it lives
+                item['driveId'] = drive_id
+                
+                if 'folder' in item:
+                    # Recursive call for subfolders
+                    traverse(item['id'])
+                elif 'file' in item:
+                    # Collect file metadata
+                    all_files.append(item)
+                    
+        traverse(item_id)
+        return all_files
+
     def get_drive_root_children(self, user_email: str = DMS_USER_EMAIL,
                                 top: int = 200, **kwargs) -> Dict[str, Any]:
         """
@@ -402,9 +427,18 @@ class GraphAPIService:
         )
 
     def get_drive_folder_children(self, user_email: str = DMS_USER_EMAIL,
-                                  folder_id: str = '', top: int = 200, **kwargs) -> Dict[str, Any]:
-        """List children of a folder by its item ID within the DMS drive."""
-        return self.get_drive_item_children(DMS_DRIVE_ID, folder_id, user_email, top)
+                                  folder_id: str = '', drive_id: Optional[str] = None,
+                                  top: int = 200, **kwargs) -> Dict[str, Any]:
+        """List children of a folder by its item ID. Uses provided drive_id or defaults to DMS_DRIVE_ID."""
+        target_drive = drive_id or DMS_DRIVE_ID
+        return self.get_drive_item_children(target_drive, folder_id, user_email, top)
+
+    def list_shared_with_me(self, user_email: str = DMS_USER_EMAIL, top: int = 200) -> Dict[str, Any]:
+        """List items shared with the authenticated user."""
+        token = self.get_access_token(user_email, require_delegated=True)
+        params = {'$top': top}
+        # /me/drive/sharedWithMe returns DriveItems shared with the user
+        return self._make_request('GET', "/me/drive/sharedWithMe", token, params)
 
     # ── Item metadata ──
 

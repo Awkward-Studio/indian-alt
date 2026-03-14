@@ -52,9 +52,9 @@ class DocumentProcessorService:
             return self._extract_from_pdf(file_content)
 
         # Office formats
-        if ext == '.docx': return self._extract_from_docx(file_content)
-        if ext == '.pptx': return self._extract_from_pptx(file_content)
-        if ext == '.xlsx': return self._extract_from_xlsx(file_content)
+        if ext == '.docx' or ext == '.doc': return self._extract_from_docx(file_content)
+        if ext == '.pptx' or ext == '.ppt': return self._extract_from_pptx(file_content)
+        if ext == '.xlsx' or ext == '.xls': return self._extract_from_xlsx(file_content)
         
         return file_content.decode('utf-8', errors='ignore') if ext in ['.txt', '.csv'] else f"[Format: {ext}]"
 
@@ -65,7 +65,7 @@ class DocumentProcessorService:
         """
         ext = os.path.splitext(filename)[1].lower()
         images_b64 = []
-        if ext not in ['.pdf', '.png', '.jpg', '.jpeg']: return []
+        if ext not in ['.pdf', '.png', '.jpg', '.jpeg', '.pptx', '.ppt', '.docx', '.doc', '.xlsx', '.xls']: return []
 
         try:
             if ext in ['.png', '.jpg', '.jpeg']:
@@ -73,19 +73,41 @@ class DocumentProcessorService:
             elif ext == '.pdf':
                 with fitz.open(stream=file_content, filetype="pdf") as doc:
                     total_pages = len(doc)
-                    pages_to_scan = min(total_pages, 15)
+                    print(f"[DOC-PROC] Processing all {total_pages} pages of PDF.")
                     
-                    if total_pages > 15:
-                        print(f"[DOC-PROC] WARNING: PDF contains {total_pages} pages. Truncating to top 15 pages for forensic audit.")
-                    else:
-                        print(f"[DOC-PROC] Processing all {total_pages} pages of PDF.")
-                    
-                    for i in range(pages_to_scan):
+                    for i in range(total_pages):
                         print(f"    [DOC-PROC] Rendering PDF Page {i+1} of {total_pages}...")
                         page = doc.load_page(i)
                         # Matrix 1.0 is fast and perfect for GLM-OCR
                         pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0)) 
                         images_b64.append(base64.b64encode(pix.tobytes("png")).decode('utf-8'))
+            elif ext in ['.pptx', '.ppt']:
+                try:
+                    prs = Presentation(io.BytesIO(file_content))
+                    print(f"[DOC-PROC] Extracting embedded visuals from all {len(prs.slides)} slides of {ext}.")
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if hasattr(shape, "image"):
+                                image_bytes = shape.image.blob
+                                images_b64.append(base64.b64encode(image_bytes).decode('utf-8'))
+                except Exception as ppt_err:
+                    print(f"[DOC-PROC] Failed visuals for {ext}: {ppt_err}")
+            elif ext in ['.docx', '.doc']:
+                doc = Document(io.BytesIO(file_content))
+                print(f"[DOC-PROC] Extracting inline images from {ext} document.")
+                for rel in doc.part.rels.values():
+                    if "image" in rel.target_ref:
+                        images_b64.append(base64.b64encode(rel.target_part.blob).decode('utf-8'))
+            elif ext in ['.xlsx', '.xls']:
+                # For Excel, we extract any embedded drawings/images
+                wb = load_workbook(io.BytesIO(file_content))
+                print(f"[DOC-PROC] Extracting drawings from {ext} spreadsheet.")
+                for sheet in wb.worksheets:
+                    if hasattr(sheet, '_images'):
+                        for img in sheet._images:
+                            img_data = img.ref.read() if hasattr(img.ref, 'read') else None
+                            if img_data:
+                                images_b64.append(base64.b64encode(img_data).decode('utf-8'))
         except Exception as e:
             logger.error(f"Visual Extraction Fail: {str(e)}")
         
@@ -112,10 +134,22 @@ class DocumentProcessorService:
 
     def _extract_from_pptx(self, content: bytes) -> str:
         text = ""
-        prs = Presentation(io.BytesIO(content))
-        for slide in prs.slides:
-            for shape in slide.shapes:
-                if hasattr(shape, "text"): text += shape.text + "\n"
+        try:
+            # Try as modern PPTX first (Zip-based)
+            prs = Presentation(io.BytesIO(content))
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"): text += shape.text + "\n"
+        except Exception as e:
+            # Fallback for legacy .PPT (OLE binary format)
+            if "not a zip file" in str(e):
+                logger.info("Detected legacy .PPT binary format. Attempting stream extraction.")
+                # We can use BeautifulSoup or simple regex to find text in the binary
+                # For a robust solution, we'd use a tool like 'antiword' or 'catdoc' but 
+                # here we'll do a safe fallback
+                return f"[Legacy .PPT Binary Data - High-Fidelity extraction not supported without conversion]"
+            logger.error(f"PPTX Extraction Fail: {e}")
+            text = f"[Error extracting PPTX: {str(e)}]"
         return text
 
     def _extract_from_xlsx(self, content: bytes) -> str:

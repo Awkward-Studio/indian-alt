@@ -35,13 +35,19 @@ echo ""
 echo "=== COLLECTING STATIC FILES ==="
 python manage.py collectstatic --noinput
 
-echo ""
-echo "=== STARTING GUNICORN ON PORT ${PORT:-8000} ==="
-exec gunicorn config.wsgi:application \
-    --bind 0.0.0.0:${PORT:-8000} \
-    --workers 3 \
-    --timeout 120 \
-    --access-logfile - \
-    --error-logfile - \
-    --log-level debug \
-    --capture-output
+if [ "$RUN_AS_WORKER" = "true" ]; then
+    echo ""
+    echo "=== STARTING CELERY WORKER (SINGLETON MODE) ==="
+    exec celery -A config worker -l info --concurrency=1
+else
+    echo ""
+    echo "=== STARTING GUNICORN ON PORT ${PORT:-8000} ==="
+    exec gunicorn config.wsgi:application \
+        --bind 0.0.0.0:${PORT:-8000} \
+        --workers 3 \
+        --timeout 120 \
+        --access-logfile - \
+        --error-logfile - \
+        --log-level debug \
+        --capture-output
+fi

@@ -46,9 +46,17 @@ class AIProcessorService:
         return text.strip()
 
     def _extract_json(self, text: str) -> str:
-        if not text: return "{}"
+        """Robustly find and extract JSON string from a larger text block."""
+        # 1. Look for <json> tags (our latest standard)
+        json_tag_match = re.search(r'<json>\s*(\{.*?\})\s*</json>', text, re.DOTALL)
+        if json_tag_match:
+            return json_tag_match.group(1)
+
+        # 2. Look for ```json blocks
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
         if json_match: return json_match.group(1)
+
+        # 3. Fallback: Find the last balanced braces
         try:
             last_brace = text.rfind('}')
             if last_brace != -1:
@@ -154,17 +162,55 @@ class AIProcessorService:
         user_prompt = prompt_template
         if metadata:
             for key, value in metadata.items():
-                user_prompt = re.sub(r'\{\{\s*' + re.escape(key) + r'\s*\}\}', str(value), user_prompt)
+                placeholder = '{{ ' + key + ' }}'
+                user_prompt = user_prompt.replace(placeholder, str(value))
+                # Handle cases without spaces too
+                user_prompt = user_prompt.replace('{{' + key + '}}', str(value))
         
-        user_prompt = re.sub(r'\{\{\s*content\s*\}\}', lambda _: cleaned_text, user_prompt)
+        user_prompt = user_prompt.replace('{{ content }}', cleaned_text)
+        user_prompt = user_prompt.replace('{{content}}', cleaned_text)
+        
         if cleaned_text not in user_prompt:
             user_prompt = f"{user_prompt}\n\nCONTENT:\n{cleaned_text}"
 
-        audit_log = AIAuditLog.objects.create(
-            source_type=source_type, source_id=source_id,
-            personality=personality, skill=skill,
-            model_used='qwen3.5:latest', system_prompt=system_instructions, user_prompt=user_prompt
-        )
+        audit_log_id = metadata.get('audit_log_id') if metadata else None
+        source_meta = metadata.get('_source_metadata') if metadata else None
+        celery_task_id = metadata.get('celery_task_id') if metadata else None
+        ctx_label = metadata.get('context_label') if metadata else None
+        
+        if audit_log_id:
+            try:
+                audit_log = AIAuditLog.objects.get(id=audit_log_id)
+                audit_log.system_prompt = system_instructions
+                audit_log.user_prompt = user_prompt
+                audit_log.status = 'PROCESSING'
+                if source_meta:
+                    audit_log.source_metadata = source_meta
+                if celery_task_id:
+                    audit_log.celery_task_id = celery_task_id
+                if ctx_label:
+                    audit_log.context_label = ctx_label
+                audit_log.save()
+            except AIAuditLog.DoesNotExist:
+                audit_log = AIAuditLog.objects.create(
+                    source_type=source_type, source_id=source_id,
+                    context_label=ctx_label,
+                    personality=personality, skill=skill,
+                    model_used='qwen3.5:latest', system_prompt=system_instructions, user_prompt=user_prompt,
+                    is_success=False, status='PROCESSING',
+                    source_metadata=source_meta,
+                    celery_task_id=celery_task_id
+                )
+        else:
+            audit_log = AIAuditLog.objects.create(
+                source_type=source_type, source_id=source_id,
+                context_label=ctx_label,
+                personality=personality, skill=skill,
+                model_used='qwen3.5:latest', system_prompt=system_instructions, user_prompt=user_prompt,
+                is_success=False, status='PROCESSING',
+                source_metadata=source_meta,
+                celery_task_id=celery_task_id
+            )
 
         payload = {
             "model": 'qwen3.5:latest',
@@ -193,25 +239,46 @@ class AIProcessorService:
             response = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=300)
             response.raise_for_status()
             full_response = ""
+            full_thinking = ""
+            
+            chunk_counter = 0
             for line in response.iter_lines():
                 if line:
                     # Yield raw line so frontend can parse both 'response' and 'thinking'
                     yield line.decode('utf-8') + "\n"
                     
                     chunk = json.loads(line)
-                    text = chunk.get("response") or chunk.get("thinking", "")
+                    text = chunk.get("response") or ""
+                    think = chunk.get("thinking") or ""
+                    
                     full_response += text
+                    full_thinking += think
+                    
+                    # Persist every 50 chunks to show live progress in UI without hammering DB
+                    chunk_counter += 1
+                    if chunk_counter % 50 == 0:
+                        audit_log.raw_response = full_response
+                        audit_log.raw_thinking = full_thinking
+                        audit_log.save(update_fields=['raw_response', 'raw_thinking'])
+
                     if chunk.get("done"): break
+            
             audit_log.raw_response = full_response
+            audit_log.raw_thinking = full_thinking
             audit_log.is_success = True
+            audit_log.status = 'COMPLETED'
             audit_log.save()
         except Exception as e:
+            audit_log.is_success = False
+            audit_log.status = 'FAILED'
+            audit_log.error_message = str(e)
+            audit_log.save()
             yield json.dumps({"response": f"Error: {str(e)}", "done": True})
 
     def _standard_response(self, payload: dict, audit_log: AIAuditLog) -> Dict[str, Any]:
         start_time = time.time()
         try:
-            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=300)
+            response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=2400)
             response.raise_for_status()
             data = response.json()
             
@@ -231,12 +298,16 @@ class AIProcessorService:
                 
                 audit_log.parsed_json = parsed_json
                 audit_log.is_success = True
+                audit_log.status = 'COMPLETED'
                 parsed_json["_raw_response"] = raw_response
             except:
                 audit_log.is_success = False
+                audit_log.status = 'FAILED'
                 parsed_json = {"error": "JSON parsing error", "raw": raw_response, "thinking": thinking}
         except Exception as e:
             audit_log.is_success = False
+            audit_log.status = 'FAILED'
+            audit_log.error_message = str(e)
             parsed_json = {"error": str(e)}
         finally:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)

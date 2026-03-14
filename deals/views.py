@@ -325,3 +325,274 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "from_phase": from_phase,
             "to_phase": to_phase
         })
+
+    @action(detail=False, methods=['post'])
+    def analyze_folder(self, request):
+        """
+        Kicks off an asynchronous folder analysis. Returns a task_id.
+        """
+        import traceback
+        try:
+            folder_id = request.data.get('folder_id')
+            folder_name = request.data.get('folder_name', folder_id)
+            drive_id = request.data.get('drive_id')
+            
+            if not folder_id:
+                return Response({"error": "folder_id is required"}, status=400)
+                
+            from microsoft.services.graph_service import DMS_USER_EMAIL
+            from .tasks import analyze_folder_async
+            from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+            
+            # 1. Create a PENDING audit log immediately for visibility
+            personality = AIPersonality.objects.filter(is_default=True).first()
+            skill = AISkill.objects.filter(name='deal_extraction').first()
+            
+            audit_log = AIAuditLog.objects.create(
+                source_type='onedrive_folder',
+                source_id=folder_id,
+                context_label=f"Folder: {folder_name}",
+                personality=personality,
+                skill=skill,
+                status='PENDING',
+                is_success=False,
+                model_used='qwen3.5:latest',
+                system_prompt="Queued for forensic traversal...",
+                user_prompt=f"Queued analysis for folder: {folder_name}"
+            )
+
+            # 2. Trigger task
+            task = analyze_folder_async.apply_async(
+                kwargs={
+                    'drive_id': drive_id,
+                    'folder_id': folder_id,
+                    'user_email': DMS_USER_EMAIL,
+                    'audit_log_id': str(audit_log.id) 
+                },
+                queue='celery'
+            )
+            
+            audit_log.celery_task_id = task.id
+            audit_log.save()
+            
+            return Response({
+                "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
+                "status": "queued"
+            })
+        except Exception as e:
+            print(f"[CRITICAL ERROR] analyze_folder failed:")
+            print(traceback.format_exc())
+            return Response({"error": str(e)}, status=500)
+
+    @action(detail=False, methods=['get'], url_path='task-status/(?P<task_id>[^/.]+)')
+    def task_status(self, request, task_id=None):
+        """
+        Polls the status of an AI analysis task.
+        """
+        from celery.result import AsyncResult
+        from django.core.cache import cache
+        import uuid
+        
+        result = AsyncResult(task_id)
+        
+        response = {
+            "task_id": task_id,
+            "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
+        }
+        
+        if result.status == 'SUCCESS':
+            data = result.result
+            if "error" in data:
+                return Response(data, status=500)
+                
+            # If successful, we wrap it in a session ID for the confirmation step
+            # exactly like before, but now we get the data from the task result
+            session_id = str(uuid.uuid4())
+            cache.set(f"folder_sync_{session_id}", {
+                "file_tree": data['file_tree'],
+                "drive_id": data['drive_id'],
+                "folder_id": data['folder_id'],
+                "user_email": data['user_email'],
+                "preliminary_data": data['preliminary_data'],
+                "preview_text": data.get('preview_text', '')
+            }, timeout=3600)
+            
+            response.update({
+                "session_id": session_id,
+                "folder_id": data['folder_id'],
+                "total_files": data['total_files'],
+                "preview_files_analyzed": data['preview_files_analyzed'],
+                "preliminary_data": data['preliminary_data'],
+                "raw_thinking": data.get('raw_thinking', '')
+            })
+            
+        elif result.status == 'FAILURE':
+            response["error"] = str(result.info)
+            
+        return Response(response)
+
+    @action(detail=False, methods=['post'])
+    def create_from_audit_log(self, request):
+        """
+        Kicks off the confirmation step for an existing audit log.
+        Re-caches the session data so it can be confirmed via standard confirm_folder_deal.
+        """
+        log_id = request.data.get('audit_log_id')
+        if not log_id:
+            return Response({"error": "audit_log_id is required"}, status=400)
+            
+        from ai_orchestrator.models import AIAuditLog
+        from django.core.cache import cache
+        import uuid
+        
+        try:
+            log = AIAuditLog.objects.get(id=log_id)
+            if log.source_type != 'onedrive_folder':
+                return Response({"error": "This audit log is not a folder analysis"}, status=400)
+            
+            meta = log.source_metadata
+            if not meta:
+                return Response({"error": "This log does not contain source metadata"}, status=400)
+                
+            # Re-cache exactly like the task_status poller does
+            from microsoft.services.graph_service import DMS_USER_EMAIL
+            session_id = str(uuid.uuid4())
+            cache.set(f"folder_sync_{session_id}", {
+                "file_tree": meta['file_tree'],
+                "drive_id": meta['drive_id'],
+                "folder_id": meta['folder_id'],
+                "user_email": DMS_USER_EMAIL,
+                "preliminary_data": log.parsed_json,
+                "preview_text": meta.get('preview_text', '')
+            }, timeout=3600)
+            
+            return Response({
+                "session_id": session_id,
+                "preliminary_data": log.parsed_json,
+                "total_files": meta.get('total_files', len(meta['file_tree'])),
+                "preview_files_analyzed": 5, # Default
+                "raw_thinking": log.raw_response # Fallback
+            })
+            
+        except AIAuditLog.DoesNotExist:
+            return Response({"error": "Audit log not found"}, status=404)
+
+    @action(detail=False, methods=['post'])
+    def confirm_folder_deal(self, request):
+        """
+        Creates the Deal from the preliminary analysis and kicks off the background
+        indexing task for the rest of the folder.
+        """
+        session_id = request.data.get('session_id')
+        deal_data = request.data.get('deal_data', {})
+        
+        if not session_id or not deal_data:
+            return Response({"error": "session_id and deal_data are required"}, status=400)
+            
+        from django.core.cache import cache
+        session_data = cache.get(f"folder_sync_{session_id}")
+        
+        if not session_data:
+            return Response({"error": "Session expired or invalid. Please re-analyze the folder."}, status=400)
+            
+        # 1. Create the Deal
+        serializer = self.get_serializer(data=deal_data)
+        if serializer.is_valid():
+            # Extract forensic mapping from session data if not in deal_data
+            # Just like perform_create does for emails
+            analysis_json = session_data.get('preliminary_data', {})
+            
+            deal = serializer.save(
+                processing_status='processing',
+                source_onedrive_id=session_data.get('folder_id'),
+                extracted_text=session_data.get('preview_text', '')
+            )
+            
+            # Map forensic fields manually if they came from AI
+            if analysis_json:
+                deal.analysis_json = analysis_json
+                if 'metadata' in analysis_json:
+                    deal.ambiguities = analysis_json['metadata'].get('ambiguous_points', [])
+                if 'deal_model_data' in analysis_json:
+                    deal.themes = analysis_json['deal_model_data'].get('themes', [])
+                
+                # IMPORTANT: Populate the initial Source Data Hub with the preview text
+                # so it's not empty while background indexing runs.
+                if 'analyst_report' in analysis_json:
+                    # We can use the report as initial text or if we have raw combined text
+                    # In our case, we'll store the report itself as part of the summary,
+                    # but extracted_text should ideally contain the raw signals.
+                    # For now, let's keep it clean.
+                    pass
+                deal.save()
+            
+            # 2. Trigger Background Task
+            from .tasks import process_deal_folder_background
+            process_deal_folder_background.apply_async(
+                kwargs={
+                    'deal_id': str(deal.id),
+                    'file_tree_map': session_data['file_tree'],
+                    'user_email': session_data['user_email']
+                },
+                queue='celery'
+            )
+            
+            # Optionally clear cache
+            cache.delete(f"folder_sync_{session_id}")
+            
+            return Response({
+                "status": "success",
+                "deal_id": deal.id,
+                "message": f"Deal created. Processing {len(session_data['file_tree'])} files in background."
+            }, status=201)
+            
+        return Response(serializer.errors, status=400)
+
+    @action(detail=False, methods=['get'], url_path='task-status/(?P<task_id>[^/.]+)')
+    def task_status(self, request, task_id=None):
+        """
+        Polls the status of an AI analysis task.
+        """
+        from celery.result import AsyncResult
+        from django.core.cache import cache
+        import uuid
+        
+        result = AsyncResult(task_id)
+        
+        response = {
+            "task_id": task_id,
+            "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
+        }
+        
+        if result.status == 'SUCCESS':
+            data = result.result
+            if not data:
+                 return Response({"status": "FAILURE", "error": "Task returned no data"}, status=500)
+            if "error" in data:
+                return Response(data, status=500)
+                
+            # If successful, we wrap it in a session ID for the confirmation step
+            session_id = str(uuid.uuid4())
+            cache.set(f"folder_sync_{session_id}", {
+                "file_tree": data['file_tree'],
+                "drive_id": data['drive_id'],
+                "folder_id": data['folder_id'],
+                "user_email": data['user_email'],
+                "preliminary_data": data['preliminary_data'],
+                "preview_text": data.get('preview_text', '')
+            }, timeout=3600)
+            
+            response.update({
+                "session_id": session_id,
+                "folder_id": data['folder_id'],
+                "total_files": data['total_files'],
+                "preview_files_analyzed": data['preview_files_analyzed'],
+                "preliminary_data": data['preliminary_data'],
+                "raw_thinking": data.get('raw_thinking', '')
+            })
+            
+        elif result.status == 'FAILURE':
+            response["error"] = str(result.info)
+            
+        return Response(response)

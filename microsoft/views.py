@@ -771,20 +771,48 @@ class OneDriveListView(APIView):
         # ---- call Graph API ----
         try:
             graph = GraphAPIService()
+            drive_id = request.query_params.get('drive_id')
 
             if folder_id:
                 data = graph.get_drive_folder_children(
                     user_email=user_email,
                     folder_id=folder_id,
+                    drive_id=drive_id,
                     top=top,
                 )
             else:
-                data = graph.get_drive_root_children(
-                    user_email=user_email,
-                    top=top,
-                )
+                try:
+                    # Attempt to list all shared folders
+                    data = graph.list_shared_with_me(
+                        user_email=user_email,
+                        top=top,
+                    )
+                except Exception as e:
+                    # If sharedWithMe fails (e.g., account not provisioned), fall back to configured DMS root
+                    logger.warning(f"sharedWithMe failed ({e}), falling back to DMS root children.")
+                    data = graph.get_drive_root_children(
+                        user_email=user_email,
+                        top=top,
+                    )
 
-            items = data.get('value', [])
+            # Note: Items from /sharedWithMe are 'remoteItem' in some cases
+            items = []
+            for item in data.get('value', []):
+                if 'remoteItem' in item:
+                    # Flatten remote item metadata so the frontend sees it as a normal DriveItem
+                    remote = item['remoteItem']
+                    # Preserve IDs
+                    remote['id'] = remote.get('id', item.get('id'))
+                    # Crucially: capture the driveId from the remote reference
+                    if 'parentReference' in remote:
+                        remote['driveId'] = remote['parentReference'].get('driveId')
+                    
+                    # Ensure name and types match
+                    remote['name'] = remote.get('name', item.get('name'))
+                    items.append(remote)
+                else:
+                    items.append(item)
+
             next_link = data.get('@odata.nextLink')
 
             response_data = {
@@ -936,6 +964,25 @@ class OneDriveDownloadView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+
+class AnalyzeEmailView(APIView):
+    """
+    Asynchronous analysis of an email using AI Orchestrator.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        email_id = request.data.get('email_id')
+        if not email_id:
+            return Response({"error": "email_id is required"}, status=400)
+            
+        from .tasks import analyze_email_async
+        task = analyze_email_async.delay(email_id)
+        
+        return Response({
+            "task_id": task.id,
+            "status": "queued"
+        })
 
 class AnalyzeOneDriveFileView(APIView):
     """

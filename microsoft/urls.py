@@ -21,6 +21,7 @@ from .views import (
     OneDriveFileDetailView,
     OneDriveDownloadView,
     AnalyzeOneDriveFileView,
+    AnalyzeEmailView,
 )
 
 # Email-related routers
@@ -38,4 +39,5 @@ urlpatterns = [
     path('onedrive/detail/', OneDriveFileDetailView.as_view(), name='onedrive-detail'),
     path('onedrive/download/', OneDriveDownloadView.as_view(), name='onedrive-download'),
     path('onedrive/analyze/', AnalyzeOneDriveFileView.as_view(), name='onedrive-analyze'),
+    path('emails/analyze/', AnalyzeEmailView.as_view(), name='email-analyze'),
 ]
