@@ -47,25 +47,25 @@ class AIProcessorService:
 
     def _extract_json(self, text: str) -> str:
         """Robustly find and extract JSON string from a larger text block."""
-        # 1. Look for <json> tags (our latest standard)
-        json_tag_match = re.search(r'<json>\s*(\{.*?\})\s*</json>', text, re.DOTALL)
-        if json_tag_match:
-            return json_tag_match.group(1)
-
-        # 2. Look for ```json blocks
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if json_match: return json_match.group(1)
-
-        # 3. Fallback: Find the last balanced braces
         try:
+            # 1. Try common tags/blocks first
+            patterns = [
+                r'<json>\s*(\{.*?\})\s*</json>',
+                r'```json\s*(\{.*?\})\s*```',
+                r'```\s*(\{.*?\})\s*```'
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+
+            # 2. Fallback to raw brace matching
+            first_brace = text.find('{')
             last_brace = text.rfind('}')
-            if last_brace != -1:
-                depth = 0
-                for i in range(last_brace, -1, -1):
-                    if text[i] == '}': depth += 1
-                    if text[i] == '{': depth -= 1
-                    if depth == 0: return text[i:last_brace + 1]
-        except: pass
+            if first_brace != -1 and last_brace != -1:
+                return text[first_brace:last_brace + 1]
+        except:
+            pass
         return text
 
     def ocr_transcribe(self, images: list) -> str:
@@ -95,7 +95,7 @@ class AIProcessorService:
         self,
         content: str,
         personality_name: str = "default",
-        skill_name: str = "deal_extraction",
+        skill_name: str = None,
         metadata: Optional[Dict[str, Any]] = None,
         source_id: Optional[str] = None,
         source_type: str = "email",
@@ -106,6 +106,8 @@ class AIProcessorService:
         """
         Orchestrates the multi-model forensic analysis.
         """
+        if skill_name:
+            print(f"[AI-PROCESSOR] Loading skill: {skill_name}")
         # PHASE 1: OCR (if images exist)
         ocr_context = ""
         if images and skill_name == "deal_extraction":
@@ -136,6 +138,12 @@ class AIProcessorService:
 
         system_instructions = personality.system_instructions if personality else "You are a PE analyst."
         
+        # If a skill is active, we should prefix the system instructions with the skill's specific intent
+        # to ensure it doesn't get lost in the personality's base instructions.
+        if skill:
+            skill_identity = f"# CURRENT TASK: {skill.name.upper().replace('_', ' ')}\n{skill.description}\n\n"
+            system_instructions = skill_identity + system_instructions
+        
         # --- DYNAMIC PROTOCOL INJECTION ---
         from ..models import AnalysisProtocol
         from .forex_service import ForexService
@@ -158,26 +166,42 @@ class AIProcessorService:
         if not stream:
             system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."
         
-        prompt_template = skill.prompt_template if skill else "Analyze this content."
+        prompt_template = skill.prompt_template if skill else "{{ content }}"
         user_prompt = prompt_template
+        
+        # 1. First replace specific metadata keys (like context_data, history_context)
         if metadata:
             for key, value in metadata.items():
-                placeholder = '{{ ' + key + ' }}'
-                user_prompt = user_prompt.replace(placeholder, str(value))
-                # Handle cases without spaces too
-                user_prompt = user_prompt.replace('{{' + key + '}}', str(value))
+                val_str = str(value)
+                # Handle various bracket styles: {{key}}, {{ key }}, {{  key  }}
+                user_prompt = user_prompt.replace('{{' + key + '}}', val_str)
+                user_prompt = user_prompt.replace('{{ ' + key + ' }}', val_str)
+                user_prompt = user_prompt.replace('{{  ' + key + '  }}', val_str)
+                user_prompt = user_prompt.replace('{{' + key.lower() + '}}', val_str)
+                user_prompt = user_prompt.replace('{{ ' + key.lower() + ' }}', val_str)
         
-        user_prompt = user_prompt.replace('{{ content }}', cleaned_text)
+        # 2. Then replace the primary content placeholder
         user_prompt = user_prompt.replace('{{content}}', cleaned_text)
+        user_prompt = user_prompt.replace('{{ content }}', cleaned_text)
+        user_prompt = user_prompt.replace('{{  content  }}', cleaned_text)
         
+        # 3. Safety Fallback: If user message is still not in the prompt, append it
         if cleaned_text not in user_prompt:
-            user_prompt = f"{user_prompt}\n\nCONTENT:\n{cleaned_text}"
+            user_prompt = f"{user_prompt}\n\n[USER INQUIRY]:\n{cleaned_text}"
+
+        # VERIFICATION LOG: Ensure data is actually in the prompt
+        if metadata and "context_data" in metadata:
+            if "{{ context_data }}" in user_prompt:
+                logger.error(f"[AI-PROCESSOR] CRITICAL: Template replacement FAILED for '{{{{ context_data }}}}'.")
+            else:
+                logger.info(f"[AI-PROCESSOR] Template replacement SUCCESS. Context injected.")
 
         audit_log_id = metadata.get('audit_log_id') if metadata else None
         source_meta = metadata.get('_source_metadata') if metadata else None
         celery_task_id = metadata.get('celery_task_id') if metadata else None
         ctx_label = metadata.get('context_label') if metadata else None
         
+        audit_log = None
         if audit_log_id:
             try:
                 audit_log = AIAuditLog.objects.get(id=audit_log_id)
@@ -192,16 +216,9 @@ class AIProcessorService:
                     audit_log.context_label = ctx_label
                 audit_log.save()
             except AIAuditLog.DoesNotExist:
-                audit_log = AIAuditLog.objects.create(
-                    source_type=source_type, source_id=source_id,
-                    context_label=ctx_label,
-                    personality=personality, skill=skill,
-                    model_used='qwen3.5:latest', system_prompt=system_instructions, user_prompt=user_prompt,
-                    is_success=False, status='PROCESSING',
-                    source_metadata=source_meta,
-                    celery_task_id=celery_task_id
-                )
-        else:
+                pass
+
+        if not audit_log:
             audit_log = AIAuditLog.objects.create(
                 source_type=source_type, source_id=source_id,
                 context_label=ctx_label,
@@ -238,31 +255,118 @@ class AIProcessorService:
         try:
             response = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=300)
             response.raise_for_status()
+            
             full_response = ""
             full_thinking = ""
+            is_thinking_mode = False
+            is_response_mode = False
+            
+            # Buffer for handling split tags
+            buffer = ""
             
             chunk_counter = 0
             for line in response.iter_lines():
                 if line:
-                    # Yield raw line so frontend can parse both 'response' and 'thinking'
-                    yield line.decode('utf-8') + "\n"
-                    
                     chunk = json.loads(line)
-                    text = chunk.get("response") or ""
-                    think = chunk.get("thinking") or ""
+                    raw_text = chunk.get("response") or ""
+                    buffer += raw_text
                     
-                    full_response += text
-                    full_thinking += think
-                    
-                    # Persist every 50 chunks to show live progress in UI without hammering DB
+                    # Process buffer and yield what we can
+                    while True:
+                        if is_thinking_mode:
+                            if "</thinking>" in buffer:
+                                parts = buffer.split("</thinking>", 1)
+                                content = parts[0]
+                                yield json.dumps({"response": "", "thinking": content, "done": False}) + "\n"
+                                full_thinking += content
+                                buffer = parts[1]
+                                is_thinking_mode = False
+                            else:
+                                # Avoid yielding partial "</thinking>"
+                                if "</" in buffer:
+                                    tag_start = buffer.find("</")
+                                    to_yield = buffer[:tag_start]
+                                    if to_yield:
+                                        yield json.dumps({"response": "", "thinking": to_yield, "done": False}) + "\n"
+                                        full_thinking += to_yield
+                                        buffer = buffer[tag_start:]
+                                    break
+                                else:
+                                    if buffer:
+                                        yield json.dumps({"response": "", "thinking": buffer, "done": False}) + "\n"
+                                        full_thinking += buffer
+                                        buffer = ""
+                                    break
+                        elif is_response_mode:
+                            if "</response>" in buffer:
+                                parts = buffer.split("</response>", 1)
+                                content = parts[0]
+                                yield json.dumps({"response": content, "thinking": "", "done": False}) + "\n"
+                                full_response += content
+                                buffer = parts[1]
+                                is_response_mode = False
+                            else:
+                                if "</" in buffer:
+                                    tag_start = buffer.find("</")
+                                    to_yield = buffer[:tag_start]
+                                    if to_yield:
+                                        yield json.dumps({"response": to_yield, "thinking": "", "done": False}) + "\n"
+                                        full_response += to_yield
+                                        buffer = buffer[tag_start:]
+                                    break
+                                else:
+                                    if buffer:
+                                        yield json.dumps({"response": buffer, "thinking": "", "done": False}) + "\n"
+                                        full_response += buffer
+                                        buffer = ""
+                                    break
+                        else:
+                            # Not in any mode, look for start tags
+                            if "<thinking>" in buffer:
+                                parts = buffer.split("<thinking>", 1)
+                                if parts[0]:
+                                    yield json.dumps({"response": parts[0], "thinking": "", "done": False}) + "\n"
+                                    full_response += parts[0]
+                                buffer = parts[1]
+                                is_thinking_mode = True
+                            elif "<response>" in buffer:
+                                parts = buffer.split("<response>", 1)
+                                if parts[0]:
+                                    yield json.dumps({"response": parts[0], "thinking": "", "done": False}) + "\n"
+                                    full_response += parts[0]
+                                buffer = parts[1]
+                                is_response_mode = True
+                            elif "<" in buffer:
+                                # Wait for full tag
+                                tag_start = buffer.find("<")
+                                to_yield = buffer[:tag_start]
+                                if to_yield:
+                                    yield json.dumps({"response": to_yield, "thinking": "", "done": False}) + "\n"
+                                    full_response += to_yield
+                                    buffer = buffer[tag_start:]
+                                break
+                            else:
+                                if buffer:
+                                    yield json.dumps({"response": buffer, "thinking": "", "done": False}) + "\n"
+                                    full_response += buffer
+                                    buffer = ""
+                                break
+
+                    # Persist to DB periodically
                     chunk_counter += 1
-                    if chunk_counter % 50 == 0:
+                    if chunk_counter % 10 == 0:
                         audit_log.raw_response = full_response
                         audit_log.raw_thinking = full_thinking
                         audit_log.save(update_fields=['raw_response', 'raw_thinking'])
 
                     if chunk.get("done"): break
             
+            # Final buffer flush
+            if buffer:
+                # Any remaining text is treated as response
+                yield json.dumps({"response": buffer, "thinking": "", "done": False}) + "\n"
+                full_response += buffer
+
             audit_log.raw_response = full_response
             audit_log.raw_thinking = full_thinking
             audit_log.is_success = True
@@ -285,16 +389,42 @@ class AIProcessorService:
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
             
-            audit_log.raw_response = raw_response
+            # If thinking is empty but raw_response has tags, extract them
+            if not thinking and "<thinking>" in raw_response:
+                t_match = re.search(r'<thinking>(.*?)</thinking>', raw_response, re.DOTALL)
+                if t_match:
+                    thinking = t_match.group(1).strip()
+            
+            # Clean the main response of any tags for the final UI display
+            clean_response = raw_response
+            if "<response>" in clean_response:
+                r_match = re.search(r'<response>(.*?)</response>', clean_response, re.DOTALL)
+                if r_match:
+                    clean_response = r_match.group(1).strip()
+            
+            # Remove thinking tags from clean_response regardless
+            clean_response = re.sub(r'<thinking>.*?</thinking>', '', clean_response, flags=re.DOTALL).strip()
+            clean_response = clean_response.replace("<response>", "").replace("</response>", "").strip()
+
+            audit_log.raw_response = clean_response
+            audit_log.raw_thinking = thinking
+            
             clean_json_str = self._extract_json(raw_response)
             try:
                 parsed_json = json.loads(clean_json_str)
-                if "deal_model_data" not in parsed_json: parsed_json["deal_model_data"] = {}
-                if "metadata" not in parsed_json: parsed_json["metadata"] = {"ambiguous_points": [], "missing_fields": []}
-                if "analyst_report" not in parsed_json: parsed_json["analyst_report"] = raw_response
+                
+                # Only inject deal extraction structure if it looks like a deal extraction skill
+                # or if the keys are missing and it's explicitly requested.
+                is_extraction = audit_log.skill and audit_log.skill.name == "deal_extraction"
+                
+                if is_extraction:
+                    if "deal_model_data" not in parsed_json: parsed_json["deal_model_data"] = {}
+                    if "metadata" not in parsed_json: parsed_json["metadata"] = {"ambiguous_points": [], "missing_fields": []}
+                    if "analyst_report" not in parsed_json: parsed_json["analyst_report"] = raw_response
                 
                 # Include thinking in the parsed response for the UI
                 parsed_json["thinking"] = thinking
+                parsed_json["response"] = clean_response
                 
                 audit_log.parsed_json = parsed_json
                 audit_log.is_success = True

@@ -372,6 +372,27 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "deal_flow_decisions": deal.deal_flow_decisions
         })
 
+    @action(detail=True, methods=['get'])
+    def get_paginated_extracted_text(self, request, pk=None):
+        """
+        Returns a slice of the extracted_text to avoid sending massive payloads.
+        Query params: offset (int), limit (int, default 50000)
+        """
+        deal = self.get_object()
+        offset = int(request.query_params.get('offset', 0))
+        limit = int(request.query_params.get('limit', 50000))
+        
+        full_text = deal.extracted_text or ""
+        total_length = len(full_text)
+        
+        text_slice = full_text[offset : offset + limit]
+        
+        return Response({
+            "text": text_slice,
+            "next_offset": offset + limit if offset + limit < total_length else None,
+            "total_length": total_length
+        })
+
     @action(detail=False, methods=['post'])
     def analyze_folder(self, request):
         """
@@ -552,6 +573,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             deal = serializer.save(
                 processing_status='processing',
                 source_onedrive_id=session_data.get('folder_id'),
+                source_drive_id=session_data.get('drive_id'),
                 extracted_text=session_data.get('preview_text', '')
             )
             
@@ -647,6 +669,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     def analyze_additional_documents(self, request, pk=None):
         """
         Updates the AI Summary (V2 Analysis) using the existing analysis and newly selected documents.
+        Enforces a maximum of 5 documents at once.
         """
         deal = self.get_object()
         document_ids = request.data.get('document_ids', [])
@@ -654,110 +677,52 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if not document_ids:
             return Response({"error": "No document IDs provided"}, status=400)
             
+        if len(document_ids) > 5:
+            return Response({"error": "Neural limit exceeded: Maximum 5 documents can be analyzed per incremental batch."}, status=400)
+            
         docs = deal.documents.filter(id__in=document_ids)
         if not docs.exists():
             return Response({"error": "No matching documents found for this deal"}, status=400)
             
-        # 1. Combine new text
-        new_text_context = ""
-        for doc in docs:
-            if doc.extracted_text:
-                new_text_context += f"\n\n--- NEW DOCUMENT: {doc.title} ---\n{doc.extracted_text}"
-                
-        if not new_text_context.strip():
-            return Response({"error": "Selected documents have no extracted text to analyze"}, status=400)
-
-        # 2. Build Prompt Context
-        from ai_orchestrator.services.ai_processor import AIProcessorService
+        from .tasks import analyze_additional_documents_async
         from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
-        import json
-        from django.utils import timezone
         
-        ai_service = AIProcessorService()
+        # 1. Create a PENDING audit log immediately for visibility and cancellation support
         personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='vdr_incremental_analysis').first()
         
-        existing_summary = deal.deal_summary or ""
-        existing_json = json.dumps(deal.analysis_json, default=str) if deal.analysis_json else "{}"
-        
-        # We now use the database skill instead of hardcoding the prompt
-        # We pass the context via metadata to process_content
-        current_version = len(deal.analysis_history or []) + 2 # V1 is deal_summary, so next is V2
-        
-        # 3. Create Audit Log
         audit_log = AIAuditLog.objects.create(
             source_type='vdr_incremental_analysis',
             source_id=str(deal.id),
+            context_label=f"Incremental Analysis: {deal.title}",
             personality=personality,
-            status='PROCESSING',
+            skill=skill,
+            status='PENDING',
             is_success=False,
             model_used='qwen3.5:latest',
-            system_prompt="Updating existing deal analysis with new documents.",
-            user_prompt=new_text_context
+            system_prompt="Queued for incremental forensic analysis...",
+            user_prompt=f"Analyzing {docs.count()} new documents for Deal: {deal.title}"
+        )
+
+        # 2. Trigger async task
+        task = analyze_additional_documents_async.apply_async(
+            kwargs={
+                'deal_id': str(deal.id),
+                'document_ids': document_ids,
+                'audit_log_id': str(audit_log.id)
+            },
+            queue='celery'
         )
         
-        # 4. Run Analysis
-        try:
-            result = ai_service.process_content(
-                content=new_text_context,
-                skill_name="vdr_incremental_analysis",
-                source_type="vdr_incremental_analysis",
-                source_id=str(deal.id),
-                metadata={
-                    'audit_log_id': str(audit_log.id),
-                    'existing_summary': existing_summary,
-                    'version_num': current_version
-                }
-            )
-            
-            analysis = {}
-            raw_thinking = ""
-            if isinstance(result, dict) and 'parsed_json' in result:
-                analysis = result['parsed_json']
-                raw_thinking = result.get('thinking', '')
-            else:
-                analysis = result
-                raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
-                
-            if analysis and "error" not in analysis:
-                # Update Deal JSON Fields
-                deal.analysis_json = analysis
-                if 'deal_model_data' in analysis:
-                    deal.themes = analysis['deal_model_data'].get('themes', deal.themes)
-                if 'metadata' in analysis:
-                    deal.ambiguities = analysis['metadata'].get('ambiguous_points', deal.ambiguities)
-                    
-                # Append to History instead of overwriting V1
-                if 'analyst_report' in analysis:
-                    new_history = list(deal.analysis_history or [])
-                    new_history.append({
-                        "version": current_version,
-                        "report": analysis['analyst_report'],
-                        "timestamp": timezone.now().isoformat(),
-                        "documents_analyzed": [d.title for d in docs]
-                    })
-                    deal.analysis_history = new_history
-                
-                # Append thinking
-                if raw_thinking:
-                    deal.thinking = (deal.thinking or "") + f"\n\n--- V{current_version} INCREMENTAL ANALYSIS ---\n{raw_thinking}"
-                    
-                deal.save()
-                
-                # Mark docs as analyzed
-                docs.update(is_ai_analyzed=True)
-                
-                return Response({
-                    "status": "success",
-                    "message": f"Successfully updated analysis using {docs.count()} documents."
-                })
-            else:
-                 return Response({"error": "AI failed to generate a valid updated summary.", "details": analysis}, status=500)
-                 
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Incremental analysis failed: {str(e)}")
-            return Response({"error": str(e)}, status=500)
+        audit_log.celery_task_id = task.id
+        audit_log.save()
+        
+        return Response({
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "status": "queued",
+            "message": f"Incremental analysis queued for {docs.count()} documents."
+        })
 
     @action(detail=True, methods=['post'])
     def upload_document(self, request, pk=None):

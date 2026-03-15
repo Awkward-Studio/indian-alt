@@ -20,7 +20,11 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = DealDocument
-        fields = '__all__'
+        fields = (
+            'id', 'deal', 'deal_title', 'title', 'document_type', 
+            'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
+            'created_at', 'uploaded_by', 'uploaded_by_name'
+        )
         read_only_fields = ('id', 'created_at')
 
 
@@ -54,6 +58,15 @@ class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Truncate potentially massive text fields for initial render
+        if data.get('extracted_text') and len(data['extracted_text']) > 20000:
+            data['extracted_text'] = data['extracted_text'][:20000]
+        if data.get('thinking') and len(data['thinking']) > 50000:
+            data['thinking'] = data['thinking'][:50000] + "\n\n... [Thinking trace truncated] ..."
+        return data
+    
     class Meta(DealSerializer.Meta):
         fields = '__all__'
 
@@ -65,6 +78,11 @@ class DealListSerializer(serializers.ModelSerializer):
         read_only=True
     )
     
+    def get_extracted_text(self, obj):
+        if obj.extracted_text and len(obj.extracted_text) > 20000:
+            return obj.extracted_text[:20000]
+        return obj.extracted_text
+
     class Meta:
         model = Deal
         fields = (

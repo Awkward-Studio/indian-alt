@@ -2,6 +2,7 @@ import logging
 import json
 import time
 import requests
+import uuid
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
 from django.forms.models import model_to_dict
@@ -156,16 +157,53 @@ class DealChatView(APIView):
                 rag_context += "No specific raw document chunks matched this query."
             
             ai_service = AIProcessorService()
-            result = ai_service.process_content(
-                content=user_message,
-                skill_name="deal_chat",
-                metadata={'deal_context': rag_context},
+            personality = AIPersonality.objects.filter(is_default=True).first()
+            skill = AISkill.objects.filter(name='deal_chat').first()
+
+            # Create PENDING audit log for background tracking
+            audit_log = AIAuditLog.objects.create(
+                source_type='deal_chat',
                 source_id=str(deal.id),
-                source_type="deal_chat",
-                stream=stream
+                context_label=f"Deal Chat: {deal.title}",
+                personality=personality,
+                skill=skill,
+                status='PENDING',
+                is_success=False,
+                model_used='qwen3.5:latest',
+                system_prompt="Processing forensic query in background...",
+                user_prompt=user_message
             )
-            if stream: return StreamingHttpResponse(result, content_type='text/event-stream')
-            return Response({"response": result.get("_raw_response", "")})
+
+            from .tasks import generate_chat_response_async
+            
+            # We don't have a conversation object in DealChat currently, 
+            # but we might need one if we want persistent history. 
+            # For now, we'll try to find or create one for the deal.
+            conversation, _ = AIConversation.objects.get_or_create(
+                user=request.user,
+                title=f"Chat: {deal.title}",
+                defaults={'id': uuid.uuid4()} # Using deal ID as a reference? No, use new UUID.
+            )
+
+            task = generate_chat_response_async.apply_async(
+                kwargs={
+                    'conversation_id': str(conversation.id),
+                    'user_message': user_message,
+                    'skill_name': 'deal_chat',
+                    'metadata': {'deal_context': rag_context},
+                    'audit_log_id': str(audit_log.id)
+                }
+            )
+
+            audit_log.celery_task_id = task.id
+            audit_log.save(update_fields=['celery_task_id'])
+
+            return Response({
+                "status": "queued",
+                "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
+                "conversation_id": str(conversation.id)
+            })
         except Exception as e:
             logger.error(f"Deal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
@@ -189,187 +227,44 @@ class UniversalChatView(APIView):
                 conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
             
             AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
-            ai_service = AIProcessorService()
-            history_context = ""
-            for msg in history[-5:]:
-                role = "User" if msg.get('role') == 'user' else "Assistant"
-                history_context += f"{role}: {msg.get('content')}\n"
-
-            # PASS 1: Intent
-            pass1_prompt = f"""[SYSTEM] Determine tools for: "{user_message}"
-DATABASE FIELDS (Use for structured filtering):
-- title, industry, sector, city, state, country (text icontains)
-- priority (Exact: New, High, Medium, Low)
-- is_female_led (bool)
-- management_meeting (bool)
-- business_proposal_stage, ic_stage (bool)
-- funding_ask (Use numeric filters only if sure)
-
-TOOLS: 
-- db_filters: {{'industry': 'Logistics', 'is_female_led': true}}
-- global_rag: "Specific semantic search for document text (e.g. CM1 margins, revenue run-rate, risk factors)"
-- get_stats: true/false
-
-RULES: 
-1. Use db_filters for hard criteria (Industry, Stages, Female Led).
-2. Use global_rag for deep metrics (Margins, CM1, etc.) or qualitative traits.
-3. You can use BOTH tools simultaneously for maximum precision.
-4. Return ONLY JSON.
-"""
-            intent_result = ai_service.process_content(
-                content=pass1_prompt, 
-                skill_name=None, 
-                stream=False,
-                source_type="universal_chat_intent",
-                source_id=str(conversation.id)
-            )
-            print(f"[AGENT] Intent: {intent_result}")
-
-            # PASS 2: Multi-Source Execution
-            context_data = {}
-            db_filters = intent_result.get("db_filters", {})
-            query_set = Deal.objects.all()
             
-            deals = query_set.all()
-            if db_filters:
-                q_obj = Q()
-                for f, v in db_filters.items():
-                    if v is not None and v != "null" and v != "{}" and v != []:
-                        # Handle booleans
-                        if isinstance(v, bool):
-                            if hasattr(Deal, f): q_obj &= Q(**{f: v})
-                        # Handle potential list values from AI
-                        else:
-                            val = v[0] if isinstance(v, list) and len(v) > 0 else v
-                            if f == 'query': q_obj |= Q(title__icontains=val) | Q(deal_summary__icontains=val)
-                            elif hasattr(Deal, f): q_obj &= Q(**{f"{f}__icontains": str(val)})
-                
-                filtered_deals = query_set.filter(q_obj)
-                # Fallback if strict filters are TOO specific
-                if filtered_deals.count() > 0:
-                    deals = filtered_deals[:50]
-                else:
-                    print(f"[AGENT] Strict filters {db_filters} returned 0. Using recent deals.")
-                    deals = query_set.order_by('-created_at')[:50]
-            else:
-                deals = query_set.order_by('-created_at')[:50]
+            personality = AIPersonality.objects.filter(is_default=True).first()
+            skill = AISkill.objects.filter(name='universal_chat').first()
 
-            # Provide a complete summary of pipeline stats
-            total_deals = query_set.count()
-            context_data["pipeline_overview"] = f"Total deals in system: {total_deals}. Context provided for {deals.count()} deals."
+            # Create PENDING audit log for background tracking
+            audit_log = AIAuditLog.objects.create(
+                source_type='universal_chat',
+                source_id=str(conversation.id),
+                context_label=f"Global Chat: {conversation.title}",
+                personality=personality,
+                skill=skill,
+                status='PENDING',
+                is_success=False,
+                model_used='qwen3.5:latest',
+                system_prompt="Queued for global pipeline query...",
+                user_prompt=user_message
+            )
 
-            # EXPOSE RICH FORENSIC DATA
-            context_data["deals"] = []
-            for d in deals:
-                # Get a brief summary of the last 3 phase changes for timeline context
-                logs = d.phase_logs.all().order_by('-changed_at')[:3]
-                deal_timeline = []
-                for l in logs:
-                    deal_timeline.append(f"{l.changed_at.date()}: {l.from_phase} -> {l.to_phase} (Rationale: {l.rationale or 'N/A'})")
-
-                context_data["deals"].append({
-                    "title": d.title, 
-                    "industry": d.industry, 
-                    "sector": d.sector,
-                    "ask": d.funding_ask,
-                    "city": d.city,
-                    "priority": d.priority,
-                    "current_phase": d.current_phase,
-                    "is_female_led": d.is_female_led,
-                    "management_met": d.management_meeting,
-                    "themes": d.themes if isinstance(d.themes, list) else [],
-                    "ambiguities": d.ambiguities if isinstance(d.ambiguities, list) else [],
-                    "summary": d.deal_summary[:1000] if d.deal_summary else "",
-                    "recent_timeline": deal_timeline
-                })
-
-            rag_query = intent_result.get("global_rag")
-            if rag_query:
-                from .models import DocumentChunk
-                from pgvector.django import CosineDistance
-                
-                embed_service = EmbeddingService()
-                # If we have specific deals filtered, prioritize chunks from those deals
-                if db_filters and 'filtered_deals' in locals() and filtered_deals.count() > 0:
-                    chunks = DocumentChunk.objects.filter(deal__in=filtered_deals).annotate(distance=CosineDistance('embedding', embed_service._get_embedding(rag_query))).order_by('distance')[:15]
-                else:
-                    chunks = embed_service.search_global_chunks(rag_query, limit=15)
-                
-                context_data["document_insights"] = [{"deal": c.deal.title, "text": c.content} for c in chunks]
-
-            if intent_result.get("get_stats"):
-                context_data["pipeline_stats"] = {
-                    "total": query_set.count(), 
-                    "female_led_count": query_set.filter(is_female_led=True).count(),
-                    "sectors": list(query_set.values('industry').annotate(count=Count('id')))
+            from .tasks import generate_chat_response_async
+            task = generate_chat_response_async.apply_async(
+                kwargs={
+                    'conversation_id': str(conversation.id),
+                    'user_message': user_message,
+                    'skill_name': 'universal_chat',
+                    'metadata': {}, # We will build the context entirely inside the Celery task
+                    'audit_log_id': str(audit_log.id)
                 }
-
-            # PASS 3: Synthesis
-            synthesis_prompt = f"""[CONTEXT]
-CHAT HISTORY:
-{history_context}
-
-REAL DATA:
-{json.dumps(context_data, indent=2, default=str)}
-
-[TASK]
-Answer the user message: "{user_message}" as a Senior Lead Private Equity Analyst speaking directly to a partner.
-
-INSTRUCTIONS:
-1. **BE CONVERSATIONAL**: Use a professional tone. Use phrases like "I've cross-referenced our records...".
-2. **BE FORENSIC**: If financial details (margins, CM1, etc.) are in document_insights, highlight them.
-3. **USE REAL DATA**: Cross-reference structured fields with document_insights.
-4. **NO HALLUCINATION**: If the data isn't in REAL DATA, just say you don't have that specific information yet.
-"""
-            if stream:
-                def stream_and_save():
-                    full_text = ""
-                    full_thinking = ""
-                    yield json.dumps({"conversation_id": str(conversation.id)}) + "\n"
-                    
-                    for chunk_str in ai_service.process_content(
-                        content=synthesis_prompt, 
-                        skill_name=None, 
-                        stream=True,
-                        source_type="universal_chat",
-                        source_id=str(conversation.id)
-                    ):
-                        try:
-                            chunk = json.loads(chunk_str)
-                            full_text += chunk.get("response", "")
-                            full_thinking += chunk.get("thinking", "")
-                        except: pass
-                        yield chunk_str
-                    
-                    AIMessage.objects.create(conversation=conversation, role='assistant', content=full_text, thinking=full_thinking)
-                    conversation.save()
-                return StreamingHttpResponse(stream_and_save(), content_type='text/event-stream')
-            
-            final_result = ai_service.process_content(
-                content=synthesis_prompt, 
-                skill_name=None, 
-                stream=False,
-                source_type="universal_chat",
-                source_id=str(conversation.id)
             )
-            raw_content = final_result.get("_raw_response", "")
-            thinking = final_result.get("thinking", "")
-            
-            AIMessage.objects.create(
-                conversation=conversation, 
-                role='assistant', 
-                content=raw_content,
-                thinking=thinking
-            )
-            conversation.save()
+
+            audit_log.celery_task_id = task.id
+            audit_log.save(update_fields=['celery_task_id'])
+
             return Response({
-                "response": raw_content,
-                "thinking": thinking,
+                "status": "queued",
+                "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
                 "conversation_id": str(conversation.id)
             })
-        except Exception as e:
-            logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
-            return Response({"error": str(e)}, status=500)
         except Exception as e:
             logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)

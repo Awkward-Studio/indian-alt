@@ -11,7 +11,8 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'id', 'source_type', 'source_id', 'context_label', 'personality', 'personality_name', 
             'skill', 'skill_name', 'model_provider', 'model_used', 
             'request_duration_ms', 'tokens_used', 'is_success', 'status',
-            'celery_task_id', 'created_at', 'error_message'
+            'celery_task_id', 'created_at', 'error_message',
+            'raw_response', 'raw_thinking', 'user_prompt'
         ]
 
 class AIPersonalitySerializer(serializers.ModelSerializer):
