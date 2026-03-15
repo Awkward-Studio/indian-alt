@@ -27,12 +27,43 @@ python manage.py migrate --noinput
 
 if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     echo ""
+    echo "=== STARTING WORKER HEALTHCHECK SERVER ON PORT ${PORT:-8000} ==="
+    python - <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+PORT = int(os.environ.get("PORT", "8000"))
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/api/core/health/", "/api/core/health"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","service":"worker"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+PY
+
+    echo ""
     echo "=== STARTING CELERY WORKER (SINGLETON MODE) ==="
     exec celery -A config worker -l info --concurrency=1
 else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="
     python manage.py create_default_superuser
+
+    echo ""
+    echo "=== SEEDING AI SKILLS ==="
+    python init_skill.py
 
     echo ""
     echo "=== CHECKING TABLES ==="
