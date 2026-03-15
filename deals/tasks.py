@@ -235,7 +235,8 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
                 document_type=doc_type,
                 onedrive_id=file_id,
                 extracted_text=extracted_text,
-                is_indexed=False # Will be set to True by vectorizer
+                is_indexed=False, # Will be set to True by vectorizer
+                is_ai_analyzed=(i < 5) # The first 5 files were used in the initial analyze_folder_async preview
             )
             
             # Update combined deal text for RAG and Source Data Hub

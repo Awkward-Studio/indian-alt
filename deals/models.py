@@ -19,6 +19,26 @@ class DealPriority(models.TextChoices):
 
 
 class DealPhase(models.TextChoices):
+    STAGE_1 = '1: Deal Sourced', '1: Deal Sourced'
+    STAGE_2 = '2: Initial Banker Call', '2: Initial Banker Call'
+    STAGE_3 = '3: NDA Execution', '3: NDA Execution'
+    STAGE_4 = '4: Initial Materials Review', '4: Initial Materials Review'
+    STAGE_5 = '5: Financial Model Call', '5: Financial Model Call'
+    STAGE_6 = '6: Additional Data Request', '6: Additional Data Request'
+    STAGE_7 = '7: Industry Research', '7: Industry Research'
+    STAGE_8 = '8: Reference Calls', '8: Reference Calls'
+    STAGE_9 = '9: IA Model Build', '9: IA Model Build'
+    STAGE_10 = '10: Field Visit', '10: Field Visit'
+    STAGE_11 = '11: Business Proposal', '11: Business Proposal'
+    STAGE_12 = '12: Term Sheet', '12: Term Sheet'
+    STAGE_13 = '13: Full Due Diligence', '13: Full Due Diligence'
+    STAGE_14 = '14: IC Note I', '14: IC Note I'
+    STAGE_15 = '15: IC Feedback', '15: IC Feedback'
+    STAGE_16 = '16: IC Note II', '16: IC Note II'
+    STAGE_17 = '17: Definitive Documentation', '17: Definitive Documentation'
+    STAGE_18 = '18: Closure', '18: Closure'
+    PASSED = 'Passed', 'Passed'
+    # Keep legacy choices for backwards compatibility during migration
     ORIGINATION = 'Origination', 'Origination'
     SCREENING = 'Screening', 'Screening'
     MGMT_MEETING = 'Management Meeting', 'Management Meeting'
@@ -27,7 +47,6 @@ class DealPhase(models.TextChoices):
     TERM_SHEET = 'Term Sheet', 'Term Sheet'
     EXECUTION = 'Execution', 'Execution'
     PORTFOLIO = 'Portfolio', 'Portfolio'
-    PASSED = 'Passed', 'Passed'
 
 
 class Deal(models.Model):
@@ -51,8 +70,15 @@ class Deal(models.Model):
     current_phase = models.CharField(
         max_length=50,
         choices=DealPhase.choices,
-        default=DealPhase.ORIGINATION
+        default=DealPhase.STAGE_1
     )
+    deal_flow_decisions = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Dictionary mapping stage IDs to decisions (e.g., {"1": "yes"})'
+    )
+    rejection_stage_id = models.IntegerField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     deal_summary = models.TextField(blank=True, null=True)
     funding_ask = models.TextField(blank=True, null=True)
@@ -122,6 +148,11 @@ class Deal(models.Model):
     thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
     ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
     analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
+    analysis_history = models.JSONField(
+        default=list, 
+        blank=True, 
+        help_text='Array of incremental analysis reports (v2, v3, etc.)'
+    )
     
     source_onedrive_id = models.CharField(
         max_length=255,
@@ -212,6 +243,10 @@ class DealDocument(models.Model):
     file_url = models.URLField(blank=True, null=True)
     extracted_text = models.TextField(blank=True, null=True)
     is_indexed = models.BooleanField(default=False)
+    is_ai_analyzed = models.BooleanField(
+        default=False,
+        help_text='Whether this document was included in the AI summary generation'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(
         'accounts.Profile',

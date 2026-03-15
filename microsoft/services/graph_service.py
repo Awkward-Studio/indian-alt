@@ -386,23 +386,44 @@ class GraphAPIService:
     def get_drive_root_children(self, user_email: str = DMS_USER_EMAIL,
                                 top: int = 200, **kwargs) -> Dict[str, Any]:
         """
-        List the DMS shared folder.
+        List the DMS shared folder(s).
 
         Resolution order:
-        1. Shared-folder URL (most reliable for shared access)
+        1. Shared-folder URL(s) (supports comma-separated list)
         2. Legacy drive path
         3. Drive root
         """
         if DMS_SHARED_FOLDER_URL:
-            try:
-                return self.list_shared_folder(DMS_SHARED_FOLDER_URL, user_email)
-            except HTTPError as exc:
-                response = getattr(exc, "response", None)
-                status_code = response.status_code if response is not None else "unknown"
-                logger.warning(
-                    "Shared DMS folder URL failed with status %s. Falling back to legacy drive path.",
-                    status_code,
-                )
+            urls = [u.strip() for u in DMS_SHARED_FOLDER_URL.split(',') if u.strip()]
+            
+            if len(urls) > 1:
+                # Multiple URLs: return the folders themselves as the root view
+                items = []
+                for url in urls:
+                    try:
+                        info = self.get_shared_folder_info(url, user_email)
+                        # Flatten driveId for frontend consistency
+                        if 'parentReference' in info:
+                            info['driveId'] = info['parentReference'].get('driveId')
+                        items.append(info)
+                    except Exception as e:
+                        logger.error(f"Failed to fetch shared folder info for {url}: {e}")
+                
+                if items:
+                    return {'value': items}
+                # If ALL shared URLs failed, fall through to legacy drive path
+            else:
+                # Single URL: maintain legacy behavior of listing children immediately
+                try:
+                    return self.list_shared_folder(urls[0], user_email)
+                except HTTPError as exc:
+                    response = getattr(exc, "response", None)
+                    status_code = response.status_code if response is not None else "unknown"
+                    logger.warning(
+                        "Shared DMS folder URL failed with status %s. Falling back to legacy drive path.",
+                        status_code,
+                    )
+                # Fall through to legacy drive path on error
 
         if DMS_DRIVE_ID and DMS_FOLDER_PATH:
             try:

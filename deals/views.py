@@ -326,6 +326,52 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "to_phase": to_phase
         })
 
+    @action(detail=True, methods=['post'])
+    def update_flow_state(self, request, pk=None):
+        """
+        Unified endpoint for the 18-stage interactive deal flow.
+        Accepts `active_stage`, `decisions_update` (dict), and optional `reason`.
+        """
+        deal = self.get_object()
+        active_stage = request.data.get('active_stage')
+        decisions_update = request.data.get('decisions_update')
+        reason = request.data.get('reason')
+        
+        # 1. Update Decisions (Allow reset if explicitly empty dict)
+        if decisions_update is not None:
+            if decisions_update == {}:
+                deal.deal_flow_decisions = {}
+            else:
+                current_decisions = deal.deal_flow_decisions or {}
+                current_decisions.update(decisions_update)
+                deal.deal_flow_decisions = current_decisions
+        
+        # 2. Update active stage & create log if changed
+        if active_stage and deal.current_phase != active_stage:
+            from_phase = deal.current_phase
+            deal.current_phase = active_stage
+            
+            DealPhaseLog.objects.create(
+                deal=deal,
+                from_phase=from_phase,
+                to_phase=active_stage,
+                rationale=reason,
+                changed_by=request.user.profile if hasattr(request.user, 'profile') else None
+            )
+            
+        # 3. Rejection tracking (Check for presence in request.data to allow nulling)
+        if 'rejection_stage_id' in request.data:
+            deal.rejection_stage_id = request.data.get('rejection_stage_id')
+            deal.rejection_reason = reason
+            
+        deal.save(update_fields=['deal_flow_decisions', 'current_phase', 'rejection_stage_id', 'rejection_reason'])
+        
+        return Response({
+            "status": "success",
+            "current_phase": deal.current_phase,
+            "deal_flow_decisions": deal.deal_flow_decisions
+        })
+
     @action(detail=False, methods=['post'])
     def analyze_folder(self, request):
         """
@@ -596,3 +642,182 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             response["error"] = str(result.info)
             
         return Response(response)
+
+    @action(detail=True, methods=['post'])
+    def analyze_additional_documents(self, request, pk=None):
+        """
+        Updates the AI Summary (V2 Analysis) using the existing analysis and newly selected documents.
+        """
+        deal = self.get_object()
+        document_ids = request.data.get('document_ids', [])
+        
+        if not document_ids:
+            return Response({"error": "No document IDs provided"}, status=400)
+            
+        docs = deal.documents.filter(id__in=document_ids)
+        if not docs.exists():
+            return Response({"error": "No matching documents found for this deal"}, status=400)
+            
+        # 1. Combine new text
+        new_text_context = ""
+        for doc in docs:
+            if doc.extracted_text:
+                new_text_context += f"\n\n--- NEW DOCUMENT: {doc.title} ---\n{doc.extracted_text}"
+                
+        if not new_text_context.strip():
+            return Response({"error": "Selected documents have no extracted text to analyze"}, status=400)
+
+        # 2. Build Prompt Context
+        from ai_orchestrator.services.ai_processor import AIProcessorService
+        from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+        import json
+        from django.utils import timezone
+        
+        ai_service = AIProcessorService()
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        
+        existing_summary = deal.deal_summary or ""
+        existing_json = json.dumps(deal.analysis_json, default=str) if deal.analysis_json else "{}"
+        
+        # We now use the database skill instead of hardcoding the prompt
+        # We pass the context via metadata to process_content
+        current_version = len(deal.analysis_history or []) + 2 # V1 is deal_summary, so next is V2
+        
+        # 3. Create Audit Log
+        audit_log = AIAuditLog.objects.create(
+            source_type='vdr_incremental_analysis',
+            source_id=str(deal.id),
+            personality=personality,
+            status='PROCESSING',
+            is_success=False,
+            model_used='qwen3.5:latest',
+            system_prompt="Updating existing deal analysis with new documents.",
+            user_prompt=new_text_context
+        )
+        
+        # 4. Run Analysis
+        try:
+            result = ai_service.process_content(
+                content=new_text_context,
+                skill_name="vdr_incremental_analysis",
+                source_type="vdr_incremental_analysis",
+                source_id=str(deal.id),
+                metadata={
+                    'audit_log_id': str(audit_log.id),
+                    'existing_summary': existing_summary,
+                    'version_num': current_version
+                }
+            )
+            
+            analysis = {}
+            raw_thinking = ""
+            if isinstance(result, dict) and 'parsed_json' in result:
+                analysis = result['parsed_json']
+                raw_thinking = result.get('thinking', '')
+            else:
+                analysis = result
+                raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
+                
+            if analysis and "error" not in analysis:
+                # Update Deal JSON Fields
+                deal.analysis_json = analysis
+                if 'deal_model_data' in analysis:
+                    deal.themes = analysis['deal_model_data'].get('themes', deal.themes)
+                if 'metadata' in analysis:
+                    deal.ambiguities = analysis['metadata'].get('ambiguous_points', deal.ambiguities)
+                    
+                # Append to History instead of overwriting V1
+                if 'analyst_report' in analysis:
+                    new_history = list(deal.analysis_history or [])
+                    new_history.append({
+                        "version": current_version,
+                        "report": analysis['analyst_report'],
+                        "timestamp": timezone.now().isoformat(),
+                        "documents_analyzed": [d.title for d in docs]
+                    })
+                    deal.analysis_history = new_history
+                
+                # Append thinking
+                if raw_thinking:
+                    deal.thinking = (deal.thinking or "") + f"\n\n--- V{current_version} INCREMENTAL ANALYSIS ---\n{raw_thinking}"
+                    
+                deal.save()
+                
+                # Mark docs as analyzed
+                docs.update(is_ai_analyzed=True)
+                
+                return Response({
+                    "status": "success",
+                    "message": f"Successfully updated analysis using {docs.count()} documents."
+                })
+            else:
+                 return Response({"error": "AI failed to generate a valid updated summary.", "details": analysis}, status=500)
+                 
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Incremental analysis failed: {str(e)}")
+            return Response({"error": str(e)}, status=500)
+
+    @action(detail=True, methods=['post'])
+    def upload_document(self, request, pk=None):
+        """
+        Manually upload a file to the deal's VDR.
+        """
+        deal = self.get_object()
+        file_obj = request.FILES.get('file')
+        
+        if not file_obj:
+            return Response({"error": "No file provided"}, status=400)
+            
+        try:
+            from ai_orchestrator.services.document_processor import DocumentProcessorService
+            from ai_orchestrator.services.embedding_processor import EmbeddingService
+            
+            doc_processor = DocumentProcessorService()
+            embed_service = EmbeddingService()
+            
+            file_content = file_obj.read()
+            file_name = file_obj.name
+            
+            from .models import DocumentType
+            doc_type = DocumentType.OTHER
+            name_lower = file_name.lower()
+            if any(k in name_lower for k in ['financial', 'mis', 'model', 'projection']): 
+                doc_type = DocumentType.FINANCIALS
+            elif any(k in name_lower for k in ['legal', 'sha', 'ssa', 'term sheet']): 
+                doc_type = DocumentType.LEGAL
+            elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
+                doc_type = DocumentType.PITCH_DECK
+                
+            extracted_text = doc_processor.extract_text(file_content, file_name)
+            
+            from .models import DealDocument
+            doc = DealDocument.objects.create(
+                deal=deal,
+                title=file_name,
+                document_type=doc_type,
+                extracted_text=extracted_text,
+                is_indexed=False,
+                is_ai_analyzed=False,
+                uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
+            )
+            
+            if extracted_text and len(extracted_text.strip()) > 50:
+                new_context = f"\n\n--- MANUAL DOCUMENT: {file_name} ---\n{extracted_text}"
+                deal.extracted_text = (deal.extracted_text or "") + new_context
+                deal.save(update_fields=['extracted_text'])
+                
+                embed_service.vectorize_document(doc)
+                
+            from .serializers import DealDocumentSerializer
+            return Response({
+                "status": "success",
+                "document": DealDocumentSerializer(doc).data
+            })
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Manual upload failed: {str(e)}")
+            return Response({"error": str(e)}, status=500)

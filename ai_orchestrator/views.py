@@ -113,6 +113,18 @@ class DealChatView(APIView):
         try:
             deal = Deal.objects.get(id=deal_id)
             
+            # Fetch timeline/phase logs
+            phase_logs = deal.phase_logs.all().order_by('changed_at')
+            timeline = []
+            for log in phase_logs:
+                timeline.append({
+                    "from": log.from_phase,
+                    "to": log.to_phase,
+                    "rationale": log.rationale,
+                    "timestamp": log.changed_at.isoformat(),
+                    "changed_by": log.changed_by.user.email if log.changed_by and log.changed_by.user else "System"
+                })
+
             # Create a rich, structured representation of the deal's forensic data
             structured_data = {
                 "title": deal.title,
@@ -120,6 +132,7 @@ class DealChatView(APIView):
                 "sector": deal.sector,
                 "funding_ask": deal.funding_ask,
                 "priority": deal.priority,
+                "current_phase": deal.current_phase,
                 "themes": deal.themes if isinstance(deal.themes, list) else [],
                 "ambiguities": deal.ambiguities if isinstance(deal.ambiguities, list) else [],
                 "forensic_summary": deal.deal_summary,
@@ -128,7 +141,8 @@ class DealChatView(APIView):
                     "management_meeting": deal.management_meeting,
                     "proposal_stage": deal.business_proposal_stage,
                     "ic_stage": deal.ic_stage
-                }
+                },
+                "timeline_history": timeline
             }
             
             embed_service = EmbeddingService()
@@ -245,19 +259,29 @@ RULES:
             context_data["pipeline_overview"] = f"Total deals in system: {total_deals}. Context provided for {deals.count()} deals."
 
             # EXPOSE RICH FORENSIC DATA
-            context_data["deals"] = [{
-                "title": d.title, 
-                "industry": d.industry, 
-                "sector": d.sector,
-                "ask": d.funding_ask,
-                "city": d.city,
-                "priority": d.priority,
-                "is_female_led": d.is_female_led,
-                "management_met": d.management_meeting,
-                "themes": d.themes if isinstance(d.themes, list) else [],
-                "ambiguities": d.ambiguities if isinstance(d.ambiguities, list) else [],
-                "summary": d.deal_summary[:1000] if d.deal_summary else ""
-            } for d in deals]
+            context_data["deals"] = []
+            for d in deals:
+                # Get a brief summary of the last 3 phase changes for timeline context
+                logs = d.phase_logs.all().order_by('-changed_at')[:3]
+                deal_timeline = []
+                for l in logs:
+                    deal_timeline.append(f"{l.changed_at.date()}: {l.from_phase} -> {l.to_phase} (Rationale: {l.rationale or 'N/A'})")
+
+                context_data["deals"].append({
+                    "title": d.title, 
+                    "industry": d.industry, 
+                    "sector": d.sector,
+                    "ask": d.funding_ask,
+                    "city": d.city,
+                    "priority": d.priority,
+                    "current_phase": d.current_phase,
+                    "is_female_led": d.is_female_led,
+                    "management_met": d.management_meeting,
+                    "themes": d.themes if isinstance(d.themes, list) else [],
+                    "ambiguities": d.ambiguities if isinstance(d.ambiguities, list) else [],
+                    "summary": d.deal_summary[:1000] if d.deal_summary else "",
+                    "recent_timeline": deal_timeline
+                })
 
             rag_query = intent_result.get("global_rag")
             if rag_query:
@@ -418,10 +442,13 @@ class AISettingsView(APIView):
             updates = request.data.get("updates", {})
             action = updates.get('action')
             
+            import random, string
+            def rand_suffix(): return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+
             if target_type == 'personality':
                 if target_id == 'new':
                     AIPersonality.objects.create(
-                        name=updates.get('name', 'New Personality'),
+                        name=f"{updates.get('name', 'New Personality')} {rand_suffix()}",
                         description=updates.get('description', ''),
                         system_instructions=updates.get('system_instructions', 'You are...'),
                         is_default=False
@@ -435,13 +462,33 @@ class AISettingsView(APIView):
                     for k, v in updates.items(): setattr(obj, k, v)
                     obj.save()
             elif target_type == 'skill':
-                obj = AISkill.objects.get(id=target_id)
-                for k, v in updates.items(): setattr(obj, k, v)
-                obj.save()
+                if target_id == 'new':
+                    AISkill.objects.create(
+                        name=f"{updates.get('name', 'New Skill')} {rand_suffix()}",
+                        description=updates.get('description', ''),
+                        prompt_template=updates.get('prompt_template', '')
+                    )
+                elif action == 'delete':
+                    AISkill.objects.get(id=target_id).delete()
+                else:
+                    obj = AISkill.objects.get(id=target_id)
+                    for k, v in updates.items(): setattr(obj, k, v)
+                    obj.save()
             elif target_type == 'protocol':
-                obj = AnalysisProtocol.objects.get(id=target_id)
-                for k, v in updates.items(): setattr(obj, k, v)
-                obj.save()
+                if target_id == 'new':
+                    AnalysisProtocol.objects.create(
+                        name=f"{updates.get('name', 'New Protocol')} {rand_suffix()}",
+                        directives=updates.get('directives', []),
+                        is_active=False
+                    )
+                elif action == 'delete':
+                    obj = AnalysisProtocol.objects.get(id=target_id)
+                    if not obj.is_active:
+                        obj.delete()
+                else:
+                    obj = AnalysisProtocol.objects.get(id=target_id)
+                    for k, v in updates.items(): setattr(obj, k, v)
+                    obj.save()
                 
             return Response({"success": True})
         except Exception as e: 

@@ -71,13 +71,13 @@ class Email(models.Model):
 
     # Graph API identifiers
     graph_id = models.CharField(
-        max_length=255,
+        max_length=1000,
         unique=True,
         db_index=True,
         help_text='Microsoft Graph API message ID'
     )
     internet_message_id = models.CharField(
-        max_length=500,
+        max_length=1000,
         blank=True,
         null=True,
         db_index=True,
@@ -130,7 +130,7 @@ class Email(models.Model):
     is_read_receipt_requested = models.BooleanField(default=False)
 
     # Conversation threading
-    conversation_id = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    conversation_id = models.CharField(max_length=1000, blank=True, null=True, db_index=True)
     conversation_index = models.TextField(blank=True, null=True)
 
     # Categories and flags
@@ -148,7 +148,7 @@ class Email(models.Model):
 
     # Attachments and links
     has_attachments = models.BooleanField(default=False)
-    web_link = models.URLField(blank=True, null=True, help_text='Outlook web link')
+    web_link = models.URLField(max_length=1000, blank=True, null=True, help_text='Outlook web link')
 
     # Extended metadata
     graph_metadata = models.JSONField(

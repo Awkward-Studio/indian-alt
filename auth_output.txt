@@ -1,0 +1,13 @@
+/home/omi/Omi_Home_NAS/Code/Work/India-Alternatives/indian-alt/venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+Device-code authentication failed for dms-demo@india-alt.com: AADSTS70016: OAuth 2.0 device flow error. Authorization is pending. Continue polling. Trace ID: 82e7a069-094f-4241-9e63-10b36a8a0000 Correlation ID: cf555cf0-cbfb-4e21-8255-6939352717dc Timestamp: 2026-03-14 04:45:17Z
+Traceback (most recent call last):
+  File "/home/omi/Omi_Home_NAS/Code/Work/India-Alternatives/indian-alt/microsoft/management/commands/authenticate_ms_graph_device.py", line 57, in handle
+    raise CommandError(finish_msg)
+django.core.management.base.CommandError: AADSTS70016: OAuth 2.0 device flow error. Authorization is pending. Continue polling. Trace ID: 82e7a069-094f-4241-9e63-10b36a8a0000 Correlation ID: cf555cf0-cbfb-4e21-8255-6939352717dc Timestamp: 2026-03-14 04:45:17Z
+CommandError: Authentication error: AADSTS70016: OAuth 2.0 device flow error. Authorization is pending. Continue polling. Trace ID: 82e7a069-094f-4241-9e63-10b36a8a0000 Correlation ID: cf555cf0-cbfb-4e21-8255-6939352717dc Timestamp: 2026-03-14 04:45:17Z
+Starting device-code authentication for dms-demo@india-alt.com...
+This will ask you to open a Microsoft login page and enter a code.
+To sign in, use a web browser to open the page https://login.microsoft.com/device and enter the code IZVZ5PBAL to authenticate.
+
+Waiting for you to finish sign-in in the browser...

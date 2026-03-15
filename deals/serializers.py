@@ -72,6 +72,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'deal_summary', 'industry', 'sector', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'extracted_text',
-            'thinking', 'ambiguities'
+            'thinking', 'ambiguities', 'deal_flow_decisions',
+            'rejection_stage_id', 'rejection_reason', 'analysis_history'
         )
         read_only_fields = ('id', 'created_at')
