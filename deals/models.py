@@ -144,16 +144,6 @@ class Deal(models.Model):
     )
     extracted_text = models.TextField(blank=True, null=True, help_text='Combined text from linked source (Email/Files) for RAG context')
     
-    # Forensic Analysis Storage
-    thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
-    ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
-    analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
-    analysis_history = models.JSONField(
-        default=list, 
-        blank=True, 
-        help_text='Array of incremental analysis reports (v2, v3, etc.)'
-    )
-    
     source_onedrive_id = models.CharField(
         max_length=255,
         null=True,
@@ -194,6 +184,60 @@ class Deal(models.Model):
 
     def __str__(self):
         return self.title or f'Deal {self.id}'
+
+    @property
+    def latest_analysis(self):
+        return self.analyses.order_by('-version', '-created_at').first()
+
+    @property
+    def thinking(self):
+        analysis = self.latest_analysis
+        return analysis.thinking if analysis else None
+
+    @property
+    def ambiguities(self):
+        analysis = self.latest_analysis
+        return analysis.ambiguities if analysis else []
+
+    @property
+    def analysis_json(self):
+        analysis = self.latest_analysis
+        return analysis.analysis_json if analysis else {}
+
+    @property
+    def analysis_history(self):
+        analyses = self.analyses.order_by('version', 'created_at')
+        history = []
+        for analysis in analyses:
+            history.append({
+                'version': analysis.version,
+                'thinking': analysis.thinking,
+                'ambiguities': analysis.ambiguities,
+                'analysis_json': analysis.analysis_json,
+                'created_at': analysis.created_at.isoformat() if analysis.created_at else None
+            })
+        return history
+
+
+class DealAnalysis(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='analyses'
+    )
+    version = models.IntegerField(default=1)
+    thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
+    ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
+    analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_analysis'
+        ordering = ['-version', '-created_at']
+
+    def __str__(self):
+        return f"Analysis v{self.version} for {self.deal.title}"
 
 
 class DealPhaseLog(models.Model):

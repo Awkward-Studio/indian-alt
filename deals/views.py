@@ -11,6 +11,9 @@ from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer, 
     DealDocumentSerializer, DealPhaseLogSerializer
 )
+from .services.deal_creation import DealCreationService
+from .services.deal_flow import DealFlowService
+from .services.folder_analysis import FolderAnalysisService
 
 logger = logging.getLogger(__name__)
 
@@ -132,137 +135,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         return DealSerializer
     
     def perform_create(self, serializer):
-        # source_email_id, contact_discovery, and analysis_json are passed in validated_data
-        source_email_id = serializer.validated_data.pop('source_email_id', None)
-        contact_discovery = serializer.validated_data.pop('contact_discovery', None)
-        analysis_json = serializer.validated_data.pop('analysis_json', None)
-        
-        # If strings, parse to dict
-        import json
-        if isinstance(contact_discovery, str):
-            try: contact_discovery = json.loads(contact_discovery)
-            except: contact_discovery = None
-        if isinstance(analysis_json, str):
-            try: analysis_json = json.loads(analysis_json)
-            except: analysis_json = None
-                
         deal = serializer.save()
-        
-        # 0. Handle Ambiguities mapping from AI metadata
-        if analysis_json and 'metadata' in analysis_json:
-            try:
-                ambiguities = analysis_json['metadata'].get('ambiguous_points', [])
-                if ambiguities:
-                    deal.ambiguities = ambiguities
-                    deal.save(update_fields=['ambiguities'])
-            except: pass
-
-        # 1. Handle Contact & Bank Discovery
-        if contact_discovery:
-            try:
-                from banks.models import Bank
-                from contacts.models import Contact
-                
-                firm_name = contact_discovery.get('firm_name')
-                firm_domain = contact_discovery.get('firm_domain')
-                banker_name = contact_discovery.get('name')
-                
-                bank = None
-                if firm_domain:
-                    bank = Bank.objects.filter(website_domain__iexact=firm_domain).first()
-                if not bank and firm_name:
-                    bank = Bank.objects.filter(name__icontains=firm_name).first()
-                
-                # Create Bank if not found
-                if not bank and firm_name:
-                    bank = Bank.objects.create(name=firm_name, website_domain=firm_domain)
-                
-                if banker_name:
-                    # Find or create contact
-                    contact, created = Contact.objects.get_or_create(
-                        name=banker_name,
-                        bank=bank,
-                        defaults={
-                            'designation': contact_discovery.get('designation'),
-                            'linkedin_url': contact_discovery.get('linkedin')
-                        }
-                    )
-                    deal.primary_contact = contact
-                    if bank: deal.bank = bank
-                    
-                    # Increment source count for influencer tracking
-                    contact.source_count += 1
-                    contact.save(update_fields=['source_count'])
-                    deal.save(update_fields=['primary_contact', 'bank'])
-                    print(f"[DISCOVERY] Linked {deal.title} to {banker_name} ({firm_name})")
-            except Exception as e:
-                logger.error(f"Discovery error: {str(e)}")
-
-        # 2. Handle Email Linking & Threading
-        if source_email_id:
-            try:
-                from microsoft.models import Email
-                from ai_orchestrator.services.embedding_processor import EmbeddingService
-                
-                source_email = Email.objects.filter(id=source_email_id).first()
-                if source_email:
-                    source_email.deal = deal
-                    source_email.is_processed = True
-                    source_email.save(update_fields=['deal', 'is_processed'])
-                    
-                    # LINK THE WHOLE THREAD (All replies/forwards in this conversation)
-                    if source_email.conversation_id:
-                        Email.objects.filter(
-                            conversation_id=source_email.conversation_id
-                        ).update(deal=deal)
-                        print(f"[THREADING] Linked entire thread {source_email.conversation_id} to deal")
-
-                    # 3. Create DealDocument records for attachments
-                    if source_email.attachments:
-                        from .models import DealDocument, DocumentType
-                        for att in source_email.attachments:
-                            # Avoid duplicates
-                            if not DealDocument.objects.filter(deal=deal, title=att.get('name')).exists():
-                                # Determine type from filename
-                                name = att.get('name', '').lower()
-                                doc_type = DocumentType.OTHER
-                                if 'financial' in name or 'mis' in name or 'model' in name: doc_type = DocumentType.FINANCIALS
-                                elif 'legal' in name or 'sha' in name or 'ssa' in name: doc_type = DocumentType.LEGAL
-                                elif 'teaser' in name or 'deck' in name or 'pitch' in name: doc_type = DocumentType.PITCH_DECK
-                                
-                                DealDocument.objects.create(
-                                    deal=deal,
-                                    title=att.get('name'),
-                                    document_type=doc_type,
-                                    onedrive_id=att.get('id'),
-                                    uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
-                                )
-                                print(f"[DOCUMENT] Created DealDocument artifact: {att.get('name')}")
-                                
-                                # 4. Semantic Indexing for the Document
-                                try:
-                                    # Since we don't have the text yet (it needs download/OCR),
-                                    # the document processor will usually handle this later.
-                                    # BUT, if we want to trigger it, we need text.
-                                    # For now, we've registered the intent.
-                                    pass
-                                except Exception as e:
-                                    logger.error(f"Doc indexing failed: {str(e)}")
-
-                    # Copy extracted text to deal if empty
-                    if not deal.extracted_text and source_email.extracted_text:
-                        deal.extracted_text = source_email.extracted_text
-                        deal.save(update_fields=['extracted_text'])
-                    
-                    # Asynchronous vectorization
-                    try:
-                        embed_service = EmbeddingService()
-                        embed_service.vectorize_deal(deal)
-                        embed_service.vectorize_email(source_email)
-                    except Exception as e:
-                        logger.error(f"Vectorization failed: {str(e)}")
-            except Exception as e:
-                logger.error(f"Email linking failed: {str(e)}")
+        DealCreationService.process_deal_creation(deal, serializer.validated_data, self.request.user)
 
     @extend_schema(
         summary="Get deals grouped by priority",
@@ -299,32 +173,13 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Transitions a deal to a new phase and logs the rationale.
         """
         deal = self.get_object()
-        to_phase = request.data.get('to_phase')
-        rationale = request.data.get('rationale')
-        
-        if not to_phase:
-            return Response({"error": "to_phase is required"}, status=400)
-            
-        from_phase = getattr(deal, 'current_phase', None)
-        
-        # 1. Update the Deal
-        deal.current_phase = to_phase
-        deal.save(update_fields=['current_phase'])
-        
-        # 2. Log the transition
-        DealPhaseLog.objects.create(
+        result = DealFlowService.transition_phase(
             deal=deal,
-            from_phase=from_phase,
-            to_phase=to_phase,
-            rationale=rationale,
-            changed_by=request.user.profile if hasattr(request.user, 'profile') else None
+            to_phase=request.data.get('to_phase'),
+            rationale=request.data.get('rationale'),
+            request_user=request.user
         )
-        
-        return Response({
-            "status": "success",
-            "from_phase": from_phase,
-            "to_phase": to_phase
-        })
+        return Response(result)
 
     @action(detail=True, methods=['post'])
     def update_flow_state(self, request, pk=None):
@@ -333,44 +188,15 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Accepts `active_stage`, `decisions_update` (dict), and optional `reason`.
         """
         deal = self.get_object()
-        active_stage = request.data.get('active_stage')
-        decisions_update = request.data.get('decisions_update')
-        reason = request.data.get('reason')
-        
-        # 1. Update Decisions (Allow reset if explicitly empty dict)
-        if decisions_update is not None:
-            if decisions_update == {}:
-                deal.deal_flow_decisions = {}
-            else:
-                current_decisions = deal.deal_flow_decisions or {}
-                current_decisions.update(decisions_update)
-                deal.deal_flow_decisions = current_decisions
-        
-        # 2. Update active stage & create log if changed
-        if active_stage and deal.current_phase != active_stage:
-            from_phase = deal.current_phase
-            deal.current_phase = active_stage
-            
-            DealPhaseLog.objects.create(
-                deal=deal,
-                from_phase=from_phase,
-                to_phase=active_stage,
-                rationale=reason,
-                changed_by=request.user.profile if hasattr(request.user, 'profile') else None
-            )
-            
-        # 3. Rejection tracking (Check for presence in request.data to allow nulling)
-        if 'rejection_stage_id' in request.data:
-            deal.rejection_stage_id = request.data.get('rejection_stage_id')
-            deal.rejection_reason = reason
-            
-        deal.save(update_fields=['deal_flow_decisions', 'current_phase', 'rejection_stage_id', 'rejection_reason'])
-        
-        return Response({
-            "status": "success",
-            "current_phase": deal.current_phase,
-            "deal_flow_decisions": deal.deal_flow_decisions
-        })
+        result = DealFlowService.update_flow_state(
+            deal=deal,
+            active_stage=request.data.get('active_stage'),
+            decisions_update=request.data.get('decisions_update'),
+            reason=request.data.get('reason'),
+            rejection_stage_id=request.data.get('rejection_stage_id'),
+            request_user=request.user
+        )
+        return Response(result)
 
     @action(detail=True, methods=['get'])
     def get_paginated_extracted_text(self, request, pk=None):
@@ -398,106 +224,25 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """
         Kicks off an asynchronous folder analysis. Returns a task_id.
         """
-        import traceback
-        try:
-            folder_id = request.data.get('folder_id')
-            folder_name = request.data.get('folder_name', folder_id)
-            drive_id = request.data.get('drive_id')
+        folder_id = request.data.get('folder_id')
+        folder_name = request.data.get('folder_name', folder_id)
+        drive_id = request.data.get('drive_id')
+        
+        if not folder_id:
+            return Response({"error": "folder_id is required"}, status=400)
             
-            if not folder_id:
-                return Response({"error": "folder_id is required"}, status=400)
-                
-            from microsoft.services.graph_service import DMS_USER_EMAIL
-            from .tasks import analyze_folder_async
-            from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
-            
-            # 1. Create a PENDING audit log immediately for visibility
-            personality = AIPersonality.objects.filter(is_default=True).first()
-            skill = AISkill.objects.filter(name='deal_extraction').first()
-            
-            audit_log = AIAuditLog.objects.create(
-                source_type='onedrive_folder',
-                source_id=folder_id,
-                context_label=f"Folder: {folder_name}",
-                personality=personality,
-                skill=skill,
-                status='PENDING',
-                is_success=False,
-                model_used='qwen3.5:latest',
-                system_prompt="Queued for forensic traversal...",
-                user_prompt=f"Queued analysis for folder: {folder_name}"
-            )
-
-            # 2. Trigger task
-            task = analyze_folder_async.apply_async(
-                kwargs={
-                    'drive_id': drive_id,
-                    'folder_id': folder_id,
-                    'user_email': DMS_USER_EMAIL,
-                    'audit_log_id': str(audit_log.id) 
-                },
-                queue='celery'
-            )
-            
-            audit_log.celery_task_id = task.id
-            audit_log.save()
-            
-            return Response({
-                "task_id": task.id,
-                "audit_log_id": str(audit_log.id),
-                "status": "queued"
-            })
-        except Exception as e:
-            print(f"[CRITICAL ERROR] analyze_folder failed:")
-            print(traceback.format_exc())
-            return Response({"error": str(e)}, status=500)
+        result = FolderAnalysisService.queue_folder_analysis(folder_id, folder_name, drive_id)
+        return Response(result)
 
     @action(detail=False, methods=['get'], url_path='task-status/(?P<task_id>[^/.]+)')
     def task_status(self, request, task_id=None):
         """
         Polls the status of an AI analysis task.
         """
-        from celery.result import AsyncResult
-        from django.core.cache import cache
-        import uuid
-        
-        result = AsyncResult(task_id)
-        
-        response = {
-            "task_id": task_id,
-            "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
-        }
-        
-        if result.status == 'SUCCESS':
-            data = result.result
-            if "error" in data:
-                return Response(data, status=500)
-                
-            # If successful, we wrap it in a session ID for the confirmation step
-            # exactly like before, but now we get the data from the task result
-            session_id = str(uuid.uuid4())
-            cache.set(f"folder_sync_{session_id}", {
-                "file_tree": data['file_tree'],
-                "drive_id": data['drive_id'],
-                "folder_id": data['folder_id'],
-                "user_email": data['user_email'],
-                "preliminary_data": data['preliminary_data'],
-                "preview_text": data.get('preview_text', '')
-            }, timeout=3600)
-            
-            response.update({
-                "session_id": session_id,
-                "folder_id": data['folder_id'],
-                "total_files": data['total_files'],
-                "preview_files_analyzed": data['preview_files_analyzed'],
-                "preliminary_data": data['preliminary_data'],
-                "raw_thinking": data.get('raw_thinking', '')
-            })
-            
-        elif result.status == 'FAILURE':
-            response["error"] = str(result.info)
-            
-        return Response(response)
+        result = FolderAnalysisService.get_task_status(task_id)
+        if result.get("status") == "FAILURE" or "error" in result:
+            return Response(result, status=500)
+        return Response(result)
 
     @action(detail=False, methods=['post'])
     def create_from_audit_log(self, request):
@@ -508,42 +253,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         log_id = request.data.get('audit_log_id')
         if not log_id:
             return Response({"error": "audit_log_id is required"}, status=400)
-            
-        from ai_orchestrator.models import AIAuditLog
-        from django.core.cache import cache
-        import uuid
         
-        try:
-            log = AIAuditLog.objects.get(id=log_id)
-            if log.source_type != 'onedrive_folder':
-                return Response({"error": "This audit log is not a folder analysis"}, status=400)
-            
-            meta = log.source_metadata
-            if not meta:
-                return Response({"error": "This log does not contain source metadata"}, status=400)
-                
-            # Re-cache exactly like the task_status poller does
-            from microsoft.services.graph_service import DMS_USER_EMAIL
-            session_id = str(uuid.uuid4())
-            cache.set(f"folder_sync_{session_id}", {
-                "file_tree": meta['file_tree'],
-                "drive_id": meta['drive_id'],
-                "folder_id": meta['folder_id'],
-                "user_email": DMS_USER_EMAIL,
-                "preliminary_data": log.parsed_json,
-                "preview_text": meta.get('preview_text', '')
-            }, timeout=3600)
-            
-            return Response({
-                "session_id": session_id,
-                "preliminary_data": log.parsed_json,
-                "total_files": meta.get('total_files', len(meta['file_tree'])),
-                "preview_files_analyzed": 5, # Default
-                "raw_thinking": log.raw_response # Fallback
-            })
-            
-        except AIAuditLog.DoesNotExist:
-            return Response({"error": "Audit log not found"}, status=404)
+        result = FolderAnalysisService.create_session_from_audit_log(log_id)
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result)
 
     @action(detail=False, methods=['post'])
     def confirm_folder_deal(self, request):
@@ -557,113 +271,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if not session_id or not deal_data:
             return Response({"error": "session_id and deal_data are required"}, status=400)
             
-        from django.core.cache import cache
-        session_data = cache.get(f"folder_sync_{session_id}")
-        
-        if not session_data:
-            return Response({"error": "Session expired or invalid. Please re-analyze the folder."}, status=400)
-            
         # 1. Create the Deal
         serializer = self.get_serializer(data=deal_data)
         if serializer.is_valid():
-            # Extract forensic mapping from session data if not in deal_data
-            # Just like perform_create does for emails
-            analysis_json = session_data.get('preliminary_data', {})
-            
-            deal = serializer.save(
-                processing_status='processing',
-                source_onedrive_id=session_data.get('folder_id'),
-                source_drive_id=session_data.get('drive_id'),
-                extracted_text=session_data.get('preview_text', '')
-            )
-            
-            # Map forensic fields manually if they came from AI
-            if analysis_json:
-                deal.analysis_json = analysis_json
-                if 'metadata' in analysis_json:
-                    deal.ambiguities = analysis_json['metadata'].get('ambiguous_points', [])
-                if 'deal_model_data' in analysis_json:
-                    deal.themes = analysis_json['deal_model_data'].get('themes', [])
-                
-                # IMPORTANT: Populate the initial Source Data Hub with the preview text
-                # so it's not empty while background indexing runs.
-                if 'analyst_report' in analysis_json:
-                    # We can use the report as initial text or if we have raw combined text
-                    # In our case, we'll store the report itself as part of the summary,
-                    # but extracted_text should ideally contain the raw signals.
-                    # For now, let's keep it clean.
-                    pass
-                deal.save()
-            
-            # 2. Trigger Background Task
-            from .tasks import process_deal_folder_background
-            process_deal_folder_background.apply_async(
-                kwargs={
-                    'deal_id': str(deal.id),
-                    'file_tree_map': session_data['file_tree'],
-                    'user_email': session_data['user_email']
-                },
-                queue='celery'
-            )
-            
-            # Optionally clear cache
-            cache.delete(f"folder_sync_{session_id}")
-            
-            return Response({
-                "status": "success",
-                "deal_id": deal.id,
-                "message": f"Deal created. Processing {len(session_data['file_tree'])} files in background."
-            }, status=201)
+            deal = serializer.save()
+            result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
+            if "error" in result:
+                return Response(result, status=400)
+            return Response(result, status=201)
             
         return Response(serializer.errors, status=400)
-
-    @action(detail=False, methods=['get'], url_path='task-status/(?P<task_id>[^/.]+)')
-    def task_status(self, request, task_id=None):
-        """
-        Polls the status of an AI analysis task.
-        """
-        from celery.result import AsyncResult
-        from django.core.cache import cache
-        import uuid
-        
-        result = AsyncResult(task_id)
-        
-        response = {
-            "task_id": task_id,
-            "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
-        }
-        
-        if result.status == 'SUCCESS':
-            data = result.result
-            if not data:
-                 return Response({"status": "FAILURE", "error": "Task returned no data"}, status=500)
-            if "error" in data:
-                return Response(data, status=500)
-                
-            # If successful, we wrap it in a session ID for the confirmation step
-            session_id = str(uuid.uuid4())
-            cache.set(f"folder_sync_{session_id}", {
-                "file_tree": data['file_tree'],
-                "drive_id": data['drive_id'],
-                "folder_id": data['folder_id'],
-                "user_email": data['user_email'],
-                "preliminary_data": data['preliminary_data'],
-                "preview_text": data.get('preview_text', '')
-            }, timeout=3600)
-            
-            response.update({
-                "session_id": session_id,
-                "folder_id": data['folder_id'],
-                "total_files": data['total_files'],
-                "preview_files_analyzed": data['preview_files_analyzed'],
-                "preliminary_data": data['preliminary_data'],
-                "raw_thinking": data.get('raw_thinking', '')
-            })
-            
-        elif result.status == 'FAILURE':
-            response["error"] = str(result.info)
-            
-        return Response(response)
 
     @action(detail=True, methods=['post'])
     def analyze_additional_documents(self, request, pk=None):

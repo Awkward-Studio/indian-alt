@@ -49,3 +49,6 @@ azure-mgmt-compute
 azure-identity
 celery
 redis
+channels
+channels-redis
+daphne

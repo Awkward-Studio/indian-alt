@@ -14,6 +14,7 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-in-producti
 
 # Application definition
 INSTALLED_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -29,6 +30,7 @@ INSTALLED_APPS = [
     'django_extensions',
     'django_filters',
     'pgvector',
+    'channels',
     
     # Local apps
     'accounts',
@@ -41,6 +43,17 @@ INSTALLED_APPS = [
     'microsoft',
     'ai_orchestrator',
 ]
+
+ASGI_APPLICATION = 'config.asgi.application'
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [config('REDIS_URL', default='redis://localhost:6379/0')],
+        },
+    },
+}
 
 def _csv_list(value: str):
     items = [s.strip() for s in (value or "").split(",") if s.strip()]
@@ -182,6 +195,16 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+
+CELERY_TASK_ROUTES = {
+    'ai_orchestrator.tasks.generate_chat_response_async': {'queue': 'high_priority'},
+    'deals.tasks.analyze_folder_async': {'queue': 'high_priority'},
+    'deals.tasks.analyze_additional_documents_async': {'queue': 'high_priority'},
+    'deals.tasks.process_deal_folder_background': {'queue': 'low_priority'},
+    'deals.tasks.process_single_document_async': {'queue': 'low_priority'},
+    'deals.tasks.finalize_folder_background': {'queue': 'low_priority'},
+}
+CELERY_TASK_DEFAULT_QUEUE = 'default'
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = config(

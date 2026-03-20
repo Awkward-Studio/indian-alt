@@ -390,7 +390,7 @@ class GraphAPIService:
 
         Resolution order:
         1. Shared-folder URL(s) (supports comma-separated list)
-        2. Legacy drive path
+        2. Legacy drive path(s) (supports comma-separated list)
         3. Drive root
         """
         if DMS_SHARED_FOLDER_URL:
@@ -426,21 +426,40 @@ class GraphAPIService:
                 # Fall through to legacy drive path on error
 
         if DMS_DRIVE_ID and DMS_FOLDER_PATH:
-            try:
-                return self.list_folder_by_drive_path(DMS_DRIVE_ID, DMS_FOLDER_PATH, user_email, top)
-            except HTTPError as exc:
-                response = getattr(exc, "response", None)
-                if response is not None and response.status_code == 404:
-                    logger.warning(
-                        "Configured DMS folder path '%s' was not found in drive %s. Falling back to drive root.",
-                        DMS_FOLDER_PATH,
-                        DMS_DRIVE_ID,
-                    )
-                    return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
-                raise
+            paths = [p.strip() for p in DMS_FOLDER_PATH.split(',') if p.strip()]
+            
+            if len(paths) > 1:
+                # Multiple paths: return the folders themselves as the root view
+                items = []
+                for path in paths:
+                    try:
+                        # Use root:/path: to get the folder item itself
+                        info = self.get_drive_item(DMS_DRIVE_ID, f"root:/{path}:", user_email)
+                        info['driveId'] = DMS_DRIVE_ID
+                        items.append(info)
+                    except Exception as e:
+                        logger.error(f"Failed to fetch folder info for path '{path}': {e}")
+                
+                if items:
+                    return {'value': items}
+                # Fall through to drive root on error
+            else:
+                # Single path: list children immediately
+                try:
+                    return self.list_folder_by_drive_path(DMS_DRIVE_ID, paths[0], user_email, top)
+                except HTTPError as exc:
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code == 404:
+                        logger.warning(
+                            "Configured DMS folder path '%s' was not found in drive %s. Falling back to drive root.",
+                            paths[0],
+                            DMS_DRIVE_ID,
+                        )
+                        return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
+                    raise
 
         if DMS_DRIVE_ID:
-            logger.warning("DMS_FOLDER_PATH is empty. Falling back to drive root for drive %s.", DMS_DRIVE_ID)
+            logger.warning("DMS_FOLDER_PATH is empty or failed. Falling back to drive root for drive %s.", DMS_DRIVE_ID)
             return self.list_drive_root_children(DMS_DRIVE_ID, user_email, top)
 
         raise ValueError(

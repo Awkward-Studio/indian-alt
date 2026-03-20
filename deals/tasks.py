@@ -1,6 +1,6 @@
 import logging
 import time
-from celery import shared_task
+from celery import shared_task, chord
 from django.db import transaction
 
 from .models import Deal, DealDocument, DocumentType
@@ -130,10 +130,119 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         audit_log.save()
         raise e
 
+@shared_task(bind=True)
+def process_single_document_async(self, file_info, deal_id, user_email, is_preview):
+    """
+    Atomized task to process a single document from OneDrive.
+    """
+    logger.info(f"Atomized Task: Processing file {file_info.get('name')} for Deal {deal_id}")
+    
+    graph_service = GraphAPIService()
+    doc_processor = DocumentProcessorService()
+    embed_service = EmbeddingService()
+    
+    file_id = file_info.get('id')
+    file_name = file_info.get('name')
+    drive_id = file_info.get('driveId')
+    
+    if not file_id or not file_name:
+        return {"status": "skipped", "reason": "missing file info"}
+
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        
+        # Avoid duplicates
+        if DealDocument.objects.filter(deal=deal, onedrive_id=file_id).exists():
+            return {"status": "skipped", "reason": "already processed", "file": file_name}
+            
+        # Determine document type
+        doc_type = DocumentType.OTHER
+        name_lower = file_name.lower()
+        if any(k in name_lower for k in ['financial', 'mis', 'model', 'projection']): 
+            doc_type = DocumentType.FINANCIALS
+        elif any(k in name_lower for k in ['legal', 'sha', 'ssa', 'term sheet']): 
+            doc_type = DocumentType.LEGAL
+        elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
+            doc_type = DocumentType.PITCH_DECK
+
+        # Download content
+        content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+        
+        # Extract text (Limited to 2 pages for background sync)
+        extracted_text = doc_processor.transcribe_document(content, file_name, page_limit=2)
+        
+        # Create Document Record
+        doc = DealDocument.objects.create(
+            deal=deal,
+            title=file_name,
+            document_type=doc_type,
+            onedrive_id=file_id,
+            extracted_text=extracted_text,
+            is_indexed=False,
+            is_ai_analyzed=is_preview
+        )
+        
+        # Update combined deal text (Race condition warning: multiple tasks appending to the same field)
+        if extracted_text:
+            with transaction.atomic():
+                # Re-fetch deal within transaction to minimize race condition window
+                deal_locked = Deal.objects.select_for_update().get(id=deal_id)
+                new_context = f"\n\n--- DOCUMENT: {file_name} ---\n{extracted_text}"
+                if not deal_locked.extracted_text:
+                    deal_locked.extracted_text = new_context
+                else:
+                    deal_locked.extracted_text += new_context
+                deal_locked.save(update_fields=['extracted_text'])
+        
+        # Vectorize for RAG
+        if extracted_text and len(extracted_text.strip()) > 50:
+            embed_service.vectorize_document(doc)
+            
+        return {"status": "success", "file": file_name}
+        
+    except Exception as e:
+        logger.error(f"Error processing {file_name}: {str(e)}")
+        return {"status": "failed", "file": file_name, "error": str(e)}
+
+@shared_task(bind=True)
+def finalize_folder_background(self, results, deal_id, audit_log_id):
+    """
+    Callback task to finalize the deal and audit log once all documents are processed.
+    """
+    logger.info(f"Finalizing VDR Indexing for Deal {deal_id}")
+    from ai_orchestrator.models import AIAuditLog
+    
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        
+        errors = [r for r in results if r.get('status') == 'failed']
+        processed_count = len([r for r in results if r.get('status') == 'success'])
+        
+        deal.processing_status = 'completed' if not errors else 'failed'
+        if errors:
+            error_msgs = [f"{e['file']}: {e['error']}" for e in errors]
+            deal.processing_error = "; ".join(error_msgs)
+        deal.save(update_fields=['processing_status', 'processing_error'])
+        
+        audit_log.status = 'COMPLETED' if not errors else 'FAILED'
+        audit_log.is_success = True if not errors else False
+        audit_log.system_prompt = f"Successfully indexed {processed_count} documents into the VDR."
+        if errors:
+            audit_log.error_message = f"Errors encountered in {len(errors)} files."
+            
+        audit_log.save()
+        logger.info(f"Finished VDR Indexing for Deal {deal_id}. Processed {processed_count} files.")
+        return {"processed": processed_count, "errors": len(errors)}
+        
+    except Exception as e:
+        logger.error(f"Failed to finalize deal {deal_id}: {str(e)}")
+        raise e
+
 @shared_task(bind=True, max_retries=3)
 def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user_email: str):
     """
-    Background task to download and vectorize all remaining files in a folder tree.
+    Background task to download and vectorize all remaining files in a folder tree using a chord.
     """
     logger.info(f"Starting background processing for Deal {deal_id} with {len(file_tree_map)} files.")
     
@@ -148,7 +257,7 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         status='PROCESSING',
         is_success=False,
         model_used='nomic-embed-text:latest',
-        system_prompt=f"Starting background vectorization for {len(file_tree_map)} files.",
+        system_prompt=f"Starting background vectorization for {len(file_tree_map)} files via chord.",
         user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
         celery_task_id=self.request.id
     )
@@ -167,11 +276,7 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
     deal.save(update_fields=['processing_status'])
 
     graph_service = GraphAPIService()
-    doc_processor = DocumentProcessorService()
-    embed_service = EmbeddingService()
     
-    # Crucial: Background processing MUST use delegated permissions for OneDrive
-    # We ensure we have a valid delegated token for the DMS user
     try:
         graph_service.get_access_token(user_email, require_delegated=True)
     except Exception as e:
@@ -185,107 +290,12 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         audit_log.save()
         return
 
-    processed_count = 0
-    errors = []
-
-    for i, file_info in enumerate(file_tree_map):
-        try:
-            # Update log periodically
-            if i % 2 == 0:
-                audit_log.system_prompt = f"Indexing progress: {i}/{len(file_tree_map)} files completed."
-                audit_log.save()
-
-            file_id = file_info.get('id')
-            file_name = file_info.get('name')
-            drive_id = file_info.get('driveId')
-            
-            if not file_id or not file_name:
-                continue
-                
-            # Avoid duplicates if the file was already processed during the preview phase
-            if DealDocument.objects.filter(deal=deal, onedrive_id=file_id).exists():
-                continue
-                
-            # Determine document type
-            doc_type = DocumentType.OTHER
-            name_lower = file_name.lower()
-            if any(k in name_lower for k in ['financial', 'mis', 'model', 'projection']): 
-                doc_type = DocumentType.FINANCIALS
-            elif any(k in name_lower for k in ['legal', 'sha', 'ssa', 'term sheet']): 
-                doc_type = DocumentType.LEGAL
-            elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
-                doc_type = DocumentType.PITCH_DECK
-
-            # Download content
-            content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
-            
-            # Extract text (Limited to 2 pages for fast metadata/preview processing during background sync)
-            extracted_text = doc_processor.transcribe_document(content, file_name, page_limit=2)
-            
-            # Create Document Record
-            doc = DealDocument.objects.create(
-                deal=deal,
-                title=file_name,
-                document_type=doc_type,
-                onedrive_id=file_id,
-                extracted_text=extracted_text,
-                is_indexed=False, # Will be set to True by vectorizer
-                is_ai_analyzed=(i < 5) # The first 5 files were used in the initial analyze_folder_async preview
-            )
-            
-            # Update combined deal text for RAG and Source Data Hub
-            if extracted_text:
-                new_context = f"\n\n--- DOCUMENT: {file_name} ---\n{extracted_text}"
-                if not deal.extracted_text:
-                    deal.extracted_text = new_context
-                else:
-                    deal.extracted_text += new_context
-                deal.save(update_fields=['extracted_text'])
-            
-            # Vectorize for RAG
-            if extracted_text and len(extracted_text.strip()) > 50:
-                embed_service.vectorize_document(doc)
-            
-            processed_count += 1
-            
-            # PROGRESS HEARTBEAT: Update audit log every 5 files
-            if processed_count % 5 == 0:
-                audit_log.system_prompt = f"Indexing progress: {processed_count}/{total_files} files completed."
-                audit_log.save(update_fields=['system_prompt'])
-            
-            # MEMORY MANAGEMENT: Clear large strings and force collection
-            del extracted_text
-            del content
-            import gc
-            gc.collect()
-            
-            # Give the system a breather
-            time.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Failed to process file {file_info.get('name')} for Deal {deal_id}: {str(e)}")
-            errors.append(f"{file_info.get('name')}: {str(e)}")
-
-    # Update Deal status when finished
-    deal.processing_status = 'completed' if not errors else 'failed'
-    deal.processing_error = "; ".join(errors) if errors else ""
-    deal.save(update_fields=['processing_status', 'processing_error'])
+    # Dispatch chord
+    tasks = [process_single_document_async.s(f, deal_id, user_email, i < 5) for i, f in enumerate(file_tree_map)]
+    chord(tasks)(finalize_folder_background.s(deal_id, str(audit_log.id)))
     
-    # Finalize Audit Log
-    audit_log.status = 'COMPLETED' if not errors else 'FAILED'
-    audit_log.is_success = True if not errors else False
-    audit_log.system_prompt = f"Successfully indexed {processed_count} documents into the VDR."
-    if errors: 
-        error_detail = "; ".join(errors)
-        audit_log.error_message = f"Errors encountered: {error_detail}"
-        audit_log.save()
-        logger.error(f"Background processing for Deal {deal_id} finished with errors.")
-        raise Exception(f"VDR Indexing failed for some files: {error_detail}")
-    
-    audit_log.save()
-    
-    logger.info(f"Finished background processing for Deal {deal_id}. Processed {processed_count} files.")
-    return {"processed": processed_count, "errors": 0}
+    logger.info(f"Dispatched chord with {len(tasks)} tasks for Deal {deal_id}")
+    return {"status": "dispatched", "task_count": len(tasks)}
 
 @shared_task(bind=True)
 def analyze_additional_documents_async(self, deal_id: str, document_ids: list, audit_log_id: str):
@@ -342,7 +352,11 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
 
         ai_service = AIProcessorService()
         existing_summary = deal.deal_summary or ""
-        current_version = len(deal.analysis_history or []) + 2
+        
+        # Calculate next version from existing analyses
+        from .models import DealAnalysis
+        latest_analysis = deal.analyses.order_by('-version').first()
+        current_version = (latest_analysis.version + 1) if latest_analysis else 2
 
         result = ai_service.process_content(
             content=new_text_context,
@@ -366,25 +380,18 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
 
         if analysis and "error" not in analysis:
-            # Update Deal JSON Fields
-            deal.analysis_json = analysis
+            # Create a NEW DealAnalysis record for this version
+            DealAnalysis.objects.create(
+                deal=deal,
+                version=current_version,
+                thinking=raw_thinking,
+                ambiguities=analysis.get('metadata', {}).get('ambiguous_points', []),
+                analysis_json=analysis
+            )
+
+            # Update Deal meta-fields that we still keep on Deal
             if 'deal_model_data' in analysis:
                 deal.themes = analysis['deal_model_data'].get('themes', deal.themes)
-            if 'metadata' in analysis:
-                deal.ambiguities = analysis['metadata'].get('ambiguous_points', deal.ambiguities)
-                
-            if 'analyst_report' in analysis:
-                new_history = list(deal.analysis_history or [])
-                new_history.append({
-                    "version": current_version,
-                    "report": analysis['analyst_report'],
-                    "timestamp": timezone.now().isoformat(),
-                    "documents_analyzed": [d.title for d in docs]
-                })
-                deal.analysis_history = new_history
-            
-            if raw_thinking:
-                deal.thinking = (deal.thinking or "") + f"\n\n--- V{current_version} INCREMENTAL ANALYSIS ---\n{raw_thinking}"
                 
             deal.save()
             docs.update(is_ai_analyzed=True)
