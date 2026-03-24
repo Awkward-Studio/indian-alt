@@ -122,9 +122,10 @@ class AIProcessorService:
     def _stream_response(self, payload: dict, audit_log: AIAuditLog) -> Iterator[str]:
         """
         Orchestrates streaming execution and robust parsing.
-        Broadcasts each chunk via WebSockets.
+        Broadcasts each chunk via WebSockets and calculates metrics.
         """
         room_name = f'ai_stream_{str(audit_log.id)}'
+        start_time = time.time()
         
         try:
             full_response = ""
@@ -159,11 +160,18 @@ class AIProcessorService:
                     audit_log.raw_thinking = full_thinking
                     audit_log.save(update_fields=['raw_response', 'raw_thinking'])
 
+            # Finalize metrics
+            duration_ms = int((time.time() - start_time) * 1000)
+            # Estimate tokens: ~4 chars per token for average English text
+            estimated_tokens = (len(full_response) + len(full_thinking) + len(audit_log.user_prompt or "")) // 4
+
             # Finalize audit log
             audit_log.raw_response = full_response
             audit_log.raw_thinking = full_thinking
             audit_log.is_success = True
             audit_log.status = 'COMPLETED'
+            audit_log.request_duration_ms = duration_ms
+            audit_log.tokens_used = estimated_tokens
             audit_log.save()
             
             # Broadcast final completion
@@ -184,6 +192,7 @@ class AIProcessorService:
             audit_log.is_success = False
             audit_log.status = 'FAILED'
             audit_log.error_message = str(e)
+            audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
             
             if self.channel_layer:
@@ -227,6 +236,9 @@ class AIProcessorService:
             else:
                 audit_log.is_success = False
                 audit_log.status = 'FAILED'
+                
+            # Estimate tokens
+            audit_log.tokens_used = (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4
                 
         except Exception as e:
             logger.error(f"Standard execution failed: {str(e)}")

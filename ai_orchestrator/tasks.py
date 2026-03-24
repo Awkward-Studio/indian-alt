@@ -8,11 +8,11 @@ from .services.universal_chat import UniversalChatService
 
 logger = logging.getLogger(__name__)
 
-@shared_task(bind=True)
+@shared_task(bind=True, autoretry_for=(AIConversation.DoesNotExist, AIAuditLog.DoesNotExist), retry_backoff=True, max_retries=3)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
     """
     Background task to generate and save an AI chat response.
-    Ensures the response is persistent even if the user closes the UI.
+    Includes autoretry to handle DB commit race conditions.
     """
     try:
         conversation = AIConversation.objects.get(id=conversation_id)

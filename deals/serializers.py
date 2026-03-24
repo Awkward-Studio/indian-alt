@@ -48,6 +48,15 @@ class DealSerializer(serializers.ModelSerializer):
         required=False
     )
     
+    def create(self, validated_data):
+        # Pop fields that are not on the Deal model anymore
+        # Use a copy to ensure they remain available for perform_create hooks
+        model_data = validated_data.copy()
+        model_data.pop('source_email_id', None)
+        model_data.pop('contact_discovery', None)
+        model_data.pop('analysis_json', None)
+        return super().create(model_data)
+
     class Meta:
         model = Deal
         fields = '__all__'

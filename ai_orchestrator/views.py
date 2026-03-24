@@ -30,18 +30,8 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AIAuditLogSerializer
     permission_classes = [IsAuthenticated]
 
-    def retrieve(self, request, *args, **kwargs):
-        # We want to include raw fields in detail view
-        instance = self.get_object()
-        data = self.get_serializer(instance).data
-        data.update({
-            'system_prompt': instance.system_prompt,
-            'user_prompt': instance.user_prompt,
-            'raw_response': instance.raw_response,
-            'raw_thinking': instance.raw_thinking,
-            'parsed_json': instance.parsed_json,
-        })
-        return Response(data)
+    # Standard retrieve will now use the enhanced AIAuditLogSerializer
+    # which includes system_prompt, raw fields, and parsed_json automatically.
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):

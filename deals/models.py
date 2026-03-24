@@ -209,11 +209,18 @@ class Deal(models.Model):
         analyses = self.analyses.order_by('version', 'created_at')
         history = []
         for analysis in analyses:
+            # Extract the report from the analysis_json if possible, 
+            # otherwise fallback to thinking or an empty string.
+            report = ""
+            if analysis.analysis_json:
+                report = analysis.analysis_json.get('analyst_report', "")
+            
             history.append({
                 'version': analysis.version,
                 'thinking': analysis.thinking,
                 'ambiguities': analysis.ambiguities,
                 'analysis_json': analysis.analysis_json,
+                'report': report,
                 'created_at': analysis.created_at.isoformat() if analysis.created_at else None
             })
         return history

@@ -38,7 +38,7 @@ class FolderAnalysisService:
             user_prompt=f"Queued analysis for folder: {folder_name}"
         )
 
-        # Trigger task
+        # Trigger task - Initial analysis is high priority
         task = analyze_folder_async.apply_async(
             kwargs={
                 'drive_id': drive_id,
@@ -46,7 +46,7 @@ class FolderAnalysisService:
                 'user_email': DMS_USER_EMAIL,
                 'audit_log_id': str(audit_log.id) 
             },
-            queue='celery'
+            queue='high_priority'
         )
         
         audit_log.celery_task_id = task.id
@@ -172,7 +172,7 @@ class FolderAnalysisService:
             
         deal.save()
         
-        # Trigger Background Task
+        # Trigger Background Task - Indexing is low priority
         from deals.tasks import process_deal_folder_background
         process_deal_folder_background.apply_async(
             kwargs={
@@ -180,7 +180,7 @@ class FolderAnalysisService:
                 'file_tree_map': session_data['file_tree'],
                 'user_email': session_data['user_email']
             },
-            queue='celery'
+            queue='low_priority'
         )
         
         cache.delete(f"folder_sync_{session_id}")

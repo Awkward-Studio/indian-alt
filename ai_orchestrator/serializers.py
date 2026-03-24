@@ -2,8 +2,8 @@ from rest_framework import serializers
 from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog
 
 class AIAuditLogSerializer(serializers.ModelSerializer):
-    personality_name = serializers.CharField(source='personality.name', read_only=True)
-    skill_name = serializers.CharField(source='skill.name', read_only=True)
+    personality_name = serializers.SerializerMethodField()
+    skill_name = serializers.SerializerMethodField()
     
     class Meta:
         model = AIAuditLog
@@ -12,8 +12,14 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'skill', 'skill_name', 'model_provider', 'model_used', 
             'request_duration_ms', 'tokens_used', 'is_success', 'status',
             'celery_task_id', 'created_at', 'error_message',
-            'raw_response', 'raw_thinking', 'user_prompt'
+            'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json'
         ]
+
+    def get_personality_name(self, obj):
+        return obj.personality.name if obj.personality else "Direct Inference"
+
+    def get_skill_name(self, obj):
+        return obj.skill.name if obj.skill else "General Analysis"
 
 class AIPersonalitySerializer(serializers.ModelSerializer):
     class Meta:

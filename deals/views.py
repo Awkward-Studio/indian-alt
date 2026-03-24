@@ -328,7 +328,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 'document_ids': document_ids,
                 'audit_log_id': str(audit_log.id)
             },
-            queue='celery'
+            queue='high_priority'
         )
         
         audit_log.celery_task_id = task.id

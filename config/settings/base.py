@@ -203,6 +203,7 @@ CELERY_TASK_ROUTES = {
     'deals.tasks.process_deal_folder_background': {'queue': 'low_priority'},
     'deals.tasks.process_single_document_async': {'queue': 'low_priority'},
     'deals.tasks.finalize_folder_background': {'queue': 'low_priority'},
+    'microsoft.tasks.analyze_email_async': {'queue': 'low_priority'},
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'
 
