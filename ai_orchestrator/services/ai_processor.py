@@ -272,6 +272,8 @@ class AIProcessorService:
                 audit_log.is_success = True
                 audit_log.status = 'COMPLETED'
             else:
+                if is_extraction and isinstance(parsed_json, dict) and parsed_json.get("_salvaged"):
+                    audit_log.parsed_json = parsed_json
                 audit_log.is_success = False
                 audit_log.status = 'FAILED'
                 audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')

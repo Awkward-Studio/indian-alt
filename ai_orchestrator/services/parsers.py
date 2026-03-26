@@ -90,6 +90,154 @@ class ResponseParserService:
         return text
 
     @staticmethod
+    def _find_key_position(text: str, key: str) -> int:
+        pattern = re.compile(rf'"{re.escape(key)}"\s*:')
+        match = pattern.search(text)
+        return match.end() if match else -1
+
+    @staticmethod
+    def _extract_json_value_fragment(text: str, key: str) -> str | None:
+        value_start = ResponseParserService._find_key_position(text, key)
+        if value_start == -1:
+            return None
+
+        while value_start < len(text) and text[value_start].isspace():
+            value_start += 1
+        if value_start >= len(text):
+            return None
+
+        opening = text[value_start]
+        if opening in "{[":
+            closing = "}" if opening == "{" else "]"
+            depth = 0
+            in_string = False
+            escape = False
+            for index in range(value_start, len(text)):
+                char = text[index]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == opening:
+                    depth += 1
+                elif char == closing:
+                    depth -= 1
+                    if depth == 0:
+                        return text[value_start:index + 1]
+            return None
+
+        if opening == '"':
+            escape = False
+            for index in range(value_start + 1, len(text)):
+                char = text[index]
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    return text[value_start:index + 1]
+            return None
+
+        scalar_match = re.match(r'-?\d+(?:\.\d+)?|true|false|null', text[value_start:])
+        if scalar_match:
+            return scalar_match.group(0)
+        return None
+
+    @staticmethod
+    def _load_value_fragment(fragment: str | None):
+        if not fragment:
+            return None
+        try:
+            return json.loads(fragment)
+        except Exception:
+            repaired = ResponseParserService.repair_json(fragment)
+            try:
+                return json.loads(repaired)
+            except Exception:
+                return None
+
+    @staticmethod
+    def _coerce_string(value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        if isinstance(value, (int, float)):
+            return str(value)
+        return None
+
+    @staticmethod
+    def _coerce_string_list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    @staticmethod
+    def salvage_extraction_payload(text: str, clean_response: str = "", thinking: str = "") -> Dict[str, Any] | None:
+        candidate = ResponseParserService.extract_json(text)
+
+        model_data = ResponseParserService._load_value_fragment(
+            ResponseParserService._extract_json_value_fragment(candidate, "deal_model_data")
+        )
+        metadata = ResponseParserService._load_value_fragment(
+            ResponseParserService._extract_json_value_fragment(candidate, "metadata")
+        )
+        analyst_report = ResponseParserService._load_value_fragment(
+            ResponseParserService._extract_json_value_fragment(candidate, "analyst_report")
+        )
+
+        if not isinstance(model_data, dict) and not isinstance(metadata, dict):
+            return None
+
+        normalized_model_data = model_data if isinstance(model_data, dict) else {}
+        normalized_metadata = metadata if isinstance(metadata, dict) else {}
+
+        normalized_model_data = {
+            "title": ResponseParserService._coerce_string(normalized_model_data.get("title")),
+            "industry": ResponseParserService._coerce_string(normalized_model_data.get("industry")),
+            "sector": ResponseParserService._coerce_string(normalized_model_data.get("sector")),
+            "funding_ask": ResponseParserService._coerce_string(normalized_model_data.get("funding_ask")),
+            "funding_ask_for": ResponseParserService._coerce_string(normalized_model_data.get("funding_ask_for")),
+            "priority": ResponseParserService._coerce_string(normalized_model_data.get("priority")),
+            "city": ResponseParserService._coerce_string(normalized_model_data.get("city")),
+            "state": ResponseParserService._coerce_string(normalized_model_data.get("state")),
+            "country": ResponseParserService._coerce_string(normalized_model_data.get("country")),
+            "themes": ResponseParserService._coerce_string_list(normalized_model_data.get("themes")),
+        }
+        normalized_model_data = {
+            key: value for key, value in normalized_model_data.items()
+            if value not in (None, [], "")
+        }
+
+        normalized_metadata = {
+            "ambiguous_points": ResponseParserService._coerce_string_list(normalized_metadata.get("ambiguous_points")),
+            "sources_cited": ResponseParserService._coerce_string_list(normalized_metadata.get("sources_cited")),
+            "parse_mode": "salvaged",
+            "parse_warning": "Structured fields were salvaged from a malformed or truncated AI response.",
+        }
+
+        if not isinstance(analyst_report, str) or not analyst_report.strip():
+            analyst_report = clean_response.strip() or text.strip()
+
+        return {
+            "deal_model_data": normalized_model_data,
+            "metadata": normalized_metadata,
+            "analyst_report": analyst_report,
+            "thinking": thinking,
+            "response": clean_response,
+            "_raw_response": text,
+            "_salvaged": True,
+            "error": "JSON parsing error: structured fields salvaged from malformed AI output.",
+        }
+
+    @staticmethod
     def parse_standard_response(raw_response: str, thinking_text: str, is_extraction_skill: bool = False) -> Dict[str, Any]:
         """
         Cleans standard LLM response payload, splitting thinking from the final output, 
@@ -132,10 +280,18 @@ class ResponseParserService:
             return parsed_json, True, clean_response, thinking
         except Exception as e:
             logger.error(f"JSON parsing/repair failed: {str(e)}")
+            if is_extraction_skill:
+                salvaged = ResponseParserService.salvage_extraction_payload(raw_response, clean_response, thinking)
+                if salvaged:
+                    return salvaged, False, clean_response, thinking
             # FALLBACK: If JSON fails, still try to extract basic metadata from the text report
             fallback_data = {
                 "deal_model_data": {"title": "Direct Inference (Parsing Error)"},
-                "metadata": {"ambiguous_points": ["AI response was truncated or malformed."]},
+                "metadata": {
+                    "ambiguous_points": ["AI response was truncated or malformed."],
+                    "parse_mode": "failed",
+                    "parse_warning": "No structured fields could be salvaged from the malformed AI response.",
+                },
                 "analyst_report": raw_response,
                 "error": f"JSON parsing error: {str(e)}",
                 "thinking": thinking,

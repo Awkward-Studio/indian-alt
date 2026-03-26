@@ -250,7 +250,7 @@ class FolderAnalysisService:
                 "preliminary_data": log.parsed_json,
                 "total_files": meta.get('total_files', len(meta['file_tree'])),
                 "preview_files_analyzed": len(meta.get('analysis_input_files', meta.get('passed_files', []))),
-                "raw_thinking": log.raw_response,
+                "raw_thinking": log.raw_thinking,
                 "passed_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
                 "failed_files": meta.get('failed_files', []),
                 "phase": "analysis",

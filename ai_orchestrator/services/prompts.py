@@ -46,6 +46,17 @@ class PromptBuilderService:
                     directives_text += f"- {d}\n"
             system_instructions += directives_text
 
+        if skill and skill.name == "deal_extraction":
+            system_instructions += (
+                "\n\n### DEAL EXTRACTION OUTPUT CONTRACT:\n"
+                "- Return exactly one JSON object and nothing else.\n"
+                "- Do not wrap the JSON in markdown fences or <json> tags.\n"
+                "- Do not repeat keys or restart the JSON object.\n"
+                "- Keep `analyst_report` concise and bounded; prefer summary quality over length.\n"
+                "- `funding_ask` must be a string in INR Cr, not a number.\n"
+                "- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.\n"
+            )
+
         if not stream:
             system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."
             

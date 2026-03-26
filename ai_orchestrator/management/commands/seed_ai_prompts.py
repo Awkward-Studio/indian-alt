@@ -48,6 +48,23 @@ List all sources used at the end of the narrative.""",
             defaults={
                 "personality": senior_pe_personality,
                 "description": "Forensic deal extraction from folders and emails.",
+                "output_schema": {
+                    "deal_model_data": {
+                        "title": "string",
+                        "industry": "string",
+                        "sector": "string",
+                        "funding_ask": "string",
+                        "funding_ask_for": "string",
+                        "priority": "string",
+                        "city": "string",
+                        "themes": ["string"]
+                    },
+                    "metadata": {
+                        "ambiguous_points": ["string"],
+                        "sources_cited": ["string"]
+                    },
+                    "analyst_report": "string"
+                },
                 "prompt_template": """Analyze the provided documents and extract deal signals using the Forensic PE Analyst framework.
 
 ### INPUT DATA:
@@ -63,13 +80,13 @@ List all sources used at the end of the narrative.""",
 7. Red Flags & Warning Signs.
 8. Next Steps / Data Requests.
 
-You must output a valid JSON object at the VERY END of your response inside <json></json> tags with these keys:
+Return exactly one valid JSON object and nothing else. Do not use markdown fences or <json> tags. Use these keys:
 {
   "deal_model_data": {
     "title": "Exact Company Name",
     "industry": "Industry Name",
     "sector": "Sub-sector",
-    "funding_ask": " Numerical value in INR Cr",
+    "funding_ask": "Numerical value in INR Cr as a string",
     "funding_ask_for": "Use of funds (e.g. Working Capital, Expansion)",
     "priority": "High/Medium/Low based on Phase 4 results",
     "city": "HQ City",
@@ -82,7 +99,10 @@ You must output a valid JSON object at the VERY END of your response inside <jso
   "analyst_report": "Your full formatted markdown narrative from sections 1-8"
 }
 
-RULE: The 'analyst_report' field must contain the full markdown analysis including citations [Source: DocName]."""
+RULES:
+- Do not repeat the JSON object or any keys.
+- Keep 'analyst_report' concise enough to fit in a single response.
+- Every claim in 'analyst_report' must include citations [Source: DocName]."""
             }
         )
 
