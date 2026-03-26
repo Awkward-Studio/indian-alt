@@ -1,11 +1,11 @@
 import logging
 import json
-import time
 import requests
 import uuid
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
 from django.forms.models import model_to_dict
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -18,6 +18,7 @@ from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditL
 from .services.ai_processor import AIProcessorService
 from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
+from .services.realtime import broadcast_audit_log_update
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal
@@ -43,11 +44,20 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         """
         log = self.get_object()
         task_id = log.celery_task_id
+        source_meta = log.source_metadata or {}
+        task_ids_to_revoke = [
+            tid for tid in [
+                task_id,
+                source_meta.get("callback_task_id"),
+                *(source_meta.get("child_task_ids") or []),
+            ] if tid
+        ]
         
         # 1. Kill the Celery worker thread immediately
-        if task_id:
+        if task_ids_to_revoke:
             from config.celery import celery_app
-            celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')
+            for revoke_id in dict.fromkeys(task_ids_to_revoke):
+                celery_app.control.revoke(revoke_id, terminate=True, signal='SIGKILL')
             
         # 2. Force-clear Ollama VM (send a tiny request to interrupt long generation)
         try:
@@ -57,21 +67,39 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             # or we just ensure the connection is closed.
             # For Ollama, the best way to free VRAM/Process is to load a tiny model or 
             # send a request with num_predict: 1
-            requests.post(f"{ai.ollama_url}/api/generate", json={
+            requests.post(f"{ai.provider.ollama_url}/api/generate", json={
                 "model": log.model_used,
                 "prompt": "stop",
                 "options": {"num_predict": 1},
                 "stream": False
             }, timeout=5)
-        except:
-            pass
+        except Exception as e:
+            logger.warning("Failed to interrupt Ollama while cancelling audit log %s: %s", log.id, e)
 
         # 3. Update the log status
+        log.source_metadata = {
+            **source_meta,
+            "cancel_requested": True,
+            "cancel_requested_at": timezone.now().isoformat(),
+            "cancel_reason": "manual",
+            "cancelled_task_ids": task_ids_to_revoke,
+        }
         log.status = 'FAILED'
         log.error_message = "Task manually terminated by forensic user."
-        log.save()
+        log.is_success = False
+        log.save(update_fields=['source_metadata', 'status', 'error_message', 'is_success'])
+        broadcast_audit_log_update(log, event_type="terminal", done=True)
+
+        if log.source_type == "vdr_indexing" and log.source_id:
+            try:
+                deal = Deal.objects.get(id=log.source_id)
+                deal.processing_status = 'failed'
+                deal.processing_error = "Task manually terminated by forensic user."
+                deal.save(update_fields=['processing_status', 'processing_error'])
+            except Deal.DoesNotExist:
+                logger.warning("VDR cancel requested for missing deal %s", log.source_id)
         
-        return Response({"status": "cancelled", "task_id": task_id})
+        return Response({"status": "cancelled", "task_id": task_id, "revoked_task_count": len(dict.fromkeys(task_ids_to_revoke))})
 
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer

@@ -3,10 +3,12 @@ from unittest.mock import MagicMock, patch
 from django.core.cache import cache
 from django.test import TestCase
 
+from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal
 from deals.serializers import DealDetailSerializer
 from deals.services.deal_creation import DealCreationService
 from deals.services.folder_analysis import FolderAnalysisService
+from deals.services.phase_readiness import PHASE_READINESS_SOURCE_TYPE
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -128,6 +130,39 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(serialized["ambiguities"], [])
         self.assertEqual(serialized["analysis_json"], {})
         self.assertEqual(serialized["analysis_history"], [])
+        self.assertIsNone(serialized["latest_phase_readiness_check"])
+
+    def test_detail_serializer_includes_latest_phase_readiness_check(self):
+        deal = Deal.objects.create(
+            title="Acme Finance",
+            current_phase="4: Initial Materials Review",
+        )
+        AIAuditLog.objects.create(
+            source_type=PHASE_READINESS_SOURCE_TYPE,
+            source_id=str(deal.id),
+            context_label="Phase Readiness: Acme Finance",
+            model_used="qwen3.5:latest",
+            system_prompt="Queued phase-readiness recommendation...",
+            user_prompt="Evaluate phase readiness",
+            status="COMPLETED",
+            is_success=True,
+            parsed_json={
+                "decision": "ready",
+                "is_ready_for_next_phase": True,
+                "recommended_next_phase": "5: Financial Model Call",
+                "rationale": "Materials review is complete and no blocking gaps remain.",
+                "blocking_gaps": [],
+                "evidence_signals": ["Strong initial materials quality"],
+            },
+        )
+
+        serialized = DealDetailSerializer(instance=deal).data
+
+        self.assertEqual(serialized["latest_phase_readiness_check"]["status"], "COMPLETED")
+        self.assertEqual(
+            serialized["latest_phase_readiness_check"]["parsed_json"]["recommended_next_phase"],
+            "5: Financial Model Call",
+        )
 
     @patch("deals.tasks.process_deal_folder_background.apply_async")
     def test_confirm_deal_from_session_backfills_missing_fields(self, mock_apply_async):

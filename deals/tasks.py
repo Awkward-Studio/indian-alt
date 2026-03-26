@@ -3,15 +3,141 @@ import time
 from celery import shared_task, chord
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
 
 from .models import Deal, DealDocument, DocumentType, InitialAnalysisStatus
 from .services.deal_creation import DealCreationService
+from .services.phase_readiness import (
+    DealPhaseReadinessService,
+    PHASE_READINESS_SKILL_NAME,
+    PHASE_READINESS_SOURCE_TYPE,
+)
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.realtime import broadcast_audit_log_update, log_worker_event
 
 logger = logging.getLogger(__name__)
+
+
+def _is_cancel_requested(audit_log_id: str | None) -> bool:
+    if not audit_log_id:
+        return False
+    from ai_orchestrator.models import AIAuditLog
+
+    meta = AIAuditLog.objects.filter(id=audit_log_id).values_list("source_metadata", flat=True).first() or {}
+    return bool(meta.get("cancel_requested"))
+
+
+def _mark_vdr_cancelled(audit_log_id: str, deal_id: str, message: str) -> None:
+    from ai_orchestrator.models import AIAuditLog
+
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+    if audit_log:
+        audit_log.status = "FAILED"
+        audit_log.is_success = False
+        audit_log.error_message = message
+        source_metadata = audit_log.source_metadata or {}
+        audit_log.source_metadata = {
+            **source_metadata,
+            "cancel_requested": True,
+            "cancel_reason": source_metadata.get("cancel_reason", "manual"),
+        }
+        audit_log.save(update_fields=["status", "is_success", "error_message", "source_metadata"])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+
+    deal = Deal.objects.filter(id=deal_id).first()
+    if deal:
+        deal.processing_status = "failed"
+        deal.processing_error = message
+        deal.save(update_fields=["processing_status", "processing_error"])
+
+
+def _prepare_vdr_task_ids(signatures, callback_signature) -> tuple[list, object, list[str], str | None]:
+    frozen_signatures = []
+    child_task_ids: list[str] = []
+
+    for signature in signatures:
+        frozen = signature.freeze()
+        child_task_ids.append(str(frozen.id))
+        frozen_signatures.append(signature)
+
+    callback_task_id = None
+    if callback_signature is not None:
+        frozen_callback = callback_signature.freeze()
+        callback_task_id = str(frozen_callback.id)
+
+    return frozen_signatures, callback_signature, child_task_ids, callback_task_id
+
+
+@shared_task(bind=True)
+def run_phase_readiness_analysis_async(self, deal_id: str, audit_log_id: str):
+    """
+    Background task for a quick deal phase-readiness recommendation.
+    """
+    from ai_orchestrator.models import AIAuditLog
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+
+    logger.info("Starting phase-readiness analysis for Deal %s", deal_id)
+
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        audit_log.celery_task_id = self.request.id
+        audit_log.status = "PROCESSING"
+        audit_log.save(update_fields=["celery_task_id", "status"])
+
+        DealPhaseReadinessService.ensure_skill()
+        ai_service = AIProcessorService()
+        result = ai_service.process_content(
+            content=DealPhaseReadinessService.build_context(deal),
+            skill_name=PHASE_READINESS_SKILL_NAME,
+            source_type=PHASE_READINESS_SOURCE_TYPE,
+            source_id=str(deal.id),
+            metadata={
+                "audit_log_id": str(audit_log.id),
+                "_source_metadata": {
+                    "deal_id": str(deal.id),
+                    "current_phase_at_run": deal.current_phase,
+                    "trigger": "manual_status_check",
+                },
+            },
+        )
+
+        audit_log.refresh_from_db()
+        parsed_json = result.get("parsed_json") if isinstance(result, dict) and isinstance(result.get("parsed_json"), dict) else result
+        if isinstance(parsed_json, dict) and "error" not in parsed_json:
+            audit_log.parsed_json = DealPhaseReadinessService.normalize_result(parsed_json, deal)
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.error_message = None
+            audit_log.save(update_fields=["parsed_json", "status", "is_success", "error_message"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+            return {"status": "success", "audit_log_id": str(audit_log.id)}
+
+        error_message = (
+            parsed_json.get("error")
+            if isinstance(parsed_json, dict)
+            else "AI returned an invalid readiness payload."
+        )
+        audit_log.status = "FAILED"
+        audit_log.is_success = False
+        audit_log.error_message = str(error_message)
+        audit_log.save(update_fields=["status", "is_success", "error_message"])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {"error": str(error_message)}
+    except Exception as e:
+        logger.error("Phase-readiness analysis failed: %s", str(e))
+        try:
+            audit_log = AIAuditLog.objects.get(id=audit_log_id)
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(e)
+            audit_log.save(update_fields=["status", "is_success", "error_message"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        except Exception:
+            pass
+        raise
 
 
 def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: list) -> dict:
@@ -356,7 +482,7 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
         raise e
 
 @shared_task(bind=True)
-def process_single_document_async(self, file_info, deal_id, user_email, is_preview):
+def process_single_document_async(self, file_info, deal_id, user_email, is_preview, audit_log_id=None):
     """
     Atomized task to process a single document from OneDrive.
     """
@@ -374,6 +500,9 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         return {"status": "skipped", "reason": "missing file info"}
 
     try:
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+
         deal = Deal.objects.get(id=deal_id)
         
         # Avoid duplicates
@@ -390,11 +519,20 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
             doc_type = DocumentType.PITCH_DECK
 
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+
         # Download content
         content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
-        
+
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+
         # Extract text (Limited to 2 pages for background sync)
         extracted_text = doc_processor.transcribe_document(content, file_name, page_limit=2)
+
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
         
         # Create Document Record
         initial_analysis_status, initial_analysis_reason = _resolve_initial_analysis_status(deal, file_id, file_name)
@@ -423,7 +561,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                 deal_locked.save(update_fields=['extracted_text'])
         
         # Vectorize for RAG
-        if extracted_text and len(extracted_text.strip()) > 50:
+        if extracted_text and len(extracted_text.strip()) > 50 and not _is_cancel_requested(audit_log_id):
             embed_service.vectorize_document(doc)
             
         return {"status": "success", "file": file_name}
@@ -443,6 +581,12 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
     try:
         deal = Deal.objects.get(id=deal_id)
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        cancellation_message = "Task manually terminated by forensic user."
+
+        if _is_cancel_requested(audit_log_id) or any(r.get('status') == 'cancelled' for r in results):
+            _mark_vdr_cancelled(audit_log_id, deal_id, cancellation_message)
+            logger.info("VDR indexing cancelled for Deal %s", deal_id)
+            return {"processed": 0, "errors": 0, "cancelled": True}
         
         errors = [r for r in results if r.get('status') == 'failed']
         processed_count = len([r for r in results if r.get('status') == 'success'])
@@ -518,9 +662,22 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         audit_log.save()
         return
 
+    if _is_cancel_requested(str(audit_log.id)):
+        _mark_vdr_cancelled(str(audit_log.id), deal_id, "Task manually terminated by forensic user.")
+        return {"status": "cancelled", "task_count": 0}
+
     # Dispatch chord
-    tasks = [process_single_document_async.s(f, deal_id, user_email, i < 5) for i, f in enumerate(file_tree_map)]
-    chord(tasks)(finalize_folder_background.s(deal_id, str(audit_log.id)))
+    tasks = [process_single_document_async.s(f, deal_id, user_email, i < 5, str(audit_log.id)) for i, f in enumerate(file_tree_map)]
+    callback = finalize_folder_background.s(deal_id, str(audit_log.id))
+    _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
+    audit_log.source_metadata = {
+        **(audit_log.source_metadata or {}),
+        "child_task_ids": child_task_ids,
+        "callback_task_id": callback_task_id,
+        "task_count": len(tasks),
+    }
+    audit_log.save(update_fields=["source_metadata"])
+    chord(tasks)(callback)
     
     logger.info(f"Dispatched chord with {len(tasks)} tasks for Deal {deal_id}")
     return {"status": "dispatched", "task_count": len(tasks)}

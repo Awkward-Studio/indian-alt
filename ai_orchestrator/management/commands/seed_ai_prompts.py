@@ -132,4 +132,39 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
             }
         )
 
+        AISkill.objects.update_or_create(
+            name="deal_phase_readiness",
+            defaults={
+                "description": "Quick recommendation on whether a deal is ready to advance to the next phase.",
+                "output_schema": {
+                    "decision": "ready|not_ready|insufficient_information",
+                    "is_ready_for_next_phase": "boolean",
+                    "recommended_next_phase": "string|null",
+                    "rationale": "string",
+                    "blocking_gaps": ["string"],
+                    "evidence_signals": ["string"],
+                },
+                "prompt_template": """Evaluate whether this deal is ready to move to its next phase.
+
+Context:
+{{ content }}
+
+Return exactly one valid JSON object and nothing else:
+{
+  "decision": "ready|not_ready|insufficient_information",
+  "is_ready_for_next_phase": true,
+  "recommended_next_phase": "Exact next phase label or null",
+  "rationale": "Short rationale tied to the saved deal evidence",
+  "blocking_gaps": ["Specific blockers or missing items"],
+  "evidence_signals": ["Concrete positive or negative signals from the deal record"]
+}
+
+Rules:
+- Use only the supplied saved deal context.
+- If evidence is insufficient, use "insufficient_information".
+- `recommended_next_phase` must be the provided expected next phase or null.
+- Keep the rationale concise and decision-useful.""",
+            }
+        )
+
         self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts.'))

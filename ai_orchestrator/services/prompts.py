@@ -56,6 +56,15 @@ class PromptBuilderService:
                 "- `funding_ask` must be a string in INR Cr, not a number.\n"
                 "- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.\n"
             )
+        elif skill and skill.name == "deal_phase_readiness":
+            system_instructions += (
+                "\n\n### PHASE READINESS OUTPUT CONTRACT:\n"
+                "- Return exactly one JSON object and nothing else.\n"
+                "- `decision` must be one of: ready, not_ready, insufficient_information.\n"
+                "- `recommended_next_phase` must be the provided expected next phase or null.\n"
+                "- `blocking_gaps` and `evidence_signals` must be arrays of strings.\n"
+                "- Base the recommendation only on the saved deal context provided.\n"
+            )
 
         if not stream:
             system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."

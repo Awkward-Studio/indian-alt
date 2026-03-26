@@ -125,113 +125,65 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
     )
     @action(detail=True, methods=['post'])
     def analyze(self, request, pk=None):
-        """Analyze a specific email with AI, including attachments."""
+        """Queue async AI analysis for a specific email and its attachments."""
         try:
             email = self.get_object()
-            print(f"\n[EMAIL ANALYSIS] Starting AI pipeline for email: {email.subject}")
-            graph = GraphAPIService()
-            doc_processor = DocumentProcessorService()
-            
-            # 1. Base content from email body (guard against None)
-            content = email.body_html or email.body_text or ''
-            metadata = {
-                'from_email': email.from_email,
-                'subject': email.subject,
-                'date_received': email.date_received.isoformat() if email.date_received else 'Unknown'
-            }
-            
-            # 2. Process Attachments if any
-            images = []
-            attachment_context = ""
-            extracted_sources = {
-                "Email Body": content[:2000] + "..." if len(content) > 2000 else content
-            }
-            
-            if email.has_attachments:
-                print(f"[EMAIL ANALYSIS] Step 2: Fetching attachments from Graph API...")
-                attachments = graph.get_message_attachments(email.email_account.email, email.graph_id)
-                print(f"[EMAIL ANALYSIS] Found {len(attachments)} attachments.")
-                
-                for att in attachments:
-                    att_id = att.get('id')
-                    filename = att.get('name', 'attachment')
-                    print(f" -> Processing attachment: {filename}...")
-                    
-                    full_att = graph.get_attachment_content(email.email_account.email, email.graph_id, att_id)
-                    content_bytes_b64 = full_att.get('contentBytes')
-                    if not content_bytes_b64: 
-                        print(f"    [!] Skipping {filename}: No content data found.")
-                        continue
-                    
-                    content_bytes = base64.b64decode(content_bytes_b64)
+            from .tasks import analyze_email_async
+            from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
 
-                    # 1. Extract Text
-                    print(f"    [PROC] Extracting text from {filename}...")
-                    text = doc_processor.extract_text(content_bytes, filename)
-                    if text:
-                        print(f"    [OK] Extracted {len(text)} characters of text.")
-                        attachment_context += f"\n\n--- Attachment: {filename} ---\n{text}"
-                        extracted_sources[filename] = text
-                    else:
-                        print(f"    [!] No text could be extracted from {filename}.")
-
-                    # 2. Extract Visuals
-                    print(f"    [PROC] Extracting visuals for Vision AI from {filename}...")
-                    visuals = doc_processor.extract_visuals(content_bytes, filename)
-                    if visuals:
-                        print(f"    [OK] Extracted {len(visuals)} pages as images.")
-                        images.extend(visuals)
-                    else:
-                        print(f"    [OK] No visual components needed for {filename}.")
-
-            full_context = content + attachment_context
-            print(f"[EMAIL ANALYSIS] Step 3: Saving full context ({len(full_context)} chars) to database.")
-            email.extracted_text = full_context
-            email.save(update_fields=['extracted_text'])
-            
-            # 4. Analyze with AI
-            print(f"[EMAIL ANALYSIS] Step 4: Orchestrating AI Reasoning...")
-            ai_service = AIProcessorService()
-            result = ai_service.process_content(
-                content=full_context,
-                personality_name="Forensic Email Analyst",
-                metadata=metadata,
+            existing_run = AIAuditLog.objects.filter(
+                source_type='email',
                 source_id=str(email.id),
-                source_type="email",
-                images=images if images else None
+                status__in=['PENDING', 'PROCESSING'],
+            ).order_by('-created_at').first()
+            if existing_run:
+                return Response({
+                    "task_id": existing_run.celery_task_id,
+                    "audit_log_id": str(existing_run.id),
+                    "status": "processing",
+                    "message": "An email analysis is already running for this signal.",
+                }, status=status.HTTP_200_OK)
+
+            personality = AIPersonality.objects.filter(is_default=True).first()
+            skill = AISkill.objects.filter(name='deal_extraction').first()
+            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+
+            audit_log = AIAuditLog.objects.create(
+                source_type='email',
+                source_id=str(email.id),
+                context_label=f"Email: {email.subject}",
+                personality=personality,
+                skill=skill,
+                status='PENDING',
+                is_success=False,
+                model_used=default_model,
+                system_prompt="Queued forensic email analysis...",
+                user_prompt=f"Analyzing email signal: {email.subject}",
+                source_metadata={
+                    "email_id": str(email.id),
+                    "subject": email.subject,
+                    "email_account": email.email_account.email if email.email_account else None,
+                    "has_attachments": bool(email.has_attachments),
+                    "attachment_count": len(email.attachments if isinstance(email.attachments, list) else []),
+                },
             )
-            
-            # ATTACH RAW SOURCES
-            result["extracted_sources"] = extracted_sources
-            
-            # CRITICAL: Use the high-fidelity context (including OCR) for RAG
-            # The AIProcessor returns the final text it used in "_full_context"
-            final_rag_context = result.pop("_full_context", full_context)
-            email.extracted_text = final_rag_context
-            email.save(update_fields=['extracted_text'])
-            
-            print(f"[EMAIL ANALYSIS] Step 5: AI Reasoning Complete. Forensic context saved.")
-            
-            # 5. Vectorize for RAG if linked to a deal
-            if email.deal:
-                print(f"[EMAIL ANALYSIS] Triggering vectorization for RAG...")
-                try:
-                    embed_service = EmbeddingService()
-                    embed_service.vectorize_email(email)
-                except Exception as ve:
-                    logger.error(f"Vectorization failed: {str(ve)}")
-            
-            # Update email status if successful
-            if "error" not in result:
-                email.is_processed = True
-                email.processed_at = timezone.now()
-                # If we have extracted text, save it again just in case
-                if full_context:
-                    email.extracted_text = full_context
-                email.save() # Save everything
-                print(f"[EMAIL ANALYSIS] Success! Marked email {email.id} as processed.")
-            
-            return Response(result, status=status.HTTP_200_OK)
+
+            task = analyze_email_async.apply_async(
+                kwargs={
+                    "email_id": str(email.id),
+                    "audit_log_id": str(audit_log.id),
+                },
+                queue='low_priority'
+            )
+            audit_log.celery_task_id = task.id
+            audit_log.save(update_fields=['celery_task_id'])
+
+            return Response({
+                "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
+                "status": "queued",
+                "message": "Email analysis queued."
+            }, status=status.HTTP_200_OK)
             
         except Exception as e:
             logger.error(f"Error in analyze email: {str(e)}", exc_info=True)
@@ -975,14 +927,60 @@ class AnalyzeEmailView(APIView):
         email_id = request.data.get('email_id')
         if not email_id:
             return Response({"error": "email_id is required"}, status=400)
-            
+        try:
+            email = Email.objects.get(id=email_id)
+        except Email.DoesNotExist:
+            return Response({"error": "Email not found"}, status=404)
         from .tasks import analyze_email_async
-        task = analyze_email_async.delay(email_id)
-        
+        from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+
+        existing_run = AIAuditLog.objects.filter(
+            source_type='email',
+            source_id=str(email.id),
+            status__in=['PENDING', 'PROCESSING'],
+        ).order_by('-created_at').first()
+        if existing_run:
+            return Response({
+                "task_id": existing_run.celery_task_id,
+                "audit_log_id": str(existing_run.id),
+                "status": "processing",
+                "message": "An email analysis is already running for this signal.",
+            }, status=status.HTTP_200_OK)
+
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='deal_extraction').first()
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        audit_log = AIAuditLog.objects.create(
+            source_type='email',
+            source_id=str(email.id),
+            context_label=f"Email: {email.subject}",
+            personality=personality,
+            skill=skill,
+            status='PENDING',
+            is_success=False,
+            model_used=default_model,
+            system_prompt="Queued forensic email analysis...",
+            user_prompt=f"Analyzing email signal: {email.subject}",
+            source_metadata={
+                "email_id": str(email.id),
+                "subject": email.subject,
+                "email_account": email.email_account.email if email.email_account else None,
+                "has_attachments": bool(email.has_attachments),
+                "attachment_count": len(email.attachments if isinstance(email.attachments, list) else []),
+            },
+        )
+        task = analyze_email_async.apply_async(
+            kwargs={"email_id": str(email.id), "audit_log_id": str(audit_log.id)},
+            queue='low_priority'
+        )
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=['celery_task_id'])
         return Response({
             "task_id": task.id,
-            "status": "queued"
-        })
+            "audit_log_id": str(audit_log.id),
+            "status": "queued",
+            "message": "Email analysis queued.",
+        }, status=status.HTTP_200_OK)
 
 class AnalyzeOneDriveFileView(APIView):
     """

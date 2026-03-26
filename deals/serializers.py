@@ -133,6 +133,7 @@ class DealDetailSerializer(DealSerializer):
     ambiguities = serializers.SerializerMethodField()
     analysis_json = serializers.SerializerMethodField()
     analysis_history = serializers.SerializerMethodField()
+    latest_phase_readiness_check = serializers.SerializerMethodField()
 
     def get_thinking(self, obj):
         return obj.thinking
@@ -145,6 +146,18 @@ class DealDetailSerializer(DealSerializer):
 
     def get_analysis_history(self, obj):
         return obj.analysis_history if isinstance(obj.analysis_history, list) else []
+
+    def get_latest_phase_readiness_check(self, obj):
+        from .services.phase_readiness import (
+            DealPhaseReadinessService,
+            PHASE_READINESS_SOURCE_TYPE,
+        )
+
+        log = AIAuditLog.objects.filter(
+            source_type=PHASE_READINESS_SOURCE_TYPE,
+            source_id=str(obj.id),
+        ).order_by("-created_at").first()
+        return DealPhaseReadinessService.serialize_audit_log(log)
     
     def to_representation(self, instance):
         data = super().to_representation(instance)
