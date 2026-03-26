@@ -4,6 +4,7 @@ import logging
 from django.core.cache import cache
 from deals.models import Deal
 from deals.services.deal_creation import DealCreationService
+from deals.tasks import VDR_DOCUMENT_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -517,5 +518,5 @@ class FolderAnalysisService:
         return {
             "status": "queued",
             "task_id": task.id,
-            "message": f"Queued VDR processing for {len(file_tree)} files."
+            "message": f"Queued VDR processing for {min(len(file_tree), VDR_DOCUMENT_LIMIT)} of {len(file_tree)} files."
         }

@@ -19,6 +19,8 @@ from ai_orchestrator.services.realtime import broadcast_audit_log_update, log_wo
 
 logger = logging.getLogger(__name__)
 
+VDR_DOCUMENT_LIMIT = 50
+
 
 def _is_cancel_requested(audit_log_id: str | None) -> bool:
     if not audit_log_id:
@@ -616,7 +618,8 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
     """
     Background task to download and vectorize all remaining files in a folder tree using a chord.
     """
-    logger.info(f"Starting background processing for Deal {deal_id} with {len(file_tree_map)} files.")
+    limited_file_tree = list(file_tree_map[:VDR_DOCUMENT_LIMIT])
+    logger.info(f"Starting background processing for Deal {deal_id} with {len(limited_file_tree)} of {len(file_tree_map)} files.")
     
     from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
     personality = AIPersonality.objects.filter(is_default=True).first()
@@ -629,7 +632,7 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         status='PROCESSING',
         is_success=False,
         model_used='nomic-embed-text:latest',
-        system_prompt=f"Starting background vectorization for {len(file_tree_map)} files via chord.",
+        system_prompt=f"Starting background vectorization for {len(limited_file_tree)} files via chord.",
         user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
         celery_task_id=self.request.id
     )
@@ -667,13 +670,15 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         return {"status": "cancelled", "task_count": 0}
 
     # Dispatch chord
-    tasks = [process_single_document_async.s(f, deal_id, user_email, i < 5, str(audit_log.id)) for i, f in enumerate(file_tree_map)]
+    tasks = [process_single_document_async.s(f, deal_id, user_email, i < 5, str(audit_log.id)) for i, f in enumerate(limited_file_tree)]
     callback = finalize_folder_background.s(deal_id, str(audit_log.id))
     _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
     audit_log.source_metadata = {
         **(audit_log.source_metadata or {}),
         "child_task_ids": child_task_ids,
         "callback_task_id": callback_task_id,
+        "document_limit": VDR_DOCUMENT_LIMIT,
+        "requested_task_count": len(file_tree_map),
         "task_count": len(tasks),
     }
     audit_log.save(update_fields=["source_metadata"])
