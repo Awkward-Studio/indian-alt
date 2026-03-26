@@ -92,13 +92,13 @@ class UniversalChatServiceTests(TestCase):
             "metric_terms": [],
             "rag_queries": ["compare this with other fintech deals"],
             "needs_stats": False,
-            "deal_limit": 8,
-            "chunks_per_deal": 2,
+            "deal_limit": 10,
+            "chunks_per_deal": 4,
             "user_query": "compare this with other fintech deals",
         }
         with patch.object(self.service, "_build_query_plan", return_value=expected_plan) as build_query_plan, \
              patch.object(self.service, "_get_candidate_deals", return_value=[]), \
-             patch.object(self.service, "_search_ranked_chunks", return_value=[]):
+             patch.object(self.service, "_search_ranked_chunks", return_value=([], 0)):
             metadata = self.service.process_intent_and_build_metadata(
                 user_message="compare this with other fintech deals",
                 conversation_id="conv-1",
@@ -110,6 +110,8 @@ class UniversalChatServiceTests(TestCase):
         self.assertTrue(metadata["used_query_builder"])
         self.assertEqual(metadata["gate_mode"], "fresh_retrieval")
         self.assertEqual(metadata["query_plan"], expected_plan)
+        self.assertEqual(metadata["deals_considered"], 0)
+        self.assertEqual(metadata["selected_chunk_count"], 0)
 
     def test_first_turn_without_assistant_history_uses_query_builder(self):
         expected_plan = {
@@ -120,13 +122,13 @@ class UniversalChatServiceTests(TestCase):
             "metric_terms": [],
             "rag_queries": ["Tell me about Acme"],
             "needs_stats": False,
-            "deal_limit": 8,
-            "chunks_per_deal": 2,
+            "deal_limit": 10,
+            "chunks_per_deal": 4,
             "user_query": "Tell me about Acme",
         }
         with patch.object(self.service, "_build_query_plan", return_value=expected_plan) as build_query_plan, \
              patch.object(self.service, "_get_candidate_deals", return_value=[]), \
-             patch.object(self.service, "_search_ranked_chunks", return_value=[]):
+             patch.object(self.service, "_search_ranked_chunks", return_value=([], 0)):
             metadata = self.service.process_intent_and_build_metadata(
                 user_message="Tell me about Acme",
                 conversation_id="conv-1",
@@ -137,3 +139,16 @@ class UniversalChatServiceTests(TestCase):
         build_query_plan.assert_called_once()
         self.assertTrue(metadata["used_query_builder"])
         self.assertIn("No prior assistant context", metadata["gate_reason"])
+
+    def test_default_flow_config_uses_deeper_retrieval_defaults(self):
+        config = UniversalChatFlowService.build_default_config()
+        planner = next(stage for stage in config["stages"] if stage["id"] == "query_planner")
+        filtering = next(stage for stage in config["stages"] if stage["id"] == "deal_filtering")
+        retrieval = next(stage for stage in config["stages"] if stage["id"] == "chunk_retrieval")
+        assembly = next(stage for stage in config["stages"] if stage["id"] == "context_assembly")
+
+        self.assertEqual(planner["settings"]["default_deal_limit"], 10)
+        self.assertEqual(planner["settings"]["default_chunks_per_deal"], 4)
+        self.assertEqual(filtering["settings"]["candidate_pool_limit"], 120)
+        self.assertEqual(retrieval["settings"]["vector_limit"], 120)
+        self.assertEqual(assembly["settings"]["max_total_chunks"], 16)

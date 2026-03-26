@@ -8,6 +8,23 @@ from .services.universal_chat import UniversalChatService
 
 logger = logging.getLogger(__name__)
 
+CHAT_HISTORY_MESSAGE_LIMIT = 3
+CHAT_HISTORY_CHAR_LIMIT = 12000
+
+
+def _build_history_context(conversation: AIConversation) -> tuple[str, int, int]:
+    previous_messages = list(
+        AIMessage.objects.filter(conversation=conversation)
+        .order_by('-created_at')[1 : CHAT_HISTORY_MESSAGE_LIMIT + 1]
+    )
+
+    entries = [f"{msg.role.upper()}: {msg.content}\n" for msg in reversed(previous_messages)]
+    while entries and sum(len(entry) for entry in entries) > CHAT_HISTORY_CHAR_LIMIT:
+        entries.pop(0)
+
+    history_context = "".join(entries)
+    return history_context, len(entries), len(history_context)
+
 @shared_task(bind=True, autoretry_for=(AIConversation.DoesNotExist, AIAuditLog.DoesNotExist), retry_backoff=True, max_retries=3)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
     """
@@ -24,13 +41,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         audit_log.save(update_fields=['celery_task_id', 'status'])
 
         ai_service = AIProcessorService()
-        history_context = ""
-        
-        # --- RETRIEVE CONVERSATION HISTORY ---
-        previous_messages = AIMessage.objects.filter(conversation=conversation).order_by('-created_at')[1:11] # Skip the current user message
-        for msg in reversed(previous_messages):
-            history_context += f"{msg.role.upper()}: {msg.content}\n"
-        # -------------------------------------
+        history_context, history_messages_used, history_chars_used = _build_history_context(conversation)
         
         if skill_name == 'universal_chat':
             chat_service = UniversalChatService(ai_service)
@@ -45,6 +56,12 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "query_plan": task_metadata.get("query_plan") if task_metadata.get("used_query_builder", True) else None,
                 "flow_version": task_metadata.get("flow_version"),
                 "flow_config_id": task_metadata.get("flow_config_id"),
+                "history_messages_used": history_messages_used,
+                "history_chars_used": history_chars_used,
+                "deals_considered": task_metadata.get("deals_considered"),
+                "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
+                "selected_chunk_count": task_metadata.get("selected_chunk_count"),
+                "selected_sources": task_metadata.get("selected_sources"),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
@@ -61,6 +78,12 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             task_metadata = metadata or {}
             task_metadata['audit_log_id'] = audit_log_id
             task_metadata['history_context'] = history_context
+            task_metadata.setdefault('_source_metadata', {})
+            task_metadata['_source_metadata'] = {
+                **(task_metadata.get('_source_metadata') or {}),
+                "history_messages_used": history_messages_used,
+                "history_chars_used": history_chars_used,
+            }
             final_content = user_message
 
         full_text = ""

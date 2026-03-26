@@ -98,37 +98,40 @@ class UniversalChatService:
                 "used_query_builder": False,
                 "gate_mode": "conversation_only",
                 "gate_reason": gate["gate_reason"],
+                "deals_considered": 0,
+                "retrieved_chunk_count": 0,
+                "selected_chunk_count": 0,
+                "selected_sources": [],
             }
 
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
-        chunks = self._search_ranked_chunks(plan, deals)
+        chunks, candidate_chunk_count = self._search_ranked_chunks(plan, deals)
+        serialized_deals = [self._serialize_deal(deal) for deal in deals]
+        serialized_chunks = [self._serialize_chunk(item) for item in chunks]
 
-        context_data = {
-            "flow_version": getattr(self.flow_version, "version", None),
-            "query_plan": plan,
-            "pipeline_overview": self._build_pipeline_overview(deals),
-            "matching_deals": [self._serialize_deal(deal) for deal in deals],
-            "document_insights": [self._serialize_chunk(item) for item in chunks],
-        }
+        context_data = self._format_context_data(
+            plan=plan,
+            deals=serialized_deals,
+            chunks=serialized_chunks,
+        )
 
         if plan.get("needs_stats") and self._stage_enabled("stats_block"):
-            context_data["pipeline_stats"] = {
+            context_data += "\n\n[PIPELINE STATS]\n" + json.dumps({
                 "total_deals": Deal.objects.count(),
                 "female_led_count": Deal.objects.filter(is_female_led=True).count(),
                 "by_industry": list(
                     Deal.objects.values("industry").annotate(count=Count("id")).order_by("-count")[:10]
                 ),
-            }
+            }, default=str)
 
-        context_data_str = json.dumps(context_data, default=str)
         max_context_chars = int(self._stage_settings("context_assembly").get("max_context_chars", 60000) or 60000)
-        if len(context_data_str) > max_context_chars:
-            context_data_str = context_data_str[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
+        if len(context_data) > max_context_chars:
+            context_data = context_data[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
 
         return {
             "history_context": history_context,
-            "context_data": context_data_str,
+            "context_data": context_data,
             "audit_log_id": audit_log_id,
             "query_plan": plan,
             "flow_version": getattr(self.flow_version, "version", None),
@@ -137,6 +140,13 @@ class UniversalChatService:
             "used_query_builder": True,
             "gate_mode": "fresh_retrieval",
             "gate_reason": gate["gate_reason"],
+            "deals_considered": len(deals),
+            "retrieved_chunk_count": candidate_chunk_count,
+            "selected_chunk_count": len(serialized_chunks),
+            "selected_sources": [
+                f"{chunk['deal']}|{chunk.get('source_title') or chunk['source_type']}"
+                for chunk in serialized_chunks
+            ],
         }
 
     def _decide_query_builder_usage(self, user_message: str, history_context: str) -> Dict[str, Any]:
@@ -315,6 +325,7 @@ class UniversalChatService:
                 deal.sector or "",
                 deal.city or "",
                 deal.deal_summary or "",
+                " ".join(deal.themes if isinstance(deal.themes, list) else []),
             ]
             combined = " ".join(haystacks).lower()
             score = 0
@@ -332,6 +343,8 @@ class UniversalChatService:
                     score += float(rerank_settings.get("deal_title_keyword_boost") or 30)
                 if keyword_lower in combined:
                     score += float(rerank_settings.get("deal_context_keyword_boost") or 10)
+                if keyword_lower in " ".join(deal.themes if isinstance(deal.themes, list) else []).lower():
+                    score += float(rerank_settings.get("deal_context_keyword_boost") or 10) * 1.5
 
             for metric in plan.get("metric_terms", []):
                 if metric.lower() in combined:
@@ -345,7 +358,7 @@ class UniversalChatService:
             return top
         return pool[: min(plan.get("deal_limit", 8), int(filter_settings.get("result_limit") or plan.get("deal_limit", 8)))]
 
-    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> List[Dict[str, Any]]:
+    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> tuple[List[Dict[str, Any]], int]:
         retrieval_settings = self._stage_settings("chunk_retrieval")
         rerank_settings = self._stage_settings("chunk_rerank")
         assembly_settings = self._stage_settings("context_assembly")
@@ -428,7 +441,7 @@ class UniversalChatService:
             if len(selected) >= max_total:
                 break
 
-        return selected
+        return selected, len(candidate_chunks)
 
     def _build_pipeline_overview(self, deals: List[Deal]) -> str:
         total = Deal.objects.count()
@@ -458,13 +471,13 @@ class UniversalChatService:
             "management_meeting": deal.management_meeting,
             "funding_ask": deal.funding_ask,
             "themes": deal.themes if isinstance(deal.themes, list) else [],
-            "summary_excerpt": (deal.deal_summary or "")[:600],
+            "summary_excerpt": (deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
             "recent_timeline": recent_timeline,
         }
 
     def _serialize_chunk(self, item: Dict[str, Any]) -> Dict[str, Any]:
         chunk = item["chunk"]
-        excerpt = chunk.content[:900]
+        excerpt = chunk.content[: int(self._stage_settings("context_assembly").get("chunk_excerpt_chars", 1400) or 1400)]
         metadata = chunk.metadata or {}
         return {
             "deal": chunk.deal.title,
@@ -476,6 +489,48 @@ class UniversalChatService:
             "text": excerpt,
             "metadata": metadata,
         }
+
+    def _format_context_data(self, plan: Dict[str, Any], deals: List[Dict[str, Any]], chunks: List[Dict[str, Any]]) -> str:
+        sections = [
+            "[PIPELINE OVERVIEW]",
+            self._build_pipeline_overview_from_payload(deals),
+            "",
+            "[QUERY PLAN]",
+            json.dumps(plan, default=str, indent=2),
+            "",
+            "[CANDIDATE DEALS]",
+        ]
+
+        if deals:
+            for deal in deals:
+                sections.append(
+                    f"- {deal['title']} | Industry: {deal.get('industry') or 'N/A'} | "
+                    f"Sector: {deal.get('sector') or 'N/A'} | Priority: {deal.get('priority') or 'N/A'} | "
+                    f"Phase: {deal.get('current_phase') or 'N/A'} | Themes: {', '.join(deal.get('themes') or []) or 'N/A'}"
+                )
+                if deal.get("summary_excerpt"):
+                    sections.append(f"  Summary: {deal['summary_excerpt']}")
+        else:
+            sections.append("- No strong candidate deals found.")
+
+        sections.extend(["", "[TOP EVIDENCE CHUNKS]"])
+        if chunks:
+            for index, chunk in enumerate(chunks, start=1):
+                sections.append(
+                    f"{index}. [Deal: {chunk['deal']} | Source: {chunk.get('source_title') or chunk['source_type']} | "
+                    f"Type: {chunk['source_type']} | Score: {chunk['score']}]"
+                )
+                sections.append(chunk["text"])
+        else:
+            sections.append("- No high-confidence document chunks were selected.")
+
+        return "\n".join(sections).strip()
+
+    def _build_pipeline_overview_from_payload(self, deals: List[Dict[str, Any]]) -> str:
+        total = Deal.objects.count()
+        if not deals:
+            return f"Total deals in system: {total}. No strongly matching deals were found, so the answer should stay conservative."
+        return f"Total deals in system: {total}. Retrieval narrowed the answer context to {len(deals)} candidate deals."
 
     def _normalize_string_list(self, values: Any) -> List[str]:
         if not values:
@@ -515,17 +570,22 @@ class UniversalChatService:
     def simulate_query(self, user_message: str, conversation_id: str = "admin-preview") -> Dict[str, Any]:
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
-        chunks = self._search_ranked_chunks(plan, deals)
+        chunks, candidate_chunk_count = self._search_ranked_chunks(plan, deals)
+        serialized_deals = [self._serialize_deal(deal) for deal in deals]
+        serialized_chunks = [self._serialize_chunk(item) for item in chunks]
         context_data = {
             "query_plan": plan,
-            "matching_deals": [self._serialize_deal(deal) for deal in deals],
-            "document_insights": [self._serialize_chunk(item) for item in chunks],
+            "matching_deals": serialized_deals,
+            "document_insights": serialized_chunks,
+            "deals_considered": len(serialized_deals),
+            "retrieved_chunk_count": candidate_chunk_count,
+            "selected_chunk_count": len(serialized_chunks),
         }
         return {
             "flow_version": getattr(self.flow_version, "version", None),
             "query_plan": plan,
-            "candidate_deals": context_data["matching_deals"],
-            "top_chunks": context_data["document_insights"],
-            "context_preview": json.dumps(context_data, default=str)[:4000],
+            "candidate_deals": serialized_deals,
+            "top_chunks": serialized_chunks,
+            "context_preview": self._format_context_data(plan, serialized_deals, serialized_chunks)[:4000],
             "answer_prompt_preview": self._stage_settings("answer_generation").get("prompt_template"),
         }

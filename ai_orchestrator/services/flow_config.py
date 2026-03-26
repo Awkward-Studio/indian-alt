@@ -127,26 +127,26 @@ class UniversalChatFlowService:
                     "settings": {
                         "prompt_template": DEFAULT_PLANNER_PROMPT,
                         "fallback_query_type": "pipeline_search",
-                        "default_deal_limit": 8,
-                        "default_chunks_per_deal": 2,
+                        "default_deal_limit": 10,
+                        "default_chunks_per_deal": 4,
                     },
                 },
                 {
                     "id": "deal_filtering",
                     "enabled": True,
                     "settings": {
-                        "candidate_pool_limit": 60,
-                        "result_limit": 8,
+                        "candidate_pool_limit": 120,
+                        "result_limit": 10,
                     },
                 },
                 {
                     "id": "chunk_retrieval",
                     "enabled": True,
                     "settings": {
-                        "vector_limit": 60,
+                        "vector_limit": 120,
                         "sqlite_candidate_limit": 300,
-                        "fallback_candidate_limit": 120,
-                        "default_chunks_per_deal": 2,
+                        "fallback_candidate_limit": 240,
+                        "default_chunks_per_deal": 4,
                     },
                 },
                 {
@@ -177,9 +177,11 @@ class UniversalChatFlowService:
                     "id": "context_assembly",
                     "enabled": True,
                     "settings": {
-                        "max_total_chunks": 8,
-                        "fallback_max_total_chunks": 8,
-                        "max_context_chars": 60000,
+                        "max_total_chunks": 16,
+                        "fallback_max_total_chunks": 16,
+                        "max_context_chars": 85000,
+                        "chunk_excerpt_chars": 1600,
+                        "deal_summary_excerpt_chars": 1000,
                     },
                 },
                 {

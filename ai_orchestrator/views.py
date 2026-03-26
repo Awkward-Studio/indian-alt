@@ -190,12 +190,16 @@ class DealChatView(APIView):
             }
             
             embed_service = EmbeddingService()
-            chunks = embed_service.search_similar_chunks(user_message, deal, limit=8)
+            chunks = embed_service.search_similar_chunks(user_message, deal, limit=16)
             
-            rag_context = f"DEAL FORENSIC RECORD:\n{json.dumps(structured_data, default=str, indent=2)}\n\nRAW DOCUMENT CHUNKS (MOST RELEVANT TO QUERY):\n"
+            rag_context = f"[DEAL FORENSIC RECORD]\n{json.dumps(structured_data, default=str, indent=2)}\n\n[TOP EVIDENCE CHUNKS]\n"
             if chunks:
-                for chunk in chunks:
-                    rag_context += f"\n--- {chunk.metadata.get('filename', 'Source')} ---\n{chunk.content}\n"
+                for index, chunk in enumerate(chunks, start=1):
+                    source_title = (chunk.metadata or {}).get('title') or (chunk.metadata or {}).get('filename') or 'Source'
+                    rag_context += (
+                        f"\n{index}. [Deal: {deal.title} | Source: {source_title} | Type: {chunk.source_type}]\n"
+                        f"{chunk.content[:1600]}\n"
+                    )
             else:
                 rag_context += "No specific raw document chunks matched this query."
             
@@ -236,7 +240,16 @@ class DealChatView(APIView):
                     'conversation_id': str(conversation.id),
                     'user_message': user_message,
                     'skill_name': 'deal_chat',
-                    'metadata': {'deal_context': rag_context},
+                    'metadata': {
+                        'deal_context': rag_context,
+                        '_source_metadata': {
+                            'retrieved_chunk_count': len(chunks),
+                            'selected_sources': [
+                                ((chunk.metadata or {}).get('title') or (chunk.metadata or {}).get('filename') or 'Source')
+                                for chunk in chunks
+                            ],
+                        },
+                    },
                     'audit_log_id': str(audit_log.id)
                 }
             )
