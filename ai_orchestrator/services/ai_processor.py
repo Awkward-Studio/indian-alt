@@ -8,7 +8,7 @@ from .llm_providers import OllamaProviderService
 from .prompts import PromptBuilderService
 from .parsers import ResponseParserService
 from .ocr import OCRService
-from .realtime import broadcast_audit_log_update
+from .realtime import broadcast_audit_log_update, log_worker_event
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -51,26 +51,34 @@ class AIProcessorService:
             personality = AIPersonality.objects.filter(is_default=True).first()
             
         skill = AISkill.objects.filter(name=skill_name).first() if skill_name else None
+        vision_model = personality.vision_model_name if personality and personality.vision_model_name else 'llava:latest'
+
+        # Audit Log Setup (Internal bookkeeping) - Initialize early to avoid UnboundLocalError in log_worker_event
+        audit_log = self._setup_audit_log(
+            source_type, source_id, personality, skill, 
+            "", "", metadata
+        )
 
         # PHASE 1: OCR (Optional, delegated to OCRService)
         if images and skill_name == "deal_extraction":
-            vision_model = personality.vision_model_name if personality else "llava:latest"
+            log_worker_event(audit_log, f"Starting OCR analysis for {len(images)} images.")
             ocr_context = self.ocr_service.transcribe(images, model=vision_model)
             content = f"{content}\n\n[HIGH-FIDELITY DOCUMENT OCR]:\n{ocr_context}"
+            log_worker_event(audit_log, "OCR analysis complete.")
 
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
-        print(f"[AI-PIPELINE] Phase 2: Orchestrating Forensic Logic with {personality.text_model_name if personality else 'LLM'}...")
-        
+        log_worker_event(audit_log, f"Preparing prompt for {personality.text_model_name if personality else 'LLM'}.")
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         prompt_template = skill.prompt_template if skill else "{{ content }}"
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
 
-        # Audit Log Setup (Internal bookkeeping)
-        audit_log = self._setup_audit_log(
-            source_type, source_id, personality, skill, 
-            system_instructions, user_prompt, metadata
-        )
+        # Update Audit Log with the generated prompts
+        audit_log.system_prompt = system_instructions
+        audit_log.user_prompt = user_prompt
+        audit_log.save(update_fields=['system_prompt', 'user_prompt'])
+        
+        log_worker_event(audit_log, "Sending request to AI model server.")
 
         payload = {
             "model": model_override or (personality.text_model_name if personality else 'qwen3.5:latest'),
@@ -79,11 +87,15 @@ class AIProcessorService:
             "stream": stream,
             "keep_alive": "2h",
             "options": {
-                "num_ctx": 32768,
+                "num_ctx": 65536,
+                "num_predict": 8192,
                 "temperature": 0.1,
-                "num_gpu": 99
+                "num_gpu": 99,
+                "repeat_penalty": 1.0
             }
         }
+
+        self._prepare_for_text_analysis(payload["model"], vision_model)
 
         # PHASE 3: EXECUTION (Delegated to Provider + Parser)
         if stream:
@@ -123,6 +135,17 @@ class AIProcessorService:
             is_success=False, status='PROCESSING',
             source_metadata=source_meta, celery_task_id=celery_task_id
         )
+
+    def _prepare_for_text_analysis(self, text_model: str, vision_model: str) -> None:
+        """
+        On a single-GPU / single-concurrency deployment, explicitly evict the OCR
+        model before firing the text model to maximize available VRAM.
+        """
+        if not text_model or not vision_model:
+            return
+        if text_model == vision_model:
+            return
+        self.provider.unload_model(vision_model)
 
     def _stream_response(self, payload: dict, audit_log: AIAuditLog) -> Iterator[str]:
         """
@@ -251,6 +274,7 @@ class AIProcessorService:
             else:
                 audit_log.is_success = False
                 audit_log.status = 'FAILED'
+                audit_log.error_message = "AI response was truncated or malformed (JSON block not found)."
                 
             # Estimate tokens
             audit_log.tokens_used = (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4

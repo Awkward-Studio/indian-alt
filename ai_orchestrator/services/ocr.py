@@ -28,7 +28,7 @@ class OCRService:
                 "prompt": "Extract all text and tabular data from this document page exactly. Output Markdown.",
                 "images": [img],
                 "stream": False,
-                "keep_alive": "2h"
+                "keep_alive": "30s"
             }
             try:
                 resp = self.provider.execute_standard(payload, timeout=120)

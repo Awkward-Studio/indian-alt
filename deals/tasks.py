@@ -8,7 +8,7 @@ from .models import Deal, DealDocument, DocumentType, InitialAnalysisStatus
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
-from ai_orchestrator.services.realtime import broadcast_audit_log_update
+from ai_orchestrator.services.realtime import broadcast_audit_log_update, log_worker_event
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +124,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
     if audit_log_id:
         try:
             audit_log = AIAuditLog.objects.get(id=audit_log_id)
-            audit_log.status = 'PROCESSING'
-            audit_log.save()
-            broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
+            log_worker_event(audit_log, f"Worker picking up traversal for folder {folder_id}", status='PROCESSING')
         except AIAuditLog.DoesNotExist:
             audit_log_id = None
             
@@ -145,21 +143,20 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             user_prompt=f"Traversing folder: {folder_id}",
             celery_task_id=self.request.id
         )
+        log_worker_event(audit_log, f"Initialized traversal log for folder {folder_id}")
 
     graph = GraphAPIService()
     
     try:
         # 1. Traverse recursively
+        log_worker_event(audit_log, "Querying Microsoft Graph for folder tree...")
         file_tree = graph.get_folder_tree(drive_id, folder_id, user_email=user_email)
         if not file_tree:
-            audit_log.status = 'FAILED'
-            audit_log.error_message = "No files found in folder"
-            audit_log.save()
-            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+            log_worker_event(audit_log, "No files found in specified folder.", status='FAILED', done=True)
             return {"error": "No files found"}
             
         # Update log with traversal results - Transition to WAITING_FOR_SELECTION
-        audit_log.status = 'COMPLETED'
+        log_worker_event(audit_log, f"Traversal complete. Discovered {len(file_tree)} objects.", status='COMPLETED', done=True)
         audit_log.system_prompt = f"Traversal complete. Found {len(file_tree)} objects. Awaiting selection..."
         audit_log.is_success = True
         # Store the tree in source_metadata for later recovery
@@ -173,7 +170,6 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             "interaction_mode": "editable",
         }
         audit_log.save()
-        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
 
         return {
             "status": "success",
@@ -186,10 +182,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             "user_email": user_email
         }
     except Exception as e:
-        audit_log.status = 'FAILED'
-        audit_log.error_message = str(e)
-        audit_log.save()
-        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        log_worker_event(audit_log, f"Traversal error: {str(e)}", status='FAILED', done=True)
         raise e
 
 @shared_task(bind=True)
@@ -204,10 +197,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
     
     try:
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
-        audit_log.status = 'PROCESSING'
-        audit_log.system_prompt = f"Extracting deal data from {len(selected_file_ids)} selected documents..."
-        audit_log.save()
-        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
+        log_worker_event(audit_log, f"Worker starting AI analysis for {len(selected_file_ids)} documents", status='PROCESSING')
     except AIAuditLog.DoesNotExist:
         logger.error("Audit log %s not found for selection analysis", audit_log_id)
         return {"error": "Audit log not found"}
@@ -215,21 +205,16 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
     try:
         cache_key = f"folder_sync_{session_id}"
         session_data = cache.get(cache_key)
-        logger.info("Cache lookup for key %s: %s", cache_key, "HIT" if session_data else "MISS")
         
         if not session_data:
-            audit_log.status = 'FAILED'
-            error_msg = f"Session {session_id} expired or invalid. Re-open the preflight log and confirm again."
-            audit_log.error_message = error_msg
-            audit_log.save(update_fields=['status', 'error_message'])
-            logger.error(error_msg)
-            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-            return {"error": error_msg}
+            log_worker_event(audit_log, f"Session {session_id} expired. Re-open log to retry.", status='FAILED', done=True)
+            return {"error": "Session expired"}
 
         passed_files = session_data.get("passed_files", [])
         failed_files = session_data.get("failed_files", [])
         combined_text = _build_combined_text(passed_files, selected_file_ids)
 
+        log_worker_event(audit_log, f"Compiled context for {len(passed_files)} documents. Sending to AI VM...")
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
             "selected_files_count": len(selected_file_ids),
@@ -242,12 +227,10 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             "workflow_stage": "analysis_complete",
         }
         audit_log.save(update_fields=['source_metadata'])
-        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
 
         analysis = {}
         raw_thinking = ""
         if combined_text:
-            logger.info("Content extracted successfully. Total length: %s chars. Sending to AI VM...", len(combined_text))
             ai_service = AIProcessorService()
             meta = {
                 '_source_metadata': audit_log.source_metadata,
@@ -262,19 +245,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
                 source_type="onedrive_folder",
                 metadata=meta
             )
-
-            if isinstance(result, dict) and 'parsed_json' in result:
-                analysis = result['parsed_json']
-                raw_thinking = result.get('thinking', '')
-            else:
-                analysis = result
-                raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
-        else:
-            audit_log.status = 'FAILED'
-            audit_log.error_message = "No readable text found in selection."
-            audit_log.save()
-            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-            return {"error": "No content found"}
+            log_worker_event(audit_log, "AI Analysis complete.")
 
         if isinstance(analysis, dict):
             metadata = analysis.setdefault("metadata", {})
@@ -317,19 +288,17 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
 
     try:
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
-        audit_log.status = 'PROCESSING'
-        audit_log.system_prompt = f"Validating {len(selected_file_ids)} selected documents before deal extraction..."
-        audit_log.save()
-        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
+        log_worker_event(audit_log, f"Worker starting preflight for {len(selected_file_ids)} files", status='PROCESSING')
     except AIAuditLog.DoesNotExist:
         return {"error": "Audit log not found"}
 
     try:
+        log_worker_event(audit_log, "Downloading and extracting selected documents...")
         extraction_result = _extract_selected_files(drive_id, user_email, selected_file_ids)
         passed_files = extraction_result["passed_files"]
         failed_files = extraction_result["failed_files"]
 
-        audit_log.status = 'COMPLETED'
+        log_worker_event(audit_log, f"Preflight results: {len(passed_files)} PASSED, {len(failed_files)} FAILED", status='COMPLETED', done=True)
         audit_log.is_success = True
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),

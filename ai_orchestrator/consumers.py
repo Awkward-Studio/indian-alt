@@ -47,3 +47,41 @@ class AIStreamConsumer(AsyncWebsocketConsumer):
             'done': event.get('done', False),
             'audit_log': event.get('audit_log'),
         }))
+
+class AIAuditLogConsumer(AsyncWebsocketConsumer):
+    """
+    WebSocket consumer for global audit log updates.
+    Users connect to ws/audit-logs/ to see state changes across the entire ledger.
+    """
+    async def connect(self):
+        self.room_group_name = 'audit_logs_general'
+
+        # Join room group
+        await self.channel_layer.group_add(
+            self.room_group_name,
+            self.channel_name
+        )
+
+        await self.accept()
+        logger.info(f"WebSocket connected: {self.room_group_name}")
+
+    async def disconnect(self, close_code):
+        # Leave room group
+        await self.channel_layer.group_discard(
+            self.room_group_name,
+            self.channel_name
+        )
+        logger.info(f"WebSocket disconnected: {self.room_group_name}")
+
+    async def ai_message(self, event):
+        """
+        Handles messages sent to the group via channel_layer.group_send
+        """
+        # Send message to WebSocket
+        await self.send(text_data=json.dumps({
+            'event_type': event.get('event_type', 'snapshot'),
+            'audit_log_id': event.get('audit_log_id'),
+            'status': event.get('status', 'processing'),
+            'done': event.get('done', False),
+            'audit_log': event.get('audit_log'),
+        }))

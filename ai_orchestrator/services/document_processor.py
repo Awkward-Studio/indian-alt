@@ -65,7 +65,7 @@ class DocumentProcessorService:
                     "prompt": "Extract all text and tabular data from this document exactly. Output Markdown.",
                     "images": [img],
                     "stream": False,
-                    "keep_alive": "2h"
+                    "keep_alive": "30s"
                 }
                 resp = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=120)
                 if resp.status_code == 200:

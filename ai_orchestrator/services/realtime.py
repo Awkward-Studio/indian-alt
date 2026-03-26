@@ -21,7 +21,10 @@ def serialize_audit_log(log) -> dict:
         "system_prompt": log.system_prompt,
         "parsed_json": log.parsed_json,
         "source_metadata": log.source_metadata,
+        "worker_logs": log.worker_logs or [],
         "skill_name": log.skill.name if log.skill else "General Analysis",
+        "personality_name": log.personality.name if log.personality else "Direct Inference",
+        "celery_task_id": log.celery_task_id,
     }
 
 
@@ -30,14 +33,44 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
     if not channel_layer or not log:
         return
 
+    data = {
+        "type": "ai_message",
+        "event_type": event_type,
+        "audit_log_id": str(log.id),
+        "status": (log.status or "").lower(),
+        "done": done,
+        "audit_log": serialize_audit_log(log),
+    }
+
+    # Per-log stream (e.g., for detailed reasoning view)
     async_to_sync(channel_layer.group_send)(
         f"ai_stream_{str(log.id)}",
-        {
-            "type": "ai_message",
-            "event_type": event_type,
-            "audit_log_id": str(log.id),
-            "status": (log.status or "").lower(),
-            "done": done,
-            "audit_log": serialize_audit_log(log),
-        },
+        data,
     )
+
+    # Global ledger stream (for list view updates)
+    async_to_sync(channel_layer.group_send)(
+        "audit_logs_general",
+        data,
+    )
+
+
+def log_worker_event(log, message: str, *, status: str = None, event_type: str = "snapshot", done: bool = False) -> None:
+    """
+    Appends a message to the AIAuditLog.worker_logs list and broadcasts the update.
+    """
+    if not log:
+        return
+
+    # Update the log in DB
+    if not log.worker_logs:
+        log.worker_logs = []
+    
+    log.worker_logs.append(message)
+    if status:
+        log.status = status
+    
+    log.save(update_fields=['worker_logs', 'status'] if status else ['worker_logs'])
+
+    # Broadcast
+    broadcast_audit_log_update(log, event_type=event_type, done=done)
