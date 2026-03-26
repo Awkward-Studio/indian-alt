@@ -274,7 +274,8 @@ class AIProcessorService:
             else:
                 audit_log.is_success = False
                 audit_log.status = 'FAILED'
-                audit_log.error_message = "AI response was truncated or malformed (JSON block not found)."
+                audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')
+                logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
                 
             # Estimate tokens
             audit_log.tokens_used = (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4

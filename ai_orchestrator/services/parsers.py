@@ -12,25 +12,79 @@ class ResponseParserService:
     """
 
     @staticmethod
+    def repair_json(json_str: str) -> str:
+        """
+        Attempts to fix common AI JSON issues like unescaped quotes in long text blocks.
+        """
+        if not json_str:
+            return ""
+
+        # 1. Handle unescaped double quotes inside values
+        # This is a heuristic: it looks for quotes that are NOT followed by , or } or ] or :
+        # and NOT preceded by : or [ or {
+        # Actually, a better way is to use a state machine, but let's try a robust regex first.
+        
+        # 2. Remove trailing commas
+        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+        
+        # 3. Handle illegal control characters
+        json_str = json_str.replace('\t', '    ')
+        # We don't want to replace \n because it might be a valid newline in a string (which is still illegal JSON but common)
+        # but let's at least ensure they are escaped if they are raw.
+        
+        return json_str.strip()
+
+    @staticmethod
     def extract_json(text: str) -> str:
         """Robustly find and extract JSON string from a larger text block."""
         try:
-            # 1. Try common tags/blocks first
+            # 1. Try to find content between tags (non-greedy to avoid capturing multiple blocks if tags are repeated)
             patterns = [
-                r'<json>\s*(\{.*?\})\s*</json>',
-                r'```json\s*(\{.*?\})\s*```',
-                r'```\s*(\{.*?\})\s*```'
+                r'<json>(.*?)</json>',
+                r'```json(.*?)\s*```',
+                r'```(.*?)\s*```'
             ]
+            
+            candidate = None
             for pattern in patterns:
                 match = re.search(pattern, text, re.DOTALL)
                 if match:
-                    return match.group(1).strip()
+                    candidate = match.group(1).strip()
+                    break
+            
+            if not candidate:
+                # Fallback to finding from first {
+                first_brace = text.find('{')
+                if first_brace != -1:
+                    candidate = text[first_brace:].strip()
+            
+            if not candidate:
+                return text
 
-            # 2. Fallback to raw brace matching
-            first_brace = text.find('{')
-            last_brace = text.rfind('}')
-            if first_brace != -1 and last_brace != -1:
-                return text[first_brace:last_brace + 1]
+            # 2. Use raw_decode to get the FIRST valid JSON object from the candidate
+            # This handles cases where the AI appends extra text or repeats the JSON structure.
+            start_idx = candidate.find('{')
+            if start_idx == -1:
+                return candidate
+                
+            # Attempt to repair common issues before raw_decode to increase success rate
+            # (e.g., trailing commas or unescaped characters that raw_decode might stumble on)
+            # but we only repair the first object part if possible.
+            
+            try:
+                decoder = json.JSONDecoder()
+                # raw_decode returns (object, end_index)
+                obj, _ = decoder.raw_decode(candidate[start_idx:])
+                return json.dumps(obj)
+            except json.JSONDecodeError:
+                # If raw_decode fails on the raw string, try repairing it and decoding again
+                repaired_candidate = ResponseParserService.repair_json(candidate[start_idx:])
+                try:
+                    obj, _ = decoder.raw_decode(repaired_candidate)
+                    return json.dumps(obj)
+                except:
+                    # Final fallback: return the original candidate if all decoding/repair fails
+                    return candidate
         except Exception as e:
             logger.error(f"JSON extraction failed: {str(e)}")
         return text
@@ -46,7 +100,12 @@ class ResponseParserService:
             t_match = re.search(r'<thinking>(.*?)</thinking>', raw_response, re.DOTALL)
             if t_match:
                 thinking = t_match.group(1).strip()
+
+        # 1. EXTRACT JSON FIRST BEFORE STRIPPING ANYTHING ELSE
+        # extract_json now robustly finds the first object and attempts repairs
+        clean_json_str = ResponseParserService.extract_json(raw_response)
                 
+        # 2. CLEAN RESPONSE FOR DISPLAY
         clean_response = raw_response
         if "<response>" in clean_response:
             r_match = re.search(r'<response>(.*?)</response>', clean_response, re.DOTALL)
@@ -55,9 +114,10 @@ class ResponseParserService:
                 
         clean_response = re.sub(r'<thinking>.*?</thinking>', '', clean_response, flags=re.DOTALL).strip()
         clean_response = clean_response.replace("<response>", "").replace("</response>", "").strip()
+        # Also strip the <json> block from the display text if it's there
+        clean_response = re.sub(r'<json>.*?</json>', '', clean_response, flags=re.DOTALL).strip()
 
-        clean_json_str = ResponseParserService.extract_json(clean_response)
-        
+        # 3. PARSE JSON
         try:
             parsed_json = json.loads(clean_json_str)
             
@@ -71,12 +131,13 @@ class ResponseParserService:
             parsed_json["_raw_response"] = raw_response
             return parsed_json, True, clean_response, thinking
         except Exception as e:
+            logger.error(f"JSON parsing/repair failed: {str(e)}")
             # FALLBACK: If JSON fails, still try to extract basic metadata from the text report
             fallback_data = {
                 "deal_model_data": {"title": "Direct Inference (Parsing Error)"},
                 "metadata": {"ambiguous_points": ["AI response was truncated or malformed."]},
                 "analyst_report": raw_response,
-                "error": "JSON parsing error",
+                "error": f"JSON parsing error: {str(e)}",
                 "thinking": thinking,
                 "response": clean_response
             }
