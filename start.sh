@@ -55,7 +55,7 @@ PY
 
     echo ""
     echo "=== STARTING CELERY WORKER (SINGLETON MODE) ==="
-    exec celery -A config worker -l info --concurrency=1
+    exec celery -A config worker -l info --concurrency=1 -Q high_priority,low_priority,default
 else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="
