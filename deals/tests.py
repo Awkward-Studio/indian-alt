@@ -4,6 +4,7 @@ from django.core.cache import cache
 from django.test import TestCase
 
 from deals.models import Deal
+from deals.serializers import DealDetailSerializer
 from deals.services.deal_creation import DealCreationService
 from deals.services.folder_analysis import FolderAnalysisService
 
@@ -90,6 +91,43 @@ class DealAnalysisMappingTests(TestCase):
         )
         self.assertEqual(deal.funding_ask, "125")
         self.assertEqual(deal.themes, ["Digital Lending", "Embedded Finance"])
+        self.assertEqual(
+            deal.ambiguities,
+            [
+                "Customer concentration needs verification",
+                "Unit economics depend on channel mix",
+            ],
+        )
+
+    def test_detail_serializer_includes_latest_analysis_fields(self):
+        deal = Deal.objects.create(title="Acme Finance")
+
+        DealCreationService.process_deal_creation(
+            deal,
+            {"analysis_json": self.analysis_json},
+        )
+
+        serialized = DealDetailSerializer(instance=deal).data
+
+        self.assertEqual(serialized["thinking"], "Reasoning trace")
+        self.assertEqual(
+            serialized["ambiguities"],
+            [
+                "Customer concentration needs verification",
+                "Unit economics depend on channel mix",
+            ],
+        )
+        self.assertEqual(serialized["analysis_json"]["metadata"]["ambiguous_points"][0], "Customer concentration needs verification")
+        self.assertEqual(serialized["analysis_history"][0]["ambiguities"][1], "Unit economics depend on channel mix")
+
+    def test_detail_serializer_returns_empty_ambiguities_without_analysis(self):
+        deal = Deal.objects.create(title="No Analysis Yet")
+
+        serialized = DealDetailSerializer(instance=deal).data
+
+        self.assertEqual(serialized["ambiguities"], [])
+        self.assertEqual(serialized["analysis_json"], {})
+        self.assertEqual(serialized["analysis_history"], [])
 
     @patch("deals.tasks.process_deal_folder_background.apply_async")
     def test_confirm_deal_from_session_backfills_missing_fields(self, mock_apply_async):

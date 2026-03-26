@@ -129,6 +129,22 @@ class DealSerializer(serializers.ModelSerializer):
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
+    thinking = serializers.SerializerMethodField()
+    ambiguities = serializers.SerializerMethodField()
+    analysis_json = serializers.SerializerMethodField()
+    analysis_history = serializers.SerializerMethodField()
+
+    def get_thinking(self, obj):
+        return obj.thinking
+
+    def get_ambiguities(self, obj):
+        return obj.ambiguities if isinstance(obj.ambiguities, list) else []
+
+    def get_analysis_json(self, obj):
+        return obj.analysis_json if isinstance(obj.analysis_json, dict) else {}
+
+    def get_analysis_history(self, obj):
+        return obj.analysis_history if isinstance(obj.analysis_history, list) else []
     
     def to_representation(self, instance):
         data = super().to_representation(instance)
