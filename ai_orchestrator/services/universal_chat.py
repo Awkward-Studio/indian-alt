@@ -35,6 +35,30 @@ STAGE_TOKENS = {
     "term sheet", "closed", "rejected", "management meeting",
 }
 
+FOLLOW_UP_SKIP_PATTERNS = [
+    r"^\s*why\??\s*$",
+    r"^\s*how\??\s*$",
+    r"^\s*what do you mean\??\s*$",
+    r"^\s*explain( that| this| more)?\b",
+    r"^\s*clarify\b",
+    r"^\s*expand\b",
+    r"^\s*summar(?:ize|ise)\b",
+    r"^\s*rewrite\b",
+    r"^\s*rephrase\b",
+    r"^\s*shorten\b",
+    r"^\s*make (it|this) shorter\b",
+    r"^\s*turn (that|this|it) into\b",
+    r"^\s*convert (that|this|it) into\b",
+]
+
+FORCE_RETRIEVAL_TERMS = {
+    "find", "search", "show me", "which deals", "list deals", "similar deals",
+    "compare", "comparison", "versus", "vs", "difference", "latest", "current",
+    "pipeline", "count", "how many", "total", "metric", "metrics", "arr", "mrr",
+    "revenue", "ebitda", "valuation", "funding ask", "stage", "phase", "status",
+    "verify", "check the document", "source", "citation", "citations",
+}
+
 
 class UniversalChatService:
     """
@@ -52,6 +76,30 @@ class UniversalChatService:
             self.flow_config, self.flow_version = UniversalChatFlowService.get_runtime_config()
 
     def process_intent_and_build_metadata(self, user_message: str, conversation_id: str, history_context: str, audit_log_id: str) -> dict:
+        gate = self._decide_query_builder_usage(user_message, history_context)
+        answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
+
+        if not gate["used_query_builder"]:
+            return {
+                "history_context": history_context,
+                "context_data": "No fresh deal or document retrieval was run for this turn. Use the recent conversation only.",
+                "audit_log_id": audit_log_id,
+                "query_plan": json.dumps(
+                    {
+                        "mode": "conversation_only",
+                        "reason": gate["gate_reason"],
+                        "user_query": user_message,
+                    },
+                    default=str,
+                ),
+                "flow_version": getattr(self.flow_version, "version", None),
+                "flow_config_id": str(self.flow_version.id) if getattr(self.flow_version, "id", None) else None,
+                "answer_generation_prompt": answer_prompt,
+                "used_query_builder": False,
+                "gate_mode": "conversation_only",
+                "gate_reason": gate["gate_reason"],
+            }
+
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
         chunks = self._search_ranked_chunks(plan, deals)
@@ -78,8 +126,6 @@ class UniversalChatService:
         if len(context_data_str) > max_context_chars:
             context_data_str = context_data_str[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
 
-        answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
-
         return {
             "history_context": history_context,
             "context_data": context_data_str,
@@ -88,7 +134,67 @@ class UniversalChatService:
             "flow_version": getattr(self.flow_version, "version", None),
             "flow_config_id": str(self.flow_version.id) if getattr(self.flow_version, "id", None) else None,
             "answer_generation_prompt": answer_prompt,
+            "used_query_builder": True,
+            "gate_mode": "fresh_retrieval",
+            "gate_reason": gate["gate_reason"],
         }
+
+    def _decide_query_builder_usage(self, user_message: str, history_context: str) -> Dict[str, Any]:
+        if not history_context or "ASSISTANT:" not in history_context:
+            return {
+                "used_query_builder": True,
+                "gate_reason": "No prior assistant context was available for a conversation-only follow-up.",
+            }
+
+        original_message = user_message.strip()
+        lowered = original_message.lower()
+        if not lowered:
+            return {
+                "used_query_builder": True,
+                "gate_reason": "Empty message defaults to the retrieval pipeline.",
+            }
+
+        if self._looks_like_retrieval_request(original_message, lowered):
+            return {
+                "used_query_builder": True,
+                "gate_reason": "The follow-up requests fresh retrieval, search, comparison, metrics, or verification.",
+            }
+
+        if self._looks_like_conversational_follow_up(lowered):
+            return {
+                "used_query_builder": False,
+                "gate_reason": "The follow-up is a clarification, rewrite, or formatting request about the existing conversation.",
+            }
+
+        return {
+            "used_query_builder": True,
+            "gate_reason": "The follow-up did not clearly match a safe conversation-only pattern.",
+        }
+
+    def _looks_like_retrieval_request(self, original_message: str, lowered_message: str) -> bool:
+        if any(term in lowered_message for term in FORCE_RETRIEVAL_TERMS):
+            return True
+
+        quoted_terms = re.findall(r'"([^"]+)"', original_message)
+        if quoted_terms:
+            return True
+
+        title_case_candidates = re.findall(r"\b[A-Z][a-zA-Z0-9&.-]+(?:\s+[A-Z][a-zA-Z0-9&.-]+){0,3}\b", original_message)
+        if title_case_candidates:
+            return True
+
+        return False
+
+    def _looks_like_conversational_follow_up(self, lowered_message: str) -> bool:
+        if any(re.search(pattern, lowered_message, flags=re.IGNORECASE) for pattern in FOLLOW_UP_SKIP_PATTERNS):
+            return True
+
+        conversational_terms = [
+            "that", "this", "it", "the answer", "your answer", "last answer",
+            "more detail", "more details", "bullet", "bullets", "table",
+            "email", "memo", "note", "notes", "action items",
+        ]
+        return any(term in lowered_message for term in conversational_terms)
 
     def _build_query_plan(self, user_message: str, conversation_id: str) -> Dict[str, Any]:
         planner_template = self._stage_settings("query_planner").get("prompt_template") or UniversalChatFlowService.build_default_config()["stages"][0]["settings"]["prompt_template"]

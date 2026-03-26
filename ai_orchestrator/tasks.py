@@ -37,6 +37,16 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             task_metadata = chat_service.process_intent_and_build_metadata(
                 user_message, conversation_id, history_context, audit_log_id
             )
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "used_query_builder": bool(task_metadata.get("used_query_builder", True)),
+                "gate_mode": task_metadata.get("gate_mode", "fresh_retrieval"),
+                "gate_reason": task_metadata.get("gate_reason"),
+                "query_plan": task_metadata.get("query_plan") if task_metadata.get("used_query_builder", True) else None,
+                "flow_version": task_metadata.get("flow_version"),
+                "flow_config_id": task_metadata.get("flow_config_id"),
+            }
+            audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
             if not AISkill.objects.filter(name='universal_chat').exists():
                 final_content = (
