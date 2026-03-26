@@ -45,6 +45,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         log = self.get_object()
         task_id = log.celery_task_id
         source_meta = log.source_metadata or {}
+        revoke_errors = []
         task_ids_to_revoke = [
             tid for tid in [
                 task_id,
@@ -55,9 +56,17 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         
         # 1. Kill the Celery worker thread immediately
         if task_ids_to_revoke:
-            from config.celery import celery_app
-            for revoke_id in dict.fromkeys(task_ids_to_revoke):
-                celery_app.control.revoke(revoke_id, terminate=True, signal='SIGKILL')
+            try:
+                from config.celery import celery_app
+                for revoke_id in dict.fromkeys(task_ids_to_revoke):
+                    try:
+                        celery_app.control.revoke(revoke_id, terminate=True, signal='SIGKILL')
+                    except Exception as e:
+                        revoke_errors.append(f"Failed to revoke task {revoke_id}: {e}")
+                        logger.warning("Failed to revoke task %s for audit log %s: %s", revoke_id, log.id, e)
+            except Exception as e:
+                revoke_errors.append(f"Failed to connect to Celery broker: {e}")
+                logger.warning("Failed to connect to Celery broker while cancelling audit log %s: %s", log.id, e)
             
         # 2. Force-clear Ollama VM (send a tiny request to interrupt long generation)
         try:
@@ -88,7 +97,11 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         log.error_message = "Task manually terminated by forensic user."
         log.is_success = False
         log.save(update_fields=['source_metadata', 'status', 'error_message', 'is_success'])
-        broadcast_audit_log_update(log, event_type="terminal", done=True)
+        try:
+            broadcast_audit_log_update(log, event_type="terminal", done=True)
+        except Exception as e:
+            revoke_errors.append(f"Failed to broadcast cancel update: {e}")
+            logger.warning("Failed to broadcast cancel update for audit log %s: %s", log.id, e)
 
         if log.source_type == "vdr_indexing" and log.source_id:
             try:
@@ -98,8 +111,18 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 deal.save(update_fields=['processing_status', 'processing_error'])
             except Deal.DoesNotExist:
                 logger.warning("VDR cancel requested for missing deal %s", log.source_id)
+            except Exception as e:
+                revoke_errors.append(f"Failed to update deal processing state: {e}")
+                logger.warning("Failed to update deal processing state for cancelled audit log %s: %s", log.id, e)
         
-        return Response({"status": "cancelled", "task_id": task_id, "revoked_task_count": len(dict.fromkeys(task_ids_to_revoke))})
+        response_payload = {
+            "status": "cancelled",
+            "task_id": task_id,
+            "revoked_task_count": len(dict.fromkeys(task_ids_to_revoke)),
+        }
+        if revoke_errors:
+            response_payload["warnings"] = revoke_errors
+        return Response(response_payload)
 
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer
