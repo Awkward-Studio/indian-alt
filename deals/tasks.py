@@ -13,15 +13,12 @@ logger = logging.getLogger(__name__)
 @shared_task(bind=True)
 def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str = None):
     """
-    Kicks off deep folder traversal and AI extraction in the background.
+    Kicks off deep folder traversal. Returns the full tree for selection.
     """
-    logger.info(f"Starting async folder analysis for {folder_id}")
+    logger.info(f"Starting async folder traversal for {folder_id}")
     
     from microsoft.services.graph_service import GraphAPIService
-    from ai_orchestrator.services.document_processor import DocumentProcessorService
-    from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
-    import uuid
     
     # 1. Recover or Create Audit Log
     if audit_log_id:
@@ -40,16 +37,14 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             personality=personality, skill=skill,
             status='PROCESSING', is_success=False,
             model_used='qwen3.5:latest', system_prompt="Forensic traversal...",
-            user_prompt=f"Analyzing folder: {folder_id}",
+            user_prompt=f"Traversing folder: {folder_id}",
             celery_task_id=self.request.id
         )
 
     graph = GraphAPIService()
-    doc_processor = DocumentProcessorService()
-    ai_service = AIProcessorService()
     
     try:
-        # 1. Traverse
+        # 1. Traverse recursively
         file_tree = graph.get_folder_tree(drive_id, folder_id, user_email=user_email)
         if not file_tree:
             audit_log.status = 'FAILED'
@@ -57,38 +52,87 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             audit_log.save()
             return {"error": "No files found"}
             
-        # Update log with traversal results
-        audit_log.system_prompt = f"Traversal complete. Found {len(file_tree)} objects. Starting extraction..."
+        # Update log with traversal results - Transition to WAITING_FOR_SELECTION
+        audit_log.status = 'COMPLETED'
+        audit_log.system_prompt = f"Traversal complete. Found {len(file_tree)} objects. Awaiting selection..."
+        audit_log.is_success = True
+        # Store the tree in source_metadata for later recovery
+        audit_log.source_metadata = {
+            "file_tree": file_tree,
+            "drive_id": drive_id,
+            "folder_id": folder_id,
+            "total_files": len(file_tree)
+        }
         audit_log.save()
 
-        # 2. Extract preview text using GLM-OCR
-        preview_files = file_tree[:5]
-        combined_text = ""
-        
-        for file_info in preview_files:
-            try:
-                content = graph.get_drive_item_content(user_email, file_info['id'], drive_id=drive_id)
-                # We transcribe all pages for the 5 preview files
-                extracted = doc_processor.transcribe_document(content, file_info['name'], page_limit=None)
-                combined_text += f"\n--- FILE: {file_info['name']} ---\n{extracted}"
-            except Exception as e:
-                logger.error(f"Error reading {file_info['name']}: {e}")
+        return {
+            "status": "success",
+            "folder_id": folder_id,
+            "total_files": len(file_tree),
+            "file_tree": file_tree,
+            "drive_id": drive_id,
+            "user_email": user_email
+        }
+    except Exception as e:
+        audit_log.status = 'FAILED'
+        audit_log.error_message = str(e)
+        audit_log.save()
+        raise e
 
-        # 3. AI Analysis
+@shared_task(bind=True)
+def analyze_selection_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str, selected_file_ids: list):
+    """
+    Performs AI extraction and deal modeling based on a manual selection of files.
+    """
+    logger.info(f"Starting selection analysis for folder {folder_id} with {len(selected_file_ids)} files")
+    
+    from microsoft.services.graph_service import GraphAPIService
+    from ai_orchestrator.services.document_processor import DocumentProcessorService
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+    from ai_orchestrator.models import AIAuditLog
+    
+    try:
+        audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        audit_log.status = 'PROCESSING'
+        audit_log.system_prompt = f"Extracting deal data from {len(selected_file_ids)} selected documents..."
+        audit_log.save()
+    except AIAuditLog.DoesNotExist:
+        return {"error": "Audit log not found"}
+
+    graph = GraphAPIService()
+    doc_processor = DocumentProcessorService()
+    ai_service = AIProcessorService()
+    
+    try:
+        # 1. Fetch metadata for the selected files to get names (optional, but good for logs)
+        # Actually, the file_tree was already returned to the frontend, 
+        # so we just need to iterate and download.
+        
+        combined_text = ""
+        analyzed_names = []
+        
+        for file_id in selected_file_ids:
+            try:
+                # We need the name for the OCR logger
+                item_info = graph.get_drive_item(drive_id, file_id, user_email=user_email)
+                name = item_info.get('name', 'unknown_file')
+                analyzed_names.append(name)
+                
+                content = graph.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+                extracted = doc_processor.transcribe_document(content, name, page_limit=None)
+                combined_text += f"\n--- FILE: {name} ---\n{extracted}"
+            except Exception as e:
+                logger.error(f"Error reading selected file {file_id}: {e}")
+
+        # 2. AI Analysis
         analysis = {}
         raw_thinking = ""
         if combined_text:
-            # We pass the existing audit_log to process_content so it UPDATES instead of creating a new one
             meta = {
-                '_source_metadata': {
-                    "file_tree": file_tree,
-                    "drive_id": drive_id,
-                    "folder_id": folder_id,
-                    "total_files": len(file_tree)
-                },
+                '_source_metadata': audit_log.source_metadata,
                 'audit_log_id': str(audit_log.id),
                 'celery_task_id': self.request.id,
-                'context_label': f"Folder: {folder_id}" # Will be updated if name is known
+                'context_label': audit_log.context_label
             }
             
             result = ai_service.process_content(
@@ -98,7 +142,6 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
                 metadata=meta
             )
 
-            # The service now updates the audit_log internally if we pass the ID (we need to update the service too)
             if isinstance(result, dict) and 'parsed_json' in result:
                 analysis = result['parsed_json']
                 raw_thinking = result.get('thinking', '')
@@ -106,21 +149,20 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
                 analysis = result
                 raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
         else:
-            # NO CONTENT EXTRACTED
             audit_log.status = 'FAILED'
-            audit_log.error_message = "No readable context found in these folder objects (e.g. legacy binary formats)."
+            audit_log.error_message = "No readable text found in selection."
             audit_log.save()
-            return {"error": "No content found", "folder_id": folder_id}
+            return {"error": "No content found"}
 
         return {
             "status": "success",
             "folder_id": folder_id,
-            "total_files": len(file_tree),
-            "preview_files_analyzed": len(preview_files),
+            "total_files": len(selected_file_ids),
+            "preview_files_analyzed": len(selected_file_ids),
             "preview_text": combined_text,
             "preliminary_data": analysis,
             "raw_thinking": raw_thinking,
-            "file_tree": file_tree,
+            "analyzed_files": analyzed_names,
             "drive_id": drive_id,
             "user_email": user_email
         }

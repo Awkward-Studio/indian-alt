@@ -141,6 +141,60 @@ class FolderAnalysisService:
             return {"error": "Audit log not found"}
 
     @staticmethod
+    def trigger_selection_analysis(session_id: str, selected_file_ids: list) -> dict:
+        """
+        Kicks off AI extraction based on specific user-selected file IDs.
+        """
+        from deals.tasks import analyze_selection_async
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+        
+        session_data = cache.get(f"folder_sync_{session_id}")
+        if not session_data:
+            return {"error": "Session expired or invalid. Please re-analyze the folder."}
+            
+        # Extract metadata from the previous audit log if available
+        # But we actually already have the data in the session cache
+        
+        # We need the audit log ID to update the same reasoning stream
+        # Or should we create a new one? Let's use a new one for clarity in the ledger
+        from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='deal_extraction').first()
+        
+        audit_log = AIAuditLog.objects.create(
+            source_type='onedrive_folder',
+            source_id=session_data['folder_id'],
+            context_label=f"Selection Analysis: {len(selected_file_ids)} files",
+            personality=personality,
+            skill=skill,
+            status='PENDING',
+            is_success=False,
+            model_used='qwen3.5:latest',
+            system_prompt="Queued for extraction from selection...",
+            user_prompt=f"Extracting deal data from {len(selected_file_ids)} files"
+        )
+
+        task = analyze_selection_async.apply_async(
+            kwargs={
+                'drive_id': session_data['drive_id'],
+                'folder_id': session_data['folder_id'],
+                'user_email': DMS_USER_EMAIL,
+                'audit_log_id': str(audit_log.id),
+                'selected_file_ids': selected_file_ids
+            },
+            queue='high_priority'
+        )
+        
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=['celery_task_id'])
+        
+        return {
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "status": "queued"
+        }
+
+    @staticmethod
     def confirm_deal_from_session(session_id: str, deal: Deal) -> dict:
         """
         Updates the newly created Deal with cached forensic mapping and triggers background indexing.

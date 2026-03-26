@@ -234,6 +234,26 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         result = FolderAnalysisService.queue_folder_analysis(folder_id, folder_name, drive_id)
         return Response(result)
 
+    @action(detail=False, methods=['post'])
+    def analyze_selection(self, request):
+        """
+        Kicks off AI extraction based on specific user-selected file IDs.
+        """
+        session_id = request.data.get('session_id')
+        selected_file_ids = request.data.get('selected_file_ids', [])
+        
+        if not session_id or not selected_file_ids:
+            return Response({"error": "session_id and selected_file_ids are required"}, status=400)
+            
+        try:
+            result = FolderAnalysisService.trigger_selection_analysis(session_id, selected_file_ids)
+            if "error" in result:
+                return Response(result, status=400)
+            return Response(result)
+        except Exception as e:
+            logger.error(f"Analyze selection failed: {str(e)}")
+            return Response({"error": str(e)}, status=500)
+
     @action(detail=False, methods=['get'], url_path='task-status/(?P<task_id>[^/.]+)')
     def task_status(self, request, task_id=None):
         """
