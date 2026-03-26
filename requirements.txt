@@ -52,3 +52,4 @@ redis
 channels
 channels-redis
 daphne
+django-redis

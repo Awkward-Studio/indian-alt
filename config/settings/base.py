@@ -196,9 +196,22 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 
+# Cache Configuration
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
 CELERY_TASK_ROUTES = {
     'ai_orchestrator.tasks.generate_chat_response_async': {'queue': 'high_priority'},
     'deals.tasks.analyze_folder_async': {'queue': 'high_priority'},
+    'deals.tasks.preflight_selection_async': {'queue': 'high_priority'},
+    'deals.tasks.analyze_selection_async': {'queue': 'high_priority'},
     'deals.tasks.analyze_additional_documents_async': {'queue': 'high_priority'},
     'deals.tasks.process_deal_folder_background': {'queue': 'low_priority'},
     'deals.tasks.process_single_document_async': {'queue': 'low_priority'},

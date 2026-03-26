@@ -1,6 +1,7 @@
 import logging
 import time
 from celery import shared_task, chord
+from django.core.cache import cache
 from django.db import transaction
 
 from .models import Deal, DealDocument, DocumentType
@@ -9,6 +10,84 @@ from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: list) -> dict:
+    """
+    Downloads and extracts text for the selected files, returning exact pass/fail coverage.
+    """
+    graph = GraphAPIService()
+    doc_processor = DocumentProcessorService()
+
+    passed_files = []
+    failed_files = []
+    combined_text_parts = []
+
+    for file_id in selected_file_ids:
+        file_record = {
+            "file_id": file_id,
+            "file_name": "unknown_file",
+            "status": "failed",
+            "extraction_mode": None,
+            "reason": None,
+        }
+        try:
+            item_info = graph.get_drive_item(drive_id, file_id, user_email=user_email)
+            name = item_info.get('name', 'unknown_file')
+            file_record["file_name"] = name
+
+            logger.info("Selection preflight: downloading %s (%s)", name, file_id)
+            content = graph.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+
+            logger.info("Selection preflight: extracting %s (%s)", name, file_id)
+            extraction = doc_processor.get_extraction_result(content, name, page_limit=None)
+            extracted_text = (extraction.get("text") or "").strip()
+            extraction_mode = extraction.get("mode")
+
+            if not extracted_text:
+                file_record["reason"] = extraction.get("error") or f"No readable content extracted for {name}"
+                file_record["extraction_mode"] = extraction_mode
+                failed_files.append(file_record)
+                continue
+
+            if extraction.get("error"):
+                file_record["reason"] = extraction["error"]
+                file_record["extraction_mode"] = extraction_mode
+                failed_files.append(file_record)
+                continue
+
+            file_record["status"] = "passed"
+            file_record["extraction_mode"] = extraction_mode
+            file_record["text_length"] = len(extracted_text)
+            file_record["extracted_text"] = extracted_text
+            passed_files.append(file_record)
+            combined_text_parts.append(f"\n--- FILE: {name} ---\n{extracted_text}")
+        except Exception as e:
+            file_record["reason"] = str(e)
+            logger.error("Error reading selected file %s: %s", file_id, e)
+            failed_files.append(file_record)
+
+    return {
+        "passed_files": passed_files,
+        "failed_files": failed_files,
+        "combined_text": "".join(combined_text_parts).strip(),
+    }
+
+
+def _build_combined_text(passed_files: list, selected_file_ids: list | None = None) -> str:
+    """
+    Reconstructs the final model context from preflight-cached extraction output.
+    """
+    selected_ids = set(selected_file_ids or [])
+    parts = []
+    for file in passed_files:
+        if selected_ids and file.get("file_id") not in selected_ids:
+            continue
+        extracted_text = (file.get("extracted_text") or "").strip()
+        if not extracted_text:
+            continue
+        parts.append(f"\n--- FILE: {file.get('file_name', 'unknown_file')} ---\n{extracted_text}")
+    return "".join(parts).strip()
 
 @shared_task(bind=True)
 def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str = None):
@@ -32,11 +111,15 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
     if not audit_log_id:
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
+        
+        # Use model from personality
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        
         audit_log = AIAuditLog.objects.create(
             source_type='onedrive_folder', source_id=folder_id,
             personality=personality, skill=skill,
             status='PROCESSING', is_success=False,
-            model_used='qwen3.5:latest', system_prompt="Forensic traversal...",
+            model_used=default_model, system_prompt="Forensic traversal...",
             user_prompt=f"Traversing folder: {folder_id}",
             celery_task_id=self.request.id
         )
@@ -61,12 +144,17 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             "file_tree": file_tree,
             "drive_id": drive_id,
             "folder_id": folder_id,
-            "total_files": len(file_tree)
+            "total_files": len(file_tree),
+            "workflow_stage": "traversal_complete",
+            "interaction_status": "pending",
+            "interaction_mode": "editable",
         }
         audit_log.save()
 
         return {
             "status": "success",
+            "phase": "traversal",
+            "audit_log_id": str(audit_log.id),
             "folder_id": folder_id,
             "total_files": len(file_tree),
             "file_tree": file_tree,
@@ -80,14 +168,12 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         raise e
 
 @shared_task(bind=True)
-def analyze_selection_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str, selected_file_ids: list):
+def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_file_ids: list):
     """
     Performs AI extraction and deal modeling based on a manual selection of files.
     """
-    logger.info(f"Starting selection analysis for folder {folder_id} with {len(selected_file_ids)} files")
+    logger.info("Starting selection analysis for session %s with %s files", session_id, len(selected_file_ids))
     
-    from microsoft.services.graph_service import GraphAPIService
-    from ai_orchestrator.services.document_processor import DocumentProcessorService
     from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.models import AIAuditLog
     
@@ -97,37 +183,44 @@ def analyze_selection_async(self, drive_id: str, folder_id: str, user_email: str
         audit_log.system_prompt = f"Extracting deal data from {len(selected_file_ids)} selected documents..."
         audit_log.save()
     except AIAuditLog.DoesNotExist:
+        logger.error("Audit log %s not found for selection analysis", audit_log_id)
         return {"error": "Audit log not found"}
 
-    graph = GraphAPIService()
-    doc_processor = DocumentProcessorService()
-    ai_service = AIProcessorService()
-    
     try:
-        # 1. Fetch metadata for the selected files to get names (optional, but good for logs)
-        # Actually, the file_tree was already returned to the frontend, 
-        # so we just need to iterate and download.
+        cache_key = f"folder_sync_{session_id}"
+        session_data = cache.get(cache_key)
+        logger.info("Cache lookup for key %s: %s", cache_key, "HIT" if session_data else "MISS")
         
-        combined_text = ""
-        analyzed_names = []
-        
-        for file_id in selected_file_ids:
-            try:
-                # We need the name for the OCR logger
-                item_info = graph.get_drive_item(drive_id, file_id, user_email=user_email)
-                name = item_info.get('name', 'unknown_file')
-                analyzed_names.append(name)
-                
-                content = graph.get_drive_item_content(user_email, file_id, drive_id=drive_id)
-                extracted = doc_processor.transcribe_document(content, name, page_limit=None)
-                combined_text += f"\n--- FILE: {name} ---\n{extracted}"
-            except Exception as e:
-                logger.error(f"Error reading selected file {file_id}: {e}")
+        if not session_data:
+            audit_log.status = 'FAILED'
+            error_msg = f"Session {session_id} expired or invalid. Re-open the preflight log and confirm again."
+            audit_log.error_message = error_msg
+            audit_log.save(update_fields=['status', 'error_message'])
+            logger.error(error_msg)
+            return {"error": error_msg}
 
-        # 2. AI Analysis
+        passed_files = session_data.get("passed_files", [])
+        failed_files = session_data.get("failed_files", [])
+        combined_text = _build_combined_text(passed_files, selected_file_ids)
+
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "selected_files_count": len(selected_file_ids),
+            "passed_files_count": len(passed_files),
+            "failed_files_count": len(failed_files),
+            "selected_file_ids": selected_file_ids,
+            "passed_files": passed_files,
+            "failed_files": failed_files,
+            "analysis_input_files": [file for file in passed_files if file.get("file_id") in set(selected_file_ids)],
+            "workflow_stage": "analysis_complete",
+        }
+        audit_log.save(update_fields=['source_metadata'])
+
         analysis = {}
         raw_thinking = ""
         if combined_text:
+            logger.info("Content extracted successfully. Total length: %s chars. Sending to AI VM...", len(combined_text))
+            ai_service = AIProcessorService()
             meta = {
                 '_source_metadata': audit_log.source_metadata,
                 'audit_log_id': str(audit_log.id),
@@ -154,17 +247,104 @@ def analyze_selection_async(self, drive_id: str, folder_id: str, user_email: str
             audit_log.save()
             return {"error": "No content found"}
 
+        if isinstance(analysis, dict):
+            metadata = analysis.setdefault("metadata", {})
+            metadata["selected_files_count"] = len(selected_file_ids)
+            metadata["passed_files_count"] = len(passed_files)
+            metadata["failed_files_count"] = len(failed_files)
+            metadata["passed_files"] = passed_files
+            metadata["failed_files"] = failed_files
+            metadata["analysis_input_files"] = passed_files
+
         return {
+            "phase": "analysis",
             "status": "success",
-            "folder_id": folder_id,
+            "folder_id": session_data.get("folder_id"),
             "total_files": len(selected_file_ids),
-            "preview_files_analyzed": len(selected_file_ids),
+            "preview_files_analyzed": len([file for file in passed_files if file.get("file_id") in set(selected_file_ids)]),
             "preview_text": combined_text,
             "preliminary_data": analysis,
             "raw_thinking": raw_thinking,
-            "analyzed_files": analyzed_names,
+            "analyzed_files": [file["file_name"] for file in passed_files if file.get("file_id") in set(selected_file_ids)],
+            "passed_files": [file for file in passed_files if file.get("file_id") in set(selected_file_ids)],
+            "failed_files": failed_files,
+            "drive_id": session_data.get("drive_id"),
+            "user_email": session_data.get("user_email")
+        }
+    except Exception as e:
+        audit_log.status = 'FAILED'
+        audit_log.error_message = str(e)
+        audit_log.save()
+        raise e
+
+
+@shared_task(bind=True)
+def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str, selected_file_ids: list, session_id: str):
+    """
+    Performs a read/extraction preflight on selected files before the user confirms the Qwen analysis.
+    """
+    from ai_orchestrator.models import AIAuditLog
+
+    try:
+        audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        audit_log.status = 'PROCESSING'
+        audit_log.system_prompt = f"Validating {len(selected_file_ids)} selected documents before deal extraction..."
+        audit_log.save()
+    except AIAuditLog.DoesNotExist:
+        return {"error": "Audit log not found"}
+
+    try:
+        extraction_result = _extract_selected_files(drive_id, user_email, selected_file_ids)
+        passed_files = extraction_result["passed_files"]
+        failed_files = extraction_result["failed_files"]
+
+        audit_log.status = 'COMPLETED'
+        audit_log.is_success = True
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "selected_files_count": len(selected_file_ids),
+            "passed_files_count": len(passed_files),
+            "failed_files_count": len(failed_files),
+            "selected_file_ids": selected_file_ids,
+            "passed_files": passed_files,
+            "failed_files": failed_files,
+            "workflow_stage": "preflight_complete",
+            "interaction_status": "pending",
+            "interaction_mode": "editable",
+        }
+        audit_log.raw_response = (
+            f"Preflight completed for {len(selected_file_ids)} selected files.\n"
+            f"Passed: {len(passed_files)}\nFailed: {len(failed_files)}"
+        )
+        audit_log.save()
+
+        cache_key = f"folder_sync_{session_id}"
+        session_data = cache.get(cache_key) or {}
+        session_data.update({
+            "folder_id": folder_id,
             "drive_id": drive_id,
-            "user_email": user_email
+            "user_email": user_email,
+            "selected_file_ids": selected_file_ids,
+            "passed_files": passed_files,
+            "failed_files": failed_files,
+            "preflight_audit_log_id": str(audit_log.id),
+        })
+        cache.set(cache_key, session_data, timeout=3600)
+        logger.info("Session %s updated in cache with %s passed files. Key: %s", session_id, len(passed_files), cache_key)
+
+        return {
+            "phase": "preflight",
+            "status": "success",
+            "audit_log_id": str(audit_log.id),
+            "session_id": session_id,
+            "folder_id": folder_id,
+            "selected_files_count": len(selected_file_ids),
+            "passed_files_count": len(passed_files),
+            "failed_files_count": len(failed_files),
+            "passed_files": passed_files,
+            "failed_files": failed_files,
+            "drive_id": drive_id,
+            "user_email": user_email,
         }
     except Exception as e:
         audit_log.status = 'FAILED'
