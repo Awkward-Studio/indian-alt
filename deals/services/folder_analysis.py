@@ -3,6 +3,7 @@ import traceback
 import logging
 from django.core.cache import cache
 from deals.models import Deal
+from deals.services.deal_creation import DealCreationService
 
 logger = logging.getLogger(__name__)
 
@@ -451,9 +452,13 @@ class FolderAnalysisService:
                 ambiguities=analysis_json.get('metadata', {}).get('ambiguous_points', []),
                 analysis_json=analysis_json
             )
-            
-            if 'deal_model_data' in analysis_json:
-                deal.themes = analysis_json['deal_model_data'].get('themes', [])
+
+            DealCreationService.apply_analysis_to_deal(
+                deal,
+                analysis_json,
+                overwrite=False,
+                overwrite_themes=True,
+            )
             
         deal.save()
         

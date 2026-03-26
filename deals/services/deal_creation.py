@@ -40,10 +40,76 @@ class DealCreationService:
         DealCreationService._link_email_thread(deal, source_email_id, request_user)
 
     @staticmethod
+    def _get_analysis_model_data(analysis_json: dict | None) -> dict:
+        if not isinstance(analysis_json, dict):
+            return {}
+        model_data = analysis_json.get('deal_model_data')
+        return model_data if isinstance(model_data, dict) else {}
+
+    @staticmethod
+    def _normalize_string_list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    @staticmethod
+    def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):
+        if not isinstance(analysis_json, dict):
+            return
+
+        model_data = DealCreationService._get_analysis_model_data(analysis_json)
+        analyst_report = analysis_json.get('analyst_report')
+        changed_fields = []
+
+        field_mapping = {
+            'title': 'title',
+            'industry': 'industry',
+            'sector': 'sector',
+            'funding_ask': 'funding_ask',
+            'funding_ask_for': 'funding_ask_for',
+            'priority': 'priority',
+            'city': 'city',
+            'state': 'state',
+            'country': 'country',
+        }
+
+        for analysis_key, deal_field in field_mapping.items():
+            value = model_data.get(analysis_key)
+            if not isinstance(value, str):
+                continue
+
+            normalized_value = value.strip()
+            if not normalized_value:
+                continue
+
+            current_value = getattr(deal, deal_field)
+            if overwrite or not current_value:
+                if current_value != normalized_value:
+                    setattr(deal, deal_field, normalized_value)
+                    changed_fields.append(deal_field)
+
+        if isinstance(analyst_report, str):
+            normalized_report = analyst_report.strip()
+            if normalized_report and (overwrite or not deal.deal_summary):
+                if deal.deal_summary != normalized_report:
+                    deal.deal_summary = normalized_report
+                    changed_fields.append('deal_summary')
+
+        themes = DealCreationService._normalize_string_list(model_data.get('themes'))
+        if themes and (overwrite_themes or not deal.themes):
+            if deal.themes != themes:
+                deal.themes = themes
+                changed_fields.append('themes')
+
+        if changed_fields:
+            deal.save(update_fields=list(dict.fromkeys(changed_fields)))
+
+    @staticmethod
     def _map_ambiguities(deal: Deal, analysis_json: dict):
         if analysis_json and 'metadata' in analysis_json:
             try:
                 from deals.models import DealAnalysis
+                DealCreationService.apply_analysis_to_deal(deal, analysis_json)
                 ambiguities = analysis_json['metadata'].get('ambiguous_points', [])
                 thinking = analysis_json.get('thinking', '')
                 

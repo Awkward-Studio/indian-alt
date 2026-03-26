@@ -5,6 +5,7 @@ from django.core.cache import cache
 from django.db import transaction
 
 from .models import Deal, DealDocument, DocumentType, InitialAnalysisStatus
+from .services.deal_creation import DealCreationService
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -616,11 +617,12 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                 analysis_json=analysis
             )
 
-            # Update Deal meta-fields that we still keep on Deal
-            if 'deal_model_data' in analysis:
-                deal.themes = analysis['deal_model_data'].get('themes', deal.themes)
-                
-            deal.save()
+            DealCreationService.apply_analysis_to_deal(
+                deal,
+                analysis,
+                overwrite=False,
+                overwrite_themes=True,
+            )
             docs.update(is_ai_analyzed=True)
             
             audit_log.status = 'COMPLETED'
