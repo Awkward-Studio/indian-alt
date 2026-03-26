@@ -425,7 +425,7 @@ class FolderAnalysisService:
     @staticmethod
     def confirm_deal_from_session(session_id: str, deal: Deal) -> dict:
         """
-        Updates the newly created Deal with cached forensic mapping and triggers background indexing.
+        Updates the newly created Deal with cached forensic mapping.
         """
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
@@ -433,7 +433,8 @@ class FolderAnalysisService:
             
         analysis_json = session_data.get('preliminary_data', {})
         
-        deal.processing_status = 'processing'
+        deal.processing_status = 'idle'
+        deal.processing_error = None
         deal.source_onedrive_id = session_data.get('folder_id')
         deal.source_drive_id = session_data.get('drive_id')
         deal.extracted_text = session_data.get('preview_text', '')
@@ -461,22 +462,60 @@ class FolderAnalysisService:
             )
             
         deal.save()
-        
-        # Trigger Background Task - Indexing is low priority
-        from deals.tasks import process_deal_folder_background
-        process_deal_folder_background.apply_async(
-            kwargs={
-                'deal_id': str(deal.id),
-                'file_tree_map': session_data['file_tree'],
-                'user_email': session_data['user_email']
-            },
-            queue='low_priority'
-        )
-        
+
         cache.delete(f"folder_sync_{session_id}")
         
         return {
             "status": "success",
             "deal_id": deal.id,
-            "message": f"Deal created. Processing {len(session_data['file_tree'])} files in background."
+            "message": "Deal created. Start VDR processing from the deal page when ready."
+        }
+
+    @staticmethod
+    def trigger_vdr_processing(deal: Deal) -> dict:
+        """
+        Queues the deferred VDR indexing job using persisted OneDrive audit-log metadata.
+        """
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return {"error": "This deal is not linked to a OneDrive folder, so deferred VDR processing is unavailable."}
+
+        if deal.processing_status == 'processing':
+            return {"error": "VDR processing is already running for this deal."}
+
+        from ai_orchestrator.models import AIAuditLog
+        from deals.tasks import process_deal_folder_background
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+
+        candidate_logs = AIAuditLog.objects.filter(
+            source_type='onedrive_folder',
+            source_id=deal.source_onedrive_id,
+        ).order_by('-created_at')
+
+        file_tree = None
+        for log in candidate_logs:
+            metadata = log.source_metadata or {}
+            if metadata.get('drive_id') == deal.source_drive_id and metadata.get('file_tree'):
+                file_tree = metadata['file_tree']
+                break
+
+        if not file_tree:
+            return {"error": "No persisted folder tree was found for this deal. Re-run the folder analysis to enable VDR processing."}
+
+        task = process_deal_folder_background.apply_async(
+            kwargs={
+                'deal_id': str(deal.id),
+                'file_tree_map': file_tree,
+                'user_email': DMS_USER_EMAIL,
+            },
+            queue='low_priority'
+        )
+
+        deal.processing_status = 'processing'
+        deal.processing_error = None
+        deal.save(update_fields=['processing_status', 'processing_error'])
+
+        return {
+            "status": "queued",
+            "task_id": task.id,
+            "message": f"Queued VDR processing for {len(file_tree)} files."
         }

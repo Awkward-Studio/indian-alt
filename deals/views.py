@@ -298,8 +298,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def confirm_folder_deal(self, request):
         """
-        Creates the Deal from the preliminary analysis and kicks off the background
-        indexing task for the rest of the folder.
+        Creates the Deal from the preliminary analysis.
         """
         session_id = request.data.get('session_id')
         deal_data = request.data.get('deal_data', {})
@@ -317,6 +316,17 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return Response(result, status=201)
             
         return Response(serializer.errors, status=400)
+
+    @action(detail=True, methods=['post'])
+    def start_vdr_processing(self, request, pk=None):
+        """
+        Starts deferred VDR processing for a deal linked to a OneDrive folder.
+        """
+        deal = self.get_object()
+        result = FolderAnalysisService.trigger_vdr_processing(deal)
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result)
 
     @action(detail=True, methods=['post'])
     def analyze_additional_documents(self, request, pk=None):
