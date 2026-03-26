@@ -17,6 +17,8 @@ from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLo
 from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
 from .services.ai_processor import AIProcessorService
 from .services.embedding_processor import EmbeddingService
+from .services.flow_config import UniversalChatFlowService
+from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal
 
@@ -149,6 +151,9 @@ class DealChatView(APIView):
             ai_service = AIProcessorService()
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_chat').first()
+            
+            # Use model from personality
+            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
 
             # Create PENDING audit log for background tracking
             audit_log = AIAuditLog.objects.create(
@@ -159,7 +164,7 @@ class DealChatView(APIView):
                 skill=skill,
                 status='PENDING',
                 is_success=False,
-                model_used='qwen3.5:latest',
+                model_used=default_model,
                 system_prompt="Processing forensic query in background...",
                 user_prompt=user_message
             )
@@ -220,6 +225,9 @@ class UniversalChatView(APIView):
             
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='universal_chat').first()
+            
+            # Use model from personality
+            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
 
             # Create PENDING audit log for background tracking
             audit_log = AIAuditLog.objects.create(
@@ -230,7 +238,7 @@ class UniversalChatView(APIView):
                 skill=skill,
                 status='PENDING',
                 is_success=False,
-                model_used='qwen3.5:latest',
+                model_used=default_model,
                 system_prompt="Queued for global pipeline query...",
                 user_prompt=user_message
             )
@@ -268,25 +276,30 @@ class AISettingsView(APIView):
             
             ai_service = AIProcessorService()
             vm_service = VMControlService()
+            ollama_url = ai_service.provider.ollama_url
             
             personalities = AIPersonality.objects.all()
             skills = AISkill.objects.all()
             protocols = AnalysisProtocol.objects.all()
+            flow_state = UniversalChatFlowService.serialize_state()
             
             # Fast Check for VM Connectivity
             vm_online = False
             available_models = []
             telemetry = {"loaded_models": []}
+            vm_status = vm_service.get_status()
             
             try:
-                # Use a very short timeout for the initial ping
-                tags_resp = requests.get(f"{ai_service.ollama_url}/api/tags", timeout=1.5)
+                # Use the same Ollama endpoint the rest of the app is configured to use.
+                # The previous 1.5s timeout was too aggressive for remote GPU hosts and
+                # could mark the link offline while normal inference still worked.
+                tags_resp = requests.get(f"{ollama_url}/api/tags", timeout=5)
                 if tags_resp.status_code == 200:
                     vm_online = True
                     available_models = [m['name'] for m in tags_resp.json().get('models', [])]
                     
                     # If online, try fetching telemetry
-                    ps_resp = requests.get(f"{ai_service.ollama_url}/api/ps", timeout=1.5)
+                    ps_resp = requests.get(f"{ollama_url}/api/ps", timeout=5)
                     if ps_resp.status_code == 200:
                         for model in ps_resp.json().get('models', []):
                             vram_gb = model.get('size_vram', 0) / 1e9
@@ -294,8 +307,12 @@ class AISettingsView(APIView):
                                 "name": model.get('name'), 
                                 "vram_gb": round(vram_gb, 2)
                             })
-            except:
-                logger.warning("Neural Engine (Ollama VM) is unreachable.")
+            except Exception as e:
+                logger.warning("Neural Engine connectivity probe failed for %s: %s", ollama_url, e)
+
+            # If Azure reports the VM is running but the short telemetry probe missed,
+            # expose the actual VM status separately while keeping vm_online tied to
+            # successful Ollama connectivity.
 
             # Live Forex
             from .services.forex_service import ForexService
@@ -306,10 +323,11 @@ class AISettingsView(APIView):
                 "personalities": AIPersonalitySerializer(personalities, many=True).data,
                 "skills": AISkillSerializer(skills, many=True).data,
                 "protocols": AnalysisProtocolSerializer(protocols, many=True).data,
+                "universal_chat_flow": flow_state,
                 "available_models": available_models,
                 "telemetry": telemetry,
                 "vm_online": vm_online,
-                "vm_status": vm_service.get_status(),
+                "vm_status": vm_status,
                 "live_rate": live_rate
             })
         except Exception as e: 
@@ -322,7 +340,7 @@ class AISettingsView(APIView):
         try:
             from .models import AnalysisProtocol
             
-            target_type = request.data.get("type") # 'personality', 'skill', 'protocol'
+            target_type = request.data.get("type") # 'personality', 'skill', 'protocol', 'flow'
             target_id = request.data.get("id")
             updates = request.data.get("updates", {})
             action = updates.get('action')
@@ -374,6 +392,40 @@ class AISettingsView(APIView):
                     obj = AnalysisProtocol.objects.get(id=target_id)
                     for k, v in updates.items(): setattr(obj, k, v)
                     obj.save()
+            elif target_type == 'flow':
+                if target_id != 'universal_chat':
+                    return Response({"error": "Unsupported flow target"}, status=400)
+
+                if action == 'create_draft':
+                    draft = UniversalChatFlowService.create_draft_from_published()
+                    return Response({"success": True, "draft_version_id": str(draft.id)})
+
+                if action == 'publish':
+                    published = UniversalChatFlowService.publish_draft()
+                    return Response({"success": True, "published_version_id": str(published.id)})
+
+                if action == 'test':
+                    query = str(updates.get("query") or "").strip()
+                    if not query:
+                        return Response({"error": "A test query is required."}, status=400)
+                    flow_state = UniversalChatFlowService.serialize_state()
+                    draft_version = flow_state.get("draft_version")
+                    draft_config = draft_version.get("config") if draft_version else None
+                    published_version = flow_state.get("published_version") or {}
+                    chat_service = UniversalChatService(
+                        AIProcessorService(),
+                        flow_config=draft_config or published_version.get("config"),
+                    )
+                    return Response({
+                        "success": True,
+                        "simulation": chat_service.simulate_query(query)
+                    })
+
+                config = updates.get("config")
+                if not isinstance(config, dict):
+                    return Response({"error": "Flow updates require a config object."}, status=400)
+                draft = UniversalChatFlowService.update_draft(config)
+                return Response({"success": True, "draft_version_id": str(draft.id)})
                 
             return Response({"success": True})
         except Exception as e: 

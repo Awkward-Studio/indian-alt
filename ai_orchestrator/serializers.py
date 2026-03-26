@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog
+from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog, AIFlowDefinition, AIFlowVersion
 
 class AIAuditLogSerializer(serializers.ModelSerializer):
     personality_name = serializers.SerializerMethodField()
@@ -12,7 +12,8 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'skill', 'skill_name', 'model_provider', 'model_used', 
             'request_duration_ms', 'tokens_used', 'is_success', 'status',
             'celery_task_id', 'created_at', 'error_message',
-            'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json'
+            'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json',
+            'source_metadata'
         ]
 
     def get_personality_name(self, obj):
@@ -34,6 +35,18 @@ class AISkillSerializer(serializers.ModelSerializer):
 class AnalysisProtocolSerializer(serializers.ModelSerializer):
     class Meta:
         model = AnalysisProtocol
+        fields = '__all__'
+
+
+class AIFlowDefinitionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIFlowDefinition
+        fields = '__all__'
+
+
+class AIFlowVersionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIFlowVersion
         fields = '__all__'
 
 class AIMessageSerializer(serializers.ModelSerializer):

@@ -14,17 +14,17 @@ class OCRService:
     def __init__(self):
         self.provider = OllamaProviderService()
 
-    def transcribe(self, images: List[str]) -> str:
-        """Specialized OCR using GLM-OCR model."""
+    def transcribe(self, images: List[str], model: str = 'glm-ocr:latest') -> str:
+        """Specialized OCR using visual model."""
         if not images: return ""
         
-        print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via GLM-OCR...")
+        print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via {model}...")
         transcription = ""
         
         for i, img in enumerate(images):
-            print(f"    [AI-PIPELINE] Phase 1: Transcribing page {i+1} of {len(images)} via GLM-OCR...")
+            print(f"    [AI-PIPELINE] Phase 1: Transcribing page {i+1} of {len(images)} via {model}...")
             payload = {
-                "model": "glm-ocr:latest",
+                "model": model,
                 "prompt": "Extract all text and tabular data from this document page exactly. Output Markdown.",
                 "images": [img],
                 "stream": False,

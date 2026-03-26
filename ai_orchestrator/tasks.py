@@ -37,10 +37,21 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             task_metadata = chat_service.process_intent_and_build_metadata(
                 user_message, conversation_id, history_context, audit_log_id
             )
+            final_content = user_message
+            if not AISkill.objects.filter(name='universal_chat').exists():
+                final_content = (
+                    "[CHAT HISTORY]\n"
+                    f"{task_metadata.get('history_context', '')}\n\n"
+                    "[RETRIEVED CONTEXT]\n"
+                    f"{task_metadata.get('context_data', '')}\n\n"
+                    "[USER QUERY]\n"
+                    f"{user_message}"
+                )
         else:
             task_metadata = metadata or {}
             task_metadata['audit_log_id'] = audit_log_id
             task_metadata['history_context'] = history_context
+            final_content = user_message
 
         full_text = ""
         full_thinking = ""
@@ -48,7 +59,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
 
         # Call the AI service with stream=True
         for chunk_str in ai_service.process_content(
-            content=user_message,
+            content=final_content,
             skill_name=skill_name,
             source_type=skill_name,
             source_id=str(conversation.id),

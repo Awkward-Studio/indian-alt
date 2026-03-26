@@ -361,26 +361,42 @@ class GraphAPIService:
         params = {'$top': top}
         return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}/children", token, params)
 
-    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL) -> List[Dict[str, Any]]:
-        """Recursively fetch all files inside a given folder ID."""
+    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL, max_depth: int = 5) -> List[Dict[str, Any]]:
+        """
+        Efficiently fetch all files inside a folder tree using a queue-based traversal.
+        Limits depth to prevent infinite loops or timeouts on massive structures.
+        """
         all_files = []
+        # Queue stores (folder_id, current_depth, path_prefix)
+        queue = [(item_id, 0, "")]
         
-        def traverse(current_item_id):
-            children_data = self.get_drive_item_children(drive_id, current_item_id, user_email=user_email, top=999)
-            items = children_data.get('value', [])
+        token = self.get_access_token(user_email, require_delegated=True)
+        
+        while queue:
+            current_id, depth, path_prefix = queue.pop(0)
             
-            for item in items:
-                # Explicitly attach the current drive_id to the item so background tasks know where it lives
-                item['driveId'] = drive_id
+            if depth > max_depth:
+                continue
                 
-                if 'folder' in item:
-                    # Recursive call for subfolders
-                    traverse(item['id'])
-                elif 'file' in item:
-                    # Collect file metadata
-                    all_files.append(item)
+            try:
+                # Use a single API call per folder level
+                endpoint = f"/drives/{drive_id}/items/{current_id}/children"
+                params = {'$top': 999, '$select': 'id,name,folder,file,size'}
+                data = self._make_request('GET', endpoint, token, params)
+                items = data.get('value', [])
+                
+                for item in items:
+                    item['driveId'] = drive_id
+                    display_path = f"{path_prefix}/{item['name']}".strip('/')
+                    item['path'] = display_path
                     
-        traverse(item_id)
+                    if 'folder' in item:
+                        queue.append((item['id'], depth + 1, display_path))
+                    elif 'file' in item:
+                        all_files.append(item)
+            except Exception as e:
+                logger.error(f"Error traversing folder {current_id}: {e}")
+                
         return all_files
 
     def get_drive_root_children(self, user_email: str = DMS_USER_EMAIL,

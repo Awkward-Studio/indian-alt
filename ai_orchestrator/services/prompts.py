@@ -67,9 +67,11 @@ class PromptBuilderService:
         
         # 2. Replace primary content
         cleaned_content = PromptBuilderService.clean_html(content)
-        max_chars = 160000 
+        # 100k chars is approx 25k-28k tokens, leaving safe room for system instructions 
+        # and a full 4k-8k token response within the 32k context window.
+        max_chars = 100000 
         if len(cleaned_content) > max_chars:
-            cleaned_content = cleaned_content[:100000] + "\n\n[... TRUNCATED ...]\n\n" + cleaned_content[-60000:]
+            cleaned_content = cleaned_content[:60000] + "\n\n[... TRUNCATED DUE TO CONTEXT LIMITS ...]\n\n" + cleaned_content[-40000:]
             
         user_prompt = user_prompt.replace('{{content}}', cleaned_content)
         user_prompt = user_prompt.replace('{{ content }}', cleaned_content)

@@ -22,38 +22,46 @@ class DocumentProcessorService:
     def __init__(self):
         self.ollama_url = os.environ.get('OLLAMA_URL') or config('OLLAMA_URL', default='http://localhost:11434')
 
-    def transcribe_document(self, file_content: bytes, filename: str, page_limit: int = None) -> str:
+    def get_extraction_result(self, file_content: bytes, filename: str, page_limit: int = None) -> dict:
         """
-        Master method: Converts document to images (up to page_limit) and sends to GLM-OCR on the VM.
-        Returns the markdown transcription.
+        Returns structured extraction details so callers can distinguish OCR success,
+        text fallback, and outright failures for auditability.
         """
         ext = os.path.splitext(filename)[1].lower()
-        
-        # 1. Try to get images for GLM-OCR
         images_b64 = self._convert_to_images(file_content, filename, page_limit)
-        
-        # 2. If no images (e.g. Word/Excel on Linux), use lightweight local text extraction
-        if not images_b64:
-            print(f"[DOC-PROC] No images for {filename}. Using local text extraction fallback.")
-            if ext in ['.txt', '.csv']:
-                return file_content.decode('utf-8', errors='ignore')
-            
-            fallback_text = self.extract_text_fallback(file_content, filename, page_limit=page_limit)
-            if fallback_text:
-                return fallback_text
-                
-            return f"[No readable content extracted for: {filename}]"
 
-        # 3. Process with GLM-OCR
+        if not images_b64:
+            logger.info("[DOC-PROC] No renderable images for %s. Using fallback extraction.", filename)
+            if ext in ['.txt', '.csv']:
+                text = file_content.decode('utf-8', errors='ignore').strip()
+                if text:
+                    return {"text": text, "mode": "fallback_text"}
+                return {"text": "", "mode": "fallback_text", "error": "Plain-text file produced no readable content"}
+
+            fallback_text = self.extract_text_fallback(file_content, filename, page_limit=page_limit).strip()
+            if fallback_text:
+                return {"text": fallback_text, "mode": "fallback_text"}
+
+            return {"text": "", "mode": "fallback_text", "error": f"No readable content extracted for {filename}"}
+
+        from ..models import AIPersonality
+
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        vision_model = (
+            personality.vision_model_name
+            if personality and personality.vision_model_name
+            else getattr(settings, "OLLAMA_DEFAULT_VISION_MODEL", "llava:latest")
+        )
+
         transcription = ""
         total_pages = len(images_b64)
-        print(f"[DOC-PROC] Sending {total_pages} pages of {filename} to GLM-OCR VM...")
-        
+        print(f"[DOC-PROC] Sending {total_pages} pages of {filename} to {vision_model} VM...")
+
         for i, img in enumerate(images_b64):
             try:
                 print(f"    [DOC-PROC] Transcribing page {i+1} of {total_pages}...")
                 payload = {
-                    "model": "glm-ocr:latest",
+                    "model": vision_model,
                     "prompt": "Extract all text and tabular data from this document exactly. Output Markdown.",
                     "images": [img],
                     "stream": False,
@@ -65,11 +73,33 @@ class DocumentProcessorService:
                     transcription += f"\n\n--- {filename} (PAGE {i+1}) ---\n{page_text}"
                 else:
                     logger.error(f"GLM-OCR returned {resp.status_code}: {resp.text}")
+                    return {
+                        "text": transcription.strip(),
+                        "mode": "glm_ocr",
+                        "error": f"OCR returned {resp.status_code} for page {i+1}"
+                    }
             except Exception as e:
                 logger.error(f"GLM-OCR failed on page {i+1} of {filename}: {str(e)}")
-                transcription += f"\n\n[OCR Failed for Page {i+1}]"
-                
-        return transcription
+                return {
+                    "text": transcription.strip(),
+                    "mode": "glm_ocr",
+                    "error": f"OCR failed on page {i+1}: {str(e)}"
+                }
+
+        transcription = transcription.strip()
+        if transcription:
+            return {"text": transcription, "mode": "glm_ocr"}
+        return {"text": "", "mode": "glm_ocr", "error": f"OCR produced no readable content for {filename}"}
+
+    def transcribe_document(self, file_content: bytes, filename: str, page_limit: int = None) -> str:
+        """
+        Master method: Converts document to images (up to page_limit) and sends to GLM-OCR on the VM.
+        Returns the markdown transcription.
+        """
+        result = self.get_extraction_result(file_content, filename, page_limit=page_limit)
+        if result.get("text"):
+            return result["text"]
+        return f"[No readable content extracted for: {filename}]"
 
     def _convert_to_images(self, file_content: bytes, filename: str, page_limit: int = None) -> list:
         """

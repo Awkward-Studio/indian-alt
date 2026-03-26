@@ -71,7 +71,26 @@ class ResponseParserService:
             parsed_json["_raw_response"] = raw_response
             return parsed_json, True, clean_response, thinking
         except Exception as e:
-            return {"error": "JSON parsing error", "raw": raw_response, "thinking": thinking, "err_msg": str(e)}, False, clean_response, thinking
+            # FALLBACK: If JSON fails, still try to extract basic metadata from the text report
+            fallback_data = {
+                "deal_model_data": {"title": "Direct Inference (Parsing Error)"},
+                "metadata": {"ambiguous_points": ["AI response was truncated or malformed."]},
+                "analyst_report": raw_response,
+                "error": "JSON parsing error",
+                "thinking": thinking,
+                "response": clean_response
+            }
+            
+            # Simple heuristic: look for "Investment Analysis: Company Name" or similar in the first 5 lines
+            first_lines = raw_response.split('\n')[:10]
+            for line in first_lines:
+                if line.startswith('# ') or line.startswith('## '):
+                    title = line.replace('#', '').replace('Investment Analysis:', '').replace('Report', '').strip()
+                    if title:
+                        fallback_data["deal_model_data"]["title"] = title
+                        break
+            
+            return fallback_data, False, clean_response, thinking
 
     @staticmethod
     def parse_stream(stream_iterator):

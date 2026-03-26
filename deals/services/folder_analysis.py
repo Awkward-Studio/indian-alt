@@ -13,6 +13,20 @@ class FolderAnalysisService:
     """
 
     @staticmethod
+    def _infer_workflow_stage(meta: dict, has_parsed_json: bool) -> str | None:
+        if not meta:
+            return None
+        if meta.get("workflow_stage"):
+            return meta["workflow_stage"]
+        if has_parsed_json:
+            return "analysis_complete"
+        if meta.get("passed_files") or meta.get("failed_files"):
+            return "preflight_complete"
+        if meta.get("file_tree"):
+            return "traversal_complete"
+        return None
+
+    @staticmethod
     def queue_folder_analysis(folder_id: str, folder_name: str, drive_id: str) -> dict:
         """
         Kicks off an asynchronous folder analysis. Returns tracking info.
@@ -25,6 +39,9 @@ class FolderAnalysisService:
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
         
+        # Use model from personality
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        
         audit_log = AIAuditLog.objects.create(
             source_type='onedrive_folder',
             source_id=folder_id,
@@ -33,9 +50,16 @@ class FolderAnalysisService:
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used='qwen3.5:latest',
+            model_used=default_model,
             system_prompt="Queued for forensic traversal...",
-            user_prompt=f"Queued analysis for folder: {folder_name}"
+            user_prompt=f"Queued analysis for folder: {folder_name}",
+            source_metadata={
+                "drive_id": drive_id,
+                "folder_id": folder_id,
+                "workflow_stage": "traversal_pending",
+                "interaction_status": "pending",
+                "interaction_mode": "editable",
+            },
         )
 
         # Trigger task - Initial analysis is high priority
@@ -77,25 +101,58 @@ class FolderAnalysisService:
                 return {"status": "FAILURE", "error": "Task returned no data"}
             if "error" in data:
                 return data # Propagate error dict
+
+            if data.get("phase") == "preflight":
+                session_id = data.get("session_id")
+                if session_id:
+                    session_data = cache.get(f"folder_sync_{session_id}") or {}
+                    session_data.update({
+                        "selected_file_ids": data.get("selected_file_ids", []),
+                        "passed_files": data.get("passed_files", []),
+                        "failed_files": data.get("failed_files", []),
+                        "preflight_audit_log_id": data.get("audit_log_id"),
+                    })
+                    cache.set(f"folder_sync_{session_id}", session_data, timeout=3600)
+                response.update({
+                    "phase": "preflight",
+                    "session_id": session_id,
+                    "selected_files_count": data.get("selected_files_count", 0),
+                    "passed_files_count": data.get("passed_files_count", 0),
+                    "failed_files_count": data.get("failed_files_count", 0),
+                    "passed_files": data.get("passed_files", []),
+                    "failed_files": data.get("failed_files", []),
+                    "folder_id": data.get("folder_id"),
+                    "drive_id": data.get("drive_id"),
+                })
+                return response
                 
             session_id = str(uuid.uuid4())
             cache.set(f"folder_sync_{session_id}", {
-                "file_tree": data['file_tree'],
-                "drive_id": data['drive_id'],
-                "folder_id": data['folder_id'],
-                "user_email": data['user_email'],
-                "preliminary_data": data['preliminary_data'],
+                "file_tree": data.get('file_tree', []),
+                "drive_id": data.get('drive_id'),
+                "folder_id": data.get('folder_id'),
+                "user_email": data.get('user_email'),
+                "originating_audit_log_id": data.get('audit_log_id'),
+                "preliminary_data": data.get('preliminary_data'),
                 "preview_text": data.get('preview_text', ''),
-                "raw_thinking": data.get('raw_thinking', '')
+                "raw_thinking": data.get('raw_thinking', ''),
+                "passed_files": data.get('passed_files', []),
+                "failed_files": data.get('failed_files', []),
+                "analysis_input_files": data.get('passed_files', []),
             }, timeout=3600)
             
             response.update({
+                "phase": data.get("phase", "analysis"),
                 "session_id": session_id,
-                "folder_id": data['folder_id'],
-                "total_files": data['total_files'],
-                "preview_files_analyzed": data['preview_files_analyzed'],
-                "preliminary_data": data['preliminary_data'],
-                "raw_thinking": data.get('raw_thinking', '')
+                "folder_id": data.get('folder_id'),
+                "total_files": data.get('total_files', 0),
+                "file_tree": data.get('file_tree', []),
+                "selected_file_ids": data.get('selected_file_ids', []),
+                "preview_files_analyzed": data.get('preview_files_analyzed', 0),
+                "preliminary_data": data.get('preliminary_data'),
+                "raw_thinking": data.get('raw_thinking', ''),
+                "passed_files": data.get('passed_files', []),
+                "failed_files": data.get('failed_files', []),
             })
             
         elif result.status == 'FAILURE':
@@ -118,24 +175,84 @@ class FolderAnalysisService:
             
             meta = log.source_metadata
             if not meta:
-                return {"error": "This log does not contain source metadata"}
-                
+                return {"error": "This audit log does not contain folder source metadata. It was likely created before metadata capture was added, so re-run the folder analysis and selection flow."}
+            if not meta.get('file_tree') or not meta.get('drive_id') or not meta.get('folder_id'):
+                return {"error": "This audit log is missing required folder metadata. Re-run the folder analysis and selection flow."}
+
+            workflow_stage = FolderAnalysisService._infer_workflow_stage(meta, bool(log.parsed_json))
             session_id = str(uuid.uuid4())
+
+            if workflow_stage == "traversal_complete":
+                cache.set(f"folder_sync_{session_id}", {
+                    "file_tree": meta['file_tree'],
+                    "drive_id": meta['drive_id'],
+                    "folder_id": meta['folder_id'],
+                    "user_email": DMS_USER_EMAIL,
+                    "originating_audit_log_id": str(log.id),
+                    "selected_file_ids": meta.get("selected_file_ids", []),
+                }, timeout=3600)
+                return {
+                    "phase": "traversal",
+                    "session_id": session_id,
+                    "file_tree": meta['file_tree'],
+                    "total_files": meta.get('total_files', len(meta['file_tree'])),
+                    "selected_file_ids": meta.get("selected_file_ids", []),
+                    "interaction_status": meta.get("interaction_status", "pending"),
+                    "interaction_mode": meta.get("interaction_mode", "editable"),
+                }
+
+            if workflow_stage == "preflight_complete":
+                cache.set(f"folder_sync_{session_id}", {
+                    "file_tree": meta['file_tree'],
+                    "drive_id": meta['drive_id'],
+                    "folder_id": meta['folder_id'],
+                    "user_email": DMS_USER_EMAIL,
+                    "preflight_audit_log_id": str(log.id),
+                    "selected_file_ids": meta.get("selected_file_ids", []),
+                    "passed_files": meta.get("passed_files", []),
+                    "failed_files": meta.get("failed_files", []),
+                    "approved_file_ids": meta.get("approved_file_ids", []),
+                }, timeout=3600)
+                return {
+                    "phase": "preflight",
+                    "session_id": session_id,
+                    "selected_file_ids": meta.get("selected_file_ids", []),
+                    "passed_files": meta.get("passed_files", []),
+                    "failed_files": meta.get("failed_files", []),
+                    "approved_file_ids": meta.get("approved_file_ids", []),
+                    "selected_files_count": meta.get("selected_files_count", len(meta.get("selected_file_ids", []))),
+                    "passed_files_count": meta.get("passed_files_count", len(meta.get("passed_files", []))),
+                    "failed_files_count": meta.get("failed_files_count", len(meta.get("failed_files", []))),
+                    "interaction_status": meta.get("interaction_status", "pending"),
+                    "interaction_mode": meta.get("interaction_mode", "editable"),
+                }
+
+            if meta.get("file_tree") and not workflow_stage:
+                return {"error": "This folder audit log predates resumable workflow-stage metadata. Re-run the folder traversal or readability check from OneDrive, then reopen the new log from AI History."}
+
+            if not log.parsed_json:
+                return {"error": "This audit log does not contain extracted deal data. Re-run the selection analysis before initializing a deal."}
+                
             cache.set(f"folder_sync_{session_id}", {
                 "file_tree": meta['file_tree'],
                 "drive_id": meta['drive_id'],
                 "folder_id": meta['folder_id'],
                 "user_email": DMS_USER_EMAIL,
                 "preliminary_data": log.parsed_json,
-                "preview_text": meta.get('preview_text', '')
+                "preview_text": meta.get('preview_text', ''),
+                "passed_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
+                "failed_files": meta.get('failed_files', []),
             }, timeout=3600)
             
             return {
                 "session_id": session_id,
                 "preliminary_data": log.parsed_json,
                 "total_files": meta.get('total_files', len(meta['file_tree'])),
-                "preview_files_analyzed": 5,
-                "raw_thinking": log.raw_response
+                "preview_files_analyzed": len(meta.get('analysis_input_files', meta.get('passed_files', []))),
+                "raw_thinking": log.raw_response,
+                "passed_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
+                "failed_files": meta.get('failed_files', []),
+                "phase": "analysis",
             }
         except AIAuditLog.DoesNotExist:
             return {"error": "Audit log not found"}
@@ -143,14 +260,30 @@ class FolderAnalysisService:
     @staticmethod
     def trigger_selection_analysis(session_id: str, selected_file_ids: list) -> dict:
         """
-        Kicks off AI extraction based on specific user-selected file IDs.
+        Kicks off a preflight extraction pass on user-selected file IDs.
         """
-        from deals.tasks import analyze_selection_async
+        from deals.tasks import preflight_selection_async
         from microsoft.services.graph_service import DMS_USER_EMAIL
         
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
             return {"error": "Session expired or invalid. Please re-analyze the folder."}
+
+        source_log_id = session_data.get("originating_audit_log_id")
+        if source_log_id:
+            from ai_orchestrator.models import AIAuditLog
+            source_log = AIAuditLog.objects.filter(id=source_log_id).first()
+            if source_log:
+                source_meta = source_log.source_metadata or {}
+                if source_meta.get("interaction_status") == "completed":
+                    return {"error": "This traversal interaction has already been completed and is now read-only."}
+                source_log.source_metadata = {
+                    **source_meta,
+                    "selected_file_ids": selected_file_ids,
+                    "interaction_status": "completed",
+                    "interaction_mode": "read_only",
+                }
+                source_log.save(update_fields=["source_metadata"])
             
         # Extract metadata from the previous audit log if available
         # But we actually already have the data in the session cache
@@ -161,6 +294,9 @@ class FolderAnalysisService:
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
         
+        # Use model from personality
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        
         audit_log = AIAuditLog.objects.create(
             source_type='onedrive_folder',
             source_id=session_data['folder_id'],
@@ -169,18 +305,29 @@ class FolderAnalysisService:
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used='qwen3.5:latest',
+            model_used=default_model,
             system_prompt="Queued for extraction from selection...",
-            user_prompt=f"Extracting deal data from {len(selected_file_ids)} files"
+            user_prompt=f"Extracting deal data from {len(selected_file_ids)} files",
+            source_metadata={
+                "file_tree": session_data.get('file_tree', []),
+                "drive_id": session_data.get('drive_id'),
+                "folder_id": session_data.get('folder_id'),
+                "preview_text": session_data.get('preview_text', ''),
+                "total_files": len(session_data.get('file_tree', [])),
+                "workflow_stage": "preflight_pending",
+                "interaction_status": "pending",
+                "interaction_mode": "editable",
+            },
         )
 
-        task = analyze_selection_async.apply_async(
+        task = preflight_selection_async.apply_async(
             kwargs={
                 'drive_id': session_data['drive_id'],
                 'folder_id': session_data['folder_id'],
                 'user_email': DMS_USER_EMAIL,
                 'audit_log_id': str(audit_log.id),
-                'selected_file_ids': selected_file_ids
+                'selected_file_ids': selected_file_ids,
+                'session_id': session_id,
             },
             queue='high_priority'
         )
@@ -188,6 +335,86 @@ class FolderAnalysisService:
         audit_log.celery_task_id = task.id
         audit_log.save(update_fields=['celery_task_id'])
         
+        return {
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "status": "queued"
+        }
+
+    @staticmethod
+    def confirm_selection_analysis(session_id: str, selected_file_ids: list) -> dict:
+        """
+        Runs the final Qwen-based extraction on the approved subset of selected files.
+        """
+        from deals.tasks import analyze_selection_async
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+        from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+
+        session_data = cache.get(f"folder_sync_{session_id}")
+        if not session_data:
+            return {"error": "Session expired or invalid. Please re-analyze the folder."}
+        if not selected_file_ids:
+            return {"error": "selected_file_ids is required"}
+
+        source_log_id = session_data.get("preflight_audit_log_id")
+        if source_log_id:
+            source_log = AIAuditLog.objects.filter(id=source_log_id).first()
+            if source_log:
+                source_meta = source_log.source_metadata or {}
+                if source_meta.get("interaction_status") == "completed":
+                    return {"error": "This readability review has already been confirmed and is now read-only."}
+                source_log.source_metadata = {
+                    **source_meta,
+                    "approved_file_ids": selected_file_ids,
+                    "analysis_input_files": [
+                        file for file in session_data.get("passed_files", [])
+                        if file.get("file_id") in set(selected_file_ids)
+                    ],
+                    "interaction_status": "completed",
+                    "interaction_mode": "read_only",
+                }
+                source_log.save(update_fields=["source_metadata"])
+
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='deal_extraction').first()
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+
+        audit_log = AIAuditLog.objects.create(
+            source_type='onedrive_folder',
+            source_id=session_data['folder_id'],
+            context_label=f"Selection Analysis: {len(selected_file_ids)} approved files",
+            personality=personality,
+            skill=skill,
+            status='PENDING',
+            is_success=False,
+            model_used=default_model,
+            system_prompt="Queued for extraction from approved selection...",
+            user_prompt=f"Extracting deal data from {len(selected_file_ids)} approved files",
+            source_metadata={
+                "file_tree": session_data.get('file_tree', []),
+                "drive_id": session_data.get('drive_id'),
+                "folder_id": session_data.get('folder_id'),
+                "preview_text": session_data.get('preview_text', ''),
+                "total_files": len(session_data.get('file_tree', [])),
+                "preflight_passed_files": session_data.get('passed_files', []),
+                "preflight_failed_files": session_data.get('failed_files', []),
+                "approved_file_ids": selected_file_ids,
+                "workflow_stage": "analysis_pending",
+            },
+        )
+
+        task = analyze_selection_async.apply_async(
+            kwargs={
+                'session_id': session_id,
+                'audit_log_id': str(audit_log.id),
+                'selected_file_ids': selected_file_ids
+            },
+            queue='high_priority'
+        )
+
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=['celery_task_id'])
+
         return {
             "task_id": task.id,
             "audit_log_id": str(audit_log.id),
@@ -212,6 +439,10 @@ class FolderAnalysisService:
         
         if analysis_json:
             from deals.models import DealAnalysis
+            metadata = analysis_json.setdefault('metadata', {})
+            metadata['analysis_input_files'] = session_data.get('passed_files', [])
+            metadata['passed_files'] = session_data.get('passed_files', [])
+            metadata['failed_files'] = session_data.get('failed_files', [])
             # Create DealAnalysis record
             DealAnalysis.objects.create(
                 deal=deal,

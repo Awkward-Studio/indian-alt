@@ -25,6 +25,9 @@ def analyze_email_async(self, email_id: str):
     personality = AIPersonality.objects.filter(is_default=True).first()
     skill = AISkill.objects.filter(name='deal_extraction').first()
     
+    # Use model from personality
+    default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+    
     audit_log = AIAuditLog.objects.create(
         source_type='email',
         source_id=email_id,
@@ -33,7 +36,7 @@ def analyze_email_async(self, email_id: str):
         skill=skill,
         status='PROCESSING',
         is_success=False,
-        model_used='qwen3.5:latest',
+        model_used=default_model,
         system_prompt="Initializing forensic email analysis...",
         user_prompt=f"Analyzing email signal: {email.subject}",
         celery_task_id=self.request.id

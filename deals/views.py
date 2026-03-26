@@ -280,6 +280,22 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         return Response(result)
 
     @action(detail=False, methods=['post'])
+    def confirm_selection_analysis(self, request):
+        """
+        Runs the final Qwen analysis on the approved subset of preflight-passed files.
+        """
+        session_id = request.data.get('session_id')
+        selected_file_ids = request.data.get('selected_file_ids', [])
+
+        if not session_id or not selected_file_ids:
+            return Response({"error": "session_id and selected_file_ids are required"}, status=400)
+
+        result = FolderAnalysisService.confirm_selection_analysis(session_id, selected_file_ids)
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result)
+
+    @action(detail=False, methods=['post'])
     def confirm_folder_deal(self, request):
         """
         Creates the Deal from the preliminary analysis and kicks off the background
@@ -328,6 +344,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='vdr_incremental_analysis').first()
         
+        # Use model from personality
+        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        
         audit_log = AIAuditLog.objects.create(
             source_type='vdr_incremental_analysis',
             source_id=str(deal.id),
@@ -336,7 +355,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used='qwen3.5:latest',
+            model_used=default_model,
             system_prompt="Queued for incremental forensic analysis...",
             user_prompt=f"Analyzing {docs.count()} new documents for Deal: {deal.title}"
         )

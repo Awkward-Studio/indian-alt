@@ -8,6 +8,7 @@ from .llm_providers import OllamaProviderService
 from .prompts import PromptBuilderService
 from .parsers import ResponseParserService
 from .ocr import OCRService
+from .realtime import broadcast_audit_log_update
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -45,20 +46,21 @@ class AIProcessorService:
         if skill_name:
             print(f"[AI-PROCESSOR] Loading skill: {skill_name}")
             
-        # PHASE 1: OCR (Optional, delegated to OCRService)
-        if images and skill_name == "deal_extraction":
-            ocr_context = self.ocr_service.transcribe(images)
-            content = f"{content}\n\n[HIGH-FIDELITY DOCUMENT OCR]:\n{ocr_context}"
-
-        # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
-        print(f"[AI-PIPELINE] Phase 2: Orchestrating Forensic Logic with Qwen 3.5...")
-        
         personality = AIPersonality.objects.filter(name=personality_name).first()
-        if personality_name == "default":
+        if personality_name == "default" or not personality:
             personality = AIPersonality.objects.filter(is_default=True).first()
             
         skill = AISkill.objects.filter(name=skill_name).first() if skill_name else None
 
+        # PHASE 1: OCR (Optional, delegated to OCRService)
+        if images and skill_name == "deal_extraction":
+            vision_model = personality.vision_model_name if personality else "llava:latest"
+            ocr_context = self.ocr_service.transcribe(images, model=vision_model)
+            content = f"{content}\n\n[HIGH-FIDELITY DOCUMENT OCR]:\n{ocr_context}"
+
+        # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
+        print(f"[AI-PIPELINE] Phase 2: Orchestrating Forensic Logic with {personality.text_model_name if personality else 'LLM'}...")
+        
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         prompt_template = skill.prompt_template if skill else "{{ content }}"
         
@@ -71,7 +73,7 @@ class AIProcessorService:
         )
 
         payload = {
-            "model": model_override or 'qwen3.5:latest',
+            "model": model_override or (personality.text_model_name if personality else 'qwen3.5:latest'),
             "prompt": user_prompt,
             "system": system_instructions,
             "stream": stream,
@@ -107,14 +109,17 @@ class AIProcessorService:
                 if celery_task_id: audit_log.celery_task_id = celery_task_id
                 if ctx_label: audit_log.context_label = ctx_label
                 audit_log.save()
+                broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
                 return audit_log
             except AIAuditLog.DoesNotExist:
                 pass
 
+        model_used = personality.text_model_name if personality else 'qwen3.5:latest'
+
         return AIAuditLog.objects.create(
             source_type=source_type, source_id=source_id,
             context_label=ctx_label, personality=personality, skill=skill,
-            model_used='qwen3.5:latest', system_prompt=system_prompt, user_prompt=user_prompt,
+            model_used=model_used, system_prompt=system_prompt, user_prompt=user_prompt,
             is_success=False, status='PROCESSING',
             source_metadata=source_meta, celery_task_id=celery_task_id
         )
@@ -144,8 +149,12 @@ class AIProcessorService:
                         room_name,
                         {
                             "type": "ai_message",
+                            "event_type": "delta",
+                            "audit_log_id": str(audit_log.id),
                             "response": response_delta,
                             "thinking": thinking_delta,
+                            "response_delta": response_delta,
+                            "thinking_delta": thinking_delta,
                             "status": "processing",
                             "done": False
                         }
@@ -173,6 +182,7 @@ class AIProcessorService:
             audit_log.request_duration_ms = duration_ms
             audit_log.tokens_used = estimated_tokens
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
             # Broadcast final completion
             if self.channel_layer:
@@ -180,6 +190,8 @@ class AIProcessorService:
                     room_name,
                     {
                         "type": "ai_message",
+                        "event_type": "terminal",
+                        "audit_log_id": str(audit_log.id),
                         "response": "",
                         "thinking": "",
                         "status": "completed",
@@ -194,12 +206,15 @@ class AIProcessorService:
             audit_log.error_message = str(e)
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
             if self.channel_layer:
                 async_to_sync(self.channel_layer.group_send)(
                     room_name,
                     {
                         "type": "ai_message",
+                        "event_type": "terminal",
+                        "audit_log_id": str(audit_log.id),
                         "response": f"Error: {str(e)}",
                         "thinking": "",
                         "status": "failed",
@@ -249,5 +264,10 @@ class AIProcessorService:
         finally:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
+            broadcast_audit_log_update(
+                audit_log,
+                event_type="terminal" if audit_log.status in ['COMPLETED', 'FAILED'] else "snapshot",
+                done=audit_log.status in ['COMPLETED', 'FAILED'],
+            )
             
         return parsed_json

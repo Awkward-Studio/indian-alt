@@ -12,7 +12,7 @@ class Command(BaseCommand):
                 "description": "Senior Analyst with 10+ years experience. Rigorous, skeptical, and forensic.",
                 "model_provider": "ollama",
                 "text_model_name": "qwen3.5:latest",
-                "vision_model_name": "qwen3.5:latest",
+                "vision_model_name": "glm-ocr:latest",
                 "system_instructions": """# Role Definition
 You are a Senior Private Equity (PE) Investment Analyst with over 10 years of experience in M&A due diligence, financial modeling, and risk assessment. Your goal is to conduct comprehensive due diligence on target companies for potential acquisition or fundraise rounds.
 

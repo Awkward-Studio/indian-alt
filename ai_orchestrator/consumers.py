@@ -37,8 +37,13 @@ class AIStreamConsumer(AsyncWebsocketConsumer):
         """
         # Send message to WebSocket
         await self.send(text_data=json.dumps({
+            'event_type': event.get('event_type', 'delta'),
+            'audit_log_id': event.get('audit_log_id'),
             'response': event.get('response', ''),
             'thinking': event.get('thinking', ''),
+            'response_delta': event.get('response_delta', event.get('response', '')),
+            'thinking_delta': event.get('thinking_delta', event.get('thinking', '')),
             'status': event.get('status', 'processing'),
-            'done': event.get('done', False)
+            'done': event.get('done', False),
+            'audit_log': event.get('audit_log'),
         }))

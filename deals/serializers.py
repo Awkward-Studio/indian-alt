@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Deal, DealDocument, DealPhaseLog
+from .models import Deal, DealDocument, DealPhaseLog, InitialAnalysisStatus
 from accounts.models import Profile
 from api_requests.serializers import RequestSerializer
 from ai_orchestrator.models import AIAuditLog
@@ -17,12 +17,75 @@ class DealPhaseLogSerializer(serializers.ModelSerializer):
 class DealDocumentSerializer(serializers.ModelSerializer):
     deal_title = serializers.CharField(source='deal.title', read_only=True)
     uploaded_by_name = serializers.CharField(source='uploaded_by.name', read_only=True)
+    initial_analysis_status = serializers.SerializerMethodField()
+    initial_analysis_reason = serializers.SerializerMethodField()
+
+    def _get_initial_analysis_map(self, obj):
+        cache = self.context.setdefault('_initial_analysis_map', {})
+        deal_id = str(obj.deal_id)
+        if deal_id in cache:
+            return cache[deal_id]
+
+        analysis = obj.deal.analyses.filter(version=1).first()
+        metadata = (analysis.analysis_json or {}).get('metadata', {}) if analysis else {}
+        mapping = {
+            'passed_by_file_id': {},
+            'passed_by_name': {},
+            'failed_by_file_id': {},
+            'failed_by_name': {},
+        }
+        for file in metadata.get('analysis_input_files', []) or metadata.get('passed_files', []):
+            file_id = file.get('file_id')
+            file_name = file.get('file_name')
+            if file_id:
+                mapping['passed_by_file_id'][str(file_id)] = file
+            if file_name:
+                mapping['passed_by_name'][str(file_name).strip().lower()] = file
+        for file in metadata.get('failed_files', []):
+            file_id = file.get('file_id')
+            file_name = file.get('file_name')
+            if file_id:
+                mapping['failed_by_file_id'][str(file_id)] = file
+            if file_name:
+                mapping['failed_by_name'][str(file_name).strip().lower()] = file
+        cache[deal_id] = mapping
+        return mapping
+
+    def get_initial_analysis_status(self, obj):
+        if obj.initial_analysis_status and obj.initial_analysis_status != InitialAnalysisStatus.NOT_SELECTED:
+            return obj.initial_analysis_status
+
+        mapping = self._get_initial_analysis_map(obj)
+        if obj.onedrive_id and str(obj.onedrive_id) in mapping['passed_by_file_id']:
+            return InitialAnalysisStatus.SELECTED_AND_ANALYZED
+        if obj.onedrive_id and str(obj.onedrive_id) in mapping['failed_by_file_id']:
+            return InitialAnalysisStatus.SELECTED_FAILED
+
+        normalized_title = (obj.title or '').strip().lower()
+        if normalized_title in mapping['passed_by_name']:
+            return InitialAnalysisStatus.SELECTED_AND_ANALYZED
+        if normalized_title in mapping['failed_by_name']:
+            return InitialAnalysisStatus.SELECTED_FAILED
+        return InitialAnalysisStatus.NOT_SELECTED
+
+    def get_initial_analysis_reason(self, obj):
+        if obj.initial_analysis_reason:
+            return obj.initial_analysis_reason
+
+        mapping = self._get_initial_analysis_map(obj)
+        if obj.onedrive_id and str(obj.onedrive_id) in mapping['failed_by_file_id']:
+            return mapping['failed_by_file_id'][str(obj.onedrive_id)].get('reason')
+        normalized_title = (obj.title or '').strip().lower()
+        if normalized_title in mapping['failed_by_name']:
+            return mapping['failed_by_name'][normalized_title].get('reason')
+        return None
     
     class Meta:
         model = DealDocument
         fields = (
             'id', 'deal', 'deal_title', 'title', 'document_type', 
             'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
+            'initial_analysis_status', 'initial_analysis_reason',
             'created_at', 'uploaded_by', 'uploaded_by_name'
         )
         read_only_fields = ('id', 'created_at')

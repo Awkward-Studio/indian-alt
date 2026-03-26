@@ -283,6 +283,12 @@ class DocumentType(models.TextChoices):
     OTHER = 'Other', 'Other'
 
 
+class InitialAnalysisStatus(models.TextChoices):
+    NOT_SELECTED = 'not_selected', 'Not Selected'
+    SELECTED_AND_ANALYZED = 'selected_and_analyzed', 'Selected And Analyzed'
+    SELECTED_FAILED = 'selected_failed', 'Selected Failed'
+
+
 class DealDocument(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     deal = models.ForeignKey(
@@ -304,6 +310,13 @@ class DealDocument(models.Model):
         default=False,
         help_text='Whether this document was included in the AI summary generation'
     )
+    initial_analysis_status = models.CharField(
+        max_length=40,
+        choices=InitialAnalysisStatus.choices,
+        default=InitialAnalysisStatus.NOT_SELECTED,
+        help_text='Whether the document was selected for the initial folder analysis flow.',
+    )
+    initial_analysis_reason = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(
         'accounts.Profile',

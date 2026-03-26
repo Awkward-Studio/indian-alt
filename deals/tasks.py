@@ -4,10 +4,11 @@ from celery import shared_task, chord
 from django.core.cache import cache
 from django.db import transaction
 
-from .models import Deal, DealDocument, DocumentType
+from .models import Deal, DealDocument, DocumentType, InitialAnalysisStatus
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from ai_orchestrator.services.realtime import broadcast_audit_log_update
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,26 @@ def _build_combined_text(passed_files: list, selected_file_ids: list | None = No
         parts.append(f"\n--- FILE: {file.get('file_name', 'unknown_file')} ---\n{extracted_text}")
     return "".join(parts).strip()
 
+
+def _resolve_initial_analysis_status(deal: Deal, file_id: str | None, file_name: str | None) -> tuple[str, str | None]:
+    analysis = deal.analyses.filter(version=1).first()
+    metadata = (analysis.analysis_json or {}).get("metadata", {}) if analysis else {}
+    normalized_name = (file_name or "").strip().lower()
+
+    for file in metadata.get("analysis_input_files", []) or metadata.get("passed_files", []):
+        if file_id and str(file.get("file_id") or "") == str(file_id):
+            return InitialAnalysisStatus.SELECTED_AND_ANALYZED, None
+        if normalized_name and str(file.get("file_name") or "").strip().lower() == normalized_name:
+            return InitialAnalysisStatus.SELECTED_AND_ANALYZED, None
+
+    for file in metadata.get("failed_files", []):
+        if file_id and str(file.get("file_id") or "") == str(file_id):
+            return InitialAnalysisStatus.SELECTED_FAILED, file.get("reason")
+        if normalized_name and str(file.get("file_name") or "").strip().lower() == normalized_name:
+            return InitialAnalysisStatus.SELECTED_FAILED, file.get("reason")
+
+    return InitialAnalysisStatus.NOT_SELECTED, None
+
 @shared_task(bind=True)
 def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str = None):
     """
@@ -105,6 +126,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             audit_log = AIAuditLog.objects.get(id=audit_log_id)
             audit_log.status = 'PROCESSING'
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
         except AIAuditLog.DoesNotExist:
             audit_log_id = None
             
@@ -133,6 +155,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             audit_log.status = 'FAILED'
             audit_log.error_message = "No files found in folder"
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             return {"error": "No files found"}
             
         # Update log with traversal results - Transition to WAITING_FOR_SELECTION
@@ -150,6 +173,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             "interaction_mode": "editable",
         }
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
 
         return {
             "status": "success",
@@ -165,6 +189,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         audit_log.status = 'FAILED'
         audit_log.error_message = str(e)
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         raise e
 
 @shared_task(bind=True)
@@ -182,6 +207,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
         audit_log.status = 'PROCESSING'
         audit_log.system_prompt = f"Extracting deal data from {len(selected_file_ids)} selected documents..."
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
     except AIAuditLog.DoesNotExist:
         logger.error("Audit log %s not found for selection analysis", audit_log_id)
         return {"error": "Audit log not found"}
@@ -197,6 +223,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             audit_log.error_message = error_msg
             audit_log.save(update_fields=['status', 'error_message'])
             logger.error(error_msg)
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             return {"error": error_msg}
 
         passed_files = session_data.get("passed_files", [])
@@ -215,6 +242,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             "workflow_stage": "analysis_complete",
         }
         audit_log.save(update_fields=['source_metadata'])
+        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
 
         analysis = {}
         raw_thinking = ""
@@ -245,6 +273,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             audit_log.status = 'FAILED'
             audit_log.error_message = "No readable text found in selection."
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             return {"error": "No content found"}
 
         if isinstance(analysis, dict):
@@ -275,6 +304,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
         audit_log.status = 'FAILED'
         audit_log.error_message = str(e)
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         raise e
 
 
@@ -290,6 +320,7 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
         audit_log.status = 'PROCESSING'
         audit_log.system_prompt = f"Validating {len(selected_file_ids)} selected documents before deal extraction..."
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
     except AIAuditLog.DoesNotExist:
         return {"error": "Audit log not found"}
 
@@ -317,6 +348,7 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
             f"Passed: {len(passed_files)}\nFailed: {len(failed_files)}"
         )
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
 
         cache_key = f"folder_sync_{session_id}"
         session_data = cache.get(cache_key) or {}
@@ -350,6 +382,7 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
         audit_log.status = 'FAILED'
         audit_log.error_message = str(e)
         audit_log.save()
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         raise e
 
 @shared_task(bind=True)
@@ -394,6 +427,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         extracted_text = doc_processor.transcribe_document(content, file_name, page_limit=2)
         
         # Create Document Record
+        initial_analysis_status, initial_analysis_reason = _resolve_initial_analysis_status(deal, file_id, file_name)
         doc = DealDocument.objects.create(
             deal=deal,
             title=file_name,
@@ -401,7 +435,9 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
             onedrive_id=file_id,
             extracted_text=extracted_text,
             is_indexed=False,
-            is_ai_analyzed=is_preview
+            is_ai_analyzed=is_preview,
+            initial_analysis_status=initial_analysis_status,
+            initial_analysis_reason=initial_analysis_reason,
         )
         
         # Update combined deal text (Race condition warning: multiple tasks appending to the same field)
