@@ -63,6 +63,8 @@ class PromptBuilderService:
                 "- `decision` must be one of: ready, not_ready, insufficient_information.\n"
                 "- `recommended_next_phase` must be the provided expected next phase or null.\n"
                 "- `blocking_gaps` and `evidence_signals` must be arrays of strings.\n"
+                "- For `not_ready` and `insufficient_information`, `blocking_gaps` must state the exact current-phase blockers and the missing proof needed to advance.\n"
+                "- Do not use vague blockers; name the specific failed gate, unresolved issue, or missing item.\n"
                 "- Base the recommendation only on the saved deal context provided.\n"
             )
 

@@ -135,7 +135,7 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
         AISkill.objects.update_or_create(
             name="deal_phase_readiness",
             defaults={
-                "description": "Quick recommendation on whether a deal is ready to advance to the next phase.",
+                "description": "Stage-aware recommendation on whether a deal is ready to advance to the next phase, including exact blockers preventing advancement.",
                 "output_schema": {
                     "decision": "ready|not_ready|insufficient_information",
                     "is_ready_for_next_phase": "boolean",
@@ -144,7 +144,7 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
                     "blocking_gaps": ["string"],
                     "evidence_signals": ["string"],
                 },
-                "prompt_template": """Evaluate whether this deal is ready to move to its next phase.
+                "prompt_template": """Evaluate whether this deal is ready to move to its next phase using the firm's 18-step deal process.
 
 Context:
 {{ content }}
@@ -154,15 +154,18 @@ Return exactly one valid JSON object and nothing else:
   "decision": "ready|not_ready|insufficient_information",
   "is_ready_for_next_phase": true,
   "recommended_next_phase": "Exact next phase label or null",
-  "rationale": "Short rationale tied to the saved deal evidence",
-  "blocking_gaps": ["Specific blockers or missing items"],
+  "rationale": "Short rationale tied to the saved deal evidence and the current phase gate",
+  "blocking_gaps": ["Exact current-phase blockers with the missing proof, unresolved issue, or failed condition preventing advancement"],
   "evidence_signals": ["Concrete positive or negative signals from the deal record"]
 }
 
 Rules:
 - Use only the supplied saved deal context.
+- Judge readiness against the current phase only; do not skip phases.
 - If evidence is insufficient, use "insufficient_information".
 - `recommended_next_phase` must be the provided expected next phase or null.
+- For `not_ready` and `insufficient_information`, `blocking_gaps` must state the exact current-phase blockers and the missing proof needed to advance.
+- Do not use vague blockers; name the specific failed gate, unresolved issue, or missing item.
 - Keep the rationale concise and decision-useful.""",
             }
         )

@@ -8,7 +8,10 @@ from deals.models import Deal
 from deals.serializers import DealDetailSerializer
 from deals.services.deal_creation import DealCreationService
 from deals.services.folder_analysis import FolderAnalysisService
-from deals.services.phase_readiness import PHASE_READINESS_SOURCE_TYPE
+from deals.services.phase_readiness import (
+    DealPhaseReadinessService,
+    PHASE_READINESS_SOURCE_TYPE,
+)
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -162,6 +165,87 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(
             serialized["latest_phase_readiness_check"]["parsed_json"]["recommended_next_phase"],
             "5: Financial Model Call",
+        )
+
+    def test_phase_readiness_normalize_result_preserves_exact_blockers(self):
+        deal = Deal.objects.create(
+            title="NDA Hold",
+            current_phase="3: NDA Execution",
+        )
+
+        normalized = DealPhaseReadinessService.normalize_result(
+            {
+                "decision": "not_ready",
+                "is_ready_for_next_phase": False,
+                "recommended_next_phase": None,
+                "rationale": "The deal cannot move ahead because NDA completion is not evidenced in the saved record.",
+                "blocking_gaps": [
+                    "Missing signed NDA from both parties; no executed NDA is recorded in the saved deal context.",
+                    "No evidence confidential materials were shared after NDA completion, so the phase gate remains unproven.",
+                ],
+                "evidence_signals": [
+                    "Current phase is 3: NDA Execution.",
+                ],
+            },
+            deal,
+        )
+
+        self.assertEqual(
+            normalized["blocking_gaps"],
+            [
+                "Missing signed NDA from both parties; no executed NDA is recorded in the saved deal context.",
+                "No evidence confidential materials were shared after NDA completion, so the phase gate remains unproven.",
+            ],
+        )
+
+    def test_phase_readiness_normalize_result_backfills_missing_blockers_for_not_ready(self):
+        deal = Deal.objects.create(
+            title="Model Review",
+            current_phase="5: Financial Model Call",
+        )
+
+        normalized = DealPhaseReadinessService.normalize_result(
+            {
+                "decision": "not_ready",
+                "is_ready_for_next_phase": False,
+                "recommended_next_phase": None,
+                "rationale": "The model walkthrough evidence is not sufficient.",
+                "blocking_gaps": [],
+                "evidence_signals": [],
+            },
+            deal,
+        )
+
+        self.assertEqual(
+            normalized["blocking_gaps"],
+            [
+                "The saved deal context does not show that the gate for 5: Financial Model Call has been cleared."
+            ],
+        )
+
+    def test_phase_readiness_normalize_result_backfills_missing_blockers_for_insufficient_information(self):
+        deal = Deal.objects.create(
+            title="Diligence Pending",
+            current_phase="13: Full Due Diligence",
+        )
+
+        normalized = DealPhaseReadinessService.normalize_result(
+            {
+                "decision": "insufficient_information",
+                "is_ready_for_next_phase": False,
+                "recommended_next_phase": None,
+                "rationale": "The record is too sparse to confirm diligence completion.",
+                "blocking_gaps": [],
+                "evidence_signals": [],
+            },
+            deal,
+        )
+
+        self.assertEqual(
+            normalized["blocking_gaps"],
+            [
+                "The saved deal context is missing enough phase-specific evidence to determine whether 13: Full Due Diligence is cleared."
+            ],
         )
 
     @patch("deals.tasks.process_deal_folder_background.apply_async")

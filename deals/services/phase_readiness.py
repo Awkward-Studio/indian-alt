@@ -30,19 +30,112 @@ ORDERED_DEAL_PHASES = [
     DealPhase.STAGE_18,
 ]
 
-PHASE_READINESS_PROMPT = """Evaluate whether this deal is ready to move to its next phase.
+PHASE_READINESS_PROMPT = """Evaluate whether this deal is ready to move to its next phase using the firm's 18-step deal process.
 
 Input context:
 {{ content }}
+
+Your job:
+- Read the deal's current_phase and expected_next_phase from the supplied context.
+- Judge readiness only against the gate for the CURRENT phase.
+- Recommend advancement only if the evidence in the saved deal record supports clearing that phase's gate.
+- If the record is incomplete, say so instead of guessing.
+
+Phase gates:
+1: Deal Sourced
+- Ready only if the deal appears within mandate based on available sector, geography, ticket size, stake, and fit signals.
+- Block if mandate fit is unclear or available facts suggest out-of-mandate.
+
+2: Initial Banker Call
+- Ready only if available notes suggest acceptable deal dynamics, promoter profile, process quality, and preliminary valuation expectations.
+- Block if valuation/process/promoter concerns appear unresolved or there is no evidence the call happened.
+
+3: NDA Execution
+- Ready only if there is evidence the NDA is signed/executed or confidential information has clearly been shared post-NDA.
+- Block if NDA status is missing, delayed, or disputed.
+
+4: Initial Materials Review
+- Ready only if the available materials support a financially sound business, credible projections, and no immediate red flags around cap table, audit quality, or business fundamentals.
+- Block if core materials are missing or early red flags are unresolved.
+
+5: Financial Model Call
+- Ready only if assumptions, unit economics, growth drivers, and return potential appear defensible from saved notes and analysis.
+- Block if model credibility is weak, assumptions are unsupported, or there is no evidence the walkthrough happened.
+
+6: Additional Data Request
+- Ready only if requested follow-up data appears received and materially supports the thesis without contradiction.
+- Block if key follow-up items are still missing, inconsistent, or withheld.
+
+7: Industry Research
+- Ready only if sector work supports a differentiated thesis, attractive market structure, and manageable regulatory/competitive risk.
+- Block if thesis support is thin or the market evidence cuts against the deal.
+
+8: Reference Calls
+- Ready only if independent references support management credibility, moat, and market opportunity without surfacing material red flags.
+- Block if references are absent, mixed, or negative on integrity, concentration, channel conflict, or market claims.
+
+9: IA Model Build
+- Ready only if the independent model supports fund-level return requirements and downside protection at the current entry assumptions.
+- Block if return hurdles are not met, downside is unattractive, or the model is incomplete.
+
+10: Field Visit
+- Ready only if on-site observations reinforce management quality, operating discipline, and consistency with the data room.
+- Block if there is no evidence of a visit or if observations raise execution/culture discrepancies.
+
+11: Business Proposal
+- Ready only if the investment team appears aligned to proceed and the deal is internally documented well enough for the next step.
+- Block if internal consensus is missing, the thesis is not decision-ready, or major open issues remain.
+
+12: Term Sheet
+- Ready only if there is evidence of commercially acceptable agreement on valuation, governance, economics, and exit mechanics.
+- Block if terms are unsigned, materially disputed, or misaligned.
+
+13: Full Due Diligence
+- Ready only if legal, financial/tax, and commercial diligence findings are either clean or adequately mitigated with no fundamental deal-breakers.
+- Block if major diligence workstreams are incomplete or material findings remain unresolved.
+
+14: IC Note I
+- Ready only if the Stage I IC package appears complete, decision-ready, and aligned with diligence findings and policy requirements.
+- Block if the IC materials are incomplete, uncirculated, or not yet approved.
+
+15: IC Feedback
+- Ready only if Stage I IC concerns appear substantively addressed and documented.
+- Block if IC feedback remains open, partially answered, or unsupported by new work.
+
+16: IC Note II
+- Ready only if final IC approval appears supported, minuted, and backed by updated analysis on remaining issues.
+- Block if final IC approval is absent or the case is still not fully resolved.
+
+17: Definitive Documentation
+- Ready only if definitive agreements are substantially finalized/executed and required regulatory approvals are obtained or clearly satisfied.
+- Block if key documents, approvals, or negotiated protections remain outstanding.
+
+18: Closure
+- Ready only if conditions precedent are satisfied and the disbursement/closing record is complete.
+- Block if any CPs, approvals, or final authorizations remain open.
+
+Decision rules:
+- Use "ready" only when the saved evidence is strong enough that an investment team could reasonably advance the deal now.
+- Use "not_ready" when the evidence shows the phase gate has not been cleared.
+- Use "insufficient_information" when the record does not contain enough evidence to judge the current phase properly.
+- Be conservative. Missing critical evidence should usually lead to "insufficient_information" or "not_ready", not "ready".
+- Do not judge the whole deal abstractly. Judge the specific gate for the current phase.
+- Do not recommend skipping phases.
+- `recommended_next_phase` must be the provided expected next phase or null.
+- For `not_ready` and `insufficient_information`, `blocking_gaps` must contain the exact reasons the deal cannot advance beyond the current phase right now.
+- Each `blocking_gaps` item must be specific, current-phase-aware, and decision-ready.
+- Each `blocking_gaps` item should include the missing proof, unresolved issue, or failed condition that must be cleared.
+- Do not use vague blockers like "more diligence needed" unless you name the exact missing diligence item.
+- If the deal is `ready`, use an empty `blocking_gaps` array unless there is a narrowly scoped caveat that still does not prevent advancement.
 
 Return exactly one valid JSON object and nothing else:
 {
   "decision": "ready|not_ready|insufficient_information",
   "is_ready_for_next_phase": true,
   "recommended_next_phase": "Exact next phase label or null",
-  "rationale": "Short investment-team rationale tied to the available evidence",
-  "blocking_gaps": ["Specific missing items or reasons blocking advancement"],
-  "evidence_signals": ["Concrete positive or negative signals from the existing deal record"]
+  "rationale": "Short investment-team rationale tied to the available evidence and the current phase gate",
+  "blocking_gaps": ["Exact current-phase blockers with the missing proof, unresolved issue, or failed condition preventing advancement"],
+  "evidence_signals": ["Concrete positive or negative signals from the saved deal record that are relevant to this phase"]
 }
 
 Rules:
@@ -59,7 +152,7 @@ class DealPhaseReadinessService:
         skill, _ = AISkill.objects.update_or_create(
             name=PHASE_READINESS_SKILL_NAME,
             defaults={
-                "description": "Quick recommendation on whether a deal is ready for the next phase.",
+                "description": "Stage-aware recommendation on whether a deal is ready for the next phase, including exact blockers preventing advancement.",
                 "prompt_template": PHASE_READINESS_PROMPT,
                 "output_schema": {
                     "decision": "ready|not_ready|insufficient_information",
@@ -164,12 +257,23 @@ class DealPhaseReadinessService:
                 return []
             return [str(item).strip() for item in value if str(item).strip()]
 
+        blocking_gaps = normalize_list(data.get("blocking_gaps"))
+        if decision in {"not_ready", "insufficient_information"} and not blocking_gaps:
+            if decision == "not_ready":
+                blocking_gaps = [
+                    f"The saved deal context does not show that the gate for {deal.current_phase} has been cleared."
+                ]
+            else:
+                blocking_gaps = [
+                    f"The saved deal context is missing enough phase-specific evidence to determine whether {deal.current_phase} is cleared."
+                ]
+
         return {
             "decision": decision,
             "is_ready_for_next_phase": normalized_ready,
             "recommended_next_phase": recommended_next_phase,
             "rationale": rationale.strip(),
-            "blocking_gaps": normalize_list(data.get("blocking_gaps")),
+            "blocking_gaps": blocking_gaps,
             "evidence_signals": normalize_list(data.get("evidence_signals")),
         }
 
@@ -185,4 +289,3 @@ class DealPhaseReadinessService:
             "parsed_json": log.parsed_json if isinstance(log.parsed_json, dict) else None,
             "raw_thinking": log.raw_thinking,
         }
-
