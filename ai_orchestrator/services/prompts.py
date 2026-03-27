@@ -67,6 +67,13 @@ class PromptBuilderService:
                 "- Do not use vague blockers; name the specific failed gate, unresolved issue, or missing item.\n"
                 "- Base the recommendation only on the saved deal context provided.\n"
             )
+        elif skill and skill.name == "vdr_incremental_analysis":
+            system_instructions += (
+                "\n\n### INCREMENTAL ANALYSIS OUTPUT CONTRACT:\n"
+                "- Return exactly one JSON object and nothing else.\n"
+                "- The JSON must contain `analyst_report` as a string.\n"
+                "- Focus only on newly supplied documents; do not rewrite the full prior report.\n"
+            )
 
         if not stream:
             system_instructions += "\n\nIMPORTANT: Return ONLY a valid JSON object. Do not include any thinking text in the final response."
@@ -89,11 +96,17 @@ class PromptBuilderService:
         
         # 2. Replace primary content
         cleaned_content = PromptBuilderService.clean_html(content)
-        # 100k chars is approx 25k-28k tokens, leaving safe room for system instructions 
-        # and a full 4k-8k token response within the 32k context window.
-        max_chars = 100000 
+        # 180k chars keeps recall-oriented universal chat contexts intact while still
+        # fitting within the configured large-context inference budget.
+        max_chars = 180000
         if len(cleaned_content) > max_chars:
-            cleaned_content = cleaned_content[:60000] + "\n\n[... TRUNCATED DUE TO CONTEXT LIMITS ...]\n\n" + cleaned_content[-40000:]
+            head_chars = 100000
+            tail_chars = 60000
+            cleaned_content = (
+                cleaned_content[:head_chars]
+                + "\n\n[... TRUNCATED DUE TO CONTEXT LIMITS ...]\n\n"
+                + cleaned_content[-tail_chars:]
+            )
             
         user_prompt = user_prompt.replace('{{content}}', cleaned_content)
         user_prompt = user_prompt.replace('{{ content }}', cleaned_content)

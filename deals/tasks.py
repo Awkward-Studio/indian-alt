@@ -5,7 +5,15 @@ from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Deal, DealDocument, DocumentType, InitialAnalysisStatus
+from .models import (
+    ChunkingStatus,
+    Deal,
+    DealDocument,
+    DocumentType,
+    ExtractionMode,
+    InitialAnalysisStatus,
+    TranscriptionStatus,
+)
 from .services.deal_creation import DealCreationService
 from .services.phase_readiness import (
     DealPhaseReadinessService,
@@ -159,6 +167,8 @@ def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: l
             "file_name": "unknown_file",
             "status": "failed",
             "extraction_mode": None,
+            "transcription_status": TranscriptionStatus.FAILED,
+            "chunking_status": ChunkingStatus.NOT_CHUNKED,
             "reason": None,
         }
         try:
@@ -188,6 +198,7 @@ def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: l
 
             file_record["status"] = "passed"
             file_record["extraction_mode"] = extraction_mode
+            file_record["transcription_status"] = TranscriptionStatus.COMPLETE
             file_record["text_length"] = len(extracted_text)
             file_record["extracted_text"] = extracted_text
             passed_files.append(file_record)
@@ -238,6 +249,60 @@ def _resolve_initial_analysis_status(deal: Deal, file_id: str | None, file_name:
             return InitialAnalysisStatus.SELECTED_FAILED, file.get("reason")
 
     return InitialAnalysisStatus.NOT_SELECTED, None
+
+
+def _is_full_transcription(doc: DealDocument) -> bool:
+    return (
+        doc.transcription_status == TranscriptionStatus.COMPLETE
+        and bool((doc.extracted_text or "").strip())
+    )
+
+
+def _prepare_document_update_from_extraction(extraction: dict, *, full: bool) -> dict:
+    mode = extraction.get("mode")
+    if mode not in {ExtractionMode.GLM_OCR, ExtractionMode.FALLBACK_TEXT}:
+        mode = None
+    extracted_text = (extraction.get("text") or "").strip()
+    return {
+        "extracted_text": extracted_text,
+        "extraction_mode": mode,
+        "transcription_status": (
+            TranscriptionStatus.COMPLETE if full and extracted_text else TranscriptionStatus.PARTIAL if extracted_text else TranscriptionStatus.FAILED
+        ),
+        "last_transcribed_at": timezone.now() if extracted_text else None,
+    }
+
+
+def _vectorize_document_and_capture(doc: DealDocument, embed_service: EmbeddingService) -> int:
+    chunk_count = embed_service.chunk_and_embed(
+        text=doc.extracted_text or "",
+        deal=doc.deal,
+        source_type='document',
+        source_id=str(doc.id),
+        metadata={"title": doc.title, "type": doc.document_type},
+        replace_existing=True,
+    )
+    doc.is_indexed = bool(chunk_count)
+    doc.chunking_status = ChunkingStatus.CHUNKED if chunk_count else ChunkingStatus.FAILED
+    doc.last_chunked_at = timezone.now() if chunk_count else None
+    doc.save(update_fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
+    return chunk_count
+
+
+def _sync_deal_extracted_text_for_documents(deal: Deal, docs: list[DealDocument]) -> None:
+    existing = deal.extracted_text or ""
+    additions = []
+    for doc in docs:
+        text = (doc.extracted_text or "").strip()
+        if not text:
+            continue
+        marker = f"--- DOCUMENT: {doc.title} ---"
+        if marker in existing:
+            continue
+        additions.append(f"\n\n{marker}\n{text}")
+    if additions:
+        deal.extracted_text = existing + "".join(additions)
+        deal.save(update_fields=['extracted_text'])
 
 @shared_task(bind=True)
 def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str = None):
@@ -341,18 +406,20 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
 
         passed_files = session_data.get("passed_files", [])
         failed_files = session_data.get("failed_files", [])
+        selected_set = set(selected_file_ids)
+        approved_files = [file for file in passed_files if file.get("file_id") in selected_set]
         combined_text = _build_combined_text(passed_files, selected_file_ids)
 
-        log_worker_event(audit_log, f"Compiled context for {len(passed_files)} documents. Sending to AI VM...")
+        log_worker_event(audit_log, f"Compiled context for {len(approved_files)} documents. Sending to AI VM...")
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
             "selected_files_count": len(selected_file_ids),
-            "passed_files_count": len(passed_files),
+            "passed_files_count": len(approved_files),
             "failed_files_count": len(failed_files),
             "selected_file_ids": selected_file_ids,
             "passed_files": passed_files,
             "failed_files": failed_files,
-            "analysis_input_files": [file for file in passed_files if file.get("file_id") in set(selected_file_ids)],
+            "analysis_input_files": approved_files,
             "workflow_stage": "analysis_complete",
         }
         audit_log.save(update_fields=['source_metadata'])
@@ -375,27 +442,33 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
                 metadata=meta
             )
             log_worker_event(audit_log, "AI Analysis complete.")
+            if isinstance(result, dict) and 'parsed_json' in result:
+                analysis = result['parsed_json']
+                raw_thinking = result.get('thinking', '')
+            else:
+                analysis = result if isinstance(result, dict) else {}
+                raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
 
         if isinstance(analysis, dict):
             metadata = analysis.setdefault("metadata", {})
             metadata["selected_files_count"] = len(selected_file_ids)
-            metadata["passed_files_count"] = len(passed_files)
+            metadata["passed_files_count"] = len(approved_files)
             metadata["failed_files_count"] = len(failed_files)
             metadata["passed_files"] = passed_files
             metadata["failed_files"] = failed_files
-            metadata["analysis_input_files"] = passed_files
+            metadata["analysis_input_files"] = approved_files
 
         return {
             "phase": "analysis",
             "status": "success",
             "folder_id": session_data.get("folder_id"),
             "total_files": len(selected_file_ids),
-            "preview_files_analyzed": len([file for file in passed_files if file.get("file_id") in set(selected_file_ids)]),
+            "preview_files_analyzed": len(approved_files),
             "preview_text": combined_text,
             "preliminary_data": analysis,
             "raw_thinking": raw_thinking,
-            "analyzed_files": [file["file_name"] for file in passed_files if file.get("file_id") in set(selected_file_ids)],
-            "passed_files": [file for file in passed_files if file.get("file_id") in set(selected_file_ids)],
+            "analyzed_files": [file["file_name"] for file in approved_files],
+            "passed_files": approved_files,
             "failed_files": failed_files,
             "drive_id": session_data.get("drive_id"),
             "user_email": session_data.get("user_email")
@@ -530,8 +603,9 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         if _is_cancel_requested(audit_log_id):
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
-        # Extract text (Limited to 2 pages for background sync)
-        extracted_text = doc_processor.transcribe_document(content, file_name, page_limit=2)
+        # Background VDR sync stores a preview transcription only.
+        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=2)
+        extracted_text = (extraction.get("text") or "").strip()
 
         if _is_cancel_requested(audit_log_id):
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
@@ -545,9 +619,13 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
             onedrive_id=file_id,
             extracted_text=extracted_text,
             is_indexed=False,
-            is_ai_analyzed=is_preview,
+            is_ai_analyzed=False,
             initial_analysis_status=initial_analysis_status,
             initial_analysis_reason=initial_analysis_reason,
+            extraction_mode=extraction.get("mode"),
+            transcription_status=TranscriptionStatus.PARTIAL if extracted_text else TranscriptionStatus.FAILED,
+            chunking_status=ChunkingStatus.NOT_CHUNKED,
+            last_transcribed_at=timezone.now() if extracted_text else None,
         )
         
         # Update combined deal text (Race condition warning: multiple tasks appending to the same field)
@@ -564,7 +642,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         
         # Vectorize for RAG
         if extracted_text and len(extracted_text.strip()) > 50 and not _is_cancel_requested(audit_log_id):
-            embed_service.vectorize_document(doc)
+            _vectorize_document_and_capture(doc, embed_service)
             
         return {"status": "success", "file": file_name}
         
@@ -709,35 +787,82 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
         audit_log.status = 'PROCESSING'
         audit_log.save()
 
-        docs = DealDocument.objects.filter(id__in=document_ids)
+        docs = list(DealDocument.objects.filter(id__in=document_ids, deal=deal))
         doc_processor = DocumentProcessorService()
         graph = GraphAPIService()
+        embed_service = EmbeddingService()
         new_text_context = ""
-        
+        diagnostics = []
+        prepared_docs = []
+
         for doc in docs:
-            # Check if we need full transcription:
-            # 1. Not already analyzed
-            # 2. OR extracted_text looks like a 2-page preview (contains PAGE 1 but not higher pages, or is short)
-            # Actually, the safest way is to check is_ai_analyzed. 
-            # If it's False, it definitely needs a full run.
-            
-            if not doc.is_ai_analyzed and doc.onedrive_id:
-                try:
+            file_diag = {
+                "document_id": str(doc.id),
+                "file_name": doc.title,
+                "selected_for_run": True,
+                "used_cached_text": False,
+                "transcription_mode": doc.extraction_mode,
+                "transcription_status": doc.transcription_status,
+                "chunking_status": doc.chunking_status,
+                "chunk_count": 0,
+                "analysis_included": False,
+                "error": None,
+            }
+            try:
+                requires_full_transcription = (
+                    not _is_full_transcription(doc)
+                    or len((doc.extracted_text or "").strip()) < 50
+                )
+                if requires_full_transcription and doc.onedrive_id:
                     logger.info(f"[TASK] Performing full GLM-OCR transcription for: {doc.title}")
-                    content = graph.get_drive_item_content(user_email=DMS_USER_EMAIL, file_id=doc.onedrive_id, drive_id=deal.source_drive_id)
-                    full_text = doc_processor.transcribe_document(content, doc.title)
-                    doc.extracted_text = full_text
-                    doc.save(update_fields=['extracted_text'])
-                except Exception as e:
-                    logger.error(f"Failed to fully transcribe document {doc.title}: {e}")
-            
-            if doc.extracted_text:
-                new_text_context += f"\n\n--- NEW DOCUMENT: {doc.title} ---\n{doc.extracted_text}"
+                    content = graph.get_drive_item_content(
+                        user_email=DMS_USER_EMAIL,
+                        file_id=doc.onedrive_id,
+                        drive_id=deal.source_drive_id,
+                    )
+                    extraction = doc_processor.get_extraction_result(content, doc.title, page_limit=None)
+                    update = _prepare_document_update_from_extraction(extraction, full=True)
+                    doc.extracted_text = update["extracted_text"]
+                    doc.extraction_mode = update["extraction_mode"]
+                    doc.transcription_status = update["transcription_status"]
+                    doc.last_transcribed_at = update["last_transcribed_at"]
+                    doc.save(update_fields=['extracted_text', 'extraction_mode', 'transcription_status', 'last_transcribed_at'])
+                else:
+                    file_diag["used_cached_text"] = True
+
+                file_diag["transcription_mode"] = doc.extraction_mode
+                file_diag["transcription_status"] = doc.transcription_status
+
+                if (doc.extracted_text or "").strip():
+                    chunk_count = _vectorize_document_and_capture(doc, embed_service)
+                    file_diag["chunk_count"] = chunk_count
+                    file_diag["chunking_status"] = doc.chunking_status
+                    new_text_context += f"\n\n--- NEW DOCUMENT: {doc.title} ---\n{doc.extracted_text}"
+                    file_diag["analysis_included"] = True
+                    prepared_docs.append(doc)
+                else:
+                    doc.transcription_status = TranscriptionStatus.FAILED
+                    doc.save(update_fields=['transcription_status'])
+                    file_diag["transcription_status"] = doc.transcription_status
+                    file_diag["error"] = "No readable text extracted"
+            except Exception as e:
+                logger.error(f"Failed to fully transcribe document {doc.title}: {e}")
+                doc.transcription_status = TranscriptionStatus.FAILED
+                doc.chunking_status = ChunkingStatus.FAILED
+                doc.save(update_fields=['transcription_status', 'chunking_status'])
+                file_diag["transcription_status"] = doc.transcription_status
+                file_diag["chunking_status"] = doc.chunking_status
+                file_diag["error"] = str(e)
+            diagnostics.append(file_diag)
 
         if not new_text_context.strip():
             audit_log.status = 'FAILED'
             audit_log.error_message = "No text extracted from selected documents."
-            audit_log.save()
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "file_diagnostics": diagnostics,
+            }
+            audit_log.save(update_fields=['status', 'error_message', 'source_metadata'])
             return {"error": "No text extracted"}
 
         ai_service = AIProcessorService()
@@ -785,17 +910,26 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                 overwrite=False,
                 overwrite_themes=True,
             )
-            docs.update(is_ai_analyzed=True)
+            DealDocument.objects.filter(id__in=[doc.id for doc in prepared_docs]).update(is_ai_analyzed=True)
+            _sync_deal_extracted_text_for_documents(deal, prepared_docs)
             
             audit_log.status = 'COMPLETED'
             audit_log.is_success = True
-            audit_log.save()
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "file_diagnostics": diagnostics,
+            }
+            audit_log.save(update_fields=['status', 'is_success', 'source_metadata'])
             return {"status": "success", "version": current_version}
         else:
             error_msg = str(analysis.get('error', 'AI Output invalid'))
             audit_log.status = 'FAILED'
             audit_log.error_message = error_msg
-            audit_log.save()
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "file_diagnostics": diagnostics,
+            }
+            audit_log.save(update_fields=['status', 'error_message', 'source_metadata'])
             return {"error": error_msg}
 
     except Exception as e:

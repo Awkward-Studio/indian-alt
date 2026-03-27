@@ -423,6 +423,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         # 1. Create a PENDING audit log immediately for visibility and cancellation support
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='vdr_incremental_analysis').first()
+        if not skill:
+            return Response({"error": "AI skill 'vdr_incremental_analysis' is not configured."}, status=500)
         
         # Use model from personality
         default_model = personality.text_model_name if personality else 'qwen3.5:latest'
@@ -474,6 +476,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         try:
             from ai_orchestrator.services.document_processor import DocumentProcessorService
             from ai_orchestrator.services.embedding_processor import EmbeddingService
+            from django.utils import timezone
             
             doc_processor = DocumentProcessorService()
             embed_service = EmbeddingService()
@@ -491,7 +494,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
                 doc_type = DocumentType.PITCH_DECK
                 
-            extracted_text = doc_processor.extract_text(file_content, file_name)
+            extraction = doc_processor.get_extraction_result(file_content, file_name)
+            extracted_text = (extraction.get("text") or "").strip()
             
             from .models import DealDocument
             doc = DealDocument.objects.create(
@@ -501,6 +505,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 extracted_text=extracted_text,
                 is_indexed=False,
                 is_ai_analyzed=False,
+                extraction_mode=extraction.get("mode"),
+                transcription_status="complete" if extracted_text else "failed",
+                chunking_status="not_chunked",
+                last_transcribed_at=timezone.now() if extracted_text else None,
                 uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
             )
             

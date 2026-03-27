@@ -133,6 +133,34 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
         )
 
         AISkill.objects.update_or_create(
+            name="vdr_incremental_analysis",
+            defaults={
+                "description": "Generates a supplementary analysis version from newly selected VDR documents.",
+                "output_schema": {
+                    "analyst_report": "string",
+                },
+                "prompt_template": """[EXISTING ANALYSIS]
+Summary: {{ existing_summary }}
+
+[NEW DOCUMENTS TO ANALYZE]
+{{ content }}
+
+[TASK]
+Generate a concise Version {{ version_num }} supplementary analysis focused only on the newly supplied documents.
+
+Return exactly one valid JSON object and nothing else:
+{
+  "analyst_report": "Markdown report covering only new evidence, resolved ambiguities, and new metrics from these documents."
+}
+
+Rules:
+- Do not rewrite the entire existing analysis.
+- Use only the supplied new-document context.
+- Keep citations or file references tied to the new documents when possible.""",
+            }
+        )
+
+        AISkill.objects.update_or_create(
             name="deal_phase_readiness",
             defaults={
                 "description": "Stage-aware recommendation on whether a deal is ready to advance to the next phase, including exact blockers preventing advancement.",

@@ -289,6 +289,24 @@ class InitialAnalysisStatus(models.TextChoices):
     SELECTED_FAILED = 'selected_failed', 'Selected Failed'
 
 
+class ExtractionMode(models.TextChoices):
+    GLM_OCR = 'glm_ocr', 'GLM OCR'
+    FALLBACK_TEXT = 'fallback_text', 'Fallback Text'
+
+
+class TranscriptionStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    PARTIAL = 'partial', 'Partial'
+    COMPLETE = 'complete', 'Complete'
+    FAILED = 'failed', 'Failed'
+
+
+class ChunkingStatus(models.TextChoices):
+    NOT_CHUNKED = 'not_chunked', 'Not Chunked'
+    CHUNKED = 'chunked', 'Chunked'
+    FAILED = 'failed', 'Failed'
+
+
 class DealDocument(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     deal = models.ForeignKey(
@@ -317,6 +335,24 @@ class DealDocument(models.Model):
         help_text='Whether the document was selected for the initial folder analysis flow.',
     )
     initial_analysis_reason = models.TextField(blank=True, null=True)
+    extraction_mode = models.CharField(
+        max_length=40,
+        choices=ExtractionMode.choices,
+        blank=True,
+        null=True,
+    )
+    transcription_status = models.CharField(
+        max_length=20,
+        choices=TranscriptionStatus.choices,
+        default=TranscriptionStatus.PENDING,
+    )
+    chunking_status = models.CharField(
+        max_length=20,
+        choices=ChunkingStatus.choices,
+        default=ChunkingStatus.NOT_CHUNKED,
+    )
+    last_transcribed_at = models.DateTimeField(blank=True, null=True)
+    last_chunked_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     uploaded_by = models.ForeignKey(
         'accounts.Profile',

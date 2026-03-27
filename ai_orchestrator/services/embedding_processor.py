@@ -1,9 +1,9 @@
 import logging
 import requests
-import json
 from typing import List, Dict, Any, Optional
 from django.conf import settings
 from django.db import connection
+from django.utils import timezone
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from ..models import DocumentChunk
 from deals.models import Deal
@@ -41,8 +41,23 @@ class EmbeddingService:
             logger.error(f"Error generating embedding: {str(e)}")
             return []
 
-    def chunk_and_embed(self, text: str, deal: Deal, source_type: str, source_id: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        if not text or len(text.strip()) < 10: return False
+    def chunk_and_embed(
+        self,
+        text: str,
+        deal: Deal,
+        source_type: str,
+        source_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        replace_existing: bool = False,
+    ) -> int:
+        if not text or len(text.strip()) < 10:
+            return 0
+        if replace_existing:
+            DocumentChunk.objects.filter(
+                deal=deal,
+                source_type=source_type,
+                source_id=source_id,
+            ).delete()
         chunks = self.text_splitter.split_text(text)
         created_chunks = []
         for i, chunk_text in enumerate(chunks):
@@ -53,24 +68,38 @@ class EmbeddingService:
             created_chunks.append(doc_chunk)
         if created_chunks:
             DocumentChunk.objects.bulk_create(created_chunks)
-            return True
-        return False
+            return len(created_chunks)
+        return 0
 
     def vectorize_email(self, email: Email) -> bool:
         if not email.extracted_text or not email.deal: return False
-        success = self.chunk_and_embed(text=email.extracted_text, deal=email.deal, source_type='email', source_id=str(email.id), metadata={"subject": email.subject, "from": email.from_email})
-        if success:
+        created_count = self.chunk_and_embed(
+            text=email.extracted_text,
+            deal=email.deal,
+            source_type='email',
+            source_id=str(email.id),
+            metadata={"subject": email.subject, "from": email.from_email},
+            replace_existing=True,
+        )
+        if created_count:
             email.is_indexed = True
             email.save(update_fields=['is_indexed'])
-        return success
+        return bool(created_count)
 
     def vectorize_deal(self, deal: Deal) -> bool:
         if not deal.deal_summary: return False
-        success = self.chunk_and_embed(text=deal.deal_summary, deal=deal, source_type='deal_summary', source_id=str(deal.id), metadata={"title": deal.title})
-        if success:
+        created_count = self.chunk_and_embed(
+            text=deal.deal_summary,
+            deal=deal,
+            source_type='deal_summary',
+            source_id=str(deal.id),
+            metadata={"title": deal.title},
+            replace_existing=True,
+        )
+        if created_count:
             deal.is_indexed = True
             deal.save(update_fields=['is_indexed'])
-        return success
+        return bool(created_count)
 
     def vectorize_document(self, doc: DocumentChunk) -> bool:
         """Vectorizes a specific deal document artifact."""
@@ -78,17 +107,24 @@ class EmbeddingService:
         if not isinstance(doc, DealDocument) or not doc.extracted_text:
             return False
             
-        success = self.chunk_and_embed(
+        created_count = self.chunk_and_embed(
             text=doc.extracted_text, 
             deal=doc.deal, 
             source_type='document', 
             source_id=str(doc.id), 
-            metadata={"title": doc.title, "type": doc.document_type}
+            metadata={"title": doc.title, "type": doc.document_type},
+            replace_existing=True,
         )
-        if success:
+        if created_count:
             doc.is_indexed = True
-            doc.save(update_fields=['is_indexed'])
-        return success
+            doc.chunking_status = "chunked"
+            doc.last_chunked_at = timezone.now()
+            doc.save(update_fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
+        else:
+            doc.is_indexed = False
+            doc.chunking_status = "failed"
+            doc.save(update_fields=['is_indexed', 'chunking_status'])
+        return bool(created_count)
 
     def search_similar_chunks(self, query: str, deal: Deal, limit: int = 5) -> List[DocumentChunk]:
         """Hybrid Search: Vector for Postgres, Ranked Keyword for SQLite."""

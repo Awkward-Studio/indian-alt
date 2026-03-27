@@ -86,6 +86,8 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'id', 'deal', 'deal_title', 'title', 'document_type', 
             'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
             'initial_analysis_status', 'initial_analysis_reason',
+            'extraction_mode', 'transcription_status', 'chunking_status',
+            'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'
         )
         read_only_fields = ('id', 'created_at')

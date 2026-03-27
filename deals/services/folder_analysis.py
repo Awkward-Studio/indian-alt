@@ -428,6 +428,17 @@ class FolderAnalysisService:
         """
         Updates the newly created Deal with cached forensic mapping.
         """
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
+        from deals.models import (
+            ChunkingStatus,
+            DealAnalysis,
+            DealDocument,
+            DocumentType,
+            ExtractionMode,
+            InitialAnalysisStatus,
+            TranscriptionStatus,
+        )
+
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
             return {"error": "Session expired or invalid. Please re-analyze the folder."}
@@ -440,10 +451,15 @@ class FolderAnalysisService:
         deal.source_drive_id = session_data.get('drive_id')
         deal.extracted_text = session_data.get('preview_text', '')
         
+        approved_ids = set(session_data.get('approved_file_ids', []))
+        approved_files = [
+            file for file in session_data.get('passed_files', [])
+            if not approved_ids or file.get('file_id') in approved_ids
+        ]
+
         if analysis_json:
-            from deals.models import DealAnalysis
             metadata = analysis_json.setdefault('metadata', {})
-            metadata['analysis_input_files'] = session_data.get('passed_files', [])
+            metadata['analysis_input_files'] = approved_files
             metadata['passed_files'] = session_data.get('passed_files', [])
             metadata['failed_files'] = session_data.get('failed_files', [])
             # Create DealAnalysis record
@@ -460,6 +476,45 @@ class FolderAnalysisService:
                 analysis_json,
                 overwrite=False,
                 overwrite_themes=True,
+            )
+        embed_service = EmbeddingService()
+        created_docs = []
+        for file in approved_files:
+            file_name = file.get('file_name') or 'unknown_file'
+            extracted_text = (file.get('extracted_text') or '').strip()
+            doc = DealDocument.objects.create(
+                deal=deal,
+                title=file_name,
+                document_type=DocumentType.OTHER,
+                onedrive_id=file.get('file_id'),
+                extracted_text=extracted_text,
+                is_indexed=False,
+                is_ai_analyzed=True,
+                initial_analysis_status=InitialAnalysisStatus.SELECTED_AND_ANALYZED,
+                extraction_mode=file.get('extraction_mode') or ExtractionMode.FALLBACK_TEXT,
+                transcription_status=file.get('transcription_status') or TranscriptionStatus.COMPLETE,
+                chunking_status=ChunkingStatus.NOT_CHUNKED,
+                last_transcribed_at=deal.created_at,
+            )
+            if extracted_text:
+                if embed_service.vectorize_document(doc):
+                    doc.refresh_from_db(fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
+                created_docs.append(doc)
+
+        for file in session_data.get('failed_files', []):
+            DealDocument.objects.create(
+                deal=deal,
+                title=file.get('file_name') or 'unknown_file',
+                document_type=DocumentType.OTHER,
+                onedrive_id=file.get('file_id'),
+                extracted_text='',
+                is_indexed=False,
+                is_ai_analyzed=False,
+                initial_analysis_status=InitialAnalysisStatus.SELECTED_FAILED,
+                initial_analysis_reason=file.get('reason'),
+                extraction_mode=file.get('extraction_mode'),
+                transcription_status=TranscriptionStatus.FAILED,
+                chunking_status=ChunkingStatus.NOT_CHUNKED,
             )
             
         deal.save()
