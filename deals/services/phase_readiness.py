@@ -180,7 +180,7 @@ class DealPhaseReadinessService:
 
     @staticmethod
     def build_context(deal: Deal) -> str:
-        latest_analysis = deal.latest_analysis
+        current_analysis = deal.current_analysis or {}
         phase_history = [
             {
                 "from_phase": log.from_phase,
@@ -216,10 +216,12 @@ class DealPhaseReadinessService:
                 "business_proposal_stage": deal.business_proposal_stage,
                 "ic_stage": deal.ic_stage,
             },
-            "latest_analysis": {
-                "version": latest_analysis.version if latest_analysis else None,
-                "thinking": latest_analysis.thinking if latest_analysis else None,
-                "analysis_json": latest_analysis.analysis_json if latest_analysis else {},
+            "current_analysis": {
+                "version": current_analysis.get("version"),
+                "kind": current_analysis.get("kind"),
+                "thinking": current_analysis.get("thinking"),
+                "analysis_json": current_analysis.get("analysis_json") or {},
+                "canonical_snapshot": current_analysis.get("canonical_snapshot") or {},
             },
             "recent_phase_history": phase_history,
         }

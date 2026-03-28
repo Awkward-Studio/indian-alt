@@ -6,6 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import (
+    AnalysisKind,
     ChunkingStatus,
     Deal,
     DealDocument,
@@ -866,7 +867,8 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             return {"error": "No text extracted"}
 
         ai_service = AIProcessorService()
-        existing_summary = deal.deal_summary or ""
+        existing_canonical_snapshot = ((deal.current_analysis or {}).get("canonical_snapshot") or {}) if hasattr(deal, "current_analysis") else {}
+        existing_summary = (existing_canonical_snapshot.get("analyst_report") or deal.deal_summary or "")
         
         # Calculate next version from existing analyses
         from .models import DealAnalysis
@@ -881,6 +883,7 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             metadata={
                 'audit_log_id': str(audit_log.id),
                 'existing_summary': existing_summary,
+                'existing_canonical_snapshot': json.dumps(existing_canonical_snapshot, default=str),
                 'version_num': current_version
             }
         )
@@ -895,18 +898,33 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
 
         if analysis and "error" not in analysis:
+            normalized_analysis = DealCreationService.normalize_analysis_payload(
+                analysis,
+                previous_snapshot=existing_canonical_snapshot,
+                analysis_kind=AnalysisKind.SUPPLEMENTAL,
+                documents_analyzed=[doc.title for doc in prepared_docs if doc.title],
+                analysis_input_files=[
+                    {
+                        "file_id": str(doc.onedrive_id or doc.id),
+                        "file_name": doc.title,
+                    }
+                    for doc in prepared_docs
+                ],
+                failed_files=[],
+            )
             # Create a NEW DealAnalysis record for this version
             DealAnalysis.objects.create(
                 deal=deal,
                 version=current_version,
+                analysis_kind=AnalysisKind.SUPPLEMENTAL,
                 thinking=raw_thinking,
-                ambiguities=analysis.get('metadata', {}).get('ambiguous_points', []),
-                analysis_json=analysis
+                ambiguities=normalized_analysis.get('metadata', {}).get('ambiguous_points', []),
+                analysis_json=normalized_analysis
             )
 
             DealCreationService.apply_analysis_to_deal(
                 deal,
-                analysis,
+                normalized_analysis,
                 overwrite=False,
                 overwrite_themes=True,
             )

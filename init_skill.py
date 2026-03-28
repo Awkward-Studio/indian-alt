@@ -10,20 +10,38 @@ from ai_orchestrator.models import AISkill
 prompt_v2 = """[EXISTING ANALYSIS]
 Summary: {{ existing_summary }}
 
+[CURRENT CANONICAL SNAPSHOT]
+{{ existing_canonical_snapshot }}
+
 [NEW DOCUMENTS TO ANALYZE]
 {{ content }}
 
 [TASK]
-You are a senior Private Equity Analyst. Generate a "Version {{ version_num }}" supplementary analysis report in Markdown format.
-Do NOT rewrite the entire V1 summary. Focus strictly on:
+You are a senior Private Equity Analyst. Generate a "Version {{ version_num }}" supplementary analysis report in Markdown format and update the canonical deal view.
+Do NOT rewrite the entire V1 summary inside the supplemental report. Focus strictly on:
 1. New insights surfaced exclusively from the new documents.
 2. Resolving any ambiguities identified in the previous reports.
 3. Extracting new specific financial or operational metrics.
 
-Format your output inside a JSON block with the key 'analyst_report'. Example:
+Return exactly one JSON object with this shape:
 ```json
 {
-  "analyst_report": "### V{{ version_num }} Supplementary Analysis\\n\\nBased on the newly provided term sheet, we can confirm..."
+  "analyst_report": "### V{{ version_num }} Supplementary Analysis\\n\\nBased on the newly provided term sheet, we can confirm...",
+  "deal_model_data": {
+    "title": "optional updated title",
+    "industry": "optional updated industry",
+    "sector": "optional updated sector",
+    "funding_ask": "optional updated funding ask in INR Cr",
+    "funding_ask_for": "optional updated use of funds",
+    "priority": "optional updated priority",
+    "city": "optional updated city",
+    "state": "optional updated state",
+    "country": "optional updated country",
+    "themes": ["optional updated themes"]
+  },
+  "metadata": {
+    "ambiguous_points": ["remaining unresolved ambiguities after reviewing the new documents"]
+  }
 }
 ```
 """

@@ -1,7 +1,8 @@
 import json
 import logging
+from copy import deepcopy
 from django.core.exceptions import ObjectDoesNotExist
-from deals.models import Deal, DealDocument, DocumentType
+from deals.models import AnalysisKind, Deal, DealDocument, DocumentType
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,96 @@ class DealCreationService:
         if not isinstance(value, list):
             return []
         return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    @staticmethod
+    def _merge_string_lists(*values) -> list[str]:
+        seen = set()
+        merged = []
+        for value in values:
+            for item in DealCreationService._normalize_string_list(value):
+                if item not in seen:
+                    seen.add(item)
+                    merged.append(item)
+        return merged
+
+    @staticmethod
+    def _merge_reports(previous_report: str | None, next_report: str | None, analysis_kind: str) -> str:
+        previous = (previous_report or "").strip()
+        current = (next_report or "").strip()
+        if not previous:
+            return current
+        if not current or current in previous:
+            return previous
+        if analysis_kind == AnalysisKind.INITIAL:
+            return current
+        return f"{previous}\n\n--- Supplemental Update ---\n\n{current}"
+
+    @staticmethod
+    def build_canonical_snapshot(
+        analysis_json: dict | None,
+        *,
+        previous_snapshot: dict | None = None,
+        analysis_kind: str = AnalysisKind.INITIAL,
+    ) -> dict:
+        previous_snapshot = previous_snapshot if isinstance(previous_snapshot, dict) else {}
+        current_payload = analysis_json if isinstance(analysis_json, dict) else {}
+
+        previous_model_data = previous_snapshot.get("deal_model_data") if isinstance(previous_snapshot.get("deal_model_data"), dict) else {}
+        next_model_data = DealCreationService._get_analysis_model_data(current_payload)
+        merged_model_data = dict(previous_model_data)
+        for key, value in next_model_data.items():
+            if isinstance(value, str) and value.strip():
+                merged_model_data[key] = value.strip()
+            elif isinstance(value, list) and value:
+                merged_model_data[key] = value
+
+        previous_meta = previous_snapshot.get("metadata") if isinstance(previous_snapshot.get("metadata"), dict) else {}
+        next_meta = current_payload.get("metadata") if isinstance(current_payload.get("metadata"), dict) else {}
+
+        return {
+            "deal_model_data": merged_model_data,
+            "analyst_report": DealCreationService._merge_reports(
+                previous_snapshot.get("analyst_report"),
+                current_payload.get("analyst_report"),
+                analysis_kind,
+            ),
+            "metadata": {
+                "ambiguous_points": DealCreationService._merge_string_lists(
+                    previous_meta.get("ambiguous_points"),
+                    next_meta.get("ambiguous_points"),
+                ),
+            },
+        }
+
+    @staticmethod
+    def normalize_analysis_payload(
+        analysis_json: dict | None,
+        *,
+        previous_snapshot: dict | None = None,
+        analysis_kind: str = AnalysisKind.INITIAL,
+        documents_analyzed: list[str] | None = None,
+        analysis_input_files: list[dict] | None = None,
+        failed_files: list[dict] | None = None,
+    ) -> dict:
+        normalized = deepcopy(analysis_json) if isinstance(analysis_json, dict) else {}
+        normalized.setdefault("deal_model_data", {})
+        normalized.setdefault("metadata", {})
+        normalized.setdefault("analyst_report", "")
+
+        metadata = normalized["metadata"] if isinstance(normalized.get("metadata"), dict) else {}
+        metadata["ambiguous_points"] = DealCreationService._normalize_string_list(metadata.get("ambiguous_points"))
+        metadata["documents_analyzed"] = DealCreationService._normalize_string_list(
+            documents_analyzed if documents_analyzed is not None else metadata.get("documents_analyzed")
+        )
+        metadata["analysis_input_files"] = analysis_input_files if isinstance(analysis_input_files, list) else list(metadata.get("analysis_input_files") or [])
+        metadata["failed_files"] = failed_files if isinstance(failed_files, list) else list(metadata.get("failed_files") or [])
+        normalized["metadata"] = metadata
+        normalized["canonical_snapshot"] = DealCreationService.build_canonical_snapshot(
+            normalized,
+            previous_snapshot=previous_snapshot,
+            analysis_kind=analysis_kind,
+        )
+        return normalized
 
     @staticmethod
     def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):
@@ -109,17 +200,22 @@ class DealCreationService:
         if analysis_json and 'metadata' in analysis_json:
             try:
                 from deals.models import DealAnalysis
-                DealCreationService.apply_analysis_to_deal(deal, analysis_json)
-                ambiguities = analysis_json['metadata'].get('ambiguous_points', [])
+                normalized_analysis = DealCreationService.normalize_analysis_payload(
+                    analysis_json,
+                    analysis_kind=AnalysisKind.INITIAL,
+                )
+                DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+                ambiguities = normalized_analysis['metadata'].get('ambiguous_points', [])
                 thinking = analysis_json.get('thinking', '')
                 
                 # Create a DealAnalysis record
                 DealAnalysis.objects.create(
                     deal=deal,
                     version=1,
+                    analysis_kind=AnalysisKind.INITIAL,
                     thinking=thinking,
                     ambiguities=ambiguities,
-                    analysis_json=analysis_json
+                    analysis_json=normalized_analysis
                 )
                 print(f"[ANALYSIS] Created initial DealAnalysis record for {deal.title}")
             except Exception as e:

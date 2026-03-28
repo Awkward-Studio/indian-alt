@@ -430,6 +430,7 @@ class FolderAnalysisService:
         """
         from ai_orchestrator.services.embedding_processor import EmbeddingService
         from deals.models import (
+            AnalysisKind,
             ChunkingStatus,
             DealAnalysis,
             DealDocument,
@@ -458,22 +459,26 @@ class FolderAnalysisService:
         ]
 
         if analysis_json:
-            metadata = analysis_json.setdefault('metadata', {})
-            metadata['analysis_input_files'] = approved_files
-            metadata['passed_files'] = session_data.get('passed_files', [])
-            metadata['failed_files'] = session_data.get('failed_files', [])
+            normalized_analysis = DealCreationService.normalize_analysis_payload(
+                analysis_json,
+                analysis_kind=AnalysisKind.INITIAL,
+                documents_analyzed=[file.get('file_name') for file in approved_files if file.get('file_name')],
+                analysis_input_files=approved_files,
+                failed_files=session_data.get('failed_files', []),
+            )
             # Create DealAnalysis record
             DealAnalysis.objects.create(
                 deal=deal,
                 version=1,
+                analysis_kind=AnalysisKind.INITIAL,
                 thinking=session_data.get('raw_thinking', ''),
-                ambiguities=analysis_json.get('metadata', {}).get('ambiguous_points', []),
-                analysis_json=analysis_json
+                ambiguities=normalized_analysis.get('metadata', {}).get('ambiguous_points', []),
+                analysis_json=normalized_analysis
             )
 
             DealCreationService.apply_analysis_to_deal(
                 deal,
-                analysis_json,
+                normalized_analysis,
                 overwrite=False,
                 overwrite_themes=True,
             )

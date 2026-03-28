@@ -170,6 +170,7 @@ class DealChatView(APIView):
                 })
 
             # Create a rich, structured representation of the deal's forensic data
+            current_analysis = deal.current_analysis or {}
             structured_data = {
                 "title": deal.title,
                 "industry": deal.industry,
@@ -179,7 +180,8 @@ class DealChatView(APIView):
                 "current_phase": deal.current_phase,
                 "themes": deal.themes if isinstance(deal.themes, list) else [],
                 "ambiguities": deal.ambiguities if isinstance(deal.ambiguities, list) else [],
-                "forensic_summary": deal.deal_summary,
+                "forensic_summary": (current_analysis.get("canonical_snapshot") or {}).get("analyst_report") or deal.deal_summary,
+                "current_analysis": current_analysis,
                 "status_flags": {
                     "female_led": deal.is_female_led,
                     "management_meeting": deal.management_meeting,

@@ -4,7 +4,7 @@ from django.core.cache import cache
 from django.test import TestCase
 
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
-from deals.models import Deal, DealDocument, InitialAnalysisStatus
+from deals.models import AnalysisKind, Deal, DealDocument, InitialAnalysisStatus
 from deals.serializers import DealDetailSerializer
 from deals.services.deal_creation import DealCreationService
 from deals.services.folder_analysis import FolderAnalysisService
@@ -87,6 +87,7 @@ class DealAnalysisMappingTests(TestCase):
         deal.refresh_from_db()
         analysis = deal.latest_analysis
         self.assertIsNotNone(analysis)
+        self.assertEqual(analysis.analysis_kind, AnalysisKind.INITIAL)
         self.assertEqual(analysis.thinking, "Reasoning trace")
         self.assertEqual(
             analysis.ambiguities,
@@ -116,6 +117,8 @@ class DealAnalysisMappingTests(TestCase):
         serialized = DealDetailSerializer(instance=deal).data
 
         self.assertEqual(serialized["thinking"], "Reasoning trace")
+        self.assertEqual(serialized["initial_analysis"]["kind"], "initial")
+        self.assertEqual(serialized["current_analysis"]["canonical_snapshot"]["analyst_report"], "Structured summary from AI")
         self.assertEqual(
             serialized["ambiguities"],
             [
@@ -293,6 +296,7 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(deal.extracted_text, "Combined extracted text")
         self.assertEqual(deal.processing_status, "idle")
         self.assertEqual(analysis.thinking, "Folder reasoning trace")
+        self.assertEqual(analysis.analysis_kind, AnalysisKind.INITIAL)
         self.assertEqual(
             analysis.analysis_json["metadata"]["analysis_input_files"],
             [{"file_id": "file-1", "file_name": "Deck.pdf"}],
@@ -399,6 +403,8 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(doc.transcription_status, "complete")
         self.assertEqual(doc.extraction_mode, "glm_ocr")
         self.assertEqual(doc.is_ai_analyzed, True)
+        self.assertEqual(deal.latest_analysis.analysis_kind, AnalysisKind.SUPPLEMENTAL)
+        self.assertIn("canonical_snapshot", deal.latest_analysis.analysis_json)
         audit_log.refresh_from_db()
         self.assertEqual(audit_log.source_metadata["file_diagnostics"][0]["chunk_count"], 3)
 

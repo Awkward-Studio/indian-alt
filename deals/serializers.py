@@ -19,6 +19,8 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.CharField(source='uploaded_by.name', read_only=True)
     initial_analysis_status = serializers.SerializerMethodField()
     initial_analysis_reason = serializers.SerializerMethodField()
+    in_latest_supplemental_analysis = serializers.SerializerMethodField()
+    latest_supplemental_version = serializers.SerializerMethodField()
 
     def _get_initial_analysis_map(self, obj):
         cache = self.context.setdefault('_initial_analysis_map', {})
@@ -51,6 +53,32 @@ class DealDocumentSerializer(serializers.ModelSerializer):
         cache[deal_id] = mapping
         return mapping
 
+    def _get_latest_supplemental_map(self, obj):
+        cache = self.context.setdefault('_latest_supplemental_map', {})
+        deal_id = str(obj.deal_id)
+        if deal_id in cache:
+            return cache[deal_id]
+
+        analysis = obj.deal.latest_supplemental_analysis_record
+        analysis_json = analysis.analysis_json if analysis and isinstance(analysis.analysis_json, dict) else {}
+        metadata = analysis_json.get('metadata') if isinstance(analysis_json.get('metadata'), dict) else {}
+        mapping = {
+            'version': analysis.version if analysis else None,
+            'by_file_id': {},
+            'by_name': set(),
+        }
+        for file in metadata.get('analysis_input_files', []):
+            file_id = file.get('file_id')
+            file_name = file.get('file_name')
+            if file_id:
+                mapping['by_file_id'][str(file_id)] = file
+            if file_name:
+                mapping['by_name'].add(str(file_name).strip().lower())
+        for file_name in metadata.get('documents_analyzed', []):
+            mapping['by_name'].add(str(file_name).strip().lower())
+        cache[deal_id] = mapping
+        return mapping
+
     def get_initial_analysis_status(self, obj):
         if obj.initial_analysis_status and obj.initial_analysis_status != InitialAnalysisStatus.NOT_SELECTED:
             return obj.initial_analysis_status
@@ -79,6 +107,17 @@ class DealDocumentSerializer(serializers.ModelSerializer):
         if normalized_title in mapping['failed_by_name']:
             return mapping['failed_by_name'][normalized_title].get('reason')
         return None
+
+    def get_in_latest_supplemental_analysis(self, obj):
+        mapping = self._get_latest_supplemental_map(obj)
+        if obj.onedrive_id and str(obj.onedrive_id) in mapping['by_file_id']:
+            return True
+        normalized_title = (obj.title or '').strip().lower()
+        return normalized_title in mapping['by_name']
+
+    def get_latest_supplemental_version(self, obj):
+        mapping = self._get_latest_supplemental_map(obj)
+        return mapping['version']
     
     class Meta:
         model = DealDocument
@@ -86,6 +125,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'id', 'deal', 'deal_title', 'title', 'document_type', 
             'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
             'initial_analysis_status', 'initial_analysis_reason',
+            'in_latest_supplemental_analysis', 'latest_supplemental_version',
             'extraction_mode', 'transcription_status', 'chunking_status',
             'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'
@@ -134,6 +174,8 @@ class DealDetailSerializer(DealSerializer):
     thinking = serializers.SerializerMethodField()
     ambiguities = serializers.SerializerMethodField()
     analysis_json = serializers.SerializerMethodField()
+    initial_analysis = serializers.SerializerMethodField()
+    current_analysis = serializers.SerializerMethodField()
     analysis_history = serializers.SerializerMethodField()
     latest_phase_readiness_check = serializers.SerializerMethodField()
 
@@ -145,6 +187,12 @@ class DealDetailSerializer(DealSerializer):
 
     def get_analysis_json(self, obj):
         return obj.analysis_json if isinstance(obj.analysis_json, dict) else {}
+
+    def get_initial_analysis(self, obj):
+        return obj.initial_analysis
+
+    def get_current_analysis(self, obj):
+        return obj.current_analysis
 
     def get_analysis_history(self, obj):
         return obj.analysis_history if isinstance(obj.analysis_history, list) else []

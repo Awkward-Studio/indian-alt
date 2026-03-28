@@ -138,19 +138,28 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
                 "description": "Generates a supplementary analysis version from newly selected VDR documents.",
                 "output_schema": {
                     "analyst_report": "string",
+                    "deal_model_data": "object",
+                    "metadata": "object",
                 },
                 "prompt_template": """[EXISTING ANALYSIS]
 Summary: {{ existing_summary }}
+
+[CURRENT CANONICAL SNAPSHOT]
+{{ existing_canonical_snapshot }}
 
 [NEW DOCUMENTS TO ANALYZE]
 {{ content }}
 
 [TASK]
-Generate a concise Version {{ version_num }} supplementary analysis focused only on the newly supplied documents.
+Generate a concise Version {{ version_num }} supplementary analysis focused only on the newly supplied documents, and provide structured field updates for the canonical deal view when supported by the new evidence.
 
 Return exactly one valid JSON object and nothing else:
 {
-  "analyst_report": "Markdown report covering only new evidence, resolved ambiguities, and new metrics from these documents."
+  "analyst_report": "Markdown report covering only new evidence, resolved ambiguities, and new metrics from these documents.",
+  "deal_model_data": {},
+  "metadata": {
+    "ambiguous_points": []
+  }
 }
 
 Rules:

@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from django.db import connection
 from django.db.models import Count, Q
@@ -106,14 +106,14 @@ class UniversalChatService:
 
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
-        chunks, candidate_chunk_count = self._search_ranked_chunks(plan, deals)
+        chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         serialized_deals = [self._serialize_deal(deal) for deal in deals]
         serialized_chunks = [self._serialize_chunk(item) for item in chunks]
-
-        context_data = self._format_context_data(
+        context_data, context_diagnostics = self._format_context_data(
             plan=plan,
             deals=serialized_deals,
             chunks=serialized_chunks,
+            diagnostics=chunk_diagnostics,
         )
 
         if plan.get("needs_stats") and self._stage_enabled("stats_block"):
@@ -124,10 +124,9 @@ class UniversalChatService:
                     Deal.objects.values("industry").annotate(count=Count("id")).order_by("-count")[:10]
                 ),
             }, default=str)
-
-        max_context_chars = int(self._stage_settings("context_assembly").get("max_context_chars", 60000) or 60000)
-        if len(context_data) > max_context_chars:
-            context_data = context_data[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
+            max_context_chars = int(self._stage_settings("context_assembly").get("max_context_chars", 60000) or 60000)
+            if len(context_data) > max_context_chars:
+                context_data = context_data[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
 
         return {
             "history_context": history_context,
@@ -140,9 +139,25 @@ class UniversalChatService:
             "used_query_builder": True,
             "gate_mode": "fresh_retrieval",
             "gate_reason": gate["gate_reason"],
+            "planner_requested_deal_limit": plan.get("deal_limit"),
+            "planner_requested_chunks_per_deal": plan.get("chunks_per_deal"),
+            "effective_deal_limit": plan.get("deal_limit"),
+            "effective_chunks_per_deal": chunk_diagnostics.get("effective_chunks_per_deal"),
             "deals_considered": len(deals),
-            "retrieved_chunk_count": candidate_chunk_count,
+            "retrieved_chunk_count": chunk_diagnostics.get("candidate_chunk_count", 0),
             "selected_chunk_count": len(serialized_chunks),
+            "candidate_chunk_count": chunk_diagnostics.get("candidate_chunk_count", 0),
+            "deals_selected": len(serialized_deals),
+            "chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "selected_chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "chunks_dropped_by_per_deal_cap": chunk_diagnostics.get("dropped_by_per_deal_cap", 0),
+            "chunks_dropped_by_total_cap": chunk_diagnostics.get("dropped_by_total_cap", 0),
+            "chunks_dropped_as_duplicates": chunk_diagnostics.get("dropped_as_duplicates", 0),
+            "chunks_dropped_by_zero_score": chunk_diagnostics.get("dropped_by_zero_score", 0),
+            "max_total_chunks": chunk_diagnostics.get("max_total_chunks"),
+            "context_chars_before_trim": context_diagnostics.get("chars_before_trim"),
+            "context_chars_after_trim": context_diagnostics.get("chars_after_trim"),
+            "truncated_chunk_count": context_diagnostics.get("omitted_chunk_count"),
             "selected_sources": [
                 f"{chunk['deal']}|{chunk.get('source_title') or chunk['source_type']}"
                 for chunk in serialized_chunks
@@ -236,6 +251,8 @@ class UniversalChatService:
             query_type = fallback_query_type if fallback_query_type in QUERY_TYPES else "pipeline_search"
 
         planner_settings = self._stage_settings("query_planner")
+        max_deal_limit = max(int(planner_settings.get("max_deal_limit") or planner_settings.get("default_deal_limit") or 8), 3)
+        max_chunks_per_deal = max(int(planner_settings.get("max_chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 4), 1)
         normalized = {
             "query_type": query_type,
             "deal_filters": {},
@@ -244,8 +261,8 @@ class UniversalChatService:
             "metric_terms": self._normalize_string_list(plan.get("metric_terms")),
             "rag_queries": self._normalize_string_list(plan.get("rag_queries")),
             "needs_stats": bool(plan.get("needs_stats")),
-            "deal_limit": min(max(int(plan.get("deal_limit") or planner_settings.get("default_deal_limit") or 8), 3), 12),
-            "chunks_per_deal": min(max(int(plan.get("chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 2), 1), 4),
+            "deal_limit": min(max(int(plan.get("deal_limit") or planner_settings.get("default_deal_limit") or 8), 3), max_deal_limit),
+            "chunks_per_deal": min(max(int(plan.get("chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 2), 1), max_chunks_per_deal),
             "user_query": user_message,
         }
 
@@ -358,10 +375,9 @@ class UniversalChatService:
             return top
         return pool[: min(plan.get("deal_limit", 8), int(filter_settings.get("result_limit") or plan.get("deal_limit", 8)))]
 
-    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> tuple[List[Dict[str, Any]], int]:
+    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         retrieval_settings = self._stage_settings("chunk_retrieval")
         rerank_settings = self._stage_settings("chunk_rerank")
-        assembly_settings = self._stage_settings("context_assembly")
         queryset = DocumentChunk.objects.all().select_related("deal")
         if deals:
             queryset = queryset.filter(deal__in=deals)
@@ -371,6 +387,7 @@ class UniversalChatService:
         keywords = [term.lower() for term in plan.get("keywords", [])]
         metric_terms = [term.lower() for term in plan.get("metric_terms", [])]
         scored_items: List[Dict[str, Any]] = []
+        dropped_by_zero_score = 0
 
         if self.is_sqlite:
             candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("sqlite_candidate_limit") or 300)])
@@ -413,6 +430,7 @@ class UniversalChatService:
                 score += float(rerank_settings.get("timeline_bonus") or 25)
 
             if score <= 0:
+                dropped_by_zero_score += 1
                 continue
 
             scored_items.append({"chunk": chunk, "score": round(score, 3)})
@@ -421,27 +439,45 @@ class UniversalChatService:
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
         seen_keys = set()
-        max_per_deal = min(plan.get("chunks_per_deal", 2), int(retrieval_settings.get("default_chunks_per_deal") or plan.get("chunks_per_deal", 2)))
-        max_total = min(
-            max(max_per_deal * max(len(deals), 1), int(assembly_settings.get("fallback_max_total_chunks") or 8)),
-            int(assembly_settings.get("max_total_chunks") or 8),
-        )
+        max_per_deal, max_total = self._compute_chunk_budgets(plan, deals)
+        dropped_by_per_deal_cap = 0
+        dropped_by_total_cap = 0
+        dropped_as_duplicates = 0
 
         for item in scored_items:
             chunk = item["chunk"]
             deal_key = str(chunk.deal_id)
-            chunk_key = (deal_key, chunk.source_id, chunk.metadata.get("chunk_index"))
+            metadata = chunk.metadata or {}
+            chunk_key = (deal_key, chunk.source_id, metadata.get("chunk_index"))
             if chunk_key in seen_keys:
+                dropped_as_duplicates += 1
                 continue
             if per_deal_counts.get(deal_key, 0) >= max_per_deal:
+                dropped_by_per_deal_cap += 1
+                continue
+            if len(selected) >= max_total:
+                dropped_by_total_cap += 1
                 continue
             seen_keys.add(chunk_key)
             per_deal_counts[deal_key] = per_deal_counts.get(deal_key, 0) + 1
             selected.append(item)
-            if len(selected) >= max_total:
-                break
-
-        return selected, len(candidate_chunks)
+        diagnostics = {
+            "candidate_chunk_count": len(candidate_chunks),
+            "scored_chunk_count": len(scored_items),
+            "selected_chunk_count": len(selected),
+            "selected_chunk_count_by_deal": dict(per_deal_counts),
+            "effective_chunks_per_deal": max_per_deal,
+            "max_total_chunks": max_total,
+            "dropped_by_per_deal_cap": dropped_by_per_deal_cap,
+            "dropped_by_total_cap": dropped_by_total_cap,
+            "dropped_as_duplicates": dropped_as_duplicates,
+            "dropped_by_zero_score": dropped_by_zero_score,
+            "selected_sources": [
+                f"{item['chunk'].deal.title}|{((item['chunk'].metadata or {}).get('title') or (item['chunk'].metadata or {}).get('filename') or item['chunk'].source_type)}"
+                for item in selected
+            ],
+        }
+        return selected, diagnostics
 
     def _build_pipeline_overview(self, deals: List[Deal]) -> str:
         total = Deal.objects.count()
@@ -450,6 +486,8 @@ class UniversalChatService:
         return f"Total deals in system: {total}. Retrieval narrowed the answer context to {len(deals)} candidate deals."
 
     def _serialize_deal(self, deal: Deal) -> Dict[str, Any]:
+        current_analysis = deal.current_analysis or {}
+        canonical_snapshot = current_analysis.get("canonical_snapshot") if isinstance(current_analysis, dict) else {}
         recent_timeline = [
             {
                 "date": log.changed_at.isoformat(),
@@ -471,7 +509,8 @@ class UniversalChatService:
             "management_meeting": deal.management_meeting,
             "funding_ask": deal.funding_ask,
             "themes": deal.themes if isinstance(deal.themes, list) else [],
-            "summary_excerpt": (deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
+            "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
+            "current_analysis": current_analysis,
             "recent_timeline": recent_timeline,
         }
 
@@ -490,7 +529,8 @@ class UniversalChatService:
             "metadata": metadata,
         }
 
-    def _format_context_data(self, plan: Dict[str, Any], deals: List[Dict[str, Any]], chunks: List[Dict[str, Any]]) -> str:
+    def _format_context_data(self, plan: Dict[str, Any], deals: List[Dict[str, Any]], chunks: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> Tuple[str, Dict[str, Any]]:
+        diagnostics = diagnostics or {}
         sections = [
             "[PIPELINE OVERVIEW]",
             self._build_pipeline_overview_from_payload(deals),
@@ -524,7 +564,30 @@ class UniversalChatService:
         else:
             sections.append("- No high-confidence document chunks were selected.")
 
-        return "\n".join(sections).strip()
+        chars_before_trim = len("\n".join(sections).strip())
+        final_sections = self._trim_sections_to_budget(sections)
+        omitted_chunk_count = max(0, len(chunks) - final_sections[1])
+        if diagnostics.get("dropped_by_total_cap") or diagnostics.get("dropped_by_per_deal_cap") or omitted_chunk_count:
+            final_sections[0].extend([
+                "",
+                "[RETRIEVAL DIAGNOSTICS]",
+                json.dumps(
+                    {
+                        "selected_chunk_count": len(chunks),
+                        "omitted_chunk_count": omitted_chunk_count,
+                        "dropped_by_per_deal_cap": diagnostics.get("dropped_by_per_deal_cap", 0),
+                        "dropped_by_total_cap": diagnostics.get("dropped_by_total_cap", 0),
+                        "selected_chunk_count_by_deal": diagnostics.get("selected_chunk_count_by_deal", {}),
+                    },
+                    default=str,
+                ),
+            ])
+        text = "\n".join(final_sections[0]).strip()
+        return text, {
+            "chars_before_trim": chars_before_trim,
+            "chars_after_trim": len(text),
+            "omitted_chunk_count": omitted_chunk_count,
+        }
 
     def _build_pipeline_overview_from_payload(self, deals: List[Dict[str, Any]]) -> str:
         total = Deal.objects.count()
@@ -570,22 +633,72 @@ class UniversalChatService:
     def simulate_query(self, user_message: str, conversation_id: str = "admin-preview") -> Dict[str, Any]:
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
-        chunks, candidate_chunk_count = self._search_ranked_chunks(plan, deals)
+        chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         serialized_deals = [self._serialize_deal(deal) for deal in deals]
         serialized_chunks = [self._serialize_chunk(item) for item in chunks]
-        context_data = {
-            "query_plan": plan,
-            "matching_deals": serialized_deals,
-            "document_insights": serialized_chunks,
-            "deals_considered": len(serialized_deals),
-            "retrieved_chunk_count": candidate_chunk_count,
-            "selected_chunk_count": len(serialized_chunks),
-        }
+        context_preview, context_diagnostics = self._format_context_data(plan, serialized_deals, serialized_chunks, diagnostics=chunk_diagnostics)
         return {
             "flow_version": getattr(self.flow_version, "version", None),
             "query_plan": plan,
             "candidate_deals": serialized_deals,
             "top_chunks": serialized_chunks,
-            "context_preview": self._format_context_data(plan, serialized_deals, serialized_chunks)[:4000],
+            "context_preview": context_preview[:4000],
+            "retrieval_diagnostics": {
+                **chunk_diagnostics,
+                **context_diagnostics,
+                "planner_requested_deal_limit": plan.get("deal_limit"),
+                "planner_requested_chunks_per_deal": plan.get("chunks_per_deal"),
+                "deals_selected": len(serialized_deals),
+            },
             "answer_prompt_preview": self._stage_settings("answer_generation").get("prompt_template"),
         }
+
+    def _compute_chunk_budgets(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[int, int]:
+        retrieval_settings = self._stage_settings("chunk_retrieval")
+        assembly_settings = self._stage_settings("context_assembly")
+        requested = max(int(plan.get("chunks_per_deal") or retrieval_settings.get("default_chunks_per_deal") or 2), 1)
+        min_per_deal = max(int(assembly_settings.get("min_chunks_per_selected_deal") or 1), 1)
+        max_per_deal = max(int(assembly_settings.get("max_chunks_per_selected_deal") or requested), min_per_deal)
+        few_deal_threshold = max(int(assembly_settings.get("few_deal_chunk_boost_threshold") or 4), 1)
+        few_deal_boost = max(int(assembly_settings.get("few_deal_chunk_boost") or 0), 0)
+        single_deal_boost = max(int(assembly_settings.get("single_deal_chunk_boost") or 0), 0)
+        deal_count = max(len(deals), 1)
+
+        effective_per_deal = max(requested, min_per_deal)
+        if deal_count == 1:
+            effective_per_deal += single_deal_boost
+        elif deal_count <= few_deal_threshold:
+            effective_per_deal += few_deal_boost
+        effective_per_deal = min(effective_per_deal, max_per_deal)
+
+        soft_total = max(int(assembly_settings.get("soft_max_total_chunks") or effective_per_deal * deal_count), effective_per_deal)
+        hard_total = max(int(assembly_settings.get("max_total_chunks") or soft_total), effective_per_deal)
+        fallback_total = max(int(assembly_settings.get("fallback_max_total_chunks") or hard_total), effective_per_deal)
+        if deal_count == 1:
+            effective_total = min(hard_total, max(effective_per_deal, soft_total))
+        else:
+            effective_total = min(hard_total, max(effective_per_deal * deal_count, fallback_total, soft_total))
+        return effective_per_deal, effective_total
+
+    def _trim_sections_to_budget(self, sections: List[str]) -> Tuple[List[str], int]:
+        assembly_settings = self._stage_settings("context_assembly")
+        max_context_chars = int(assembly_settings.get("max_context_chars", 60000) or 60000)
+        if len("\n".join(sections).strip()) <= max_context_chars:
+            return sections, self._count_rendered_chunks(sections)
+
+        trimmed: List[str] = []
+        for section in sections:
+            candidate = "\n".join(trimmed + [section]).strip()
+            if len(candidate) > max_context_chars:
+                break
+            trimmed.append(section)
+
+        trimmed.append("... [ADDITIONAL CONTEXT OMITTED TO FIT RETRIEVAL BUDGET] ...")
+        return trimmed, self._count_rendered_chunks(trimmed)
+
+    def _count_rendered_chunks(self, sections: List[str]) -> int:
+        count = 0
+        for line in sections:
+            if re.match(r"^\d+\.\s+\[Deal:", line):
+                count += 1
+        return count

@@ -147,8 +147,76 @@ class UniversalChatServiceTests(TestCase):
         retrieval = next(stage for stage in config["stages"] if stage["id"] == "chunk_retrieval")
         assembly = next(stage for stage in config["stages"] if stage["id"] == "context_assembly")
 
-        self.assertEqual(planner["settings"]["default_deal_limit"], 10)
-        self.assertEqual(planner["settings"]["default_chunks_per_deal"], 4)
-        self.assertEqual(filtering["settings"]["candidate_pool_limit"], 120)
-        self.assertEqual(retrieval["settings"]["vector_limit"], 120)
-        self.assertEqual(assembly["settings"]["max_total_chunks"], 16)
+        self.assertEqual(planner["settings"]["default_deal_limit"], 20)
+        self.assertEqual(planner["settings"]["default_chunks_per_deal"], 8)
+        self.assertEqual(planner["settings"]["max_deal_limit"], 30)
+        self.assertEqual(planner["settings"]["max_chunks_per_deal"], 12)
+        self.assertEqual(filtering["settings"]["candidate_pool_limit"], 250)
+        self.assertEqual(retrieval["settings"]["vector_limit"], 300)
+        self.assertEqual(assembly["settings"]["max_total_chunks"], 80)
+
+    def test_normalize_plan_uses_configurable_high_caps(self):
+        normalized = self.service._normalize_plan(
+            {
+                "query_type": "pipeline_search",
+                "deal_filters": {},
+                "deal_limit": 28,
+                "chunks_per_deal": 11,
+                "rag_queries": ["deep retrieval query"],
+            },
+            "deep retrieval query",
+        )
+
+        self.assertEqual(normalized["deal_limit"], 28)
+        self.assertEqual(normalized["chunks_per_deal"], 11)
+
+    def test_compute_chunk_budgets_boosts_when_one_deal_matches(self):
+        one_deal = [MagicMock(id="deal-1")]
+
+        max_per_deal, max_total = self.service._compute_chunk_budgets(
+            {
+                "chunks_per_deal": 8,
+            },
+            one_deal,
+        )
+
+        self.assertEqual(max_per_deal, 20)
+        self.assertEqual(max_total, 60)
+
+    def test_simulate_query_returns_retrieval_diagnostics(self):
+        deal = MagicMock()
+
+        with patch.object(self.service, "_build_query_plan", return_value={
+            "query_type": "pipeline_search",
+            "deal_filters": {},
+            "exact_terms": [],
+            "keywords": ["acme"],
+            "metric_terms": [],
+            "rag_queries": ["Tell me about Acme"],
+            "needs_stats": False,
+            "deal_limit": 20,
+            "chunks_per_deal": 8,
+            "user_query": "Tell me about Acme",
+        }), patch.object(self.service, "_get_candidate_deals", return_value=[deal]), patch.object(
+            self.service,
+            "_search_ranked_chunks",
+            return_value=(
+                [],
+                {
+                    "candidate_chunk_count": 120,
+                    "selected_chunk_count": 0,
+                    "selected_chunk_count_by_deal": {},
+                    "effective_chunks_per_deal": 20,
+                    "max_total_chunks": 60,
+                    "dropped_by_per_deal_cap": 0,
+                    "dropped_by_total_cap": 12,
+                    "dropped_as_duplicates": 0,
+                    "dropped_by_zero_score": 8,
+                },
+            ),
+        ), patch.object(self.service, "_serialize_deal", return_value={"title": "Acme"}):
+            simulation = self.service.simulate_query("Tell me about Acme")
+
+        self.assertEqual(simulation["retrieval_diagnostics"]["planner_requested_deal_limit"], 20)
+        self.assertEqual(simulation["retrieval_diagnostics"]["effective_chunks_per_deal"], 20)
+        self.assertEqual(simulation["retrieval_diagnostics"]["candidate_chunk_count"], 120)

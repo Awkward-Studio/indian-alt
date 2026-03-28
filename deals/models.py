@@ -190,6 +190,15 @@ class Deal(models.Model):
         return self.analyses.order_by('-version', '-created_at').first()
 
     @property
+    def initial_analysis_record(self):
+        analysis = self.analyses.filter(analysis_kind=AnalysisKind.INITIAL).order_by('version', 'created_at').first()
+        return analysis or self.analyses.order_by('version', 'created_at').first()
+
+    @property
+    def latest_supplemental_analysis_record(self):
+        return self.analyses.filter(analysis_kind=AnalysisKind.SUPPLEMENTAL).order_by('-version', '-created_at').first()
+
+    @property
     def thinking(self):
         analysis = self.latest_analysis
         return analysis.thinking if analysis else None
@@ -204,26 +213,79 @@ class Deal(models.Model):
         analysis = self.latest_analysis
         return analysis.analysis_json if analysis else {}
 
+    @staticmethod
+    def _normalize_analysis_record(analysis):
+        if not analysis:
+            return None
+
+        analysis_json = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
+        metadata = analysis_json.get('metadata') if isinstance(analysis_json.get('metadata'), dict) else {}
+        canonical_snapshot = analysis_json.get('canonical_snapshot')
+        if not isinstance(canonical_snapshot, dict):
+            canonical_snapshot = {
+                'deal_model_data': analysis_json.get('deal_model_data') if isinstance(analysis_json.get('deal_model_data'), dict) else {},
+                'analyst_report': analysis_json.get('analyst_report', ''),
+                'metadata': {
+                    'ambiguous_points': metadata.get('ambiguous_points', []),
+                },
+            }
+
+        report = analysis_json.get('analyst_report')
+        if not isinstance(report, str):
+            report = ''
+
+        return {
+            'version': analysis.version,
+            'kind': analysis.analysis_kind,
+            'thinking': analysis.thinking,
+            'ambiguities': analysis.ambiguities,
+            'analysis_json': analysis_json,
+            'report': report,
+            'created_at': analysis.created_at.isoformat() if analysis.created_at else None,
+            'documents_analyzed': metadata.get('documents_analyzed', []),
+            'analysis_input_files': metadata.get('analysis_input_files', []),
+            'failed_files': metadata.get('failed_files', []),
+            'canonical_snapshot': canonical_snapshot,
+        }
+
+    @property
+    def initial_analysis(self):
+        return self._normalize_analysis_record(self.initial_analysis_record)
+
+    @property
+    def current_analysis(self):
+        current = self._normalize_analysis_record(self.latest_analysis)
+        if current:
+            return current
+
+        fallback_report = self.deal_summary or ""
+        return {
+            'version': None,
+            'kind': AnalysisKind.INITIAL,
+            'thinking': None,
+            'ambiguities': [],
+            'analysis_json': {},
+            'report': fallback_report,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'documents_analyzed': [],
+            'analysis_input_files': [],
+            'failed_files': [],
+            'canonical_snapshot': {
+                'deal_model_data': {},
+                'analyst_report': fallback_report,
+                'metadata': {'ambiguous_points': []},
+            },
+        }
+
     @property
     def analysis_history(self):
         analyses = self.analyses.order_by('version', 'created_at')
-        history = []
-        for analysis in analyses:
-            # Extract the report from the analysis_json if possible, 
-            # otherwise fallback to thinking or an empty string.
-            report = ""
-            if analysis.analysis_json:
-                report = analysis.analysis_json.get('analyst_report', "")
-            
-            history.append({
-                'version': analysis.version,
-                'thinking': analysis.thinking,
-                'ambiguities': analysis.ambiguities,
-                'analysis_json': analysis.analysis_json,
-                'report': report,
-                'created_at': analysis.created_at.isoformat() if analysis.created_at else None
-            })
-        return history
+        return [self._normalize_analysis_record(analysis) for analysis in analyses]
+
+
+class AnalysisKind(models.TextChoices):
+    INITIAL = 'initial', 'Initial'
+    SUPPLEMENTAL = 'supplemental', 'Supplemental'
 
 
 class DealAnalysis(models.Model):
@@ -234,6 +296,11 @@ class DealAnalysis(models.Model):
         related_name='analyses'
     )
     version = models.IntegerField(default=1)
+    analysis_kind = models.CharField(
+        max_length=20,
+        choices=AnalysisKind.choices,
+        default=AnalysisKind.INITIAL,
+    )
     thinking = models.TextField(blank=True, null=True, help_text='Internal reasoning process of the AI')
     ambiguities = models.JSONField(default=list, blank=True, help_text='List of ambiguous points identified during analysis')
     analysis_json = models.JSONField(default=dict, blank=True, help_text='Full raw JSON output from the AI analysis')
