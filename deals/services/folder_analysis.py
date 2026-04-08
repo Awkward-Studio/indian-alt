@@ -166,23 +166,56 @@ class FolderAnalysisService:
     def create_session_from_audit_log(log_id: str) -> dict:
         """
         Re-caches session data from an existing successful audit log.
+        Supports both onedrive_folder and email sources.
         """
         from ai_orchestrator.models import AIAuditLog
         from microsoft.services.graph_service import DMS_USER_EMAIL
         
         try:
             log = AIAuditLog.objects.get(id=log_id)
-            if log.source_type != 'onedrive_folder':
-                return {"error": "This audit log is not a folder analysis"}
+            if log.source_type not in ['onedrive_folder', 'email']:
+                return {"error": f"This audit log source type ({log.source_type}) does not support deal initialization"}
             
-            meta = log.source_metadata
+            meta = log.source_metadata or {}
+            session_id = str(uuid.uuid4())
+
+            # Handle Email Source
+            if log.source_type == 'email':
+                if not log.parsed_json:
+                    return {"error": "This email audit log does not contain extracted deal data. Re-run the analysis before initializing a deal."}
+                
+                # Fetch the email object to get the full extracted text if available
+                from microsoft.models import Email
+                email_obj = Email.objects.filter(id=log.source_id).first()
+                preview_text = email_obj.extracted_text if email_obj else log.user_prompt
+
+                cache.set(f"folder_sync_{session_id}", {
+                    "source_type": "email",
+                    "source_id": log.source_id,
+                    "user_email": DMS_USER_EMAIL,
+                    "preliminary_data": log.parsed_json,
+                    "preview_text": preview_text,
+                    "raw_thinking": log.raw_thinking,
+                    "originating_audit_log_id": str(log.id),
+                    "analysis_input_files": meta.get('analysis_input_files', []),
+                    "failed_files": meta.get('failed_files', []),
+                }, timeout=3600)
+
+                return {
+                    "session_id": session_id,
+                    "preliminary_data": log.parsed_json,
+                    "raw_thinking": log.raw_thinking,
+                    "phase": "analysis",
+                    "source_type": "email"
+                }
+
+            # Handle OneDrive Folder Source
             if not meta:
                 return {"error": "This audit log does not contain folder source metadata. It was likely created before metadata capture was added, so re-run the folder analysis and selection flow."}
             if not meta.get('file_tree') or not meta.get('drive_id') or not meta.get('folder_id'):
                 return {"error": "This audit log is missing required folder metadata. Re-run the folder analysis and selection flow."}
 
             workflow_stage = FolderAnalysisService._infer_workflow_stage(meta, bool(log.parsed_json))
-            session_id = str(uuid.uuid4())
 
             if workflow_stage == "traversal_complete":
                 cache.set(f"folder_sync_{session_id}", {
@@ -427,6 +460,7 @@ class FolderAnalysisService:
     def confirm_deal_from_session(session_id: str, deal: Deal) -> dict:
         """
         Updates the newly created Deal with cached forensic mapping.
+        Supports both onedrive_folder and email sources.
         """
         from ai_orchestrator.services.embedding_processor import EmbeddingService
         from deals.models import (
@@ -442,19 +476,28 @@ class FolderAnalysisService:
 
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
-            return {"error": "Session expired or invalid. Please re-analyze the folder."}
+            return {"error": "Session expired or invalid. Please re-analyze the source."}
             
         analysis_json = session_data.get('preliminary_data', {})
-        
+        source_type = session_data.get('source_type', 'onedrive_folder')
+
         deal.processing_status = 'idle'
         deal.processing_error = None
-        deal.source_onedrive_id = session_data.get('folder_id')
-        deal.source_drive_id = session_data.get('drive_id')
+        
+        if source_type == 'onedrive_folder':
+            deal.source_onedrive_id = session_data.get('folder_id')
+            deal.source_drive_id = session_data.get('drive_id')
+        elif source_type == 'email':
+            deal.source_email_id = session_data.get('source_id')
+
         deal.extracted_text = session_data.get('preview_text', '')
         
+        # Determine input files for analysis tracking
         approved_ids = set(session_data.get('approved_file_ids', []))
+        input_files = session_data.get('analysis_input_files', session_data.get('passed_files', []))
+        
         approved_files = [
-            file for file in session_data.get('passed_files', [])
+            file for file in input_files
             if not approved_ids or file.get('file_id') in approved_ids
         ]
 
@@ -482,48 +525,57 @@ class FolderAnalysisService:
                 overwrite=False,
                 overwrite_themes=True,
             )
+
         embed_service = EmbeddingService()
         created_docs = []
         for file in approved_files:
             file_name = file.get('file_name') or 'unknown_file'
             extracted_text = (file.get('extracted_text') or '').strip()
-            doc = DealDocument.objects.create(
-                deal=deal,
-                title=file_name,
-                document_type=DocumentType.OTHER,
-                onedrive_id=file.get('file_id'),
-                extracted_text=extracted_text,
-                is_indexed=False,
-                is_ai_analyzed=True,
-                initial_analysis_status=InitialAnalysisStatus.SELECTED_AND_ANALYZED,
-                extraction_mode=file.get('extraction_mode') or ExtractionMode.FALLBACK_TEXT,
-                transcription_status=file.get('transcription_status') or TranscriptionStatus.COMPLETE,
-                chunking_status=ChunkingStatus.NOT_CHUNKED,
-                last_transcribed_at=deal.created_at,
-            )
+            
+            doc_kwargs = {
+                "deal": deal,
+                "title": file_name,
+                "document_type": DocumentType.OTHER,
+                "extracted_text": extracted_text,
+                "is_indexed": False,
+                "is_ai_analyzed": True,
+                "initial_analysis_status": InitialAnalysisStatus.SELECTED_AND_ANALYZED,
+                "extraction_mode": file.get('extraction_mode') or ExtractionMode.FALLBACK_TEXT,
+                "transcription_status": file.get('transcription_status') or TranscriptionStatus.COMPLETE,
+                "chunking_status": ChunkingStatus.NOT_CHUNKED,
+                "last_transcribed_at": deal.created_at,
+            }
+
+            if source_type == 'onedrive_folder':
+                doc_kwargs["onedrive_id"] = file.get('file_id')
+            
+            doc = DealDocument.objects.create(**doc_kwargs)
+            
             if extracted_text:
                 if embed_service.vectorize_document(doc):
                     doc.refresh_from_db(fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
                 created_docs.append(doc)
 
         for file in session_data.get('failed_files', []):
-            DealDocument.objects.create(
-                deal=deal,
-                title=file.get('file_name') or 'unknown_file',
-                document_type=DocumentType.OTHER,
-                onedrive_id=file.get('file_id'),
-                extracted_text='',
-                is_indexed=False,
-                is_ai_analyzed=False,
-                initial_analysis_status=InitialAnalysisStatus.SELECTED_FAILED,
-                initial_analysis_reason=file.get('reason'),
-                extraction_mode=file.get('extraction_mode'),
-                transcription_status=TranscriptionStatus.FAILED,
-                chunking_status=ChunkingStatus.NOT_CHUNKED,
-            )
+            doc_kwargs = {
+                "deal": deal,
+                "title": file.get('file_name') or 'unknown_file',
+                "document_type": DocumentType.OTHER,
+                "extracted_text": '',
+                "is_indexed": False,
+                "is_ai_analyzed": False,
+                "initial_analysis_status": InitialAnalysisStatus.SELECTED_FAILED,
+                "initial_analysis_reason": file.get('reason'),
+                "extraction_mode": file.get('extraction_mode'),
+                "transcription_status": TranscriptionStatus.FAILED,
+                "chunking_status": ChunkingStatus.NOT_CHUNKED,
+            }
+            if source_type == 'onedrive_folder':
+                doc_kwargs["onedrive_id"] = file.get('file_id')
+            
+            DealDocument.objects.create(**doc_kwargs)
             
         deal.save()
-
         cache.delete(f"folder_sync_{session_id}")
         
         return {

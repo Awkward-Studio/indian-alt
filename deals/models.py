@@ -156,6 +156,12 @@ class Deal(models.Model):
         blank=True,
         help_text='The OneDrive/SharePoint Drive ID this deal belongs to'
     )
+    source_email_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text='The Microsoft Graph ID of the email this deal was created from'
+    )
 
     # Background Processing Tracking
     processing_status = models.CharField(
