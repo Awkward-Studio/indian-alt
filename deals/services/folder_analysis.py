@@ -218,14 +218,20 @@ class FolderAnalysisService:
             workflow_stage = FolderAnalysisService._infer_workflow_stage(meta, bool(log.parsed_json))
 
             if workflow_stage == "traversal_complete":
-                cache.set(f"folder_sync_{session_id}", {
+                cache_data = {
                     "file_tree": meta['file_tree'],
-                    "drive_id": meta['drive_id'],
-                    "folder_id": meta['folder_id'],
                     "user_email": DMS_USER_EMAIL,
                     "originating_audit_log_id": str(log.id),
                     "selected_file_ids": meta.get("selected_file_ids", []),
-                }, timeout=3600)
+                    "source_type": log.source_type
+                }
+                if log.source_type == 'onedrive_folder':
+                    cache_data.update({"drive_id": meta['drive_id'], "folder_id": meta['folder_id']})
+                else:
+                    cache_data.update({"email_id": meta.get('email_id', log.source_id)})
+
+                cache.set(f"folder_sync_{session_id}", cache_data, timeout=3600)
+                
                 return {
                     "phase": "traversal",
                     "session_id": session_id,
@@ -234,20 +240,27 @@ class FolderAnalysisService:
                     "selected_file_ids": meta.get("selected_file_ids", []),
                     "interaction_status": meta.get("interaction_status", "pending"),
                     "interaction_mode": meta.get("interaction_mode", "editable"),
+                    "source_type": log.source_type
                 }
 
             if workflow_stage == "preflight_complete":
-                cache.set(f"folder_sync_{session_id}", {
+                cache_data = {
                     "file_tree": meta['file_tree'],
-                    "drive_id": meta['drive_id'],
-                    "folder_id": meta['folder_id'],
                     "user_email": DMS_USER_EMAIL,
                     "preflight_audit_log_id": str(log.id),
                     "selected_file_ids": meta.get("selected_file_ids", []),
                     "passed_files": meta.get("passed_files", []),
                     "failed_files": meta.get("failed_files", []),
                     "approved_file_ids": meta.get("approved_file_ids", []),
-                }, timeout=3600)
+                    "source_type": log.source_type
+                }
+                if log.source_type == 'onedrive_folder':
+                    cache_data.update({"drive_id": meta['drive_id'], "folder_id": meta['folder_id']})
+                else:
+                    cache_data.update({"email_id": meta.get('email_id', log.source_id)})
+
+                cache.set(f"folder_sync_{session_id}", cache_data, timeout=3600)
+
                 return {
                     "phase": "preflight",
                     "session_id": session_id,
@@ -260,6 +273,7 @@ class FolderAnalysisService:
                     "failed_files_count": meta.get("failed_files_count", len(meta.get("failed_files", []))),
                     "interaction_status": meta.get("interaction_status", "pending"),
                     "interaction_mode": meta.get("interaction_mode", "editable"),
+                    "source_type": log.source_type
                 }
 
             if meta.get("file_tree") and not workflow_stage:

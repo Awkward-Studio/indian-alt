@@ -151,9 +151,9 @@ def run_phase_readiness_analysis_async(self, deal_id: str, audit_log_id: str):
         raise
 
 
-def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: list) -> dict:
+def _extract_selected_files(drive_id: str | None, user_email: str, selected_file_ids: list, email_id: str | None = None) -> dict:
     """
-    Downloads and extracts text for the selected files, returning exact pass/fail coverage.
+    Downloads and extracts text for the selected files, supporting both OneDrive and Email sources.
     """
     graph = GraphAPIService()
     doc_processor = DocumentProcessorService()
@@ -161,6 +161,11 @@ def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: l
     passed_files = []
     failed_files = []
     combined_text_parts = []
+    
+    email_obj = None
+    if email_id:
+        from microsoft.models import Email
+        email_obj = Email.objects.filter(id=email_id).first()
 
     for file_id in selected_file_ids:
         file_record = {
@@ -173,12 +178,34 @@ def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: l
             "reason": None,
         }
         try:
-            item_info = graph.get_drive_item(drive_id, file_id, user_email=user_email)
-            name = item_info.get('name', 'unknown_file')
-            file_record["file_name"] = name
+            content = None
+            name = "unknown_file"
+            
+            if file_id == "body" and email_obj:
+                name = "Email Body"
+                content = (email_obj.body_html or email_obj.body_text or email_obj.body_preview or "").encode('utf-8')
+            elif drive_id:
+                item_info = graph.get_drive_item(drive_id, file_id, user_email=user_email)
+                name = item_info.get('name', 'unknown_file')
+                logger.info("Selection preflight: downloading OneDrive file %s (%s)", name, file_id)
+                content = graph.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+            elif email_obj:
+                # Find attachment in email
+                attachments = email_obj.attachments if isinstance(email_obj.attachments, list) else []
+                att = next((a for a in attachments if a.get('id') == file_id), None)
+                if att:
+                    name = att.get('name', 'unknown_attachment')
+                    logger.info("Selection preflight: downloading Email attachment %s (%s)", name, file_id)
+                    att_content = graph.get_attachment_content(user_email, email_obj.graph_id, file_id)
+                    if 'contentBytes' in att_content:
+                        import base64
+                        content = base64.b64decode(att_content['contentBytes'])
 
-            logger.info("Selection preflight: downloading %s (%s)", name, file_id)
-            content = graph.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+            file_record["file_name"] = name
+            if content is None:
+                file_record["reason"] = f"Could not retrieve content for {name}"
+                failed_files.append(file_record)
+                continue
 
             logger.info("Selection preflight: extracting %s (%s)", name, file_id)
             extraction = doc_processor.get_extraction_result(content, name, page_limit=None)
@@ -187,12 +214,6 @@ def _extract_selected_files(drive_id: str, user_email: str, selected_file_ids: l
 
             if not extracted_text:
                 file_record["reason"] = extraction.get("error") or f"No readable content extracted for {name}"
-                file_record["extraction_mode"] = extraction_mode
-                failed_files.append(file_record)
-                continue
-
-            if extraction.get("error"):
-                file_record["reason"] = extraction["error"]
                 file_record["extraction_mode"] = extraction_mode
                 failed_files.append(file_record)
                 continue
@@ -412,6 +433,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
         combined_text = _build_combined_text(passed_files, selected_file_ids)
 
         log_worker_event(audit_log, f"Compiled context for {len(approved_files)} documents. Sending to AI VM...")
+        source_type = audit_log.source_type
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
             "selected_files_count": len(selected_file_ids),
@@ -422,6 +444,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             "failed_files": failed_files,
             "analysis_input_files": approved_files,
             "workflow_stage": "analysis_complete",
+            "source_type": source_type,
         }
         audit_log.save(update_fields=['source_metadata'])
 
@@ -439,7 +462,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             result = ai_service.process_content(
                 content=combined_text,
                 skill_name="deal_extraction",
-                source_type="onedrive_folder",
+                source_type=source_type,
                 metadata=meta
             )
             log_worker_event(audit_log, "AI Analysis complete.")
@@ -483,9 +506,10 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
 
 
 @shared_task(bind=True)
-def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str, selected_file_ids: list, session_id: str):
+def preflight_selection_async(self, drive_id: str | None, folder_id: str | None, user_email: str, audit_log_id: str, selected_file_ids: list, session_id: str):
     """
     Performs a read/extraction preflight on selected files before the user confirms the Qwen analysis.
+    Supports both OneDrive and Email sources.
     """
     from ai_orchestrator.models import AIAuditLog
 
@@ -496,8 +520,14 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
         return {"error": "Audit log not found"}
 
     try:
-        log_worker_event(audit_log, "Downloading and extracting selected documents...")
-        extraction_result = _extract_selected_files(drive_id, user_email, selected_file_ids)
+        cache_key = f"folder_sync_{session_id}"
+        session_data = cache.get(cache_key) or {}
+        
+        email_id = session_data.get("email_id")
+        source_type = audit_log.source_type
+
+        log_worker_event(audit_log, f"Downloading and extracting selected {source_type} content...")
+        extraction_result = _extract_selected_files(drive_id, user_email, selected_file_ids, email_id=email_id)
         passed_files = extraction_result["passed_files"]
         failed_files = extraction_result["failed_files"]
 
@@ -514,6 +544,7 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
             "workflow_stage": "preflight_complete",
             "interaction_status": "pending",
             "interaction_mode": "editable",
+            "source_type": source_type
         }
         audit_log.raw_response = (
             f"Preflight completed for {len(selected_file_ids)} selected files.\n"
@@ -522,11 +553,11 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
         audit_log.save()
         broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
 
-        cache_key = f"folder_sync_{session_id}"
-        session_data = cache.get(cache_key) or {}
         session_data.update({
             "folder_id": folder_id,
             "drive_id": drive_id,
+            "email_id": email_id,
+            "source_type": source_type,
             "user_email": user_email,
             "selected_file_ids": selected_file_ids,
             "passed_files": passed_files,
@@ -534,20 +565,22 @@ def preflight_selection_async(self, drive_id: str, folder_id: str, user_email: s
             "preflight_audit_log_id": str(audit_log.id),
         })
         cache.set(cache_key, session_data, timeout=3600)
-        logger.info("Session %s updated in cache with %s passed files. Key: %s", session_id, len(passed_files), cache_key)
+        logger.info("Session %s updated in cache with %s passed files. Source: %s", session_id, len(passed_files), source_type)
 
         return {
             "phase": "preflight",
             "status": "success",
             "audit_log_id": str(audit_log.id),
             "session_id": session_id,
-            "folder_id": folder_id,
+            "source_type": source_type,
             "selected_files_count": len(selected_file_ids),
             "passed_files_count": len(passed_files),
             "failed_files_count": len(failed_files),
             "passed_files": passed_files,
             "failed_files": failed_files,
             "drive_id": drive_id,
+            "folder_id": folder_id,
+            "email_id": email_id,
             "user_email": user_email,
         }
     except Exception as e:
