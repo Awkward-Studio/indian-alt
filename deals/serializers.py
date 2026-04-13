@@ -165,7 +165,7 @@ class DealSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = '__all__'
-        read_only_fields = ('id', 'created_at')
+        read_only_fields = ('id',)
 
 
 class DealDetailSerializer(DealSerializer):
@@ -187,15 +187,18 @@ class DealDetailSerializer(DealSerializer):
     
     class Meta:
         model = Deal
-        exclude = (
-            'extracted_text', 
-            'thinking', 
-            'ambiguities', 
-            'analysis_json', 
-            'deal_flow_decisions',
-            'analysis_history'
+        fields = (
+            'id', 'title', 'bank', 'bank_name', 'primary_contact',
+            'primary_contact_name', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
+            'funding_ask', 'funding_ask_for', 'current_phase', 'industry',
+            'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
+            'ic_stage', 'city', 'country', 'created_at', 'deal_summary',
+            'deal_details', 'company_details', 'comments', 'reasons_for_passing',
+            'legacy_investment_bank', 'other_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
+            'phase_logs', 'latest_phase_readiness_check', 'source_onedrive_id',
+            'source_drive_id', 'source_email_id', 'processing_status', 'processing_error'
         )
-        read_only_fields = ('id', 'created_at')
+        read_only_fields = ('id',)
 
 
 class DealHeavyFieldsSerializer(serializers.ModelSerializer):
@@ -243,7 +246,7 @@ class DealListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = (
-            'id', 'title', 'bank', 'bank_name', 'priority', 'current_phase', 'created_at',
+            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase', 'created_at',
             'deal_summary', 'industry', 'sector', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for',

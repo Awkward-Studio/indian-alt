@@ -126,9 +126,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['title', 'deal_summary', 'industry', 'sector', 'city', 'state', 'country']
-    ordering_fields = ['created_at', 'title', 'priority']
+    ordering_fields = ['created_at', 'title', 'priority', 'deal_status']
     ordering = ['-created_at']
-    filterset_fields = ['bank', 'priority', 'fund', 'is_female_led', 'management_meeting']
+    filterset_fields = ['bank', 'priority', 'deal_status', 'fund', 'is_female_led', 'management_meeting']
     
     def get_serializer_class(self):
         # Use lightweight serializer for list views to reduce payload size
@@ -148,7 +148,18 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """
         deal = self.get_object()
         serializer = self.get_serializer(deal)
-        return Response(serializer.data)
+        data = serializer.data
+
+        include_extracted_text = request.query_params.get('include_extracted_text', 'true').lower() == 'true'
+        include_thinking = request.query_params.get('include_thinking', 'true').lower() == 'true'
+
+        if not include_extracted_text:
+            data.pop('extracted_text', None)
+
+        if not include_thinking:
+            data.pop('thinking', None)
+
+        return Response(data)
     
     def perform_create(self, serializer):
         deal = serializer.save()

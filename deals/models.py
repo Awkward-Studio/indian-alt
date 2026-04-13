@@ -7,15 +7,18 @@ from contacts.models import Contact
 
 
 class DealPriority(models.TextChoices):
+    HIGH = 'High', 'High'
+    MEDIUM = 'Medium', 'Medium'
+    LOW = 'Low', 'Low'
+
+
+class DealStatus(models.TextChoices):
     NEW = 'New', 'New'
     TO_BE_PASSED = 'To be Passed', 'To be Passed'
     TO_BE_PASS = 'To Be Pass', 'To Be Pass'
     PASSED = 'Passed', 'Passed'
     PORTFOLIO = 'Portfolio', 'Portfolio'
     INVESTED = 'Invested', 'Invested'
-    HIGH = 'High', 'High'
-    MEDIUM = 'Medium', 'Medium'
-    LOW = 'Low', 'Low'
 
 
 class DealPhase(models.TextChoices):
@@ -63,9 +66,18 @@ class Deal(models.Model):
     priority = models.CharField(
         max_length=20,
         choices=DealPriority.choices,
+        default=DealPriority.MEDIUM,
         blank=True,
         null=True,
         db_column='priority'
+    )
+    deal_status = models.CharField(
+        max_length=20,
+        choices=DealStatus.choices,
+        default=DealStatus.NEW,
+        blank=True,
+        null=True,
+        db_column='deal_status'
     )
     current_phase = models.CharField(
         max_length=50,
@@ -185,6 +197,7 @@ class Deal(models.Model):
         indexes = [
             models.Index(fields=['-created_at']),
             models.Index(fields=['priority']),
+            models.Index(fields=['deal_status']),
             models.Index(fields=['bank']),
         ]
 
