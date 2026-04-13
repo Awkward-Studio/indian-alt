@@ -247,9 +247,10 @@ class DealListSerializer(serializers.ModelSerializer):
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase', 'created_at',
-            'deal_summary', 'industry', 'sector', 'primary_contact',
+            'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
-            'funding_ask', 'funding_ask_for',
+            'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
+            'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
             'rejection_stage_id', 'rejection_reason'
         )
         read_only_fields = ('id', 'created_at')

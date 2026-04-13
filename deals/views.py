@@ -1,6 +1,10 @@
 import logging
+from decimal import Decimal, InvalidOperation
+
+import django_filters.rest_framework as django_filters
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
@@ -20,6 +24,25 @@ from .services.phase_readiness import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class DealPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class DealFilterSet(django_filters.FilterSet):
+    sector = django_filters.CharFilter(lookup_expr='icontains')
+    city = django_filters.CharFilter(lookup_expr='icontains')
+
+    class Meta:
+        model = Deal
+        fields = [
+            'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
+            'management_meeting', 'business_proposal_stage', 'ic_stage',
+            'current_phase', 'sector', 'city'
+        ]
 
 
 @extend_schema_view(
@@ -122,14 +145,56 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 )
 class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     # Use select_related to avoid N+1 queries on foreign keys
-    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').all()
+    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility').all()
     permission_classes = [IsAuthenticated]
+    pagination_class = DealPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['title', 'deal_summary', 'industry', 'sector', 'city', 'state', 'country']
-    ordering_fields = ['created_at', 'title', 'priority', 'deal_status']
+    filterset_class = DealFilterSet
+    search_fields = [
+        'title', 'deal_summary', 'industry', 'sector', 'city', 'state',
+        'country', 'fund', 'priority', 'deal_status', 'current_phase',
+        'funding_ask_for', 'bank__name',
+        'legacy_investment_bank', 'primary_contact__name'
+    ]
+    ordering_fields = [
+        'created_at', 'title', 'priority', 'deal_status',
+        'sector', 'industry', 'fund', 'current_phase', 'city'
+    ]
     ordering = ['-created_at']
-    filterset_fields = ['bank', 'priority', 'deal_status', 'fund', 'is_female_led', 'management_meeting']
-    
+    @staticmethod
+    def _parse_funding_ask(value):
+        if value in (None, ''):
+            return 0.0
+
+        cleaned_value = str(value).strip().replace(',', '')
+        try:
+            return float(Decimal(cleaned_value))
+        except (InvalidOperation, ValueError, TypeError):
+            return 0.0
+
+    @action(detail=False, methods=['get'])
+    def dashboard_metrics(self, request):
+        """
+        Calculates aggregate metrics for the dashboard without loading all records.
+        """
+        queryset = Deal.objects.all()
+
+        total_value = 0.0
+        invested_ytd = 0.0
+        for deal_status, funding_ask in queryset.values_list('deal_status', 'funding_ask').iterator(chunk_size=1000):
+            parsed_amount = self._parse_funding_ask(funding_ask)
+            total_value += parsed_amount
+            if deal_status == 'Invested':
+                invested_ytd += parsed_amount
+
+        return Response({
+            'totalDeals': queryset.count(),
+            'activeDeals': queryset.filter(deal_status='New').count(),
+            'closedDeals': queryset.filter(deal_status__in=['Invested', 'Portfolio']).count(),
+            'totalValue': total_value,
+            'investedYTD': invested_ytd,
+        })
+
     def get_serializer_class(self):
         # Use lightweight serializer for list views to reduce payload size
         if self.action == 'list':
