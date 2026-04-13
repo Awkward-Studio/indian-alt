@@ -142,6 +142,29 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = serializer.save()
         DealCreationService.process_deal_creation(deal, serializer.validated_data, self.request.user)
 
+    @action(detail=True, methods=['patch'])
+    def connect_onedrive(self, request, pk=None):
+        """
+        Manually link a OneDrive folder to an existing deal.
+        """
+        deal = self.get_object()
+        folder_id = request.data.get('source_onedrive_id')
+        drive_id = request.data.get('source_drive_id')
+        
+        if not folder_id or not drive_id:
+            return Response({"error": "source_onedrive_id and source_drive_id are required"}, status=400)
+            
+        deal.source_onedrive_id = folder_id
+        deal.source_drive_id = drive_id
+        deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
+        
+        return Response({
+            "status": "success",
+            "message": "OneDrive folder linked successfully",
+            "source_onedrive_id": deal.source_onedrive_id,
+            "source_drive_id": deal.source_drive_id
+        })
+
     @extend_schema(
         summary="Get deals grouped by priority",
         description="Retrieve all deals grouped by their priority level.",
