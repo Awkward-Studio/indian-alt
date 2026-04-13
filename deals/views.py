@@ -9,7 +9,7 @@ from core.mixins import ErrorHandlingMixin
 from .models import Deal, DealDocument, DealPhaseLog
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer, 
-    DealDocumentSerializer, DealPhaseLogSerializer
+    DealDocumentSerializer, DealPhaseLogSerializer, DealHeavyFieldsSerializer
 )
 from .services.deal_creation import DealCreationService
 from .services.deal_flow import DealFlowService
@@ -136,7 +136,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return DealListSerializer
         if self.action == 'retrieve':
             return DealDetailSerializer
+        if self.action == 'heavy_fields':
+            return DealHeavyFieldsSerializer
         return DealSerializer
+    
+    @action(detail=True, methods=['get'])
+    def heavy_fields(self, request, pk=None):
+        """
+        Retrieve heavy fields (thinking, extracted_text, analysis_history)
+        lazily for forensic details.
+        """
+        deal = self.get_object()
+        serializer = self.get_serializer(deal)
+        return Response(serializer.data)
     
     def perform_create(self, serializer):
         deal = serializer.save()

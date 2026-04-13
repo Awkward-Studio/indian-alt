@@ -171,13 +171,40 @@ class DealSerializer(serializers.ModelSerializer):
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
+    latest_phase_readiness_check = serializers.SerializerMethodField()
+
+    def get_latest_phase_readiness_check(self, obj):
+        from .services.phase_readiness import (
+            DealPhaseReadinessService,
+            PHASE_READINESS_SOURCE_TYPE,
+        )
+
+        log = AIAuditLog.objects.filter(
+            source_type=PHASE_READINESS_SOURCE_TYPE,
+            source_id=str(obj.id),
+        ).order_by("-created_at").first()
+        return DealPhaseReadinessService.serialize_audit_log(log)
+    
+    class Meta:
+        model = Deal
+        exclude = (
+            'extracted_text', 
+            'thinking', 
+            'ambiguities', 
+            'analysis_json', 
+            'deal_flow_decisions',
+            'analysis_history'
+        )
+        read_only_fields = ('id', 'created_at')
+
+
+class DealHeavyFieldsSerializer(serializers.ModelSerializer):
     thinking = serializers.SerializerMethodField()
     ambiguities = serializers.SerializerMethodField()
     analysis_json = serializers.SerializerMethodField()
     initial_analysis = serializers.SerializerMethodField()
     current_analysis = serializers.SerializerMethodField()
     analysis_history = serializers.SerializerMethodField()
-    latest_phase_readiness_check = serializers.SerializerMethodField()
 
     def get_thinking(self, obj):
         return obj.thinking
@@ -197,29 +224,13 @@ class DealDetailSerializer(DealSerializer):
     def get_analysis_history(self, obj):
         return obj.analysis_history if isinstance(obj.analysis_history, list) else []
 
-    def get_latest_phase_readiness_check(self, obj):
-        from .services.phase_readiness import (
-            DealPhaseReadinessService,
-            PHASE_READINESS_SOURCE_TYPE,
+    class Meta:
+        model = Deal
+        fields = (
+            'id', 'extracted_text', 'thinking', 'ambiguities', 
+            'analysis_json', 'initial_analysis', 'current_analysis', 
+            'analysis_history'
         )
-
-        log = AIAuditLog.objects.filter(
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(obj.id),
-        ).order_by("-created_at").first()
-        return DealPhaseReadinessService.serialize_audit_log(log)
-    
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        # Truncate potentially massive text fields for initial render
-        if data.get('extracted_text') and len(data['extracted_text']) > 20000:
-            data['extracted_text'] = data['extracted_text'][:20000]
-        if data.get('thinking') and len(data['thinking']) > 50000:
-            data['thinking'] = data['thinking'][:50000] + "\n\n... [Thinking trace truncated] ..."
-        return data
-    
-    class Meta(DealSerializer.Meta):
-        fields = '__all__'
 
 
 class DealListSerializer(serializers.ModelSerializer):
@@ -229,19 +240,13 @@ class DealListSerializer(serializers.ModelSerializer):
         read_only=True
     )
     
-    def get_extracted_text(self, obj):
-        if obj.extracted_text and len(obj.extracted_text) > 20000:
-            return obj.extracted_text[:20000]
-        return obj.extracted_text
-
     class Meta:
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'current_phase', 'created_at',
             'deal_summary', 'industry', 'sector', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
-            'funding_ask', 'funding_ask_for', 'extracted_text',
-            'thinking', 'ambiguities', 'deal_flow_decisions',
-            'rejection_stage_id', 'rejection_reason', 'analysis_history'
+            'funding_ask', 'funding_ask_for',
+            'rejection_stage_id', 'rejection_reason'
         )
         read_only_fields = ('id', 'created_at')
