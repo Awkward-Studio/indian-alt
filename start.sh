@@ -54,8 +54,8 @@ HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 PY
 
     echo ""
-    echo "=== STARTING CELERY WORKER (CONCURRENT MODE) ==="
-    exec celery -A config worker --loglevel=info -Q high_priority,low_priority,default --concurrency=4
+    echo "=== STARTING CELERY WORKER (SINGLETON MODE) ==="
+    exec celery -A config worker --loglevel=info -Q high_priority,low_priority,default --concurrency=1
 else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="
