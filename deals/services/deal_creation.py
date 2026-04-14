@@ -229,10 +229,12 @@ class DealCreationService:
         try:
             from banks.models import Bank
             from contacts.models import Contact
+            from deals.services.contact_linking import sync_deal_contact_links
             
             firm_name = contact_discovery.get('firm_name')
             firm_domain = contact_discovery.get('firm_domain')
             banker_name = contact_discovery.get('name')
+            banker_email = contact_discovery.get('email')
             
             bank = None
             if firm_domain:
@@ -245,15 +247,37 @@ class DealCreationService:
                 bank = Bank.objects.create(name=firm_name, website_domain=firm_domain)
             
             if banker_name:
-                # Find or create contact
-                contact, created = Contact.objects.get_or_create(
-                    name=banker_name,
-                    bank=bank,
-                    defaults={
-                        'designation': contact_discovery.get('designation'),
-                        'linkedin_url': contact_discovery.get('linkedin')
-                    }
-                )
+                # Deduplication logic: try email first, then name + bank
+                contact = None
+                if banker_email:
+                    contact = Contact.objects.filter(email__iexact=banker_email).first()
+                
+                if not contact:
+                    contact = Contact.objects.filter(name__iexact=banker_name, bank=bank).first()
+                
+                if not contact:
+                    contact = Contact.objects.create(
+                        name=banker_name,
+                        bank=bank,
+                        email=banker_email,
+                        designation=contact_discovery.get('designation'),
+                        linkedin_url=contact_discovery.get('linkedin')
+                    )
+                else:
+                    # Update fields if they were missing
+                    updated_fields = []
+                    if not contact.email and banker_email:
+                        contact.email = banker_email
+                        updated_fields.append('email')
+                    if not contact.designation and contact_discovery.get('designation'):
+                        contact.designation = contact_discovery.get('designation')
+                        updated_fields.append('designation')
+                    if not contact.linkedin_url and contact_discovery.get('linkedin'):
+                        contact.linkedin_url = contact_discovery.get('linkedin')
+                        updated_fields.append('linkedin_url')
+                    if updated_fields:
+                        contact.save(update_fields=updated_fields)
+
                 deal.primary_contact = contact
                 if bank: 
                     deal.bank = bank
@@ -262,6 +286,11 @@ class DealCreationService:
                 contact.source_count += 1
                 contact.save(update_fields=['source_count'])
                 deal.save(update_fields=['primary_contact', 'bank'])
+                sync_deal_contact_links(
+                    deal,
+                    primary_contact=contact,
+                    primary_contact_provided=True,
+                )
                 print(f"[DISCOVERY] Linked {deal.title} to {banker_name} ({firm_name})")
         except Exception as e:
             logger.error(f"Discovery error: {str(e)}")

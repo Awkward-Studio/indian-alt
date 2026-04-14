@@ -733,19 +733,32 @@ class OneDriveListView(APIView):
                     top=top,
                 )
             else:
+                # ROOT VIEW: Combine multiple sources
+                combined_items = []
+                seen_ids = set()
+
+                def add_items(items_list):
+                    for item in items_list:
+                        item_id = item.get('id')
+                        if item_id and item_id not in seen_ids:
+                            combined_items.append(item)
+                            seen_ids.add(item_id)
+
+                # 1. Try list_shared_with_me
                 try:
-                    # Attempt to list all shared folders
-                    data = graph.list_shared_with_me(
-                        user_email=user_email,
-                        top=top,
-                    )
+                    shared_data = graph.list_shared_with_me(user_email=user_email, top=top)
+                    add_items(shared_data.get('value', []))
                 except Exception as e:
-                    # If sharedWithMe fails (e.g., account not provisioned), fall back to configured DMS root
-                    logger.warning(f"sharedWithMe failed ({e}), falling back to DMS root children.")
-                    data = graph.get_drive_root_children(
-                        user_email=user_email,
-                        top=top,
-                    )
+                    logger.warning(f"sharedWithMe failed in root view: {e}")
+
+                # 2. Try get_drive_root_children (DMS_SHARED_FOLDER_URL and DMS_DRIVE_ID)
+                try:
+                    root_data = graph.get_drive_root_children(user_email=user_email, top=top)
+                    add_items(root_data.get('value', []))
+                except Exception as e:
+                    logger.warning(f"get_drive_root_children failed in root view: {e}")
+
+                data = {'value': combined_items}
 
             # Note: Items from /sharedWithMe are 'remoteItem' in some cases
             items = []

@@ -16,11 +16,6 @@ from .models import (
     TranscriptionStatus,
 )
 from .services.deal_creation import DealCreationService
-from .services.phase_readiness import (
-    DealPhaseReadinessService,
-    PHASE_READINESS_SKILL_NAME,
-    PHASE_READINESS_SOURCE_TYPE,
-)
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -79,76 +74,6 @@ def _prepare_vdr_task_ids(signatures, callback_signature) -> tuple[list, object,
         callback_task_id = str(frozen_callback.id)
 
     return frozen_signatures, callback_signature, child_task_ids, callback_task_id
-
-
-@shared_task(bind=True)
-def run_phase_readiness_analysis_async(self, deal_id: str, audit_log_id: str):
-    """
-    Background task for a quick deal phase-readiness recommendation.
-    """
-    from ai_orchestrator.models import AIAuditLog
-    from ai_orchestrator.services.ai_processor import AIProcessorService
-
-    logger.info("Starting phase-readiness analysis for Deal %s", deal_id)
-
-    try:
-        deal = Deal.objects.get(id=deal_id)
-        audit_log = AIAuditLog.objects.get(id=audit_log_id)
-        audit_log.celery_task_id = self.request.id
-        audit_log.status = "PROCESSING"
-        audit_log.save(update_fields=["celery_task_id", "status"])
-
-        DealPhaseReadinessService.ensure_skill()
-        ai_service = AIProcessorService()
-        result = ai_service.process_content(
-            content=DealPhaseReadinessService.build_context(deal),
-            skill_name=PHASE_READINESS_SKILL_NAME,
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(deal.id),
-            metadata={
-                "audit_log_id": str(audit_log.id),
-                "_source_metadata": {
-                    "deal_id": str(deal.id),
-                    "current_phase_at_run": deal.current_phase,
-                    "trigger": "manual_status_check",
-                },
-            },
-        )
-
-        audit_log.refresh_from_db()
-        parsed_json = result.get("parsed_json") if isinstance(result, dict) and isinstance(result.get("parsed_json"), dict) else result
-        if isinstance(parsed_json, dict) and "error" not in parsed_json:
-            audit_log.parsed_json = DealPhaseReadinessService.normalize_result(parsed_json, deal)
-            audit_log.status = "COMPLETED"
-            audit_log.is_success = True
-            audit_log.error_message = None
-            audit_log.save(update_fields=["parsed_json", "status", "is_success", "error_message"])
-            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-            return {"status": "success", "audit_log_id": str(audit_log.id)}
-
-        error_message = (
-            parsed_json.get("error")
-            if isinstance(parsed_json, dict)
-            else "AI returned an invalid readiness payload."
-        )
-        audit_log.status = "FAILED"
-        audit_log.is_success = False
-        audit_log.error_message = str(error_message)
-        audit_log.save(update_fields=["status", "is_success", "error_message"])
-        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-        return {"error": str(error_message)}
-    except Exception as e:
-        logger.error("Phase-readiness analysis failed: %s", str(e))
-        try:
-            audit_log = AIAuditLog.objects.get(id=audit_log_id)
-            audit_log.status = "FAILED"
-            audit_log.is_success = False
-            audit_log.error_message = str(e)
-            audit_log.save(update_fields=["status", "is_success", "error_message"])
-            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-        except Exception:
-            pass
-        raise
 
 
 def _extract_selected_files(drive_id: str | None, user_email: str, selected_file_ids: list, email_id: str | None = None) -> dict:

@@ -56,17 +56,6 @@ class PromptBuilderService:
                 "- `funding_ask` must be a string in INR Cr, not a number.\n"
                 "- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.\n"
             )
-        elif skill and skill.name == "deal_phase_readiness":
-            system_instructions += (
-                "\n\n### PHASE READINESS OUTPUT CONTRACT:\n"
-                "- Return exactly one JSON object and nothing else.\n"
-                "- `decision` must be one of: ready, not_ready, insufficient_information.\n"
-                "- `recommended_next_phase` must be the provided expected next phase or null.\n"
-                "- `blocking_gaps` and `evidence_signals` must be arrays of strings.\n"
-                "- For `not_ready` and `insufficient_information`, `blocking_gaps` must state the exact current-phase blockers and the missing proof needed to advance.\n"
-                "- Do not use vague blockers; name the specific failed gate, unresolved issue, or missing item.\n"
-                "- Base the recommendation only on the saved deal context provided.\n"
-            )
         elif skill and skill.name == "vdr_incremental_analysis":
             system_instructions += (
                 "\n\n### INCREMENTAL ANALYSIS OUTPUT CONTRACT:\n"

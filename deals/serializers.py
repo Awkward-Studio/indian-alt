@@ -1,10 +1,9 @@
 from rest_framework import serializers
 from .models import Deal, DealDocument, DealPhaseLog, InitialAnalysisStatus
 from accounts.models import Profile
+from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
-from ai_orchestrator.models import AIAuditLog
-
-
+from .services.contact_linking import sync_deal_contact_links
 class DealPhaseLogSerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.name', read_only=True)
     
@@ -139,6 +138,12 @@ class DealSerializer(serializers.ModelSerializer):
         source='primary_contact.name',
         read_only=True
     )
+    additional_contacts = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Contact.objects.all(),
+        required=False
+    )
+    other_contact_details = serializers.SerializerMethodField()
     request_data = RequestSerializer(source='request', read_only=True)
     
     # Write-only field for linking email during creation
@@ -152,15 +157,69 @@ class DealSerializer(serializers.ModelSerializer):
         queryset=Profile.objects.all(),
         required=False
     )
+
+    def get_other_contact_details(self, obj):
+        contacts = obj.additional_contacts.select_related('bank').all()
+        return [
+            {
+                "id": str(contact.id),
+                "name": contact.name,
+                "email": contact.email,
+                "bank": str(contact.bank_id) if contact.bank_id else None,
+                "bank_name": contact.bank.name if contact.bank else None,
+            }
+            for contact in contacts
+        ]
     
     def create(self, validated_data):
         # Pop fields that are not on the Deal model anymore
         # Use a copy to ensure they remain available for perform_create hooks
         model_data = validated_data.copy()
+        additional_contacts = model_data.pop('additional_contacts', None)
+        legacy_other_contacts = model_data.pop('other_contacts', None)
+        deal_status = model_data.get('deal_status')
+        current_phase = model_data.get('current_phase')
+        synced_status = current_phase or deal_status or '1: Deal Sourced'
+        model_data['deal_status'] = synced_status
+        model_data['current_phase'] = synced_status
         model_data.pop('source_email_id', None)
         model_data.pop('contact_discovery', None)
         model_data.pop('analysis_json', None)
-        return super().create(model_data)
+        deal = super().create(model_data)
+
+        if additional_contacts is None and legacy_other_contacts:
+            additional_contacts = Contact.objects.filter(id__in=legacy_other_contacts)
+
+        sync_deal_contact_links(
+            deal,
+            primary_contact=model_data.get('primary_contact'),
+            primary_contact_provided='primary_contact' in model_data,
+            additional_contacts=additional_contacts,
+            additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
+        )
+        return deal
+
+    def update(self, instance, validated_data):
+        model_data = validated_data.copy()
+        additional_contacts = model_data.pop('additional_contacts', None)
+        legacy_other_contacts = model_data.pop('other_contacts', None)
+        if 'deal_status' in model_data or 'current_phase' in model_data:
+            synced_status = model_data.get('current_phase') or model_data.get('deal_status') or instance.current_phase or instance.deal_status or '1: Deal Sourced'
+            model_data['deal_status'] = synced_status
+            model_data['current_phase'] = synced_status
+        deal = super().update(instance, model_data)
+
+        if additional_contacts is None and legacy_other_contacts is not None:
+            additional_contacts = Contact.objects.filter(id__in=legacy_other_contacts)
+
+        sync_deal_contact_links(
+            deal,
+            primary_contact=model_data.get('primary_contact', instance.primary_contact),
+            primary_contact_provided='primary_contact' in model_data,
+            additional_contacts=additional_contacts,
+            additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
+        )
+        return deal
 
     class Meta:
         model = Deal
@@ -171,20 +230,7 @@ class DealSerializer(serializers.ModelSerializer):
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
-    latest_phase_readiness_check = serializers.SerializerMethodField()
     file_tree = serializers.SerializerMethodField()
-
-    def get_latest_phase_readiness_check(self, obj):
-        from .services.phase_readiness import (
-            DealPhaseReadinessService,
-            PHASE_READINESS_SOURCE_TYPE,
-        )
-
-        log = AIAuditLog.objects.filter(
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(obj.id),
-        ).order_by("-created_at").first()
-        return DealPhaseReadinessService.serialize_audit_log(log)
 
     def get_file_tree(self, obj):
         from .services.folder_analysis import FolderAnalysisService
@@ -200,8 +246,8 @@ class DealDetailSerializer(DealSerializer):
             'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
             'ic_stage', 'city', 'country', 'created_at', 'deal_summary',
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
-            'legacy_investment_bank', 'other_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
-            'phase_logs', 'latest_phase_readiness_check', 'source_onedrive_id',
+            'legacy_investment_bank', 'other_contacts', 'other_contact_details', 'additional_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
+            'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree',
         )

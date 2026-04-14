@@ -52,7 +52,7 @@ class ContactFilterSet(FilterSet):
 )
 class ContactViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     # select_related prevents N+1 queries when accessing bank.name
-    queryset = Contact.objects.select_related('bank').all()
+    queryset = Contact.objects.select_related('bank').prefetch_related('primary_deals', 'additional_deals').all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'email', 'designation', 'location']

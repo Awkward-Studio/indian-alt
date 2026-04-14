@@ -37,6 +37,15 @@ class Contact(models.Model):
     twitter_handle = models.TextField(blank=True, null=True)
     source_count = models.IntegerField(default=0, help_text='Total deals sourced from this contact')
 
+    # Legacy Banker Database Fields
+    ranking = models.TextField(blank=True, null=True, help_text='Legacy Ranking')
+    primary_coverage_person = models.TextField(blank=True, null=True, help_text='Person Covering - Primary')
+    secondary_coverage_person = models.TextField(blank=True, null=True, help_text='Person Covering - Secondary')
+    total_deals_legacy = models.IntegerField(default=0, help_text='Total Deals from Legacy DB')
+    pipeline = models.TextField(blank=True, null=True, help_text='Legacy Pipeline/Status')
+    follow_ups = models.TextField(blank=True, null=True, help_text='Legacy Follow Ups')
+    last_meeting_date = models.TextField(blank=True, null=True, help_text='Legacy Last Meeting / Call Date (Stored as text)')
+
     class Meta:
         db_table = 'contact'
         ordering = ['name', 'created_at']

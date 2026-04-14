@@ -493,8 +493,8 @@ class GraphAPIService:
         """List items shared with the authenticated user."""
         token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
-        # /me/drive/sharedWithMe returns DriveItems shared with the user
-        return self._make_request('GET', "/me/drive/sharedWithMe", token, params)
+        # /users/{user_email}/drive/sharedWithMe is more robust than /me/drive/sharedWithMe
+        return self._make_request('GET', f"/users/{user_email}/drive/sharedWithMe", token, params)
 
     # ── Item metadata ──
 

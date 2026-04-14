@@ -59,6 +59,14 @@ List all sources used at the end of the narrative.""",
                         "city": "string",
                         "themes": ["string"]
                     },
+                    "contact_discovery": {
+                        "firm_name": "string",
+                        "firm_domain": "string",
+                        "name": "string",
+                        "designation": "string",
+                        "linkedin": "string",
+                        "email": "string"
+                    },
                     "metadata": {
                         "ambiguous_points": ["string"],
                         "sources_cited": ["string"]
@@ -90,7 +98,15 @@ Return exactly one valid JSON object and nothing else. Do not use markdown fence
     "funding_ask_for": "Use of funds (e.g. Working Capital, Expansion)",
     "priority": "High/Medium/Low based on Phase 4 results",
     "city": "HQ City",
-    "themes": ["List of market/tech theme tags"]
+    "themes": ["List of India Alternative themes"]
+  },
+  "contact_discovery": {
+    "firm_name": "Investment Bank or Advisory Firm Name",
+    "firm_domain": "Website domain of the firm (e.g. website.com)",
+    "name": "Primary Banker or Contact Name",
+    "designation": "Designation/Title of the Contact",
+    "linkedin": "LinkedIn URL if available",
+    "email": "Email address of the contact if available"
   },
   "metadata": {
     "ambiguous_points": ["Specific risks or gaps needing verification"],
@@ -100,6 +116,13 @@ Return exactly one valid JSON object and nothing else. Do not use markdown fence
 }
 
 RULES:
+- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes:
+  a. Women Oriented Consumption
+  b. Health & Wellness
+  c. Financial Services + Tech
+  d. Gen Z + Millennials
+  e. Climate & Sustainability
+- BANKERS: Investment Banker and advisory team details are typically located on the final pages of the pitch deck or teaser. Extract them carefully into the 'contact_discovery' object. If none are found, output null for contact_discovery.
 - Do not repeat the JSON object or any keys.
 - Keep 'analyst_report' concise enough to fit in a single response.
 - Every claim in 'analyst_report' must include citations [Source: DocName]."""
@@ -166,44 +189,6 @@ Rules:
 - Do not rewrite the entire existing analysis.
 - Use only the supplied new-document context.
 - Keep citations or file references tied to the new documents when possible.""",
-            }
-        )
-
-        AISkill.objects.update_or_create(
-            name="deal_phase_readiness",
-            defaults={
-                "description": "Stage-aware recommendation on whether a deal is ready to advance to the next phase, including exact blockers preventing advancement.",
-                "output_schema": {
-                    "decision": "ready|not_ready|insufficient_information",
-                    "is_ready_for_next_phase": "boolean",
-                    "recommended_next_phase": "string|null",
-                    "rationale": "string",
-                    "blocking_gaps": ["string"],
-                    "evidence_signals": ["string"],
-                },
-                "prompt_template": """Evaluate whether this deal is ready to move to its next phase using the firm's 18-step deal process.
-
-Context:
-{{ content }}
-
-Return exactly one valid JSON object and nothing else:
-{
-  "decision": "ready|not_ready|insufficient_information",
-  "is_ready_for_next_phase": true,
-  "recommended_next_phase": "Exact next phase label or null",
-  "rationale": "Short rationale tied to the saved deal evidence and the current phase gate",
-  "blocking_gaps": ["Exact current-phase blockers with the missing proof, unresolved issue, or failed condition preventing advancement"],
-  "evidence_signals": ["Concrete positive or negative signals from the deal record"]
-}
-
-Rules:
-- Use only the supplied saved deal context.
-- Judge readiness against the current phase only; do not skip phases.
-- If evidence is insufficient, use "insufficient_information".
-- `recommended_next_phase` must be the provided expected next phase or null.
-- For `not_ready` and `insufficient_information`, `blocking_gaps` must state the exact current-phase blockers and the missing proof needed to advance.
-- Do not use vague blockers; name the specific failed gate, unresolved issue, or missing item.
-- Keep the rationale concise and decision-useful.""",
             }
         )
 

@@ -18,10 +18,6 @@ from .serializers import (
 from .services.deal_creation import DealCreationService
 from .services.deal_flow import DealFlowService
 from .services.folder_analysis import FolderAnalysisService
-from .services.phase_readiness import (
-    DealPhaseReadinessService,
-    PHASE_READINESS_SOURCE_TYPE,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +37,7 @@ class DealFilterSet(django_filters.FilterSet):
         fields = [
             'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'current_phase', 'sector', 'city'
+            'current_phase', 'sector', 'city', 'primary_contact'
         ]
 
 
@@ -145,7 +141,7 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 )
 class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     # Use select_related to avoid N+1 queries on foreign keys
-    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility').all()
+    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility', 'additional_contacts').all()
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -189,7 +185,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
         return Response({
             'totalDeals': queryset.count(),
-            'activeDeals': queryset.filter(deal_status='New').count(),
+            'activeDeals': queryset.exclude(deal_status__in=['Passed', 'Invested', 'Portfolio']).count(),
             'closedDeals': queryset.filter(deal_status__in=['Invested', 'Portfolio']).count(),
             'totalValue': total_value,
             'investedYTD': invested_ytd,
@@ -444,72 +440,6 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if "error" in result:
             return Response(result, status=400)
         return Response(result)
-
-    @action(detail=True, methods=['post'])
-    def run_phase_readiness_analysis(self, request, pk=None):
-        """
-        Queues a quick AI recommendation on whether the deal is ready for the next phase.
-        """
-        deal = self.get_object()
-
-        from .tasks import run_phase_readiness_analysis_async
-        from ai_orchestrator.models import AIAuditLog, AIPersonality
-
-        existing_run = AIAuditLog.objects.filter(
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(deal.id),
-            status__in=["PENDING", "PROCESSING"],
-        ).order_by("-created_at").first()
-        if existing_run:
-            return Response(
-                {
-                    "task_id": existing_run.celery_task_id,
-                    "audit_log_id": str(existing_run.id),
-                    "status": "processing",
-                    "message": "A phase-readiness analysis is already running for this deal.",
-                },
-                status=200,
-            )
-
-        skill = DealPhaseReadinessService.ensure_skill()
-        personality = AIPersonality.objects.filter(is_default=True).first()
-        default_model = personality.text_model_name if personality else "qwen3.5:latest"
-
-        audit_log = AIAuditLog.objects.create(
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(deal.id),
-            context_label=f"Phase Readiness: {deal.title}",
-            personality=personality,
-            skill=skill,
-            status="PENDING",
-            is_success=False,
-            model_used=default_model,
-            system_prompt="Queued phase-readiness recommendation...",
-            user_prompt=f"Evaluate whether {deal.title} is ready to move beyond {deal.current_phase}.",
-            source_metadata={
-                "deal_id": str(deal.id),
-                "current_phase_at_run": deal.current_phase,
-                "trigger": "manual_status_check",
-            },
-        )
-
-        task = run_phase_readiness_analysis_async.apply_async(
-            kwargs={
-                "deal_id": str(deal.id),
-                "audit_log_id": str(audit_log.id),
-            },
-            queue="high_priority",
-        )
-
-        audit_log.celery_task_id = task.id
-        audit_log.save(update_fields=["celery_task_id"])
-
-        return Response({
-            "task_id": task.id,
-            "audit_log_id": str(audit_log.id),
-            "status": "queued",
-            "message": "Phase-readiness analysis queued.",
-        })
 
     @action(detail=True, methods=['post'])
     def analyze_additional_documents(self, request, pk=None):

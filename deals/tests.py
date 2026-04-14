@@ -5,14 +5,15 @@ from django.test import TestCase
 
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from deals.models import AnalysisKind, Deal, DealDocument, InitialAnalysisStatus
-from deals.serializers import DealDetailSerializer
+from deals.serializers import DealDetailSerializer, DealSerializer
+from contacts.serializers import ContactSerializer
+from contacts.models import Contact
+from banks.models import Bank
 from deals.services.deal_creation import DealCreationService
+from deals.services.deal_flow import DealFlowService
+from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
 from deals.tasks import analyze_additional_documents_async, analyze_selection_async, process_single_document_async
-from deals.services.phase_readiness import (
-    DealPhaseReadinessService,
-    PHASE_READINESS_SOURCE_TYPE,
-)
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -137,39 +138,6 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(serialized["ambiguities"], [])
         self.assertEqual(serialized["analysis_json"], {})
         self.assertEqual(serialized["analysis_history"], [])
-        self.assertIsNone(serialized["latest_phase_readiness_check"])
-
-    def test_detail_serializer_includes_latest_phase_readiness_check(self):
-        deal = Deal.objects.create(
-            title="Acme Finance",
-            current_phase="4: Initial Materials Review",
-        )
-        AIAuditLog.objects.create(
-            source_type=PHASE_READINESS_SOURCE_TYPE,
-            source_id=str(deal.id),
-            context_label="Phase Readiness: Acme Finance",
-            model_used="qwen3.5:latest",
-            system_prompt="Queued phase-readiness recommendation...",
-            user_prompt="Evaluate phase readiness",
-            status="COMPLETED",
-            is_success=True,
-            parsed_json={
-                "decision": "ready",
-                "is_ready_for_next_phase": True,
-                "recommended_next_phase": "5: Financial Model Call",
-                "rationale": "Materials review is complete and no blocking gaps remain.",
-                "blocking_gaps": [],
-                "evidence_signals": ["Strong initial materials quality"],
-            },
-        )
-
-        serialized = DealDetailSerializer(instance=deal).data
-
-        self.assertEqual(serialized["latest_phase_readiness_check"]["status"], "COMPLETED")
-        self.assertEqual(
-            serialized["latest_phase_readiness_check"]["parsed_json"]["recommended_next_phase"],
-            "5: Financial Model Call",
-        )
 
     def test_detail_serializer_includes_persisted_file_tree_for_folder_backed_deal(self):
         deal = Deal.objects.create(
@@ -200,86 +168,108 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(serialized["file_tree"][0]["name"], "Deck.pdf")
         self.assertEqual(serialized["file_tree"][0]["path"], "Investment/Deck.pdf")
 
-    def test_phase_readiness_normalize_result_preserves_exact_blockers(self):
+
+class DealStatusSyncTests(TestCase):
+    def test_serializer_create_syncs_deal_status_and_current_phase(self):
+        serializer = DealSerializer(data={
+            "title": "Synced Create",
+            "deal_status": "12: Term Sheet",
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        deal = serializer.save()
+
+        self.assertEqual(deal.deal_status, "12: Term Sheet")
+        self.assertEqual(deal.current_phase, "12: Term Sheet")
+
+    def test_serializer_update_syncs_from_current_phase(self):
         deal = Deal.objects.create(
-            title="NDA Hold",
+            title="Synced Update",
+            deal_status="3: NDA Execution",
             current_phase="3: NDA Execution",
         )
+        serializer = DealSerializer(instance=deal, data={"current_phase": "16: IC Note II"}, partial=True)
 
-        normalized = DealPhaseReadinessService.normalize_result(
-            {
-                "decision": "not_ready",
-                "is_ready_for_next_phase": False,
-                "recommended_next_phase": None,
-                "rationale": "The deal cannot move ahead because NDA completion is not evidenced in the saved record.",
-                "blocking_gaps": [
-                    "Missing signed NDA from both parties; no executed NDA is recorded in the saved deal context.",
-                    "No evidence confidential materials were shared after NDA completion, so the phase gate remains unproven.",
-                ],
-                "evidence_signals": [
-                    "Current phase is 3: NDA Execution.",
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        updated = serializer.save()
+
+        self.assertEqual(updated.deal_status, "16: IC Note II")
+        self.assertEqual(updated.current_phase, "16: IC Note II")
+
+    def test_deal_serializer_sets_primary_contact_bank_and_additional_contacts(self):
+        bank = Bank.objects.create(name="Axis Capital")
+        primary_contact = Contact.objects.create(name="Primary Banker", bank=bank)
+        secondary_contact = Contact.objects.create(name="Secondary Banker")
+        serializer = DealSerializer(data={
+            "title": "Linked Deal",
+            "primary_contact": str(primary_contact.id),
+            "additional_contacts": [str(secondary_contact.id)],
+        })
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        deal = serializer.save()
+
+        self.assertEqual(deal.primary_contact_id, primary_contact.id)
+        self.assertEqual(deal.bank_id, bank.id)
+        self.assertEqual(list(deal.additional_contacts.values_list("id", flat=True)), [secondary_contact.id])
+        self.assertEqual(deal.other_contacts, [str(secondary_contact.id)])
+
+    def test_contact_serializer_updates_linked_deals_bidirectionally(self):
+        bank = Bank.objects.create(name="Avendus")
+        contact = Contact.objects.create(name="Banker", bank=bank)
+        deal_primary = Deal.objects.create(title="Primary Deal")
+        deal_additional = Deal.objects.create(title="Additional Deal")
+
+        serializer = ContactSerializer(
+            instance=contact,
+            data={
+                "bank": str(bank.id),
+                "linked_deals_payload": [
+                    {"deal_id": str(deal_primary.id), "is_primary": True},
+                    {"deal_id": str(deal_additional.id), "is_primary": False},
                 ],
             },
-            deal,
+            partial=True,
         )
 
-        self.assertEqual(
-            normalized["blocking_gaps"],
-            [
-                "Missing signed NDA from both parties; no executed NDA is recorded in the saved deal context.",
-                "No evidence confidential materials were shared after NDA completion, so the phase gate remains unproven.",
-            ],
-        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
 
-    def test_phase_readiness_normalize_result_backfills_missing_blockers_for_not_ready(self):
+        deal_primary.refresh_from_db()
+        deal_additional.refresh_from_db()
+        self.assertEqual(deal_primary.primary_contact_id, contact.id)
+        self.assertEqual(deal_primary.bank_id, bank.id)
+        self.assertTrue(deal_additional.additional_contacts.filter(id=contact.id).exists())
+
+    def test_sync_contact_deal_links_removes_unselected_relationships(self):
+        contact = Contact.objects.create(name="Relationship Banker")
+        deal = Deal.objects.create(title="Legacy Linked", primary_contact=contact)
+
+        sync_contact_deal_links(contact, [])
+
+        deal.refresh_from_db()
+        self.assertIsNone(deal.primary_contact)
+
+    def test_update_flow_state_sets_passed_on_rejection(self):
         deal = Deal.objects.create(
-            title="Model Review",
+            title="Rejected Deal",
+            deal_status="5: Financial Model Call",
             current_phase="5: Financial Model Call",
         )
 
-        normalized = DealPhaseReadinessService.normalize_result(
-            {
-                "decision": "not_ready",
-                "is_ready_for_next_phase": False,
-                "recommended_next_phase": None,
-                "rationale": "The model walkthrough evidence is not sufficient.",
-                "blocking_gaps": [],
-                "evidence_signals": [],
-            },
-            deal,
+        DealFlowService.update_flow_state(
+            deal=deal,
+            active_stage="Passed",
+            decisions_update={"5": "no"},
+            reason="Model assumptions broke",
+            rejection_stage_id=5,
         )
 
-        self.assertEqual(
-            normalized["blocking_gaps"],
-            [
-                "The saved deal context does not show that the gate for 5: Financial Model Call has been cleared."
-            ],
-        )
+        deal.refresh_from_db()
+        self.assertEqual(deal.deal_status, "Passed")
+        self.assertEqual(deal.current_phase, "Passed")
+        self.assertEqual(deal.rejection_stage_id, 5)
 
-    def test_phase_readiness_normalize_result_backfills_missing_blockers_for_insufficient_information(self):
-        deal = Deal.objects.create(
-            title="Diligence Pending",
-            current_phase="13: Full Due Diligence",
-        )
-
-        normalized = DealPhaseReadinessService.normalize_result(
-            {
-                "decision": "insufficient_information",
-                "is_ready_for_next_phase": False,
-                "recommended_next_phase": None,
-                "rationale": "The record is too sparse to confirm diligence completion.",
-                "blocking_gaps": [],
-                "evidence_signals": [],
-            },
-            deal,
-        )
-
-        self.assertEqual(
-            normalized["blocking_gaps"],
-            [
-                "The saved deal context is missing enough phase-specific evidence to determine whether 13: Full Due Diligence is cleared."
-            ],
-        )
 
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document")
     @patch("deals.tasks.process_deal_folder_background.apply_async")
