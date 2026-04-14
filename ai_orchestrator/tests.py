@@ -1,6 +1,8 @@
 from django.test import TestCase
 from unittest.mock import MagicMock, patch
 
+from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.parsers import ResponseParserService
 from ai_orchestrator.services.flow_config import UniversalChatFlowService
 from ai_orchestrator.services.universal_chat import UniversalChatService
@@ -58,6 +60,38 @@ class ResponseParserServiceTests(TestCase):
             thinking='',
         )
         self.assertIsNone(salvaged)
+
+    @patch("ai_orchestrator.services.ai_processor.broadcast_audit_log_update")
+    def test_standard_response_marks_salvaged_extraction_as_completed(self, _broadcast):
+        audit_log = AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-1",
+            context_label="Selection Analysis",
+            status="PROCESSING",
+            is_success=False,
+            system_prompt="system",
+            user_prompt="user",
+        )
+
+        service = AIProcessorService()
+        service.provider = MagicMock()
+        service.provider.execute_standard.return_value = {
+            "response": (
+                '{"deal_model_data":{"title":"Acme","funding_ask":"125"},'
+                '"metadata":{"ambiguous_points":["One gap"]},'
+                '"analyst_report":"# Summary",'
+                '"deal_model_data":{"title":"Acme"}'
+            ),
+            "thinking": "",
+        }
+
+        parsed = service._standard_response({"model": "test"}, audit_log)
+
+        audit_log.refresh_from_db()
+        self.assertTrue(audit_log.is_success)
+        self.assertEqual(audit_log.status, "COMPLETED")
+        self.assertIsNone(audit_log.error_message)
+        self.assertTrue(parsed.get("_salvaged"))
 
 
 class UniversalChatServiceTests(TestCase):

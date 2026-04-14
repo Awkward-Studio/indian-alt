@@ -29,6 +29,57 @@ class FolderAnalysisService:
         return None
 
     @staticmethod
+    def get_persisted_file_tree_for_deal(deal: Deal) -> list[dict]:
+        """
+        Returns the latest persisted OneDrive folder tree for a deal, if available.
+        """
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return []
+
+        from ai_orchestrator.models import AIAuditLog
+
+        candidate_logs = AIAuditLog.objects.filter(
+            source_type='onedrive_folder',
+            source_id=deal.source_onedrive_id,
+        ).order_by('-created_at')
+
+        for log in candidate_logs:
+            metadata = log.source_metadata or {}
+            if metadata.get('drive_id') == deal.source_drive_id and metadata.get('file_tree'):
+                return metadata['file_tree']
+
+        return []
+
+    @staticmethod
+    def _get_existing_confirmed_deal(session_data: dict) -> Deal | None:
+        deal_id = session_data.get("confirmed_deal_id")
+        if deal_id:
+            return Deal.objects.filter(id=deal_id).first()
+
+        audit_log_id = session_data.get("originating_audit_log_id")
+        if not audit_log_id:
+            return None
+
+        from ai_orchestrator.models import AIAuditLog
+
+        log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        metadata = log.source_metadata if log else {}
+        confirmed_deal_id = (metadata or {}).get("deal_id")
+        if not confirmed_deal_id:
+            return None
+        return Deal.objects.filter(id=confirmed_deal_id).first()
+
+    @staticmethod
+    def _get_originating_audit_log(session_data: dict):
+        audit_log_id = session_data.get("originating_audit_log_id") or session_data.get("preflight_audit_log_id")
+        if not audit_log_id:
+            return None
+
+        from ai_orchestrator.models import AIAuditLog
+
+        return AIAuditLog.objects.filter(id=audit_log_id).first()
+
+    @staticmethod
     def queue_folder_analysis(folder_id: str, folder_name: str, drive_id: str) -> dict:
         """
         Kicks off an asynchronous folder analysis. Returns tracking info.
@@ -287,9 +338,14 @@ class FolderAnalysisService:
                 "drive_id": meta['drive_id'],
                 "folder_id": meta['folder_id'],
                 "user_email": DMS_USER_EMAIL,
+                "source_type": log.source_type,
+                "originating_audit_log_id": str(log.id),
                 "preliminary_data": log.parsed_json,
                 "preview_text": meta.get('preview_text', ''),
+                "raw_thinking": log.raw_thinking,
                 "passed_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
+                "analysis_input_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
+                "approved_file_ids": meta.get('approved_file_ids', []),
                 "failed_files": meta.get('failed_files', []),
             }, timeout=3600)
             
@@ -302,6 +358,7 @@ class FolderAnalysisService:
                 "passed_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
                 "failed_files": meta.get('failed_files', []),
                 "phase": "analysis",
+                "source_type": log.source_type,
             }
         except AIAuditLog.DoesNotExist:
             return {"error": "Audit log not found"}
@@ -491,18 +548,30 @@ class FolderAnalysisService:
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
             return {"error": "Session expired or invalid. Please re-analyze the source."}
+
+        existing_deal = FolderAnalysisService._get_existing_confirmed_deal(session_data)
+        if existing_deal:
+            if existing_deal.id != deal.id:
+                deal.delete()
+            return {
+                "status": "success",
+                "deal_id": existing_deal.id,
+                "message": "Deal already created from this analysis session.",
+            }
             
         analysis_json = session_data.get('preliminary_data', {})
         source_type = session_data.get('source_type', 'onedrive_folder')
+        origin_log = FolderAnalysisService._get_originating_audit_log(session_data)
+        origin_meta = origin_log.source_metadata if origin_log else {}
 
         deal.processing_status = 'idle'
         deal.processing_error = None
         
         if source_type == 'onedrive_folder':
-            deal.source_onedrive_id = session_data.get('folder_id')
-            deal.source_drive_id = session_data.get('drive_id')
+            deal.source_onedrive_id = session_data.get('folder_id') or origin_meta.get('folder_id') or getattr(origin_log, 'source_id', None)
+            deal.source_drive_id = session_data.get('drive_id') or origin_meta.get('drive_id')
         elif source_type == 'email':
-            deal.source_email_id = session_data.get('source_id')
+            deal.source_email_id = session_data.get('source_id') or origin_meta.get('email_id') or getattr(origin_log, 'source_id', None)
 
         deal.extracted_text = session_data.get('preview_text', '')
         
@@ -590,6 +659,15 @@ class FolderAnalysisService:
             DealDocument.objects.create(**doc_kwargs)
             
         deal.save()
+
+        if origin_log:
+            origin_log.source_metadata = {
+                **(origin_log.source_metadata or {}),
+                "deal_id": str(deal.id),
+                "interaction_status": "completed",
+                "interaction_mode": "read_only",
+            }
+            origin_log.save(update_fields=["source_metadata"])
         cache.delete(f"folder_sync_{session_id}")
         
         return {
@@ -609,21 +687,10 @@ class FolderAnalysisService:
         if deal.processing_status == 'processing':
             return {"error": "VDR processing is already running for this deal."}
 
-        from ai_orchestrator.models import AIAuditLog
         from deals.tasks import process_deal_folder_background
         from microsoft.services.graph_service import DMS_USER_EMAIL
 
-        candidate_logs = AIAuditLog.objects.filter(
-            source_type='onedrive_folder',
-            source_id=deal.source_onedrive_id,
-        ).order_by('-created_at')
-
-        file_tree = None
-        for log in candidate_logs:
-            metadata = log.source_metadata or {}
-            if metadata.get('drive_id') == deal.source_drive_id and metadata.get('file_tree'):
-                file_tree = metadata['file_tree']
-                break
+        file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
 
         if not file_tree:
             return {"error": "No persisted folder tree was found for this deal. Re-run the folder analysis to enable VDR processing."}

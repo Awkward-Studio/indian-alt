@@ -171,6 +171,35 @@ class DealAnalysisMappingTests(TestCase):
             "5: Financial Model Call",
         )
 
+    def test_detail_serializer_includes_persisted_file_tree_for_folder_backed_deal(self):
+        deal = Deal.objects.create(
+            title="Folder Backed Deal",
+            source_onedrive_id="folder-123",
+            source_drive_id="drive-xyz",
+        )
+        AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-123",
+            context_label="Folder: Backed",
+            model_used="qwen3.5:latest",
+            system_prompt="Traversal complete",
+            user_prompt="Analyze folder",
+            status="COMPLETED",
+            is_success=True,
+            source_metadata={
+                "drive_id": "drive-xyz",
+                "folder_id": "folder-123",
+                "file_tree": [
+                    {"id": "file-1", "name": "Deck.pdf", "path": "Investment/Deck.pdf"},
+                ],
+            },
+        )
+
+        serialized = DealDetailSerializer(instance=deal).data
+
+        self.assertEqual(serialized["file_tree"][0]["name"], "Deck.pdf")
+        self.assertEqual(serialized["file_tree"][0]["path"], "Investment/Deck.pdf")
+
     def test_phase_readiness_normalize_result_preserves_exact_blockers(self):
         deal = Deal.objects.create(
             title="NDA Hold",
@@ -308,6 +337,80 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(passed_doc.extraction_mode, "glm_ocr")
         failed_doc = deal.documents.get(onedrive_id="file-2")
         self.assertEqual(failed_doc.initial_analysis_status, InitialAnalysisStatus.SELECTED_FAILED)
+
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document")
+    def test_confirm_deal_from_session_returns_existing_confirmed_deal(self, mock_vectorize_document):
+        mock_vectorize_document.return_value = True
+        existing_deal = Deal.objects.create(title="Existing")
+        origin_log = AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-1",
+            context_label="Selection Analysis",
+            status="COMPLETED",
+            is_success=True,
+            source_metadata={"deal_id": str(existing_deal.id)},
+        )
+        session_id = "session-existing"
+        cache.set(
+            f"folder_sync_{session_id}",
+            {
+                "originating_audit_log_id": str(origin_log.id),
+                "preliminary_data": self.analysis_json,
+                "passed_files": [],
+                "failed_files": [],
+            },
+            timeout=3600,
+        )
+        duplicate = Deal.objects.create(title="Duplicate")
+
+        result = FolderAnalysisService.confirm_deal_from_session(session_id, duplicate)
+
+        self.assertEqual(result["deal_id"], existing_deal.id)
+        self.assertEqual(result["message"], "Deal already created from this analysis session.")
+        self.assertFalse(Deal.objects.filter(id=duplicate.id).exists())
+
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document")
+    def test_confirm_deal_from_session_restores_folder_linkage_from_origin_log(self, mock_vectorize_document):
+        mock_vectorize_document.return_value = True
+        origin_log = AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-xyz",
+            context_label="Selection Analysis",
+            status="COMPLETED",
+            is_success=True,
+            source_metadata={
+                "folder_id": "folder-xyz",
+                "drive_id": "drive-xyz",
+                "file_tree": [{"id": "file-1", "name": "Deck.pdf", "path": "Deck.pdf"}],
+                "analysis_input_files": [{"file_id": "file-1", "file_name": "Deck.pdf"}],
+            },
+        )
+        session_id = "session-origin-log"
+        cache.set(
+            f"folder_sync_{session_id}",
+            {
+                "originating_audit_log_id": str(origin_log.id),
+                "preliminary_data": self.analysis_json,
+                "passed_files": [{
+                    "file_id": "file-1",
+                    "file_name": "Deck.pdf",
+                    "extracted_text": "Deck extracted text",
+                    "extraction_mode": "glm_ocr",
+                    "transcription_status": "complete",
+                }],
+                "approved_file_ids": ["file-1"],
+                "failed_files": [],
+            },
+            timeout=3600,
+        )
+        deal = Deal.objects.create(title="Linked Later")
+
+        result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
+
+        self.assertEqual(result["status"], "success")
+        deal.refresh_from_db()
+        self.assertEqual(deal.source_onedrive_id, "folder-xyz")
+        self.assertEqual(deal.source_drive_id, "drive-xyz")
 
     @patch("ai_orchestrator.services.ai_processor.AIProcessorService")
     def test_analyze_selection_async_returns_real_preliminary_data(self, mock_ai_processor):

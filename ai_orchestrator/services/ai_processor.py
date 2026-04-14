@@ -274,10 +274,18 @@ class AIProcessorService:
             else:
                 if is_extraction and isinstance(parsed_json, dict) and parsed_json.get("_salvaged"):
                     audit_log.parsed_json = parsed_json
-                audit_log.is_success = False
-                audit_log.status = 'FAILED'
-                audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')
-                logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
+                    audit_log.is_success = True
+                    audit_log.status = 'COMPLETED'
+                    audit_log.error_message = None
+                    logger.warning(
+                        "AuditLog %s completed with salvaged extraction payload.",
+                        audit_log.id,
+                    )
+                else:
+                    audit_log.is_success = False
+                    audit_log.status = 'FAILED'
+                    audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')
+                    logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
                 
             # Estimate tokens
             audit_log.tokens_used = (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4

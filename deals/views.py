@@ -427,8 +427,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             deal = serializer.save()
             result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
             if "error" in result:
+                deal.delete()
                 return Response(result, status=400)
-            return Response(result, status=201)
+            status_code = 200 if result.get("message") == "Deal already created from this analysis session." else 201
+            return Response(result, status=status_code)
             
         return Response(serializer.errors, status=400)
 

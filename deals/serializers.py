@@ -172,6 +172,7 @@ class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     latest_phase_readiness_check = serializers.SerializerMethodField()
+    file_tree = serializers.SerializerMethodField()
 
     def get_latest_phase_readiness_check(self, obj):
         from .services.phase_readiness import (
@@ -184,6 +185,11 @@ class DealDetailSerializer(DealSerializer):
             source_id=str(obj.id),
         ).order_by("-created_at").first()
         return DealPhaseReadinessService.serialize_audit_log(log)
+
+    def get_file_tree(self, obj):
+        from .services.folder_analysis import FolderAnalysisService
+
+        return FolderAnalysisService.get_persisted_file_tree_for_deal(obj)
     
     class Meta:
         model = Deal
@@ -196,7 +202,8 @@ class DealDetailSerializer(DealSerializer):
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
             'legacy_investment_bank', 'other_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
             'phase_logs', 'latest_phase_readiness_check', 'source_onedrive_id',
-            'source_drive_id', 'source_email_id', 'processing_status', 'processing_error'
+            'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
+            'file_tree',
         )
         read_only_fields = ('id',)
 
