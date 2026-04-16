@@ -14,16 +14,13 @@ class AIPersonality(models.Model):
     
     model_provider = models.CharField(
         max_length=50, 
-        default='ollama',
+        default='vllm',
         choices=[
-            ('ollama', 'Ollama (Local/Azure)'),
-            ('openai', 'OpenAI (GPT-4o)'),
-            ('gemini', 'Google Gemini'),
-            ('anthropic', 'Anthropic Claude'),
+            ('vllm', 'vLLM (OpenAI-Compatible)'),
         ]
     )
-    text_model_name = models.CharField(max_length=100, default='llama3.1:latest', help_text="Model for text-only tasks")
-    vision_model_name = models.CharField(max_length=100, default='llava:latest', help_text="Model for tasks with images/charts")
+    text_model_name = models.CharField(max_length=200, default='default', help_text="Model for text-only tasks")
+    vision_model_name = models.CharField(max_length=200, default='default', help_text="Model for tasks with images/charts")
     
     system_instructions = models.TextField(help_text="The core 'system' prompt that defines behavior")
     is_default = models.BooleanField(default=False, help_text="Whether this is the default personality")
@@ -164,7 +161,7 @@ class AIAuditLog(models.Model):
     personality = models.ForeignKey(AIPersonality, on_delete=models.SET_NULL, null=True)
     skill = models.ForeignKey(AISkill, on_delete=models.SET_NULL, null=True)
     
-    model_provider = models.CharField(max_length=50, default='ollama')
+    model_provider = models.CharField(max_length=50, default='vllm')
     model_used = models.CharField(max_length=100)
     
     # Payload details
@@ -259,7 +256,17 @@ class DocumentChunk(models.Model):
         'deals.Deal',
         on_delete=models.CASCADE,
         related_name='chunks',
-        help_text='The deal this chunk belongs to'
+        help_text='The deal this chunk belongs to',
+        null=True,
+        blank=True,
+    )
+    audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.CASCADE,
+        related_name='chunks',
+        null=True,
+        blank=True,
+        help_text='Initial analysis run this chunk belongs to before a deal exists',
     )
     
     # Provenance
@@ -270,6 +277,8 @@ class DocumentChunk(models.Model):
             ('attachment', 'Email Attachment'),
             ('onedrive', 'OneDrive File'),
             ('deal_summary', 'Deal Summary'),
+            ('document', 'Deal Document Artifact'),
+            ('analysis_document', 'Folder Analysis Document Artifact'),
             ('ai_thinking', 'AI Reasoning Logic'),
             ('ai_ambiguities', 'AI Identified Ambiguities'),
             ('extracted_source', 'Raw Extracted Text'),
@@ -292,6 +301,7 @@ class DocumentChunk(models.Model):
         verbose_name_plural = "Document Chunks"
         indexes = [
             models.Index(fields=['deal', 'source_type']),
+            models.Index(fields=['audit_log', 'source_type']),
             # Vector search index is usually created via SQL, but pgvector supports it
         ]
 

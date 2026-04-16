@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     ports:
       - "5432:5432"
     volumes:
@@ -24,26 +24,13 @@ services:
     networks:
       - app-network
 
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    # No ports exposed to the public; only internal access
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    networks:
-      - app-network
-
   backend:
     build: .
     volumes:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DEBUG=False
       - SECRET_KEY=${SECRET_KEY}
@@ -51,7 +38,15 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - OLLAMA_URL=http://ollama:11434
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      - VLLM_EMBEDDING_URL=${VLLM_EMBEDDING_URL:-http://host.docker.internal:8000/v1}
+      - VLLM_API_KEY=${VLLM_API_KEY}
+      - VLLM_TEXT_MODEL=${VLLM_TEXT_MODEL}
+      - VLLM_VISION_MODEL=${VLLM_VISION_MODEL}
+      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL}
+      - DOC_PROCESSOR_URL=${DOC_PROCESSOR_URL:-http://host.docker.internal:8100}
+      - DOC_PROCESSOR_API_KEY=${DOC_PROCESSOR_API_KEY}
+      - DOC_PROCESSOR_TIMEOUT=${DOC_PROCESSOR_TIMEOUT:-300}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
       - USE_SQLITE=False
       - DB_SSL_REQUIRE=False
@@ -63,8 +58,6 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
-      ollama:
         condition: service_started
     networks:
       - app-network
@@ -89,6 +82,5 @@ networks:
 
 volumes:
   postgres_data:
-  ollama_data:
   static_volume:
   media_volume:
