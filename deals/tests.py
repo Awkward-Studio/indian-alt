@@ -4,12 +4,14 @@ from django.core.cache import cache
 from django.test import TestCase
 
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
+from ai_orchestrator.services.embedding_processor import EmbeddingService
 from deals.models import AnalysisKind, Deal, DealDocument, InitialAnalysisStatus
 from deals.serializers import DealDetailSerializer, DealSerializer
 from contacts.serializers import ContactSerializer
 from contacts.models import Contact
 from banks.models import Bank
 from deals.services.deal_creation import DealCreationService
+from deals.services.document_artifacts import DocumentArtifactService
 from deals.services.deal_flow import DealFlowService
 from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
@@ -106,6 +108,27 @@ class DealAnalysisMappingTests(TestCase):
                 "Unit economics depend on channel mix",
             ],
         )
+
+    def test_normalize_analysis_payload_preserves_document_evidence_in_canonical_snapshot(self):
+        normalized = DealCreationService.normalize_analysis_payload(
+            {
+                "deal_model_data": {"title": "Acme Finance"},
+                "analyst_report": "Report body",
+                "document_evidence": [{"document_name": "Deck.pdf"}],
+                "metadata": {"ambiguous_points": ["Check margin bridge"]},
+            },
+            analysis_kind=AnalysisKind.INITIAL,
+            documents_analyzed=["Deck.pdf"],
+            analysis_input_files=[{"file_id": "file-1", "file_name": "Deck.pdf"}],
+            failed_files=[],
+        )
+
+        self.assertEqual(normalized["document_evidence"], [{"document_name": "Deck.pdf"}])
+        self.assertEqual(
+            normalized["canonical_snapshot"]["document_evidence"],
+            [{"document_name": "Deck.pdf"}],
+        )
+        self.assertEqual(normalized["metadata"]["documents_analyzed"], ["Deck.pdf"])
 
     def test_detail_serializer_includes_latest_analysis_fields(self):
         deal = Deal.objects.create(title="Acme Finance")
@@ -289,6 +312,7 @@ class DealStatusSyncTests(TestCase):
                     "file_id": "file-1",
                     "file_name": "Deck.pdf",
                     "extracted_text": "Deck extracted text",
+                    "normalized_text": "Deck normalized text",
                     "extraction_mode": "glm_ocr",
                     "transcription_status": "complete",
                 }],
@@ -312,13 +336,17 @@ class DealStatusSyncTests(TestCase):
         self.assertEqual(deal.city, "Mumbai")
         self.assertEqual(deal.deal_summary, "Structured summary from AI")
         self.assertEqual(deal.themes, ["Digital Lending", "Embedded Finance"])
-        self.assertEqual(deal.extracted_text, "Combined extracted text")
+        self.assertEqual(deal.extracted_text, "--- DOCUMENT: Deck.pdf ---\nDeck normalized text")
         self.assertEqual(deal.processing_status, "idle")
         self.assertEqual(analysis.thinking, "Folder reasoning trace")
         self.assertEqual(analysis.analysis_kind, AnalysisKind.INITIAL)
         self.assertEqual(
             analysis.analysis_json["metadata"]["analysis_input_files"],
             [{"file_id": "file-1", "file_name": "Deck.pdf"}],
+        )
+        self.assertEqual(
+            analysis.analysis_json["metadata"]["documents_analyzed"],
+            ["Deck.pdf"],
         )
         self.assertEqual(deal.documents.count(), 2)
         passed_doc = deal.documents.get(onedrive_id="file-1")
@@ -437,12 +465,17 @@ class DealStatusSyncTests(TestCase):
         result = analyze_selection_async(task_self, "session-1", str(audit_log.id), ["keep-1"])
 
         self.assertEqual(result["preliminary_data"]["analyst_report"], "Fresh report")
-        self.assertEqual(result["passed_files"], [{"file_id": "keep-1", "file_name": "Deck.pdf", "extracted_text": "Important content"}])
+        self.assertIn("document_evidence", result["preliminary_data"])
+        self.assertEqual(result["preliminary_data"]["metadata"]["documents_analyzed"], ["Deck.pdf"])
+        self.assertEqual(len(result["passed_files"]), 1)
+        self.assertEqual(result["passed_files"][0]["file_id"], "keep-1")
+        self.assertEqual(result["passed_files"][0]["file_name"], "Deck.pdf")
+        self.assertEqual(result["passed_files"][0]["normalized_text"], "Important content")
+        self.assertIn("document_artifact", result["passed_files"][0])
         audit_log.refresh_from_db()
-        self.assertEqual(
-            audit_log.source_metadata["analysis_input_files"],
-            [{"file_id": "keep-1", "file_name": "Deck.pdf", "extracted_text": "Important content"}],
-        )
+        self.assertEqual(len(audit_log.source_metadata["analysis_input_files"]), 1)
+        self.assertEqual(audit_log.source_metadata["analysis_input_files"][0]["file_id"], "keep-1")
+        self.assertEqual(audit_log.source_metadata["analysis_input_files"][0]["file_name"], "Deck.pdf")
 
     @patch("deals.tasks._vectorize_document_and_capture")
     @patch("deals.tasks.GraphAPIService")
@@ -533,6 +566,164 @@ class DealStatusSyncTests(TestCase):
         doc = DealDocument.objects.get(onedrive_id="file-1")
         self.assertEqual(doc.transcription_status, "partial")
         self.assertEqual(doc.is_ai_analyzed, False)
+        self.assertIn(doc.normalized_text or "", ["preview text from first pages", doc.extracted_text])
+
+    def test_document_artifact_service_reports_complete_and_degraded_statuses(self):
+        deal = Deal.objects.create(title="Artifact Deal")
+        complete_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Complete.pdf",
+            document_type="Other",
+            extracted_text="Some extracted text",
+            normalized_text="Some normalized text",
+            evidence_json={
+                "document_name": "Complete.pdf",
+                "document_type": "Other",
+                "document_summary": "Summary",
+                "claims": [],
+                "metrics": [],
+                "tables_summary": [],
+                "contacts_found": [],
+                "risks": [],
+                "open_questions": [],
+                "citations": ["Complete.pdf"],
+                "reasoning": "",
+                "quality_flags": [],
+                "normalized_text": "Some normalized text",
+                "source_map": {"document_name": "Complete.pdf"},
+            },
+        )
+        degraded_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Fallback.pdf",
+            document_type="Other",
+            extracted_text="Fallback text",
+            normalized_text="Fallback text",
+            evidence_json={
+                "document_name": "Fallback.pdf",
+                "document_type": "Other",
+                "document_summary": "Fallback text",
+                "claims": [],
+                "metrics": [],
+                "tables_summary": [],
+                "contacts_found": [],
+                "risks": [],
+                "open_questions": [],
+                "citations": ["Fallback.pdf"],
+                "reasoning": "",
+                "quality_flags": ["fallback_artifact"],
+                "normalized_text": "Fallback text",
+                "source_map": {"document_name": "Fallback.pdf"},
+            },
+        )
+
+        self.assertTrue(DocumentArtifactService.artifact_complete(complete_doc))
+        self.assertEqual(DocumentArtifactService.artifact_status(degraded_doc), DocumentArtifactService.STATUS_DEGRADED)
+
+    def test_document_serializer_exposes_artifact_status(self):
+        deal = Deal.objects.create(title="Serializer Deal")
+        doc = DealDocument.objects.create(
+            deal=deal,
+            title="Evidence.pdf",
+            document_type="Other",
+            extracted_text="Source text",
+            normalized_text="Source text",
+            evidence_json=DocumentArtifactService.artifact_from_file_record(
+                {"file_name": "Evidence.pdf", "extracted_text": "Source text", "document_type": "Other"}
+            ),
+        )
+
+        serialized = DealDetailSerializer(instance=deal).data
+        self.assertEqual(serialized["documents"][0]["artifact_status"], DocumentArtifactService.STATUS_DEGRADED)
+        self.assertFalse(serialized["documents"][0]["artifact_complete"])
+
+    def test_document_artifact_service_builds_embedding_chunk_families(self):
+        artifact = {
+            "document_name": "Metrics.pdf",
+            "document_type": "Pitch Deck",
+            "document_summary": "Revenue and EBITDA overview",
+            "claims": ["Growth accelerated in FY25"],
+            "metrics": [{"name": "EBITDA Margin", "value": "19%"}],
+            "tables_summary": [{"title": "P&L", "rows": ["Revenue", "EBITDA"]}],
+            "contacts_found": [],
+            "risks": ["Customer concentration remains high"],
+            "open_questions": [],
+            "citations": ["Metrics.pdf"],
+            "reasoning": "",
+            "quality_flags": [],
+            "normalized_text": "Normalized narrative text",
+            "source_map": {"document_name": "Metrics.pdf"},
+        }
+
+        chunks = DocumentArtifactService.build_embedding_chunks(artifact)
+        kinds = [chunk["metadata"]["chunk_kind"] for chunk in chunks]
+        self.assertIn("normalized_text", kinds)
+        self.assertIn("metric", kinds)
+        self.assertIn("table_summary", kinds)
+        self.assertIn("claim", kinds)
+        self.assertIn("risk", kinds)
+
+    def test_vectorize_document_creates_multiple_chunk_families(self):
+        deal = Deal.objects.create(title="Chunked Deal")
+        doc = DealDocument.objects.create(
+            deal=deal,
+            title="Deck.pdf",
+            document_type="Pitch Deck",
+            extracted_text="Revenue grew quickly and EBITDA margin improved.",
+            normalized_text="Revenue grew quickly and EBITDA margin improved.",
+            evidence_json={
+                "document_name": "Deck.pdf",
+                "document_type": "Pitch Deck",
+                "document_summary": "Revenue and profitability improved",
+                "claims": ["Revenue momentum improved"],
+                "metrics": [{"name": "EBITDA Margin", "value": "19%"}],
+                "tables_summary": [{"title": "Financial Summary", "values": ["Revenue", "EBITDA"]}],
+                "contacts_found": [],
+                "risks": ["Concentration risk"],
+                "open_questions": [],
+                "citations": ["Deck.pdf"],
+                "reasoning": "",
+                "quality_flags": [],
+                "normalized_text": "Revenue grew quickly and EBITDA margin improved.",
+                "source_map": {"document_name": "Deck.pdf"},
+            },
+            source_map_json={"document_name": "Deck.pdf"},
+            key_metrics_json=[{"name": "EBITDA Margin", "value": "19%"}],
+            table_json=[{"title": "Financial Summary"}],
+        )
+
+        service = EmbeddingService()
+        service.is_sqlite = True
+
+        self.assertTrue(service.vectorize_document(doc))
+        created_chunks = list(DocumentChunk.objects.filter(deal=deal, source_type='document', source_id=str(doc.id)))
+        self.assertGreaterEqual(len(created_chunks), 4)
+        chunk_kinds = {chunk.metadata.get("chunk_kind") for chunk in created_chunks}
+        self.assertIn("normalized_text", chunk_kinds)
+        self.assertIn("metric", chunk_kinds)
+        self.assertIn("table_summary", chunk_kinds)
+
+    def test_rerank_prefers_metric_chunks_for_numeric_queries(self):
+        deal = Deal.objects.create(title="Ranking Deal")
+        service = EmbeddingService()
+        service.is_sqlite = True
+        metric_chunk = DocumentChunk(
+            deal=deal,
+            source_type='document',
+            source_id='doc-1',
+            content='EBITDA Margin: 19%',
+            metadata={"chunk_kind": "metric"},
+        )
+        text_chunk = DocumentChunk(
+            deal=deal,
+            source_type='document',
+            source_id='doc-1',
+            content='General company overview',
+            metadata={"chunk_kind": "normalized_text"},
+        )
+
+        reranked = service._rerank_chunks([text_chunk, metric_chunk], "What is EBITDA margin?", 2)
+        self.assertEqual(reranked[0].metadata.get("chunk_kind"), "metric")
 
     @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
     @patch("deals.tasks.process_deal_folder_background.apply_async")

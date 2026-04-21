@@ -74,6 +74,32 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "[USER QUERY]\n"
                     f"{user_message}"
                 )
+        elif skill_name == 'deal_chat':
+            chat_service = UniversalChatService(ai_service)
+            task_metadata = chat_service.process_single_deal_build_metadata(
+                user_message,
+                conversation_id,
+                history_context,
+                audit_log_id,
+                metadata.get("deal_id"),
+            )
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "used_query_builder": True,
+                "gate_mode": task_metadata.get("gate_mode"),
+                "gate_reason": task_metadata.get("gate_reason"),
+                "query_plan": task_metadata.get("query_plan"),
+                "flow_version": task_metadata.get("flow_version"),
+                "flow_config_id": task_metadata.get("flow_config_id"),
+                "history_messages_used": history_messages_used,
+                "history_chars_used": history_chars_used,
+                "deals_considered": task_metadata.get("deals_considered"),
+                "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
+                "selected_chunk_count": task_metadata.get("selected_chunk_count"),
+                "selected_sources": task_metadata.get("selected_sources"),
+            }
+            audit_log.save(update_fields=['source_metadata'])
+            final_content = user_message
         else:
             task_metadata = metadata or {}
             task_metadata['audit_log_id'] = audit_log_id
@@ -85,6 +111,18 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "history_chars_used": history_chars_used,
             }
             final_content = user_message
+
+        if skill_name == 'deal_chat':
+            task_metadata['audit_log_id'] = audit_log_id
+            task_metadata['history_context'] = history_context
+            task_metadata.setdefault('_source_metadata', {})
+            task_metadata['_source_metadata'] = {
+                **(task_metadata.get('_source_metadata') or {}),
+                "history_messages_used": history_messages_used,
+                "history_chars_used": history_chars_used,
+                "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
+                "selected_sources": task_metadata.get("selected_sources"),
+            }
 
         full_text = ""
         full_thinking = ""

@@ -4,6 +4,7 @@ from accounts.models import Profile
 from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
 from .services.contact_linking import sync_deal_contact_links
+from .services.document_artifacts import DocumentArtifactService
 class DealPhaseLogSerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.name', read_only=True)
     
@@ -20,6 +21,8 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     initial_analysis_reason = serializers.SerializerMethodField()
     in_latest_supplemental_analysis = serializers.SerializerMethodField()
     latest_supplemental_version = serializers.SerializerMethodField()
+    artifact_status = serializers.SerializerMethodField()
+    artifact_complete = serializers.SerializerMethodField()
 
     def _get_initial_analysis_map(self, obj):
         cache = self.context.setdefault('_initial_analysis_map', {})
@@ -117,6 +120,12 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     def get_latest_supplemental_version(self, obj):
         mapping = self._get_latest_supplemental_map(obj)
         return mapping['version']
+
+    def get_artifact_status(self, obj):
+        return DocumentArtifactService.artifact_status(obj)
+
+    def get_artifact_complete(self, obj):
+        return DocumentArtifactService.artifact_complete(obj)
     
     class Meta:
         model = DealDocument
@@ -125,6 +134,9 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
             'initial_analysis_status', 'initial_analysis_reason',
             'in_latest_supplemental_analysis', 'latest_supplemental_version',
+            'artifact_status', 'artifact_complete',
+            'normalized_text', 'evidence_json', 'source_map_json', 'table_json',
+            'key_metrics_json', 'reasoning',
             'extraction_mode', 'transcription_status', 'chunking_status',
             'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'

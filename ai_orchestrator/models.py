@@ -288,8 +288,11 @@ class DocumentChunk(models.Model):
     
     # Content & Vector
     content = models.TextField()
-    # nomic-embed-text uses 768 dimensions
-    embedding = VectorField(dimensions=768, null=True, blank=True)
+    # Qwen/Qwen3-Embedding-0.6B returns 1024 dimensions.
+    embedding = VectorField(dimensions=1024, null=True, blank=True)
+    embedding_model = models.CharField(max_length=200, blank=True, default="")
+    embedding_dimensions = models.IntegerField(null=True, blank=True)
+    indexed_at = models.DateTimeField(null=True, blank=True)
     
     # Extra context (e.g., filename, page number, chunk index)
     metadata = models.JSONField(default=dict, blank=True)
@@ -307,3 +310,34 @@ class DocumentChunk(models.Model):
 
     def __str__(self):
         return f"Chunk for Deal {self.deal_id} ({self.source_type})"
+
+
+class DealRetrievalProfile(models.Model):
+    """
+    Semantic retrieval profile for shortlist generation before chunk search.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.OneToOneField(
+        'deals.Deal',
+        on_delete=models.CASCADE,
+        related_name='retrieval_profile',
+    )
+    profile_text = models.TextField()
+    embedding = VectorField(dimensions=1024, null=True, blank=True)
+    embedding_model = models.CharField(max_length=200, blank=True, default="")
+    embedding_dimensions = models.IntegerField(null=True, blank=True)
+    source_version = models.CharField(max_length=100, blank=True, default="v1")
+    metadata = models.JSONField(default=dict, blank=True)
+    indexed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['deal']),
+            models.Index(fields=['embedding_model']),
+        ]
+
+    def __str__(self):
+        return f"Retrieval Profile for {self.deal_id}"

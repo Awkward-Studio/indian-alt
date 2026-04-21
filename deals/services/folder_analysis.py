@@ -2,6 +2,7 @@ import uuid
 import traceback
 import logging
 from django.core.cache import cache
+from ai_orchestrator.services.runtime import AIRuntimeService
 from deals.models import Deal
 from deals.services.deal_creation import DealCreationService
 from deals.tasks import VDR_DOCUMENT_LIMIT
@@ -92,10 +93,7 @@ class FolderAnalysisService:
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
         
-        # Use model from personality
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-        
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='onedrive_folder',
             source_id=folder_id,
             context_label=f"Folder: {folder_name}",
@@ -103,15 +101,14 @@ class FolderAnalysisService:
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used=default_model,
-            system_prompt="Queued for forensic traversal...",
-            user_prompt=f"Queued analysis for folder: {folder_name}",
+            system_prompt="Queued for direct folder analysis...",
+            user_prompt=f"Queued direct analysis for folder: {folder_name}",
             source_metadata={
                 "drive_id": drive_id,
                 "folder_id": folder_id,
-                "workflow_stage": "traversal_pending",
+                "workflow_stage": "analysis_pending",
                 "interaction_status": "pending",
-                "interaction_mode": "editable",
+                "interaction_mode": "read_only",
             },
         )
 
@@ -141,12 +138,28 @@ class FolderAnalysisService:
         Polls the status of an AI analysis task. Caches success data for confirmation.
         """
         from celery.result import AsyncResult
+        from ai_orchestrator.models import AIAuditLog
         result = AsyncResult(task_id)
         
         response = {
             "task_id": task_id,
             "status": result.status, 
         }
+
+        audit_log = AIAuditLog.objects.filter(celery_task_id=task_id).first()
+        if audit_log and result.status in {"PENDING", "STARTED"}:
+            callback_task_id = (audit_log.source_metadata or {}).get("callback_task_id")
+            if callback_task_id:
+                callback_result = AsyncResult(callback_task_id)
+                if callback_result.status == "SUCCESS" and callback_result.result:
+                    result = callback_result
+                    response["task_id"] = callback_task_id
+                    response["status"] = result.status
+                elif callback_result.status == "FAILURE":
+                    response["task_id"] = callback_task_id
+                    response["status"] = "FAILURE"
+                    response["error"] = str(callback_result.info)
+                    return response
         
         if result.status == 'SUCCESS':
             data = result.result
@@ -192,6 +205,7 @@ class FolderAnalysisService:
                 "passed_files": data.get('passed_files', []),
                 "failed_files": data.get('failed_files', []),
                 "analysis_input_files": data.get('passed_files', []),
+                "document_evidence": (data.get('preliminary_data') or {}).get('document_evidence', []),
             }, timeout=3600)
             
             response.update({
@@ -250,6 +264,7 @@ class FolderAnalysisService:
                     "originating_audit_log_id": str(log.id),
                     "analysis_input_files": meta.get('analysis_input_files', []),
                     "failed_files": meta.get('failed_files', []),
+                    "document_evidence": (log.parsed_json or {}).get('document_evidence', []),
                 }, timeout=3600)
 
                 return {
@@ -347,6 +362,7 @@ class FolderAnalysisService:
                 "analysis_input_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
                 "approved_file_ids": meta.get('approved_file_ids', []),
                 "failed_files": meta.get('failed_files', []),
+                "document_evidence": (log.parsed_json or {}).get('document_evidence', []),
             }, timeout=3600)
             
             return {
@@ -400,10 +416,7 @@ class FolderAnalysisService:
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
         
-        # Use model from personality
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-        
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='onedrive_folder',
             source_id=session_data['folder_id'],
             context_label=f"Selection Analysis: {len(selected_file_ids)} files",
@@ -411,7 +424,6 @@ class FolderAnalysisService:
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used=default_model,
             system_prompt="Queued for extraction from selection...",
             user_prompt=f"Extracting deal data from {len(selected_file_ids)} files",
             source_metadata={
@@ -483,9 +495,7 @@ class FolderAnalysisService:
 
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='onedrive_folder',
             source_id=session_data['folder_id'],
             context_label=f"Selection Analysis: {len(selected_file_ids)} approved files",
@@ -493,7 +503,6 @@ class FolderAnalysisService:
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used=default_model,
             system_prompt="Queued for extraction from approved selection...",
             user_prompt=f"Extracting deal data from {len(selected_file_ids)} approved files",
             source_metadata={
@@ -544,6 +553,7 @@ class FolderAnalysisService:
             InitialAnalysisStatus,
             TranscriptionStatus,
         )
+        from deals.services.document_artifacts import DocumentArtifactService
 
         session_data = cache.get(f"folder_sync_{session_id}")
         if not session_data:
@@ -573,16 +583,20 @@ class FolderAnalysisService:
         elif source_type == 'email':
             deal.source_email_id = session_data.get('source_id') or origin_meta.get('email_id') or getattr(origin_log, 'source_id', None)
 
-        deal.extracted_text = session_data.get('preview_text', '')
-        
-        # Determine input files for analysis tracking
         approved_ids = set(session_data.get('approved_file_ids', []))
         input_files = session_data.get('analysis_input_files', session_data.get('passed_files', []))
-        
         approved_files = [
             file for file in input_files
             if not approved_ids or file.get('file_id') in approved_ids
         ]
+
+        combined_context = []
+        for file in approved_files:
+            normalized_text = (file.get('normalized_text') or file.get('extracted_text') or '').strip()
+            if not normalized_text:
+                continue
+            combined_context.append(f"\n\n--- DOCUMENT: {file.get('file_name') or 'unknown_file'} ---\n{normalized_text}")
+        deal.extracted_text = "".join(combined_context).strip() or session_data.get('preview_text', '')
 
         if analysis_json:
             normalized_analysis = DealCreationService.normalize_analysis_payload(
@@ -620,6 +634,12 @@ class FolderAnalysisService:
                 "title": file_name,
                 "document_type": DocumentType.OTHER,
                 "extracted_text": extracted_text,
+                "normalized_text": file.get('normalized_text') or extracted_text,
+                "evidence_json": file.get('document_artifact') or {},
+                "source_map_json": (file.get('document_artifact') or {}).get('source_map', {}),
+                "table_json": (file.get('document_artifact') or {}).get('tables_summary', []),
+                "key_metrics_json": (file.get('document_artifact') or {}).get('metrics', []),
+                "reasoning": file.get('document_reasoning') or (file.get('document_artifact') or {}).get('reasoning', ''),
                 "is_indexed": False,
                 "is_ai_analyzed": True,
                 "initial_analysis_status": InitialAnalysisStatus.SELECTED_AND_ANALYZED,
@@ -633,6 +653,7 @@ class FolderAnalysisService:
                 doc_kwargs["onedrive_id"] = file.get('file_id')
             
             doc = DealDocument.objects.create(**doc_kwargs)
+            DocumentArtifactService.persist_artifact(doc, DocumentArtifactService.artifact_from_file_record(file))
             
             if extracted_text:
                 if embed_service.vectorize_document(doc):
@@ -645,6 +666,7 @@ class FolderAnalysisService:
                 "title": file.get('file_name') or 'unknown_file',
                 "document_type": DocumentType.OTHER,
                 "extracted_text": '',
+                "normalized_text": '',
                 "is_indexed": False,
                 "is_ai_analyzed": False,
                 "initial_analysis_status": InitialAnalysisStatus.SELECTED_FAILED,

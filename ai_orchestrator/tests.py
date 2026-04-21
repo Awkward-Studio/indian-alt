@@ -1,8 +1,10 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from unittest.mock import MagicMock, patch
 
 from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.services.ai_processor import AIProcessorService
+from ai_orchestrator.services.document_processor import DocumentProcessorService
+from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.parsers import ResponseParserService
 from ai_orchestrator.services.flow_config import UniversalChatFlowService
 from ai_orchestrator.services.universal_chat import UniversalChatService
@@ -174,6 +176,19 @@ class UniversalChatServiceTests(TestCase):
         self.assertTrue(metadata["used_query_builder"])
         self.assertIn("No prior assistant context", metadata["gate_reason"])
 
+    @patch("ai_orchestrator.services.universal_chat.AIRuntimeService.get_planner_model", return_value="planner-model")
+    def test_query_planner_uses_planner_model_override(self, _planner_model):
+        self.ai_service.process_content.return_value = {
+            "query_type": "pipeline_search",
+            "deal_filters": {},
+            "rag_queries": ["Tell me about Acme"],
+        }
+
+        self.service._build_query_plan("Tell me about Acme", "conv-1")
+
+        _, kwargs = self.ai_service.process_content.call_args
+        self.assertEqual(kwargs["model_override"], "planner-model")
+
     def test_default_flow_config_uses_deeper_retrieval_defaults(self):
         config = UniversalChatFlowService.build_default_config()
         planner = next(stage for stage in config["stages"] if stage["id"] == "query_planner")
@@ -217,6 +232,32 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(max_per_deal, 20)
         self.assertEqual(max_total, 60)
 
+    def test_candidate_deals_prefers_semantic_profile_hits(self):
+        semantic_deal = MagicMock()
+        semantic_deal.id = "deal-semantic"
+        semantic_deal.created_at = 1
+
+        with patch.object(self.service.embed_service, "search_deal_profiles", return_value=[semantic_deal]), \
+             patch("ai_orchestrator.services.universal_chat.Deal.objects") as deal_manager:
+            queryset = MagicMock()
+            queryset.prefetch_related.return_value = queryset
+            queryset.order_by.return_value = []
+            deal_manager.all.return_value = queryset
+
+            deals = self.service._get_candidate_deals(
+                {
+                    "deal_filters": {},
+                    "exact_terms": [],
+                    "keywords": [],
+                    "metric_terms": [],
+                    "rag_queries": ["collections quality in Karnataka"],
+                    "user_query": "collections quality in Karnataka",
+                    "deal_limit": 5,
+                }
+            )
+
+        self.assertEqual(deals, [semantic_deal])
+
     def test_simulate_query_returns_retrieval_diagnostics(self):
         deal = MagicMock()
 
@@ -254,3 +295,103 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(simulation["retrieval_diagnostics"]["planner_requested_deal_limit"], 20)
         self.assertEqual(simulation["retrieval_diagnostics"]["effective_chunks_per_deal"], 20)
         self.assertEqual(simulation["retrieval_diagnostics"]["candidate_chunk_count"], 120)
+
+
+class EmbeddingServiceTests(TestCase):
+    def test_rerank_chunks_falls_back_to_heuristics_when_reranker_disabled(self):
+        service = EmbeddingService()
+        service.reranker_model = ""
+        chunk_a = MagicMock()
+        chunk_a.source_id = "a"
+        chunk_a.metadata = {"chunk_kind": "metric", "chunk_index": 0}
+        chunk_a.distance = 0.3
+        chunk_b = MagicMock()
+        chunk_b.source_id = "b"
+        chunk_b.metadata = {"chunk_kind": "risk", "chunk_index": 0}
+        chunk_b.distance = 0.2
+
+        ranked = service._rerank_chunks([chunk_a, chunk_b], "ARR by quarter", limit=2)
+
+        self.assertEqual(ranked[0], chunk_a)
+
+    @override_settings(RERANKER_MODEL="bge-reranker")
+    def test_model_rerank_chunks_uses_provider_scores(self):
+        service = EmbeddingService()
+        service.reranker_model = "bge-reranker"
+        service.reranker = MagicMock()
+        service.reranker.rerank.return_value = [
+            {"index": 1, "score": 0.95},
+            {"index": 0, "score": 0.7},
+        ]
+        chunk_a = MagicMock()
+        chunk_a.content = "first"
+        chunk_a.source_id = "a"
+        chunk_a.metadata = {"chunk_kind": "claim", "chunk_index": 0}
+        chunk_b = MagicMock()
+        chunk_b.content = "second"
+        chunk_b.source_id = "b"
+        chunk_b.metadata = {"chunk_kind": "risk", "chunk_index": 0}
+
+        ranked = service._rerank_chunks([chunk_a, chunk_b], "Which risk matters most?", limit=2)
+
+        self.assertEqual(ranked[0], chunk_b)
+        self.assertEqual(getattr(chunk_b, "rerank_score", None), 0.95)
+
+
+class DocumentProcessorServiceTests(TestCase):
+    @override_settings(
+        DOC_PROCESSOR_URL="http://docproc.internal",
+        DOC_PROCESSOR_API_KEY="secret-token",
+        DOC_PROCESSOR_TIMEOUT=123,
+    )
+    @patch("ai_orchestrator.services.document_processor.requests.post")
+    def test_remote_extraction_result_is_normalized(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "raw_extracted_text": "Raw OCR text",
+            "normalized_text": "Normalized OCR text",
+            "extraction_mode": "docproc_remote",
+            "transcription_status": "complete",
+            "quality_flags": ["vision_first"],
+            "render_metadata": {"route": "vision_first", "page_count": 2},
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        service = DocumentProcessorService()
+        result = service.get_extraction_result(b"file-bytes", "example.pdf", page_limit=5)
+
+        self.assertEqual(result["text"], "Normalized OCR text")
+        self.assertEqual(result["raw_extracted_text"], "Raw OCR text")
+        self.assertEqual(result["normalized_text"], "Normalized OCR text")
+        self.assertEqual(result["mode"], "docproc_remote")
+        self.assertEqual(result["quality_flags"], ["vision_first"])
+        self.assertEqual(result["render_metadata"]["page_count"], 2)
+
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["timeout"], 123)
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
+        self.assertEqual(kwargs["json"]["filename"], "example.pdf")
+        self.assertEqual(kwargs["json"]["page_limit"], 5)
+
+    @override_settings(DOC_PROCESSOR_URL="http://docproc.internal")
+    @patch.object(DocumentProcessorService, "_local_extract")
+    @patch("ai_orchestrator.services.document_processor.requests.post")
+    def test_remote_failure_falls_back_to_local_extraction(self, mock_post, mock_local_extract):
+        mock_post.side_effect = RuntimeError("docproc unavailable")
+        mock_local_extract.return_value = {
+            "text": "Local text",
+            "raw_extracted_text": "Local text",
+            "normalized_text": "Local text",
+            "mode": "fallback_text",
+            "transcription_status": "complete",
+            "quality_flags": ["local_backend_fallback"],
+            "render_metadata": {},
+        }
+
+        service = DocumentProcessorService()
+        result = service.get_extraction_result(b"file-bytes", "example.docx")
+
+        self.assertEqual(result["mode"], "fallback_text")
+        self.assertEqual(result["normalized_text"], "Local text")
+        mock_local_extract.assert_called_once()

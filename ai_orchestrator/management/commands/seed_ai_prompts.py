@@ -1,4 +1,5 @@
 from django.core.management.base import BaseCommand
+from django.conf import settings
 from ai_orchestrator.models import AIPersonality, AISkill
 
 class Command(BaseCommand):
@@ -10,9 +11,9 @@ class Command(BaseCommand):
             name="Senior PE Investment Analyst",
             defaults={
                 "description": "Senior Analyst with 10+ years experience. Rigorous, skeptical, and forensic.",
-                "model_provider": "ollama",
-                "text_model_name": "qwen3.5:latest",
-                "vision_model_name": "glm-ocr:latest",
+                "model_provider": "vllm",
+                "text_model_name": getattr(settings, "VLLM_TEXT_MODEL", "") or "default",
+                "vision_model_name": getattr(settings, "VLLM_VISION_MODEL", "") or "default",
                 "system_instructions": """# Role Definition
 You are a Senior Private Equity (PE) Investment Analyst with over 10 years of experience in M&A due diligence, financial modeling, and risk assessment. Your goal is to conduct comprehensive due diligence on target companies for potential acquisition or fundraise rounds.
 
@@ -156,6 +157,157 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
         )
 
         AISkill.objects.update_or_create(
+            name="document_evidence_extraction",
+            defaults={
+                "personality": senior_pe_personality,
+                "description": "Extracts structured evidence from a single document before final deal synthesis.",
+                "output_schema": {
+                    "document_name": "string",
+                    "document_type": "string",
+                    "document_summary": "string",
+                    "claims": ["string"],
+                    "metrics": ["object"],
+                    "tables_summary": ["object"],
+                    "contacts_found": ["object"],
+                    "risks": ["string"],
+                    "open_questions": ["string"],
+                    "citations": ["string"],
+                    "reasoning": "string",
+                    "quality_flags": ["string"],
+                    "normalized_text": "string",
+                    "source_map": "object",
+                },
+                "prompt_template": """Analyze this single document and return a structured evidence object for downstream deal synthesis.
+
+[DOCUMENT NAME]
+{{ document_name }}
+
+[DOCUMENT TYPE]
+{{ document_type }}
+
+[SOURCE METADATA]
+{{ source_metadata_json }}
+
+[DOCUMENT CONTENT]
+{{ content }}
+
+Return exactly one valid JSON object and nothing else:
+{
+  "document_name": "{{ document_name }}",
+  "document_type": "{{ document_type }}",
+  "document_summary": "2-4 sentence summary of the document's most material points",
+  "claims": ["Important factual statements supported by this document"],
+  "metrics": [
+    {
+      "name": "Metric name",
+      "value": "Metric value as string",
+      "period": "Applicable period if known",
+      "unit": "INR Cr / % / x / etc",
+      "citation": "Document/page reference"
+    }
+  ],
+  "tables_summary": [
+    {
+      "title": "Short table label",
+      "highlights": ["Most important rows or insights"],
+      "citation": "Document/page reference"
+    }
+  ],
+  "contacts_found": [
+    {
+      "name": "Person name",
+      "designation": "Role/title",
+      "email": "Email if present",
+      "citation": "Document/page reference"
+    }
+  ],
+  "risks": ["Material risks or red flags in this document"],
+  "open_questions": ["Questions created by missing or unclear information in this document"],
+  "citations": ["Document/page references used"],
+  "reasoning": "Short internal reasoning trace about what mattered in this document",
+  "quality_flags": ["Use flags like fallback_artifact, low_confidence, limited_tables when needed"],
+  "normalized_text": "A cleaned normalized version of the document, concise but preserving material detail",
+  "source_map": {
+    "document_name": "{{ document_name }}",
+    "section": null,
+    "page": null
+  }
+}
+
+Rules:
+- Use only the supplied document.
+- Keep normalized_text concise enough for downstream chunking.
+- Every metric or contact should include a citation when possible.
+- Do not infer missing facts unless you label them as open questions.""",
+            }
+        )
+
+        AISkill.objects.update_or_create(
+            name="deal_synthesis",
+            defaults={
+                "personality": senior_pe_personality,
+                "description": "Synthesizes a final deal analysis from document evidence objects and supporting raw chunks.",
+                "output_schema": {
+                    "deal_model_data": "object",
+                    "metadata": "object",
+                    "analyst_report": "string",
+                    "document_evidence": "array",
+                    "cross_document_conflicts": "array",
+                    "missing_information_requests": "array",
+                },
+                "prompt_template": """Synthesize a final deal analysis from structured document evidence plus supporting raw chunks.
+
+[DOCUMENT EVIDENCE JSON]
+{{ document_evidence_json }}
+
+[SUPPORTING RAW CHUNKS JSON]
+{{ supporting_raw_chunks_json }}
+
+[TASK]
+{{ content }}
+
+Return exactly one valid JSON object and nothing else:
+{
+  "deal_model_data": {
+    "title": "Exact Company Name",
+    "industry": "Industry Name",
+    "sector": "Sub-sector",
+    "funding_ask": "Numerical value in INR Cr as a string",
+    "funding_ask_for": "Use of funds",
+    "priority": "High/Medium/Low",
+    "city": "HQ City",
+    "themes": ["India Alternative themes only"]
+  },
+  "metadata": {
+    "ambiguous_points": ["Unresolved points requiring verification"],
+    "sources_cited": ["Document names or citation labels used"],
+    "documents_analyzed": ["Document names included in this synthesis"],
+    "analysis_input_files": [{"file_id": "source id", "file_name": "Document name"}],
+    "failed_files": [{"file_id": "source id", "file_name": "Document name", "reason": "Why it failed"}]
+  },
+  "analyst_report": "Final markdown memo with citations",
+  "document_evidence": [],
+  "cross_document_conflicts": [
+    {
+      "topic": "Metric or claim in conflict",
+      "details": "Why the documents conflict",
+      "citations": ["Source labels"]
+    }
+  ],
+  "missing_information_requests": ["Follow-up diligence requests implied by the evidence"]
+}
+
+Rules:
+- Treat document_evidence_json as the primary source of truth.
+- Use supporting_raw_chunks_json only to refine detail and citations.
+- Preserve citations in every material section of analyst_report.
+- Surface contradictions explicitly in cross_document_conflicts.
+- Include metadata.documents_analyzed and metadata.analysis_input_files in the final JSON.
+- Do not invent values absent from the evidence.""",
+            }
+        )
+
+        AISkill.objects.update_or_create(
             name="vdr_incremental_analysis",
             defaults={
                 "description": "Generates a supplementary analysis version from newly selected VDR documents.",
@@ -163,6 +315,9 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
                     "analyst_report": "string",
                     "deal_model_data": "object",
                     "metadata": "object",
+                    "document_evidence": "array",
+                    "cross_document_conflicts": "array",
+                    "missing_information_requests": "array",
                 },
                 "prompt_template": """[EXISTING ANALYSIS]
 Summary: {{ existing_summary }}
@@ -170,8 +325,11 @@ Summary: {{ existing_summary }}
 [CURRENT CANONICAL SNAPSHOT]
 {{ existing_canonical_snapshot }}
 
-[NEW DOCUMENTS TO ANALYZE]
-{{ content }}
+[NEW DOCUMENT EVIDENCE JSON]
+{{ document_evidence_json }}
+
+[SUPPORTING RAW CHUNKS JSON]
+{{ supporting_raw_chunks_json }}
 
 [TASK]
 Generate a concise Version {{ version_num }} supplementary analysis focused only on the newly supplied documents, and provide structured field updates for the canonical deal view when supported by the new evidence.
@@ -181,13 +339,21 @@ Return exactly one valid JSON object and nothing else:
   "analyst_report": "Markdown report covering only new evidence, resolved ambiguities, and new metrics from these documents.",
   "deal_model_data": {},
   "metadata": {
-    "ambiguous_points": []
-  }
+    "ambiguous_points": [],
+    "documents_analyzed": ["New document names included in this version"],
+    "analysis_input_files": [{"file_id": "source id", "file_name": "Document name"}],
+    "failed_files": []
+  },
+  "document_evidence": [],
+  "cross_document_conflicts": [],
+  "missing_information_requests": []
 }
 
 Rules:
 - Do not rewrite the entire existing analysis.
-- Use only the supplied new-document context.
+- Use the structured document evidence as the primary source of truth.
+- Use supporting raw chunks only for more precise citations or nuance.
+- Include metadata.documents_analyzed and metadata.analysis_input_files in the final JSON.
 - Keep citations or file references tied to the new documents when possible.""",
             }
         )

@@ -38,7 +38,11 @@ class Command(BaseCommand):
             if success:
                 self.stdout.write(self.style.SUCCESS(f"Successfully vectorized deal {deal.id}"))
             else:
-                self.stdout.write(self.style.WARNING(f"Skipped deal {deal.id} (no summary)"))
+                profile_success = embed_service.refresh_deal_profile(deal)
+                if profile_success:
+                    self.stdout.write(self.style.SUCCESS(f"Refreshed retrieval profile for deal {deal.id}"))
+                else:
+                    self.stdout.write(self.style.WARNING(f"Skipped deal {deal.id} (no summary/profile text)"))
 
         # 2. Process Emails
         emails = Email.objects.filter(deal__isnull=False).exclude(extracted_text__isnull=True).exclude(extracted_text='')

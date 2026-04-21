@@ -16,8 +16,10 @@ from .serializers import (
     DealDocumentSerializer, DealPhaseLogSerializer, DealHeavyFieldsSerializer
 )
 from .services.deal_creation import DealCreationService
+from .services.document_artifacts import DocumentArtifactService
 from .services.deal_flow import DealFlowService
 from .services.folder_analysis import FolderAnalysisService
+from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,7 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     serializer_class = DealDocumentSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['title', 'extracted_text']
+    search_fields = ['title', 'normalized_text', 'reasoning']
     filterset_fields = ['deal', 'document_type', 'is_indexed']
     ordering_fields = ['created_at', 'title', 'document_type']
     ordering = ['-created_at']
@@ -77,24 +79,74 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             
         try:
             from ai_orchestrator.services.ai_processor import AIProcessorService
+            from ai_orchestrator.services.embedding_processor import EmbeddingService
             
-            # 1. Fetch relevant documents
             docs = DealDocument.objects.filter(is_indexed=True)
             if deal_id:
                 docs = docs.filter(deal_id=deal_id)
                 
             if not docs.exists():
                 return Response({"response": "No indexed documents found to search through."}, status=200)
-                
-            context = "\n\n".join([f"--- DOC: {d.title} (Deal: {d.deal.title}) ---\n{d.extracted_text[:2000]}..." for d in docs])
 
-            # 2. Use AI for search
+            embed_service = EmbeddingService()
+            if deal_id:
+                chunks = embed_service.search_similar_chunks(query, docs.first().deal, limit=10)
+            else:
+                chunks = embed_service.search_global_chunks(query, limit=10)
+                allowed_ids = {str(doc.id) for doc in docs}
+                chunks = [
+                    chunk for chunk in chunks
+                    if chunk.source_type != 'document' or chunk.source_id in allowed_ids
+                ]
+
+            doc_ids = {
+                chunk.source_id for chunk in chunks
+                if chunk.source_type == 'document' and chunk.source_id
+            }
+            matched_docs = {
+                str(doc.id): doc
+                for doc in docs.filter(id__in=doc_ids).select_related('deal')
+            }
+
+            evidence_blocks = []
+            for doc in matched_docs.values():
+                artifact = DocumentArtifactService.artifact_from_document(doc)
+                evidence_blocks.append(
+                    {
+                        "deal_title": doc.deal.title,
+                        "artifact_status": DocumentArtifactService.artifact_status(artifact),
+                        "document_evidence": artifact,
+                    }
+                )
+
+            chunk_blocks = []
+            for chunk in chunks:
+                title = (chunk.metadata or {}).get('title') or 'Source'
+                chunk_blocks.append(
+                    {
+                        "source_id": chunk.source_id,
+                        "source_type": chunk.source_type,
+                        "title": title,
+                        "chunk_kind": (chunk.metadata or {}).get("chunk_kind") or "text",
+                        "citation_label": (chunk.metadata or {}).get("citation_label") or title,
+                        "content": chunk.content[:1600],
+                        "metadata": chunk.metadata or {},
+                    }
+                )
+
+            context = (
+                "[DOCUMENT EVIDENCE]\n"
+                f"{evidence_blocks}\n\n"
+                "[MATCHED CHUNKS]\n"
+                f"{chunk_blocks}"
+            )
+
             ai_service = AIProcessorService()
             prompt = f"Using the following institutional documents as context, answer: {query}\n\nCONTEXT:\n{context}"
             
             result = ai_service.process_content(
                 content=prompt,
-                skill_name="deal_extraction",
+                skill_name=None,
                 source_type="global_search"
             )
             
@@ -469,10 +521,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if not skill:
             return Response({"error": "AI skill 'vdr_incremental_analysis' is not configured."}, status=500)
         
-        # Use model from personality
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-        
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='vdr_incremental_analysis',
             source_id=str(deal.id),
             context_label=f"Incremental Analysis: {deal.title}",
@@ -480,9 +529,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used=default_model,
             system_prompt="Queued for incremental forensic analysis...",
-            user_prompt=f"Analyzing {docs.count()} new documents for Deal: {deal.title}"
+            user_prompt=f"Analyzing {docs.count()} new documents for Deal: {deal.title}",
         )
 
         # 2. Trigger async task
@@ -519,10 +567,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         try:
             from ai_orchestrator.services.document_processor import DocumentProcessorService
             from ai_orchestrator.services.embedding_processor import EmbeddingService
+            from ai_orchestrator.services.ai_processor import AIProcessorService
             from django.utils import timezone
             
             doc_processor = DocumentProcessorService()
             embed_service = EmbeddingService()
+            ai_service = AIProcessorService()
             
             file_content = file_obj.read()
             file_name = file_obj.name
@@ -538,7 +588,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 doc_type = DocumentType.PITCH_DECK
                 
             extraction = doc_processor.get_extraction_result(file_content, file_name)
-            extracted_text = (extraction.get("text") or "").strip()
+            extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+            normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
             
             from .models import DealDocument
             doc = DealDocument.objects.create(
@@ -546,17 +597,22 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 title=file_name,
                 document_type=doc_type,
                 extracted_text=extracted_text,
+                normalized_text=normalized_text,
                 is_indexed=False,
                 is_ai_analyzed=False,
                 extraction_mode=extraction.get("mode"),
-                transcription_status="complete" if extracted_text else "failed",
+                transcription_status="complete" if normalized_text else "failed",
                 chunking_status="not_chunked",
-                last_transcribed_at=timezone.now() if extracted_text else None,
+                last_transcribed_at=timezone.now() if normalized_text else None,
                 uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
             )
+
+            if normalized_text:
+                DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=True)
             
-            if extracted_text and len(extracted_text.strip()) > 50:
-                new_context = f"\n\n--- MANUAL DOCUMENT: {file_name} ---\n{extracted_text}"
+            if normalized_text and len(normalized_text.strip()) > 50:
+                aggregate_text = doc.normalized_text or normalized_text
+                new_context = f"\n\n--- MANUAL DOCUMENT: {file_name} ---\n{aggregate_text}"
                 deal.extracted_text = (deal.extracted_text or "") + new_context
                 deal.save(update_fields=['extracted_text'])
                 

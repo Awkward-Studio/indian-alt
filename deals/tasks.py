@@ -1,4 +1,5 @@
 import logging
+import json
 import time
 from celery import shared_task, chord
 from django.core.cache import cache
@@ -12,18 +13,37 @@ from .models import (
     DealDocument,
     DocumentType,
     ExtractionMode,
+    FolderAnalysisDocument,
     InitialAnalysisStatus,
     TranscriptionStatus,
 )
 from .services.deal_creation import DealCreationService
+from .services.document_artifacts import DocumentArtifactService
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.realtime import broadcast_audit_log_update, log_worker_event
+from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
 VDR_DOCUMENT_LIMIT = 50
+SUPPORTED_ANALYSIS_EXTENSIONS = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".docx", ".doc",
+    ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".csv",
+}
+
+
+def _is_supported_analysis_file(file_info: dict) -> bool:
+    name = str(file_info.get("name") or "").lower()
+    return any(name.endswith(ext) for ext in SUPPORTED_ANALYSIS_EXTENSIONS)
+
+
+def _select_folder_analysis_files(file_tree: list[dict], limit: int = VDR_DOCUMENT_LIMIT) -> list[dict]:
+    supported_files = [file for file in file_tree if _is_supported_analysis_file(file)]
+    candidate_files = supported_files or list(file_tree)
+    return candidate_files[:limit]
 
 
 def _is_cancel_requested(audit_log_id: str | None) -> bool:
@@ -134,10 +154,11 @@ def _extract_selected_files(drive_id: str | None, user_email: str, selected_file
 
             logger.info("Selection preflight: extracting %s (%s)", name, file_id)
             extraction = doc_processor.get_extraction_result(content, name, page_limit=None)
-            extracted_text = (extraction.get("text") or "").strip()
+            extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+            normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
             extraction_mode = extraction.get("mode")
 
-            if not extracted_text:
+            if not normalized_text:
                 file_record["reason"] = extraction.get("error") or f"No readable content extracted for {name}"
                 file_record["extraction_mode"] = extraction_mode
                 failed_files.append(file_record)
@@ -146,10 +167,13 @@ def _extract_selected_files(drive_id: str | None, user_email: str, selected_file
             file_record["status"] = "passed"
             file_record["extraction_mode"] = extraction_mode
             file_record["transcription_status"] = TranscriptionStatus.COMPLETE
-            file_record["text_length"] = len(extracted_text)
+            file_record["text_length"] = len(normalized_text)
             file_record["extracted_text"] = extracted_text
+            file_record["normalized_text"] = normalized_text
+            file_record["quality_flags"] = extraction.get("quality_flags") or []
+            file_record["render_metadata"] = extraction.get("render_metadata") or {}
             passed_files.append(file_record)
-            combined_text_parts.append(f"\n--- FILE: {name} ---\n{extracted_text}")
+            combined_text_parts.append(f"\n--- FILE: {name} ---\n{normalized_text}")
         except Exception as e:
             file_record["reason"] = str(e)
             logger.error("Error reading selected file %s: %s", file_id, e)
@@ -171,11 +195,98 @@ def _build_combined_text(passed_files: list, selected_file_ids: list | None = No
     for file in passed_files:
         if selected_ids and file.get("file_id") not in selected_ids:
             continue
-        extracted_text = (file.get("extracted_text") or "").strip()
-        if not extracted_text:
+        combined_text = (file.get("normalized_text") or file.get("extracted_text") or "").strip()
+        if not combined_text:
             continue
-        parts.append(f"\n--- FILE: {file.get('file_name', 'unknown_file')} ---\n{extracted_text}")
+        parts.append(f"\n--- FILE: {file.get('file_name', 'unknown_file')} ---\n{combined_text}")
     return "".join(parts).strip()
+
+
+def _build_deal_context_from_files(files: list[dict]) -> str:
+    parts = []
+    for file in files:
+        normalized_text = (file.get("normalized_text") or file.get("extracted_text") or "").strip()
+        if not normalized_text:
+            continue
+        file_name = file.get("file_name") or "unknown_file"
+        parts.append(f"\n\n--- DOCUMENT: {file_name} ---\n{normalized_text}")
+    return "".join(parts).strip()
+
+
+def _build_document_evidence_for_files(
+    files: list[dict],
+    *,
+    ai_service,
+    audit_log_id: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    artifacts: list[dict] = []
+    enriched_files: list[dict] = []
+
+    for file in files:
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name=file.get("file_name") or "unknown_file",
+            extracted_text=file.get("extracted_text") or "",
+            document_type=file.get("document_type") or DocumentType.OTHER,
+            extraction_mode=file.get("extraction_mode"),
+            ai_service=ai_service,
+            source_metadata={
+                "audit_log_id": audit_log_id,
+                "source_id": file.get("file_id"),
+                "file_name": file.get("file_name"),
+            },
+        )
+        artifacts.append(artifact)
+        enriched_file = dict(file)
+        enriched_file["document_artifact"] = artifact
+        enriched_file["normalized_text"] = artifact.get("normalized_text") or file.get("extracted_text") or ""
+        enriched_file["document_reasoning"] = artifact.get("reasoning") or ""
+        enriched_files.append(enriched_file)
+
+    return artifacts, enriched_files
+
+
+def _build_synthesis_metadata(
+    *,
+    document_evidence: list[dict],
+    supporting_raw_chunks: list[dict],
+    extra: dict | None = None,
+) -> dict:
+    payload = dict(extra or {})
+    payload["document_evidence_json"] = json.dumps(document_evidence, default=str)
+    payload["supporting_raw_chunks_json"] = json.dumps(supporting_raw_chunks, default=str)
+    return payload
+
+
+def _normalize_synthesis_result(
+    analysis: dict | None,
+    *,
+    analysis_kind: str,
+    document_evidence: list[dict],
+    analysis_input_files: list[dict],
+    failed_files: list[dict],
+    previous_snapshot: dict | None = None,
+    documents_analyzed: list[str] | None = None,
+) -> dict:
+    base_analysis = analysis if isinstance(analysis, dict) else {}
+    normalized = DealCreationService.normalize_analysis_payload(
+        base_analysis,
+        previous_snapshot=previous_snapshot,
+        analysis_kind=analysis_kind,
+        documents_analyzed=documents_analyzed or [
+            file.get("file_name") for file in analysis_input_files if file.get("file_name")
+        ],
+        analysis_input_files=analysis_input_files,
+        failed_files=failed_files,
+    )
+    if not isinstance(normalized.get("document_evidence"), list) or not normalized.get("document_evidence"):
+        normalized["document_evidence"] = document_evidence
+    metadata = normalized.setdefault("metadata", {})
+    metadata["analysis_input_files"] = analysis_input_files
+    metadata["failed_files"] = failed_files
+    metadata["documents_analyzed"] = documents_analyzed or metadata.get("documents_analyzed") or [
+        file.get("file_name") for file in analysis_input_files if file.get("file_name")
+    ]
+    return normalized
 
 
 def _resolve_initial_analysis_status(deal: Deal, file_id: str | None, file_name: str | None) -> tuple[str, str | None]:
@@ -207,40 +318,37 @@ def _is_full_transcription(doc: DealDocument) -> bool:
 
 def _prepare_document_update_from_extraction(extraction: dict, *, full: bool) -> dict:
     mode = extraction.get("mode")
-    if mode not in {ExtractionMode.GLM_OCR, ExtractionMode.FALLBACK_TEXT}:
+    if mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.VLLM_VISION, ExtractionMode.FALLBACK_TEXT}:
         mode = None
-    extracted_text = (extraction.get("text") or "").strip()
+    raw_extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+    normalized_text = (extraction.get("normalized_text") or extraction.get("text") or raw_extracted_text).strip()
     return {
-        "extracted_text": extracted_text,
+        "extracted_text": raw_extracted_text,
+        "normalized_text": normalized_text,
         "extraction_mode": mode,
         "transcription_status": (
-            TranscriptionStatus.COMPLETE if full and extracted_text else TranscriptionStatus.PARTIAL if extracted_text else TranscriptionStatus.FAILED
+            TranscriptionStatus.COMPLETE if full and normalized_text else TranscriptionStatus.PARTIAL if normalized_text else TranscriptionStatus.FAILED
         ),
-        "last_transcribed_at": timezone.now() if extracted_text else None,
+        "last_transcribed_at": timezone.now() if normalized_text else None,
     }
 
 
 def _vectorize_document_and_capture(doc: DealDocument, embed_service: EmbeddingService) -> int:
-    chunk_count = embed_service.chunk_and_embed(
-        text=doc.extracted_text or "",
+    success = embed_service.vectorize_document(doc)
+    if not success:
+        return 0
+    return DocumentChunk.objects.filter(
         deal=doc.deal,
         source_type='document',
         source_id=str(doc.id),
-        metadata={"title": doc.title, "type": doc.document_type},
-        replace_existing=True,
-    )
-    doc.is_indexed = bool(chunk_count)
-    doc.chunking_status = ChunkingStatus.CHUNKED if chunk_count else ChunkingStatus.FAILED
-    doc.last_chunked_at = timezone.now() if chunk_count else None
-    doc.save(update_fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
-    return chunk_count
+    ).count()
 
 
 def _sync_deal_extracted_text_for_documents(deal: Deal, docs: list[DealDocument]) -> None:
     existing = deal.extracted_text or ""
     additions = []
     for doc in docs:
-        text = (doc.extracted_text or "").strip()
+        text = (doc.normalized_text or doc.extracted_text or "").strip()
         if not text:
             continue
         marker = f"--- DOCUMENT: {doc.title} ---"
@@ -251,15 +359,126 @@ def _sync_deal_extracted_text_for_documents(deal: Deal, docs: list[DealDocument]
         deal.extracted_text = existing + "".join(additions)
         deal.save(update_fields=['extracted_text'])
 
+
+def _build_folder_doc_result(file_info: dict, extraction: dict) -> dict:
+    extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+    normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
+    return {
+        "file_id": file_info.get("id"),
+        "file_name": file_info.get("name") or "unknown_file",
+        "path": file_info.get("path"),
+        "drive_id": file_info.get("driveId"),
+        "status": "passed" if normalized_text else "failed",
+        "reason": None if normalized_text else (extraction.get("error") or "No readable content extracted"),
+        "extraction_mode": extraction.get("mode"),
+        "transcription_status": extraction.get("transcription_status"),
+        "chunking_status": ChunkingStatus.NOT_CHUNKED,
+        "text_length": len(normalized_text),
+        "extracted_text": extracted_text,
+        "normalized_text": normalized_text,
+        "quality_flags": extraction.get("quality_flags") or [],
+        "render_metadata": extraction.get("render_metadata") or {},
+    }
+
+
+def _analysis_document_to_result(doc: FolderAnalysisDocument) -> dict:
+    artifact = DocumentArtifactService.artifact_from_analysis_document(doc)
+    return {
+        "analysis_document_id": str(doc.id),
+        "file_id": doc.source_file_id,
+        "file_name": doc.file_name,
+        "path": doc.file_path,
+        "drive_id": doc.source_drive_id,
+        "status": "passed" if (doc.normalized_text or "").strip() else "failed",
+        "reason": doc.error_message,
+        "document_type": doc.document_type,
+        "extraction_mode": doc.extraction_mode,
+        "transcription_status": doc.transcription_status,
+        "chunking_status": doc.chunking_status,
+        "text_length": len((doc.normalized_text or "").strip()),
+        "extracted_text": (doc.raw_extracted_text or "").strip(),
+        "normalized_text": (doc.normalized_text or "").strip(),
+        "quality_flags": doc.quality_flags or [],
+        "render_metadata": doc.render_metadata or {},
+        "document_artifact": artifact,
+        "document_reasoning": doc.reasoning or artifact.get("reasoning") or "",
+        "chunk_count": doc.chunk_count or 0,
+    }
+
+
+def _persist_folder_analysis_document(
+    *,
+    audit_log_id: str,
+    file_info: dict,
+    extraction: dict,
+    ai_service,
+    embed_service: EmbeddingService,
+) -> FolderAnalysisDocument:
+    raw_extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+    normalized_text = (extraction.get("normalized_text") or extraction.get("text") or raw_extracted_text).strip()
+    extraction_mode = extraction.get("mode")
+    if extraction_mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.VLLM_VISION, ExtractionMode.FALLBACK_TEXT}:
+        extraction_mode = extraction_mode or None
+
+    defaults = {
+        "source_drive_id": file_info.get("driveId") or "",
+        "file_name": file_info.get("name") or "unknown_file",
+        "file_path": file_info.get("path") or "",
+        "document_type": file_info.get("document_type") or DocumentType.OTHER,
+        "raw_extracted_text": raw_extracted_text,
+        "normalized_text": normalized_text,
+        "extraction_mode": extraction_mode,
+        "transcription_status": extraction.get("transcription_status") or (
+            TranscriptionStatus.COMPLETE if normalized_text else TranscriptionStatus.FAILED
+        ),
+        "chunking_status": ChunkingStatus.NOT_CHUNKED,
+        "quality_flags": extraction.get("quality_flags") or [],
+        "render_metadata": extraction.get("render_metadata") or {},
+        "error_message": extraction.get("error") if not normalized_text else None,
+        "last_transcribed_at": timezone.now() if normalized_text else None,
+    }
+
+    analysis_doc, _ = FolderAnalysisDocument.objects.update_or_create(
+        audit_log_id=audit_log_id,
+        source_file_id=file_info.get("id"),
+        defaults=defaults,
+    )
+
+    if normalized_text:
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name=analysis_doc.file_name,
+            extracted_text=raw_extracted_text or normalized_text,
+            document_type=analysis_doc.document_type,
+            extraction_mode=analysis_doc.extraction_mode,
+            ai_service=ai_service,
+            source_metadata={
+                "audit_log_id": audit_log_id,
+                "source_id": analysis_doc.source_file_id,
+                "file_name": analysis_doc.file_name,
+            },
+        )
+        DocumentArtifactService.persist_analysis_artifact(analysis_doc, artifact)
+        embed_service.vectorize_analysis_document(analysis_doc)
+        analysis_doc.refresh_from_db()
+    else:
+        analysis_doc.is_indexed = False
+        analysis_doc.chunk_count = 0
+        analysis_doc.chunking_status = ChunkingStatus.NOT_CHUNKED
+        analysis_doc.save(update_fields=["is_indexed", "chunk_count", "chunking_status"])
+
+    return analysis_doc
+
 @shared_task(bind=True)
 def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, audit_log_id: str = None):
     """
-    Kicks off deep folder traversal. Returns the full tree for selection.
+    Performs direct folder analysis: traversal, extraction of up to the
+    configured document limit, and final synthesis.
     """
     logger.info(f"Starting async folder traversal for {folder_id}")
     
     from microsoft.services.graph_service import GraphAPIService
     from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+    from ai_orchestrator.services.ai_processor import AIProcessorService
     
     # 1. Recover or Create Audit Log
     if audit_log_id:
@@ -273,16 +492,19 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
         
-        # Use model from personality
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+        default_model = AIRuntimeService.get_text_model(personality)
         
-        audit_log = AIAuditLog.objects.create(
-            source_type='onedrive_folder', source_id=folder_id,
-            personality=personality, skill=skill,
-            status='PROCESSING', is_success=False,
-            model_used=default_model, system_prompt="Forensic traversal...",
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type='onedrive_folder',
+            source_id=folder_id,
+            personality=personality,
+            skill=skill,
+            status='PROCESSING',
+            is_success=False,
+            model_used=default_model,
+            system_prompt="Forensic traversal...",
             user_prompt=f"Traversing folder: {folder_id}",
-            celery_task_id=self.request.id
+            celery_task_id=self.request.id,
         )
         log_worker_event(audit_log, f"Initialized traversal log for folder {folder_id}")
 
@@ -295,36 +517,240 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         if not file_tree:
             log_worker_event(audit_log, "No files found in specified folder.", status='FAILED', done=True)
             return {"error": "No files found"}
-            
-        # Update log with traversal results - Transition to WAITING_FOR_SELECTION
-        log_worker_event(audit_log, f"Traversal complete. Discovered {len(file_tree)} objects.", status='COMPLETED', done=True)
-        audit_log.system_prompt = f"Traversal complete. Found {len(file_tree)} objects. Awaiting selection..."
-        audit_log.is_success = True
-        # Store the tree in source_metadata for later recovery
+
+        selected_files = _select_folder_analysis_files(file_tree)
+        selected_file_ids = [file.get("id") for file in selected_files if file.get("id")]
+        log_worker_event(
+            audit_log,
+            f"Traversal complete. Discovered {len(file_tree)} files. Auto-selecting {len(selected_files)} files for direct analysis.",
+            status='PROCESSING',
+        )
         audit_log.source_metadata = {
             "file_tree": file_tree,
             "drive_id": drive_id,
             "folder_id": folder_id,
             "total_files": len(file_tree),
-            "workflow_stage": "traversal_complete",
-            "interaction_status": "pending",
-            "interaction_mode": "editable",
+            "selected_files_count": len(selected_files),
+            "selected_file_ids": selected_file_ids,
+            "analysis_input_files": [
+                {
+                    "file_id": file.get("id"),
+                    "file_name": file.get("name"),
+                    "path": file.get("path"),
+                    "drive_id": file.get("driveId"),
+                }
+                for file in selected_files
+            ],
+            "workflow_stage": "analysis_pending",
+            "interaction_status": "completed",
+            "interaction_mode": "read_only",
         }
-        audit_log.save()
+        audit_log.save(update_fields=["source_metadata"])
+
+        if not selected_file_ids:
+            log_worker_event(audit_log, "Traversal found no supported files for analysis.", status='FAILED', done=True)
+            return {"error": "No supported files found for analysis"}
+
+        log_worker_event(audit_log, f"Queueing {len(selected_files)} documents for parallel extraction...")
+        tasks = [
+            process_single_folder_analysis_document_async.s(file, drive_id, user_email, str(audit_log.id))
+            for file in selected_files
+        ]
+        callback = finalize_folder_analysis_async.s(drive_id, folder_id, user_email, str(audit_log.id))
+        _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
+        audit_log.celery_task_id = self.request.id
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "child_task_ids": child_task_ids,
+            "callback_task_id": callback_task_id,
+            "workflow_stage": "analysis_pending",
+        }
+        audit_log.save(update_fields=["celery_task_id", "source_metadata"])
+        chord(tasks)(callback)
 
         return {
-            "status": "success",
-            "phase": "traversal",
+            "status": "queued",
+            "phase": "analysis",
             "audit_log_id": str(audit_log.id),
             "folder_id": folder_id,
-            "total_files": len(file_tree),
+            "total_files": len(selected_files),
             "file_tree": file_tree,
+            "selected_file_ids": selected_file_ids,
             "drive_id": drive_id,
-            "user_email": user_email
+            "user_email": user_email,
         }
     except Exception as e:
         log_worker_event(audit_log, f"Traversal error: {str(e)}", status='FAILED', done=True)
         raise e
+
+
+@shared_task(bind=True)
+def process_single_folder_analysis_document_async(self, file_info: dict, drive_id: str, user_email: str, audit_log_id: str):
+    """
+    Atomized task for initial folder analysis.
+    Downloads, transcribes, and returns a normalized file record.
+    """
+    from ai_orchestrator.models import AIAuditLog
+
+    file_name = file_info.get("name") or "unknown_file"
+    graph = GraphAPIService()
+    doc_processor = DocumentProcessorService()
+    embed_service = EmbeddingService()
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+    if _is_cancel_requested(audit_log_id):
+        return {"status": "cancelled", "file_name": file_name, "file_id": file_info.get("id"), "reason": "manual termination requested"}
+
+    try:
+        if audit_log:
+            log_worker_event(audit_log, f"Processing document {file_name}", status='PROCESSING')
+
+        content = graph.get_drive_item_content(user_email, file_info.get("id"), drive_id=drive_id)
+        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
+        ai_service = AIProcessorService()
+        analysis_doc = _persist_folder_analysis_document(
+            audit_log_id=audit_log_id,
+            file_info=file_info,
+            extraction=extraction,
+            ai_service=ai_service,
+            embed_service=embed_service,
+        )
+        return _analysis_document_to_result(analysis_doc)
+    except Exception as e:
+        logger.error("Direct folder document processing failed for %s: %s", file_name, e)
+        analysis_doc, _ = FolderAnalysisDocument.objects.update_or_create(
+            audit_log_id=audit_log_id,
+            source_file_id=file_info.get("id"),
+            defaults={
+                "source_drive_id": file_info.get("driveId") or "",
+                "file_name": file_name,
+                "file_path": file_info.get("path") or "",
+                "document_type": file_info.get("document_type") or DocumentType.OTHER,
+                "transcription_status": TranscriptionStatus.FAILED,
+                "chunking_status": ChunkingStatus.NOT_CHUNKED,
+                "error_message": str(e),
+                "quality_flags": ["document_processing_failed"],
+            },
+        )
+        return _analysis_document_to_result(analysis_doc)
+
+
+@shared_task(bind=True)
+def finalize_folder_analysis_async(self, results, drive_id: str, folder_id: str, user_email: str, audit_log_id: str):
+    """
+    Chord callback for initial direct folder analysis.
+    Builds document evidence and final synthesis from atomized document results.
+    """
+    from ai_orchestrator.models import AIAuditLog
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+
+    audit_log = AIAuditLog.objects.get(id=audit_log_id)
+    analysis_docs = list(FolderAnalysisDocument.objects.filter(audit_log_id=audit_log_id).order_by("created_at"))
+    persisted_results = [_analysis_document_to_result(doc) for doc in analysis_docs]
+    passed_files = [result for result in persisted_results if result.get("status") == "passed"]
+    failed_files = [result for result in persisted_results if result.get("status") != "passed"]
+
+    if _is_cancel_requested(audit_log_id):
+        audit_log.status = 'FAILED'
+        audit_log.is_success = False
+        audit_log.error_message = "Task manually terminated by forensic user."
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "passed_files": passed_files,
+            "failed_files": failed_files,
+            "workflow_stage": "analysis_complete",
+        }
+        audit_log.save(update_fields=["status", "is_success", "error_message", "source_metadata"])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {"error": "cancelled"}
+
+    if not passed_files:
+        audit_log.status = 'FAILED'
+        audit_log.is_success = False
+        audit_log.error_message = "No readable content extracted from selected files."
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "passed_files": [],
+            "failed_files": failed_files,
+            "workflow_stage": "analysis_complete",
+        }
+        audit_log.save(update_fields=["status", "is_success", "error_message", "source_metadata"])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {"error": "No readable content extracted from selected files"}
+
+    log_worker_event(audit_log, f"Building document evidence for {len(passed_files)} readable files...", status='PROCESSING')
+    ai_service = AIProcessorService()
+    document_evidence, enriched_files = _build_document_evidence_for_files(
+        passed_files,
+        ai_service=ai_service,
+        audit_log_id=str(audit_log.id),
+    )
+    supporting_raw_chunks = DocumentArtifactService.build_supporting_raw_chunks(document_evidence)
+    meta = _build_synthesis_metadata(
+        document_evidence=document_evidence,
+        supporting_raw_chunks=supporting_raw_chunks,
+        extra={
+            '_source_metadata': audit_log.source_metadata,
+            'audit_log_id': str(audit_log.id),
+            'celery_task_id': self.request.id,
+            'context_label': audit_log.context_label,
+        },
+    )
+
+    result = ai_service.process_content(
+        content="Synthesize the final deal analysis from the supplied document evidence and supporting raw chunks.",
+        skill_name="deal_synthesis",
+        source_type='onedrive_folder',
+        metadata=meta,
+    )
+    if isinstance(result, dict) and 'parsed_json' in result:
+        analysis = result['parsed_json']
+        raw_thinking = result.get('thinking', '')
+    else:
+        analysis = result if isinstance(result, dict) else {}
+        raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
+
+    normalized_analysis = _normalize_synthesis_result(
+        analysis,
+        analysis_kind=AnalysisKind.INITIAL,
+        document_evidence=document_evidence,
+        analysis_input_files=enriched_files,
+        failed_files=failed_files,
+    )
+    metadata = normalized_analysis.setdefault("metadata", {})
+    metadata["selected_files_count"] = len(persisted_results) or len(results)
+    metadata["passed_files_count"] = len(enriched_files)
+    metadata["failed_files_count"] = len(failed_files)
+
+    audit_log.source_metadata = {
+        **(audit_log.source_metadata or {}),
+        "passed_files": enriched_files,
+        "failed_files": failed_files,
+        "analysis_input_files": enriched_files,
+        "workflow_stage": "analysis_complete",
+    }
+    audit_log.save(update_fields=["source_metadata"])
+    log_worker_event(audit_log, f"Direct folder analysis complete for {len(enriched_files)} files.", status='COMPLETED', done=True)
+
+    return {
+        "status": "success",
+        "phase": "analysis",
+        "audit_log_id": str(audit_log.id),
+        "folder_id": folder_id,
+        "total_files": len(persisted_results) or len(results),
+        "preview_files_analyzed": len(enriched_files),
+        "preview_text": _build_deal_context_from_files(enriched_files),
+        "preliminary_data": normalized_analysis,
+        "raw_thinking": raw_thinking,
+        "analyzed_files": [file["file_name"] for file in enriched_files],
+        "passed_files": enriched_files,
+        "failed_files": failed_files,
+        "file_tree": (audit_log.source_metadata or {}).get("file_tree", []),
+        "selected_file_ids": (audit_log.source_metadata or {}).get("selected_file_ids", []),
+        "drive_id": drive_id,
+        "user_email": user_email,
+    }
 
 @shared_task(bind=True)
 def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_file_ids: list):
@@ -355,7 +781,6 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
         failed_files = session_data.get("failed_files", [])
         selected_set = set(selected_file_ids)
         approved_files = [file for file in passed_files if file.get("file_id") in selected_set]
-        combined_text = _build_combined_text(passed_files, selected_file_ids)
 
         log_worker_event(audit_log, f"Compiled context for {len(approved_files)} documents. Sending to AI VM...")
         source_type = audit_log.source_type
@@ -375,18 +800,30 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
 
         analysis = {}
         raw_thinking = ""
-        if combined_text:
+        normalized_analysis = {}
+        if approved_files:
             ai_service = AIProcessorService()
+            document_evidence, enriched_files = _build_document_evidence_for_files(
+                approved_files,
+                ai_service=ai_service,
+                audit_log_id=str(audit_log.id),
+            )
+            supporting_raw_chunks = DocumentArtifactService.build_supporting_raw_chunks(document_evidence)
             meta = {
                 '_source_metadata': audit_log.source_metadata,
                 'audit_log_id': str(audit_log.id),
                 'celery_task_id': self.request.id,
-                'context_label': audit_log.context_label
+                'context_label': audit_log.context_label,
             }
+            meta = _build_synthesis_metadata(
+                document_evidence=document_evidence,
+                supporting_raw_chunks=supporting_raw_chunks,
+                extra=meta,
+            )
             
             result = ai_service.process_content(
-                content=combined_text,
-                skill_name="deal_extraction",
+                content="Synthesize the final deal analysis from the supplied document evidence and supporting raw chunks.",
+                skill_name="deal_synthesis",
                 source_type=source_type,
                 metadata=meta
             )
@@ -397,15 +834,26 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             else:
                 analysis = result if isinstance(result, dict) else {}
                 raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
+            approved_files = enriched_files
+            normalized_analysis = _normalize_synthesis_result(
+                analysis,
+                analysis_kind=AnalysisKind.INITIAL,
+                document_evidence=document_evidence,
+                analysis_input_files=approved_files,
+                failed_files=failed_files,
+            )
 
-        if isinstance(analysis, dict):
-            metadata = analysis.setdefault("metadata", {})
+        if isinstance(normalized_analysis, dict) and normalized_analysis:
+            metadata = normalized_analysis.setdefault("metadata", {})
             metadata["selected_files_count"] = len(selected_file_ids)
             metadata["passed_files_count"] = len(approved_files)
             metadata["failed_files_count"] = len(failed_files)
             metadata["passed_files"] = passed_files
             metadata["failed_files"] = failed_files
             metadata["analysis_input_files"] = approved_files
+            normalized_analysis["document_evidence"] = normalized_analysis.get("document_evidence") if isinstance(normalized_analysis.get("document_evidence"), list) else document_evidence if 'document_evidence' in locals() else []
+            normalized_analysis["missing_information_requests"] = normalized_analysis.get("missing_information_requests") if isinstance(normalized_analysis.get("missing_information_requests"), list) else []
+            normalized_analysis["cross_document_conflicts"] = normalized_analysis.get("cross_document_conflicts") if isinstance(normalized_analysis.get("cross_document_conflicts"), list) else []
 
         return {
             "phase": "analysis",
@@ -413,8 +861,8 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
             "folder_id": session_data.get("folder_id"),
             "total_files": len(selected_file_ids),
             "preview_files_analyzed": len(approved_files),
-            "preview_text": combined_text,
-            "preliminary_data": analysis,
+            "preview_text": _build_deal_context_from_files(approved_files),
+            "preliminary_data": normalized_analysis if normalized_analysis else analysis,
             "raw_thinking": raw_thinking,
             "analyzed_files": [file["file_name"] for file in approved_files],
             "passed_files": approved_files,
@@ -522,9 +970,12 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
     """
     logger.info(f"Atomized Task: Processing file {file_info.get('name')} for Deal {deal_id}")
     
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+
     graph_service = GraphAPIService()
     doc_processor = DocumentProcessorService()
     embed_service = EmbeddingService()
+    ai_service = AIProcessorService()
     
     file_id = file_info.get('id')
     file_name = file_info.get('name')
@@ -564,7 +1015,8 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
 
         # Background VDR sync stores a preview transcription only.
         extraction = doc_processor.get_extraction_result(content, file_name, page_limit=2)
-        extracted_text = (extraction.get("text") or "").strip()
+        extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+        normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
 
         if _is_cancel_requested(audit_log_id):
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
@@ -577,22 +1029,28 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
             document_type=doc_type,
             onedrive_id=file_id,
             extracted_text=extracted_text,
+            normalized_text=normalized_text,
             is_indexed=False,
             is_ai_analyzed=False,
             initial_analysis_status=initial_analysis_status,
             initial_analysis_reason=initial_analysis_reason,
             extraction_mode=extraction.get("mode"),
-            transcription_status=TranscriptionStatus.PARTIAL if extracted_text else TranscriptionStatus.FAILED,
+            transcription_status=TranscriptionStatus.PARTIAL if normalized_text else TranscriptionStatus.FAILED,
             chunking_status=ChunkingStatus.NOT_CHUNKED,
-            last_transcribed_at=timezone.now() if extracted_text else None,
+            last_transcribed_at=timezone.now() if normalized_text else None,
         )
+
+        if normalized_text:
+            doc.save(update_fields=["normalized_text"])
+            DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=True)
         
         # Update combined deal text (Race condition warning: multiple tasks appending to the same field)
-        if extracted_text:
+        if normalized_text:
             with transaction.atomic():
                 # Re-fetch deal within transaction to minimize race condition window
                 deal_locked = Deal.objects.select_for_update().get(id=deal_id)
-                new_context = f"\n\n--- DOCUMENT: {file_name} ---\n{extracted_text}"
+                aggregate_text = doc.normalized_text or normalized_text
+                new_context = f"\n\n--- DOCUMENT: {file_name} ---\n{aggregate_text}"
                 if not deal_locked.extracted_text:
                     deal_locked.extracted_text = new_context
                 else:
@@ -600,7 +1058,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                 deal_locked.save(update_fields=['extracted_text'])
         
         # Vectorize for RAG
-        if extracted_text and len(extracted_text.strip()) > 50 and not _is_cancel_requested(audit_log_id):
+        if normalized_text and len(normalized_text.strip()) > 50 and not _is_cancel_requested(audit_log_id):
             _vectorize_document_and_capture(doc, embed_service)
             
         return {"status": "success", "file": file_name}
@@ -662,16 +1120,16 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
     personality = AIPersonality.objects.filter(is_default=True).first()
     
     # 1. Create PENDING audit log for indexing
-    audit_log = AIAuditLog.objects.create(
+    audit_log = AIRuntimeService.create_audit_log(
         source_type='vdr_indexing',
         source_id=deal_id,
         personality=personality,
         status='PROCESSING',
         is_success=False,
-        model_used='nomic-embed-text:latest',
+        model_used=AIRuntimeService.get_embedding_model(),
         system_prompt=f"Starting background vectorization for {len(limited_file_tree)} files via chord.",
         user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
-        celery_task_id=self.request.id
+        celery_task_id=self.request.id,
     )
 
     try:
@@ -750,9 +1208,10 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
         doc_processor = DocumentProcessorService()
         graph = GraphAPIService()
         embed_service = EmbeddingService()
-        new_text_context = ""
         diagnostics = []
         prepared_docs = []
+        document_evidence = []
+        ai_service = AIProcessorService()
 
         for doc in docs:
             file_diag = {
@@ -773,7 +1232,7 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                     or len((doc.extracted_text or "").strip()) < 50
                 )
                 if requires_full_transcription and doc.onedrive_id:
-                    logger.info(f"[TASK] Performing full GLM-OCR transcription for: {doc.title}")
+                    logger.info(f"[TASK] Performing full document transcription for: {doc.title}")
                     content = graph.get_drive_item_content(
                         user_email=DMS_USER_EMAIL,
                         file_id=doc.onedrive_id,
@@ -782,23 +1241,26 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                     extraction = doc_processor.get_extraction_result(content, doc.title, page_limit=None)
                     update = _prepare_document_update_from_extraction(extraction, full=True)
                     doc.extracted_text = update["extracted_text"]
+                    doc.normalized_text = update["normalized_text"]
                     doc.extraction_mode = update["extraction_mode"]
                     doc.transcription_status = update["transcription_status"]
                     doc.last_transcribed_at = update["last_transcribed_at"]
-                    doc.save(update_fields=['extracted_text', 'extraction_mode', 'transcription_status', 'last_transcribed_at'])
+                    doc.save(update_fields=['extracted_text', 'normalized_text', 'extraction_mode', 'transcription_status', 'last_transcribed_at'])
                 else:
                     file_diag["used_cached_text"] = True
 
                 file_diag["transcription_mode"] = doc.extraction_mode
                 file_diag["transcription_status"] = doc.transcription_status
 
-                if (doc.extracted_text or "").strip():
+                document_text = (doc.normalized_text or doc.extracted_text or "").strip()
+                if document_text:
+                    DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=requires_full_transcription)
                     chunk_count = _vectorize_document_and_capture(doc, embed_service)
                     file_diag["chunk_count"] = chunk_count
                     file_diag["chunking_status"] = doc.chunking_status
-                    new_text_context += f"\n\n--- NEW DOCUMENT: {doc.title} ---\n{doc.extracted_text}"
                     file_diag["analysis_included"] = True
                     prepared_docs.append(doc)
+                    document_evidence.append(DocumentArtifactService.artifact_from_document(doc))
                 else:
                     doc.transcription_status = TranscriptionStatus.FAILED
                     doc.save(update_fields=['transcription_status'])
@@ -814,7 +1276,7 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                 file_diag["error"] = str(e)
             diagnostics.append(file_diag)
 
-        if not new_text_context.strip():
+        if not document_evidence:
             audit_log.status = 'FAILED'
             audit_log.error_message = "No text extracted from selected documents."
             audit_log.source_metadata = {
@@ -824,7 +1286,6 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             audit_log.save(update_fields=['status', 'error_message', 'source_metadata'])
             return {"error": "No text extracted"}
 
-        ai_service = AIProcessorService()
         existing_canonical_snapshot = ((deal.current_analysis or {}).get("canonical_snapshot") or {}) if hasattr(deal, "current_analysis") else {}
         existing_summary = (existing_canonical_snapshot.get("analyst_report") or deal.deal_summary or "")
         
@@ -833,17 +1294,22 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
         latest_analysis = deal.analyses.order_by('-version').first()
         current_version = (latest_analysis.version + 1) if latest_analysis else 2
 
+        supporting_raw_chunks = DocumentArtifactService.build_supporting_raw_chunks(document_evidence)
         result = ai_service.process_content(
-            content=new_text_context,
+            content="Generate a supplemental analysis focused only on the supplied new document evidence and raw chunks.",
             skill_name="vdr_incremental_analysis",
             source_type="vdr_incremental_analysis",
             source_id=str(deal.id),
-            metadata={
+            metadata=_build_synthesis_metadata(
+                document_evidence=document_evidence,
+                supporting_raw_chunks=supporting_raw_chunks,
+                extra={
                 'audit_log_id': str(audit_log.id),
                 'existing_summary': existing_summary,
                 'existing_canonical_snapshot': json.dumps(existing_canonical_snapshot, default=str),
                 'version_num': current_version
-            }
+                },
+            )
         )
 
         analysis = {}
@@ -856,10 +1322,11 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             raw_thinking = analysis.get('thinking', '') if isinstance(analysis, dict) else ""
 
         if analysis and "error" not in analysis:
-            normalized_analysis = DealCreationService.normalize_analysis_payload(
+            normalized_analysis = _normalize_synthesis_result(
                 analysis,
                 previous_snapshot=existing_canonical_snapshot,
                 analysis_kind=AnalysisKind.SUPPLEMENTAL,
+                document_evidence=document_evidence,
                 documents_analyzed=[doc.title for doc in prepared_docs if doc.title],
                 analysis_input_files=[
                     {

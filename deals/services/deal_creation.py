@@ -111,6 +111,9 @@ class DealCreationService:
                     next_meta.get("ambiguous_points"),
                 ),
             },
+            "document_evidence": current_payload.get("document_evidence", previous_snapshot.get("document_evidence", [])),
+            "cross_document_conflicts": current_payload.get("cross_document_conflicts", previous_snapshot.get("cross_document_conflicts", [])),
+            "missing_information_requests": current_payload.get("missing_information_requests", previous_snapshot.get("missing_information_requests", [])),
         }
 
     @staticmethod
@@ -127,6 +130,9 @@ class DealCreationService:
         normalized.setdefault("deal_model_data", {})
         normalized.setdefault("metadata", {})
         normalized.setdefault("analyst_report", "")
+        normalized.setdefault("document_evidence", [])
+        normalized.setdefault("cross_document_conflicts", [])
+        normalized.setdefault("missing_information_requests", [])
 
         metadata = normalized["metadata"] if isinstance(normalized.get("metadata"), dict) else {}
         metadata["ambiguous_points"] = DealCreationService._normalize_string_list(metadata.get("ambiguous_points"))
@@ -135,7 +141,11 @@ class DealCreationService:
         )
         metadata["analysis_input_files"] = analysis_input_files if isinstance(analysis_input_files, list) else list(metadata.get("analysis_input_files") or [])
         metadata["failed_files"] = failed_files if isinstance(failed_files, list) else list(metadata.get("failed_files") or [])
+        metadata["sources_cited"] = DealCreationService._normalize_string_list(metadata.get("sources_cited"))
         normalized["metadata"] = metadata
+        normalized["document_evidence"] = normalized["document_evidence"] if isinstance(normalized.get("document_evidence"), list) else []
+        normalized["cross_document_conflicts"] = normalized["cross_document_conflicts"] if isinstance(normalized.get("cross_document_conflicts"), list) else []
+        normalized["missing_information_requests"] = normalized["missing_information_requests"] if isinstance(normalized.get("missing_information_requests"), list) else []
         normalized["canonical_snapshot"] = DealCreationService.build_canonical_snapshot(
             normalized,
             previous_snapshot=previous_snapshot,

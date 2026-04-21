@@ -4,11 +4,12 @@ import time
 from typing import Dict, Any, Optional, Iterator
 
 from ..models import AIPersonality, AISkill, AIAuditLog
-from .llm_providers import OllamaProviderService
+from .llm_providers import VLLMProviderService
 from .prompts import PromptBuilderService
 from .parsers import ResponseParserService
 from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
+from .runtime import AIRuntimeService
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -19,13 +20,13 @@ class AIProcessorService:
     """
     Facade Orchestrator that coordinates:
     1. OCR passes via `OCRService`
-    2. Prompt building via `PromptBuilderService`
-    3. LLM API execution via `OllamaProviderService`
+        2. Prompt building via `PromptBuilderService`
+        3. LLM API execution via `VLLMProviderService`
     4. Streaming and Response Parsing via `ResponseParserService`
     """
 
     def __init__(self):
-        self.provider = OllamaProviderService()
+        self.provider = VLLMProviderService()
         self.ocr_service = OCRService()
         self.available_models = self.provider.get_available_models()
         self.channel_layer = get_channel_layer()
@@ -46,12 +47,9 @@ class AIProcessorService:
         if skill_name:
             print(f"[AI-PROCESSOR] Loading skill: {skill_name}")
             
-        personality = AIPersonality.objects.filter(name=personality_name).first()
-        if personality_name == "default" or not personality:
-            personality = AIPersonality.objects.filter(is_default=True).first()
-            
-        skill = AISkill.objects.filter(name=skill_name).first() if skill_name else None
-        vision_model = personality.vision_model_name if personality and personality.vision_model_name else 'llava:latest'
+        personality = AIRuntimeService.get_personality(personality_name)
+        skill = AIRuntimeService.get_skill(skill_name)
+        vision_model = AIRuntimeService.get_vision_model(personality)
 
         # Audit Log Setup (Internal bookkeeping) - Initialize early to avoid UnboundLocalError in log_worker_event
         audit_log = self._setup_audit_log(
@@ -67,7 +65,7 @@ class AIProcessorService:
             log_worker_event(audit_log, "OCR analysis complete.")
 
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
-        log_worker_event(audit_log, f"Preparing prompt for {personality.text_model_name if personality else 'LLM'}.")
+        log_worker_event(audit_log, f"Preparing prompt for {AIRuntimeService.get_text_model(personality)}.")
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         prompt_template = skill.prompt_template if skill else "{{ content }}"
         
@@ -81,21 +79,15 @@ class AIProcessorService:
         log_worker_event(audit_log, "Sending request to AI model server.")
 
         payload = {
-            "model": model_override or (personality.text_model_name if personality else 'qwen3.5:latest'),
+            "model": model_override or AIRuntimeService.get_text_model(personality),
             "prompt": user_prompt,
             "system": system_instructions,
             "stream": stream,
-            "keep_alive": "2h",
             "options": {
-                "num_ctx": 65536,
-                "num_predict": 8192,
+                "max_tokens": 8192,
                 "temperature": 0.1,
-                "num_gpu": 99,
-                "repeat_penalty": 1.0
             }
         }
-
-        self._prepare_for_text_analysis(payload["model"], vision_model)
 
         # PHASE 3: EXECUTION (Delegated to Provider + Parser)
         if stream:
@@ -126,26 +118,20 @@ class AIProcessorService:
             except AIAuditLog.DoesNotExist:
                 pass
 
-        model_used = personality.text_model_name if personality else 'qwen3.5:latest'
-
-        return AIAuditLog.objects.create(
-            source_type=source_type, source_id=source_id,
-            context_label=ctx_label, personality=personality, skill=skill,
-            model_used=model_used, system_prompt=system_prompt, user_prompt=user_prompt,
-            is_success=False, status='PROCESSING',
-            source_metadata=source_meta, celery_task_id=celery_task_id
+        return AIRuntimeService.create_audit_log(
+            source_type=source_type,
+            source_id=source_id,
+            context_label=ctx_label,
+            personality=personality,
+            skill=skill,
+            model_used=AIRuntimeService.get_text_model(personality),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            is_success=False,
+            status='PROCESSING',
+            source_metadata=source_meta,
+            celery_task_id=celery_task_id,
         )
-
-    def _prepare_for_text_analysis(self, text_model: str, vision_model: str) -> None:
-        """
-        On a single-GPU / single-concurrency deployment, explicitly evict the OCR
-        model before firing the text model to maximize available VRAM.
-        """
-        if not text_model or not vision_model:
-            return
-        if text_model == vision_model:
-            return
-        self.provider.unload_model(vision_model)
 
     def _stream_response(self, payload: dict, audit_log: AIAuditLog) -> Iterator[str]:
         """
@@ -258,7 +244,8 @@ class AIProcessorService:
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
             
-            is_extraction = audit_log.skill and audit_log.skill.name == "deal_extraction"
+            extraction_skills = {"deal_extraction", "document_evidence_extraction", "deal_synthesis", "vdr_incremental_analysis"}
+            is_extraction = audit_log.skill and audit_log.skill.name in extraction_skills
             
             parsed_json, success, clean_resp, clean_think = ResponseParserService.parse_standard_response(
                 raw_response, thinking, is_extraction
@@ -288,7 +275,8 @@ class AIProcessorService:
                     logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
                 
             # Estimate tokens
-            audit_log.tokens_used = (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4
+            usage = data.get("usage") or {}
+            audit_log.tokens_used = usage.get("total_tokens") or (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4
                 
         except Exception as e:
             logger.error(f"Standard execution failed: {str(e)}")

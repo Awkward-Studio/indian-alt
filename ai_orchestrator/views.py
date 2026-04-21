@@ -1,6 +1,5 @@
 import logging
 import json
-import requests
 import uuid
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
@@ -19,6 +18,7 @@ from .services.ai_processor import AIProcessorService
 from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
+from .services.runtime import AIRuntimeService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal
@@ -40,7 +40,6 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     def cancel(self, request, pk=None):
         """
         Attempts to cancel a running task using its stored Celery ID.
-        Also attempts to clear the Ollama VM state if possible.
         """
         log = self.get_object()
         task_id = log.celery_task_id
@@ -68,24 +67,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 revoke_errors.append(f"Failed to connect to Celery broker: {e}")
                 logger.warning("Failed to connect to Celery broker while cancelling audit log %s: %s", log.id, e)
             
-        # 2. Force-clear Ollama VM (send a tiny request to interrupt long generation)
-        try:
-            from .services.ai_processor import AIProcessorService
-            ai = AIProcessorService()
-            # Most LLM servers interrupt the previous request if a new one comes in with specific flags,
-            # or we just ensure the connection is closed.
-            # For Ollama, the best way to free VRAM/Process is to load a tiny model or 
-            # send a request with num_predict: 1
-            requests.post(f"{ai.provider.ollama_url}/api/generate", json={
-                "model": log.model_used,
-                "prompt": "stop",
-                "options": {"num_predict": 1},
-                "stream": False
-            }, timeout=5)
-        except Exception as e:
-            logger.warning("Failed to interrupt Ollama while cancelling audit log %s: %s", log.id, e)
-
-        # 3. Update the log status
+        # 2. Update the log status; workers will stop cooperatively at task boundaries.
         log.source_metadata = {
             **source_meta,
             "cancel_requested": True,
@@ -156,64 +138,12 @@ class DealChatView(APIView):
             return Response({"error": "deal_id and message are required"}, status=400)
         try:
             deal = Deal.objects.get(id=deal_id)
-            
-            # Fetch timeline/phase logs
-            phase_logs = deal.phase_logs.all().order_by('changed_at')
-            timeline = []
-            for log in phase_logs:
-                timeline.append({
-                    "from": log.from_phase,
-                    "to": log.to_phase,
-                    "rationale": log.rationale,
-                    "timestamp": log.changed_at.isoformat(),
-                    "changed_by": log.changed_by.user.email if log.changed_by and log.changed_by.user else "System"
-                })
-
-            # Create a rich, structured representation of the deal's forensic data
-            current_analysis = deal.current_analysis or {}
-            structured_data = {
-                "title": deal.title,
-                "industry": deal.industry,
-                "sector": deal.sector,
-                "funding_ask": deal.funding_ask,
-                "priority": deal.priority,
-                "current_phase": deal.current_phase,
-                "themes": deal.themes if isinstance(deal.themes, list) else [],
-                "ambiguities": deal.ambiguities if isinstance(deal.ambiguities, list) else [],
-                "forensic_summary": (current_analysis.get("canonical_snapshot") or {}).get("analyst_report") or deal.deal_summary,
-                "current_analysis": current_analysis,
-                "status_flags": {
-                    "female_led": deal.is_female_led,
-                    "management_meeting": deal.management_meeting,
-                    "proposal_stage": deal.business_proposal_stage,
-                    "ic_stage": deal.ic_stage
-                },
-                "timeline_history": timeline
-            }
-            
-            embed_service = EmbeddingService()
-            chunks = embed_service.search_similar_chunks(user_message, deal, limit=16)
-            
-            rag_context = f"[DEAL FORENSIC RECORD]\n{json.dumps(structured_data, default=str, indent=2)}\n\n[TOP EVIDENCE CHUNKS]\n"
-            if chunks:
-                for index, chunk in enumerate(chunks, start=1):
-                    source_title = (chunk.metadata or {}).get('title') or (chunk.metadata or {}).get('filename') or 'Source'
-                    rag_context += (
-                        f"\n{index}. [Deal: {deal.title} | Source: {source_title} | Type: {chunk.source_type}]\n"
-                        f"{chunk.content[:1600]}\n"
-                    )
-            else:
-                rag_context += "No specific raw document chunks matched this query."
-            
             ai_service = AIProcessorService()
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_chat').first()
             
-            # Use model from personality
-            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-
             # Create PENDING audit log for background tracking
-            audit_log = AIAuditLog.objects.create(
+            audit_log = AIRuntimeService.create_audit_log(
                 source_type='deal_chat',
                 source_id=str(deal.id),
                 context_label=f"Deal Chat: {deal.title}",
@@ -221,9 +151,8 @@ class DealChatView(APIView):
                 skill=skill,
                 status='PENDING',
                 is_success=False,
-                model_used=default_model,
                 system_prompt="Processing forensic query in background...",
-                user_prompt=user_message
+                user_prompt=user_message,
             )
 
             from .tasks import generate_chat_response_async
@@ -243,14 +172,7 @@ class DealChatView(APIView):
                     'user_message': user_message,
                     'skill_name': 'deal_chat',
                     'metadata': {
-                        'deal_context': rag_context,
-                        '_source_metadata': {
-                            'retrieved_chunk_count': len(chunks),
-                            'selected_sources': [
-                                ((chunk.metadata or {}).get('title') or (chunk.metadata or {}).get('filename') or 'Source')
-                                for chunk in chunks
-                            ],
-                        },
+                        'deal_id': str(deal.id),
                     },
                     'audit_log_id': str(audit_log.id)
                 }
@@ -292,11 +214,8 @@ class UniversalChatView(APIView):
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='universal_chat').first()
             
-            # Use model from personality
-            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-
             # Create PENDING audit log for background tracking
-            audit_log = AIAuditLog.objects.create(
+            audit_log = AIRuntimeService.create_audit_log(
                 source_type='universal_chat',
                 source_id=str(conversation.id),
                 context_label=f"Global Chat: {conversation.title}",
@@ -304,9 +223,8 @@ class UniversalChatView(APIView):
                 skill=skill,
                 status='PENDING',
                 is_success=False,
-                model_used=default_model,
                 system_prompt="Queued for global pipeline query...",
-                user_prompt=user_message
+                user_prompt=user_message,
             )
 
             from .tasks import generate_chat_response_async
@@ -342,7 +260,6 @@ class AISettingsView(APIView):
             
             ai_service = AIProcessorService()
             vm_service = VMControlService()
-            ollama_url = ai_service.provider.ollama_url
             
             personalities = AIPersonality.objects.all()
             skills = AISkill.objects.all()
@@ -356,29 +273,11 @@ class AISettingsView(APIView):
             vm_status = vm_service.get_status()
             
             try:
-                # Use the same Ollama endpoint the rest of the app is configured to use.
-                # The previous 1.5s timeout was too aggressive for remote GPU hosts and
-                # could mark the link offline while normal inference still worked.
-                tags_resp = requests.get(f"{ollama_url}/api/tags", timeout=5)
-                if tags_resp.status_code == 200:
-                    vm_online = True
-                    available_models = [m['name'] for m in tags_resp.json().get('models', [])]
-                    
-                    # If online, try fetching telemetry
-                    ps_resp = requests.get(f"{ollama_url}/api/ps", timeout=5)
-                    if ps_resp.status_code == 200:
-                        for model in ps_resp.json().get('models', []):
-                            vram_gb = model.get('size_vram', 0) / 1e9
-                            telemetry["loaded_models"].append({
-                                "name": model.get('name'), 
-                                "vram_gb": round(vram_gb, 2)
-                            })
+                vm_online = ai_service.provider.health_check()
+                if vm_online:
+                    available_models = ai_service.provider.get_available_models()
             except Exception as e:
-                logger.warning("Neural Engine connectivity probe failed for %s: %s", ollama_url, e)
-
-            # If Azure reports the VM is running but the short telemetry probe missed,
-            # expose the actual VM status separately while keeping vm_online tied to
-            # successful Ollama connectivity.
+                logger.warning("vLLM connectivity probe failed: %s", e)
 
             # Live Forex
             from .services.forex_service import ForexService

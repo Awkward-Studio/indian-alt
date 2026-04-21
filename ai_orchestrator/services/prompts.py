@@ -56,11 +56,29 @@ class PromptBuilderService:
                 "- `funding_ask` must be a string in INR Cr, not a number.\n"
                 "- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.\n"
             )
+        elif skill and skill.name == "document_evidence_extraction":
+            system_instructions += (
+                "\n\n### DOCUMENT EVIDENCE OUTPUT CONTRACT:\n"
+                "- Return exactly one JSON object and nothing else.\n"
+                "- `document_summary`, `normalized_text`, and `reasoning` must be strings.\n"
+                "- `claims`, `risks`, `open_questions`, `citations`, and `quality_flags` must be arrays of strings.\n"
+                "- `metrics`, `tables_summary`, `contacts_found`, and `source_map` must be valid JSON values.\n"
+            )
+        elif skill and skill.name == "deal_synthesis":
+            system_instructions += (
+                "\n\n### DEAL SYNTHESIS OUTPUT CONTRACT:\n"
+                "- Return exactly one JSON object and nothing else.\n"
+                "- `analyst_report` must be a string with citations.\n"
+                "- `document_evidence`, `cross_document_conflicts`, and `missing_information_requests` must be arrays.\n"
+                "- `metadata` must include `ambiguous_points`, `sources_cited`, `documents_analyzed`, `analysis_input_files`, and `failed_files`.\n"
+                "- Preserve supporting citations from the supplied evidence where possible.\n"
+            )
         elif skill and skill.name == "vdr_incremental_analysis":
             system_instructions += (
                 "\n\n### INCREMENTAL ANALYSIS OUTPUT CONTRACT:\n"
                 "- Return exactly one JSON object and nothing else.\n"
                 "- The JSON must contain `analyst_report` as a string.\n"
+                "- `document_evidence`, `cross_document_conflicts`, and `missing_information_requests` must be arrays.\n"
                 "- Focus only on newly supplied documents; do not rewrite the full prior report.\n"
             )
 

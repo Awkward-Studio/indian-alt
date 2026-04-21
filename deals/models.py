@@ -398,7 +398,8 @@ class InitialAnalysisStatus(models.TextChoices):
 
 
 class ExtractionMode(models.TextChoices):
-    GLM_OCR = 'glm_ocr', 'GLM OCR'
+    DOCPROC_REMOTE = 'docproc_remote', 'Docproc Remote'
+    VLLM_VISION = 'vllm_vision', 'vLLM Vision'
     FALLBACK_TEXT = 'fallback_text', 'Fallback Text'
 
 
@@ -413,6 +414,68 @@ class ChunkingStatus(models.TextChoices):
     NOT_CHUNKED = 'not_chunked', 'Not Chunked'
     CHUNKED = 'chunked', 'Chunked'
     FAILED = 'failed', 'Failed'
+
+
+class FolderAnalysisDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.CASCADE,
+        related_name='analysis_documents',
+    )
+    source_file_id = models.CharField(max_length=255, db_index=True)
+    source_drive_id = models.CharField(max_length=255, blank=True, default="")
+    file_name = models.TextField()
+    file_path = models.TextField(blank=True, default="")
+    document_type = models.CharField(
+        max_length=50,
+        choices=DocumentType.choices,
+        default=DocumentType.OTHER,
+    )
+    raw_extracted_text = models.TextField(blank=True, default="")
+    normalized_text = models.TextField(blank=True, default="")
+    evidence_json = models.JSONField(default=dict, blank=True)
+    source_map_json = models.JSONField(default=dict, blank=True)
+    table_json = models.JSONField(default=list, blank=True)
+    key_metrics_json = models.JSONField(default=list, blank=True)
+    reasoning = models.TextField(blank=True, null=True)
+    extraction_mode = models.CharField(
+        max_length=40,
+        choices=ExtractionMode.choices,
+        blank=True,
+        null=True,
+    )
+    transcription_status = models.CharField(
+        max_length=20,
+        choices=TranscriptionStatus.choices,
+        default=TranscriptionStatus.PENDING,
+    )
+    chunking_status = models.CharField(
+        max_length=20,
+        choices=ChunkingStatus.choices,
+        default=ChunkingStatus.NOT_CHUNKED,
+    )
+    quality_flags = models.JSONField(default=list, blank=True)
+    render_metadata = models.JSONField(default=dict, blank=True)
+    is_indexed = models.BooleanField(default=False)
+    chunk_count = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True, null=True)
+    last_transcribed_at = models.DateTimeField(blank=True, null=True)
+    last_chunked_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-created_at']
+        unique_together = [('audit_log', 'source_file_id')]
+        indexes = [
+            models.Index(fields=['audit_log', 'source_file_id']),
+            models.Index(fields=['audit_log', 'transcription_status']),
+            models.Index(fields=['audit_log', 'is_indexed']),
+        ]
+
+    def __str__(self):
+        return f"{self.file_name} [{self.audit_log_id}]"
 
 
 class DealDocument(models.Model):
@@ -431,6 +494,12 @@ class DealDocument(models.Model):
     onedrive_id = models.TextField(blank=True, null=True)
     file_url = models.URLField(blank=True, null=True)
     extracted_text = models.TextField(blank=True, null=True)
+    normalized_text = models.TextField(blank=True, null=True)
+    evidence_json = models.JSONField(default=dict, blank=True)
+    source_map_json = models.JSONField(default=dict, blank=True)
+    table_json = models.JSONField(default=list, blank=True)
+    key_metrics_json = models.JSONField(default=list, blank=True)
+    reasoning = models.TextField(blank=True, null=True)
     is_indexed = models.BooleanField(default=False)
     is_ai_analyzed = models.BooleanField(
         default=False,

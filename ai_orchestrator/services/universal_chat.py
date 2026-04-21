@@ -6,11 +6,13 @@ from typing import Any, Dict, List, Tuple
 from django.db import connection
 from django.db.models import Count, Q
 
-from deals.models import Deal
+from deals.models import Deal, DealDocument, FolderAnalysisDocument
 from ..models import DocumentChunk
 from .ai_processor import AIProcessorService
 from .embedding_processor import EmbeddingService
 from .flow_config import UniversalChatFlowService
+from .runtime import AIRuntimeService
+from deals.services.document_artifacts import DocumentArtifactService
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +71,76 @@ class UniversalChatService:
         self.ai_service = ai_service
         self.embed_service = EmbeddingService()
         self.is_sqlite = connection.vendor == "sqlite"
+        self._document_cache: dict[str, Any] = {}
         if flow_config is not None:
             self.flow_config = UniversalChatFlowService.validate_config(flow_config)
             self.flow_version = flow_version
         else:
             self.flow_config, self.flow_version = UniversalChatFlowService.get_runtime_config()
+
+    def _compact_document_metadata(self, artifact: Dict[str, Any], *, fallback_metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        fallback_metadata = fallback_metadata or {}
+        metrics = artifact.get("metrics")
+        if not isinstance(metrics, list):
+            metrics = [metrics] if metrics else []
+        tables = artifact.get("tables_summary")
+        if not isinstance(tables, list):
+            tables = [tables] if tables else []
+        risks = artifact.get("risks")
+        if not isinstance(risks, list):
+            risks = [risks] if risks else []
+        claims = artifact.get("claims")
+        if not isinstance(claims, list):
+            claims = [claims] if claims else []
+
+        return {
+            "document_name": artifact.get("document_name") or fallback_metadata.get("title") or fallback_metadata.get("filename"),
+            "document_type": artifact.get("document_type") or fallback_metadata.get("document_type") or fallback_metadata.get("doc_type"),
+            "citation_label": artifact.get("citation_label") or fallback_metadata.get("citation_label"),
+            "document_summary": artifact.get("document_summary") or fallback_metadata.get("summary"),
+            "metrics": metrics[:10],
+            "tables_summary": tables[:6],
+            "risks": risks[:8],
+            "claims": claims[:8],
+            "metric_names": fallback_metadata.get("metric_names") or [
+                metric.get("name")
+                for metric in metrics
+                if isinstance(metric, dict) and metric.get("name")
+            ][:10],
+            "source_map": artifact.get("source_map") or fallback_metadata.get("source_map") or {},
+        }
+
+    def _document_metadata_for_chunk(self, chunk: DocumentChunk) -> Dict[str, Any]:
+        metadata = chunk.metadata or {}
+        cache_key = f"{chunk.source_type}:{chunk.source_id}"
+        if cache_key in self._document_cache:
+            return self._document_cache[cache_key]
+
+        artifact: Dict[str, Any] | None = None
+        if chunk.source_type == "document" and chunk.source_id:
+            doc = DealDocument.objects.filter(id=chunk.source_id).first()
+            if doc:
+                artifact = DocumentArtifactService.artifact_from_document(doc)
+        elif chunk.source_type == "analysis_document" and chunk.source_id:
+            doc = FolderAnalysisDocument.objects.filter(id=chunk.source_id).first()
+            if doc:
+                artifact = DocumentArtifactService.artifact_from_analysis_document(doc)
+        elif chunk.source_type == "extracted_source":
+            artifact = {
+                "document_name": metadata.get("filename") or metadata.get("title"),
+                "document_type": metadata.get("doc_type") or metadata.get("document_type") or "Other",
+                "document_summary": metadata.get("summary") or "",
+                "metrics": metadata.get("metrics") or [],
+                "tables_summary": metadata.get("tables_summary") or [],
+                "risks": metadata.get("risks") or [],
+                "claims": metadata.get("claims") or [],
+                "source_map": metadata.get("source_map") or {},
+                "citation_label": metadata.get("citation_label") or metadata.get("filename") or metadata.get("title"),
+            }
+
+        compact = self._compact_document_metadata(artifact or {}, fallback_metadata=metadata)
+        self._document_cache[cache_key] = compact
+        return compact
 
     def process_intent_and_build_metadata(self, user_message: str, conversation_id: str, history_context: str, audit_log_id: str) -> dict:
         gate = self._decide_query_builder_usage(user_message, history_context)
@@ -107,6 +174,8 @@ class UniversalChatService:
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
+        if not isinstance(chunk_diagnostics, dict):
+            chunk_diagnostics = {}
         serialized_deals = [self._serialize_deal(deal) for deal in deals]
         serialized_chunks = [self._serialize_chunk(item) for item in chunks]
         context_data, context_diagnostics = self._format_context_data(
@@ -148,6 +217,70 @@ class UniversalChatService:
             "selected_chunk_count": len(serialized_chunks),
             "candidate_chunk_count": chunk_diagnostics.get("candidate_chunk_count", 0),
             "deals_selected": len(serialized_deals),
+            "chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "selected_chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "chunks_dropped_by_per_deal_cap": chunk_diagnostics.get("dropped_by_per_deal_cap", 0),
+            "chunks_dropped_by_total_cap": chunk_diagnostics.get("dropped_by_total_cap", 0),
+            "chunks_dropped_as_duplicates": chunk_diagnostics.get("dropped_as_duplicates", 0),
+            "chunks_dropped_by_zero_score": chunk_diagnostics.get("dropped_by_zero_score", 0),
+            "max_total_chunks": chunk_diagnostics.get("max_total_chunks"),
+            "context_chars_before_trim": context_diagnostics.get("chars_before_trim"),
+            "context_chars_after_trim": context_diagnostics.get("chars_after_trim"),
+            "truncated_chunk_count": context_diagnostics.get("omitted_chunk_count"),
+            "selected_sources": [
+                f"{chunk['deal']}|{chunk.get('source_title') or chunk['source_type']}"
+                for chunk in serialized_chunks
+            ],
+        }
+
+    def process_single_deal_build_metadata(
+        self,
+        user_message: str,
+        conversation_id: str,
+        history_context: str,
+        audit_log_id: str,
+        deal_id: str,
+    ) -> dict:
+        answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
+        deal = Deal.objects.get(id=deal_id)
+        plan = self._build_query_plan(user_message, conversation_id)
+        plan["deal_limit"] = 1
+
+        deals = [deal]
+        chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
+        if not isinstance(chunk_diagnostics, dict):
+            chunk_diagnostics = {}
+
+        serialized_deals = [self._serialize_deal(deal)]
+        serialized_chunks = [self._serialize_chunk(item) for item in chunks]
+        context_data, context_diagnostics = self._format_context_data(
+            plan=plan,
+            deals=serialized_deals,
+            chunks=serialized_chunks,
+            diagnostics=chunk_diagnostics,
+        )
+
+        return {
+            "history_context": history_context,
+            "context_data": context_data,
+            "deal_context": context_data,
+            "audit_log_id": audit_log_id,
+            "query_plan": plan,
+            "flow_version": getattr(self.flow_version, "version", None),
+            "flow_config_id": str(self.flow_version.id) if getattr(self.flow_version, "id", None) else None,
+            "answer_generation_prompt": answer_prompt,
+            "used_query_builder": True,
+            "gate_mode": "deal_scoped_retrieval",
+            "gate_reason": "single_deal_scope",
+            "planner_requested_deal_limit": 1,
+            "planner_requested_chunks_per_deal": plan.get("chunks_per_deal"),
+            "effective_deal_limit": 1,
+            "effective_chunks_per_deal": chunk_diagnostics.get("effective_chunks_per_deal"),
+            "deals_considered": 1,
+            "retrieved_chunk_count": chunk_diagnostics.get("candidate_chunk_count", 0),
+            "selected_chunk_count": len(serialized_chunks),
+            "candidate_chunk_count": chunk_diagnostics.get("candidate_chunk_count", 0),
+            "deals_selected": 1,
             "chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
             "selected_chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
             "chunks_dropped_by_per_deal_cap": chunk_diagnostics.get("dropped_by_per_deal_cap", 0),
@@ -236,6 +369,7 @@ class UniversalChatService:
                 stream=False,
                 source_type="universal_chat_intent",
                 source_id=conversation_id,
+                model_override=AIRuntimeService.get_planner_model(),
             )
             if isinstance(result, dict):
                 return self._normalize_plan(result, user_message)
@@ -330,9 +464,16 @@ class UniversalChatService:
             if value:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})
 
+        semantic_query = " | ".join(plan.get("rag_queries") or [plan["user_query"]])
+        semantic_limit = int(filter_settings.get("result_limit") or plan.get("deal_limit") or 20)
+        semantic_matches = self.embed_service.search_deal_profiles(
+            semantic_query,
+            limit=semantic_limit,
+            filters=filters,
+        )
         pool = list(queryset.order_by("-created_at")[: int(filter_settings.get("candidate_pool_limit") or 60)])
         if not pool:
-            return []
+            return semantic_matches[: plan.get("deal_limit", 8)] if semantic_matches else []
 
         scored = []
         for deal in pool:
@@ -367,21 +508,23 @@ class UniversalChatService:
                 if metric.lower() in combined:
                     score += float(rerank_settings.get("deal_metric_boost") or 20)
 
+            semantic_rank = next((idx for idx, semantic_deal in enumerate(semantic_matches) if semantic_deal.id == deal.id), None)
+            if semantic_rank is not None:
+                score += max(0, semantic_limit - semantic_rank) * 12
+
             scored.append((score, deal))
 
         scored.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
         top = [deal for score, deal in scored if score > 0][: plan.get("deal_limit", 8)]
         if top:
             return top
+        if semantic_matches:
+            return semantic_matches[: plan.get("deal_limit", 8)]
         return pool[: min(plan.get("deal_limit", 8), int(filter_settings.get("result_limit") or plan.get("deal_limit", 8)))]
 
     def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         retrieval_settings = self._stage_settings("chunk_retrieval")
         rerank_settings = self._stage_settings("chunk_rerank")
-        queryset = DocumentChunk.objects.all().select_related("deal")
-        if deals:
-            queryset = queryset.filter(deal__in=deals)
-
         rag_query = " | ".join(plan.get("rag_queries") or [plan["user_query"]])
         exact_terms = [term.lower() for term in plan.get("exact_terms", [])]
         keywords = [term.lower() for term in plan.get("keywords", [])]
@@ -389,22 +532,27 @@ class UniversalChatService:
         scored_items: List[Dict[str, Any]] = []
         dropped_by_zero_score = 0
 
-        if self.is_sqlite:
-            candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("sqlite_candidate_limit") or 300)])
-        else:
-            query_embedding = self.embed_service._get_embedding(rag_query)
-            if query_embedding:
-                from pgvector.django import CosineDistance
-                candidate_chunks = list(
-                    queryset.annotate(distance=CosineDistance("embedding", query_embedding)).order_by("distance")[: int(retrieval_settings.get("vector_limit") or 60)]
-                )
-            else:
-                candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("fallback_candidate_limit") or 120)])
+        deal_ids = [str(deal.id) for deal in deals]
+        candidate_limit = int(retrieval_settings.get("vector_limit") or 60)
+        candidate_chunks = self.embed_service.search_global_chunks(
+            rag_query,
+            limit=candidate_limit,
+            deal_ids=deal_ids or None,
+        )
+        if not candidate_chunks:
+            queryset = DocumentChunk.objects.all().select_related("deal")
+            if deals:
+                queryset = queryset.filter(deal__in=deals)
+            candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("fallback_candidate_limit") or 120)])
 
         for chunk in candidate_chunks:
             content_lower = (chunk.content or "").lower()
             title_lower = str((chunk.metadata or {}).get("title", "")).lower()
             score = 0.0
+
+            rerank_score = getattr(chunk, "rerank_score", None)
+            if rerank_score is not None:
+                score += float(rerank_score) * 100
 
             distance = getattr(chunk, "distance", None)
             if distance is not None:
@@ -527,6 +675,7 @@ class UniversalChatService:
             "score": item["score"],
             "text": excerpt,
             "metadata": metadata,
+            "document_metadata": self._document_metadata_for_chunk(chunk),
         }
 
     def _format_context_data(self, plan: Dict[str, Any], deals: List[Dict[str, Any]], chunks: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> Tuple[str, Dict[str, Any]]:
@@ -560,6 +709,11 @@ class UniversalChatService:
                     f"{index}. [Deal: {chunk['deal']} | Source: {chunk.get('source_title') or chunk['source_type']} | "
                     f"Type: {chunk['source_type']} | Score: {chunk['score']}]"
                 )
+                if chunk.get("document_metadata"):
+                    sections.append(
+                        "  Document Metadata: "
+                        + json.dumps(chunk["document_metadata"], default=str, ensure_ascii=True)
+                    )
                 sections.append(chunk["text"])
         else:
             sections.append("- No high-confidence document chunks were selected.")
