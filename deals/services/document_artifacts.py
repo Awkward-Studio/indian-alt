@@ -1,7 +1,7 @@
 import json
 import logging
 from copy import deepcopy
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
@@ -58,7 +58,7 @@ class DocumentArtifactService:
         extracted_text: str,
         document_type: str = "Other",
         extraction_mode: str | None = None,
-        ai_service: "AIProcessorService" | None = None,
+        ai_service: Optional["AIProcessorService"] = None,
         source_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_text = (extracted_text or "").strip()
@@ -161,7 +161,7 @@ class DocumentArtifactService:
         cls,
         document,
         *,
-        ai_service: "AIProcessorService" | None = None,
+        ai_service: Optional["AIProcessorService"] = None,
         force: bool = False,
     ) -> dict[str, Any]:
         existing = cls.artifact_from_document(document)
