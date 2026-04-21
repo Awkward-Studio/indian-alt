@@ -9,7 +9,18 @@ from .runtime import AIRuntimeService
 from deals.models import Deal, DealDocument, FolderAnalysisDocument
 from deals.services.document_artifacts import DocumentArtifactService
 from microsoft.models import Email
-from .llm_providers import EmbeddingProviderService, RerankerProviderService
+from .llm_providers import VLLMProviderService
+
+try:
+    from .llm_providers import EmbeddingProviderService, RerankerProviderService
+except ImportError:
+    # Fall back to the shared vLLM transport if the dedicated providers are
+    # unavailable in the deployed image.
+    EmbeddingProviderService = VLLMProviderService
+
+    class RerankerProviderService:
+        def rerank(self, *, model: str, query: str, documents: list[str], timeout: int | None = None) -> list[dict[str, Any]]:
+            return []
 
 logger = logging.getLogger(__name__)
 
