@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple
 
 from django.db import connection
@@ -11,6 +12,7 @@ from ..models import DocumentChunk
 from .ai_processor import AIProcessorService
 from .embedding_processor import EmbeddingService
 from .flow_config import UniversalChatFlowService
+from .prompts import PromptBuilderService
 from .runtime import AIRuntimeService
 from deals.services.document_artifacts import DocumentArtifactService
 
@@ -25,6 +27,12 @@ QUERY_TYPES = {
     "timeline",
     "narrative",
 }
+
+ENTITY_TYPES = {"deal", "theme", "metric", "document"}
+EVIDENCE_PREFERENCES = {"summary", "metrics", "risks", "mixed", "documents", "timeline"}
+RESULT_SHAPES = {"single_deal", "named_set", "shortlist", "cross_pipeline"}
+SELECTION_MODES = {"depth_first", "balanced", "breadth_first"}
+STATS_MODES = {"none", "count", "group", "aggregate"}
 
 METRIC_TOKENS = {
     "arr", "mrr", "revenue", "ebitda", "cm1", "cm2", "gross margin",
@@ -60,6 +68,37 @@ FORCE_RETRIEVAL_TERMS = {
     "revenue", "ebitda", "valuation", "funding ask", "stage", "phase", "status",
     "verify", "check the document", "source", "citation", "citations",
 }
+
+QUERY_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "about", "across", "all", "any",
+    "be", "by", "do", "does", "for", "from", "give", "find", "list", "main",
+    "me", "mention", "of", "our", "show", "strong", "tell", "the", "their",
+    "these", "this", "those", "to", "top", "what", "which", "with", "you",
+    "deal", "deals", "business", "company", "companies", "industry", "pipeline",
+}
+
+PLACEHOLDER_PLAN_VALUES = {
+    "exact company names or phrases",
+    "exact company names or phrases kept only for compatibility",
+    "semantic search query variants",
+    "important keywords",
+    "semantic preferences that should not become db filters",
+    "arman financial services",
+    "summary|metrics|risks|mixed|documents|timeline",
+    "single_deal|named_set|shortlist|cross_pipeline",
+    "depth_first|balanced|breadth_first",
+    "none|count|group|aggregate",
+}
+
+GENERIC_COLLECTION_TERMS = {
+    "company", "companies", "deal", "deals", "business", "businesses",
+    "sector", "sectors", "industry", "industries", "pipeline", "system",
+    "portfolio", "food", "foods", "consumer", "consumers", "beverage",
+    "beverages", "fmcg", "microfinance", "fintech",
+}
+
+def compute_candidate_deals_for_plan(service: "UniversalChatService", plan: Dict[str, Any]) -> List[Deal]:
+    return service._compute_candidate_deals(plan)
 
 
 class UniversalChatService:
@@ -219,6 +258,9 @@ class UniversalChatService:
             "deals_selected": len(serialized_deals),
             "chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
             "selected_chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "resolved_named_deal_ids": plan.get("_resolved_named_deal_ids", []),
+            "selection_mode": plan.get("selection_mode"),
+            "stats_mode": plan.get("stats_mode"),
             "chunks_dropped_by_per_deal_cap": chunk_diagnostics.get("dropped_by_per_deal_cap", 0),
             "chunks_dropped_by_total_cap": chunk_diagnostics.get("dropped_by_total_cap", 0),
             "chunks_dropped_as_duplicates": chunk_diagnostics.get("dropped_as_duplicates", 0),
@@ -283,6 +325,9 @@ class UniversalChatService:
             "deals_selected": 1,
             "chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
             "selected_chunk_count_by_deal": chunk_diagnostics.get("selected_chunk_count_by_deal", {}),
+            "resolved_named_deal_ids": [str(deal.id)],
+            "selection_mode": plan.get("selection_mode"),
+            "stats_mode": plan.get("stats_mode"),
             "chunks_dropped_by_per_deal_cap": chunk_diagnostics.get("dropped_by_per_deal_cap", 0),
             "chunks_dropped_by_total_cap": chunk_diagnostics.get("dropped_by_total_cap", 0),
             "chunks_dropped_as_duplicates": chunk_diagnostics.get("dropped_as_duplicates", 0),
@@ -379,6 +424,9 @@ class UniversalChatService:
         return self._heuristic_plan(user_message)
 
     def _normalize_plan(self, plan: Dict[str, Any], user_message: str) -> Dict[str, Any]:
+        if self._plan_contains_placeholder_values(plan):
+            return self._heuristic_plan(user_message)
+
         fallback_query_type = str(self._stage_settings("query_planner").get("fallback_query_type") or "pipeline_search").lower()
         query_type = str(plan.get("query_type") or fallback_query_type).lower()
         if query_type not in QUERY_TYPES:
@@ -387,73 +435,219 @@ class UniversalChatService:
         planner_settings = self._stage_settings("query_planner")
         max_deal_limit = max(int(planner_settings.get("max_deal_limit") or planner_settings.get("default_deal_limit") or 8), 3)
         max_chunks_per_deal = max(int(planner_settings.get("max_chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 4), 1)
+        hard_filters = plan.get("hard_filters")
+        if not isinstance(hard_filters, dict):
+            hard_filters = plan.get("deal_filters") or {}
+
+        semantic_queries = self._normalize_string_list(plan.get("semantic_queries"))
+        if not semantic_queries:
+            semantic_queries = self._normalize_string_list(plan.get("rag_queries"))
+
+        result_shape = str(plan.get("result_shape") or "").lower().strip()
+        if result_shape not in RESULT_SHAPES:
+            result_shape = {
+                "exact_lookup": "single_deal",
+                "comparison": "named_set",
+                "stats": "cross_pipeline",
+            }.get(query_type, "shortlist")
+
+        selection_mode = str(plan.get("selection_mode") or "").lower().strip()
+        if selection_mode not in SELECTION_MODES:
+            selection_mode = {
+                "single_deal": "depth_first",
+                "named_set": "depth_first",
+                "shortlist": "balanced",
+                "cross_pipeline": "breadth_first",
+            }.get(result_shape, "balanced")
+
+        evidence_preference = str(plan.get("evidence_preference") or "").lower().strip()
+        if evidence_preference not in EVIDENCE_PREFERENCES:
+            evidence_preference = "mixed"
+
+        stats_mode = str(plan.get("stats_mode") or "").lower().strip()
+        if stats_mode not in STATS_MODES:
+            stats_mode = "count" if query_type == "stats" else "none"
+
+        named_entities = self._normalize_named_entities(plan.get("named_entities"))
+        if not named_entities:
+            named_entities = self._normalize_string_entities(self._normalize_string_list(plan.get("exact_terms")))
+        unique_named_deal_terms = []
+        for entity in named_entities:
+            if entity.get("type") != "deal":
+                continue
+            text = str(entity.get("text") or "").strip().lower()
+            if text and text not in unique_named_deal_terms:
+                unique_named_deal_terms.append(text)
+        user_message_lower = str(user_message or "").strip().lower()
+
+        default_global_chunk_limit = int(plan.get("global_chunk_limit") or 0)
+        if default_global_chunk_limit <= 0:
+            default_global_chunk_limit = max(
+                0,
+                min(
+                    int(planner_settings.get("default_chunks_per_deal") or 8) * max(int(plan.get("deal_limit") or planner_settings.get("default_deal_limit") or 8), 1),
+                    int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
+                ),
+            )
+
         normalized = {
             "query_type": query_type,
-            "deal_filters": {},
+            "hard_filters": {},
+            "named_entities": named_entities,
             "exact_terms": self._normalize_string_list(plan.get("exact_terms")),
-            "keywords": self._normalize_string_list(plan.get("keywords")),
+            "semantic_queries": semantic_queries,
+            "soft_constraints": self._normalize_string_list(plan.get("soft_constraints")),
             "metric_terms": self._normalize_string_list(plan.get("metric_terms")),
-            "rag_queries": self._normalize_string_list(plan.get("rag_queries")),
-            "needs_stats": bool(plan.get("needs_stats")),
+            "evidence_preference": evidence_preference,
+            "result_shape": result_shape,
+            "selection_mode": selection_mode,
+            "needs_stats": bool(plan.get("needs_stats") or query_type == "stats" or stats_mode != "none"),
+            "stats_mode": stats_mode,
             "deal_limit": min(max(int(plan.get("deal_limit") or planner_settings.get("default_deal_limit") or 8), 3), max_deal_limit),
             "chunks_per_deal": min(max(int(plan.get("chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 2), 1), max_chunks_per_deal),
+            "global_chunk_limit": max(0, min(int(plan.get("global_chunk_limit") or default_global_chunk_limit), int(self._stage_settings("context_assembly").get("max_total_chunks") or 80))),
             "user_query": user_message,
         }
 
         for field in ["title", "industry", "sector", "city", "priority", "current_phase", "is_female_led", "management_meeting"]:
-            value = (plan.get("deal_filters") or {}).get(field)
+            value = hard_filters.get(field)
             if value not in [None, "", "null", "None"]:
-                normalized["deal_filters"][field] = value
+                normalized["hard_filters"][field] = value
 
-        if not normalized["rag_queries"]:
-            normalized["rag_queries"] = [user_message]
-        if not normalized["keywords"]:
-            normalized["keywords"] = self._tokenize_keywords(user_message)
+        if not normalized["semantic_queries"]:
+            normalized["semantic_queries"] = [user_message]
         if not normalized["metric_terms"]:
-            normalized["metric_terms"] = [term for term in normalized["keywords"] if term.lower() in METRIC_TOKENS]
+            normalized["metric_terms"] = [
+                term for term in self._tokenize_keywords(user_message)
+                if term.lower() in METRIC_TOKENS
+            ]
+        if normalized["result_shape"] == "single_deal":
+            normalized["deal_limit"] = 1
+            normalized["selection_mode"] = "depth_first"
+            normalized["chunks_per_deal"] = max(normalized["chunks_per_deal"], 8)
+            normalized["global_chunk_limit"] = max(
+                normalized["global_chunk_limit"],
+                min(
+                    int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
+                    max(normalized["chunks_per_deal"] * 3, 24),
+                ),
+            )
+        elif normalized["result_shape"] == "named_set" and normalized["named_entities"]:
+            normalized["deal_limit"] = min(max(len(normalized["named_entities"]), 1), max_deal_limit)
+            normalized["selection_mode"] = "depth_first"
+        elif (
+            len(unique_named_deal_terms) == 1
+            and normalized["stats_mode"] == "none"
+            and unique_named_deal_terms[0] in user_message_lower
+        ):
+            normalized["result_shape"] = "single_deal"
+            normalized["deal_limit"] = 1
+            normalized["selection_mode"] = "depth_first"
+            normalized["chunks_per_deal"] = max(normalized["chunks_per_deal"], 8)
+            normalized["global_chunk_limit"] = max(
+                normalized["global_chunk_limit"],
+                min(
+                    int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
+                    max(normalized["chunks_per_deal"] * 3, 24),
+                ),
+            )
+        if normalized["stats_mode"] != "none":
+            normalized["needs_stats"] = True
         return normalized
 
     def _heuristic_plan(self, user_message: str) -> Dict[str, Any]:
-        lowered = user_message.lower()
-        query_type = "stats" if any(word in lowered for word in ["count", "how many", "total"]) else "pipeline_search"
-        if any(word in lowered for word in ["compare", "versus", "vs", "difference"]):
-            query_type = "comparison"
-        if any(word in lowered for word in ["timeline", "phase", "status", "stage"]):
-            query_type = "timeline"
-
-        exact_terms = re.findall(r'"([^"]+)"', user_message)
-        keywords = self._tokenize_keywords(user_message)
-        metric_terms = [term for term in keywords if term.lower() in METRIC_TOKENS or term.upper() in {"ARR", "MRR", "CM1", "CM2"}]
-        deal_filters: Dict[str, Any] = {}
-
-        if "female led" in lowered:
-            deal_filters["is_female_led"] = True
-        if "management meeting" in lowered or "management met" in lowered:
-            deal_filters["management_meeting"] = True
-        for token in STAGE_TOKENS:
-            if token in lowered:
-                deal_filters["current_phase"] = token
-                break
-
         planner_settings = self._stage_settings("query_planner")
-        return {
-            "query_type": query_type,
-            "deal_filters": deal_filters,
-            "exact_terms": exact_terms,
-            "keywords": keywords,
-            "metric_terms": metric_terms,
-            "rag_queries": [user_message],
-            "needs_stats": query_type == "stats" and self._stage_enabled("stats_block"),
+
+        plan = {
+            "query_type": str(planner_settings.get("fallback_query_type") or "pipeline_search").lower(),
+            "hard_filters": {},
+            "named_entities": [],
+            "exact_terms": [],
+            "semantic_queries": [user_message],
+            "soft_constraints": [],
+            "metric_terms": [],
+            "evidence_preference": "mixed",
+            "result_shape": "shortlist",
+            "selection_mode": "balanced",
+            "needs_stats": False,
+            "stats_mode": "none",
             "deal_limit": int(planner_settings.get("default_deal_limit") or 8),
             "chunks_per_deal": int(planner_settings.get("default_chunks_per_deal") or 2),
+            "global_chunk_limit": min(
+                int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
+                int(planner_settings.get("default_deal_limit") or 8) * int(planner_settings.get("default_chunks_per_deal") or 2),
+            ),
             "user_query": user_message,
         }
+        return plan
+
+    def _plan_contains_placeholder_values(self, plan: Dict[str, Any]) -> bool:
+        if not isinstance(plan, dict):
+            return True
+
+        def contains_placeholder(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                return normalized in PLACEHOLDER_PLAN_VALUES
+            if isinstance(value, list):
+                return any(contains_placeholder(item) for item in value)
+            if isinstance(value, dict):
+                return any(contains_placeholder(item) for item in value.values())
+            return False
+
+        return contains_placeholder(plan)
+
+    def _normalize_named_entities(self, values: Any) -> List[Dict[str, Any]]:
+        if not isinstance(values, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in values:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalized.append({"type": "deal", "text": text, "confidence": 0.8})
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            entity_type = str(item.get("type") or "deal").strip().lower()
+            if entity_type not in ENTITY_TYPES:
+                entity_type = "deal"
+            try:
+                confidence = float(item.get("confidence", 0.8))
+            except (TypeError, ValueError):
+                confidence = 0.8
+            normalized.append({
+                "type": entity_type,
+                "text": text,
+                "confidence": max(0.0, min(confidence, 1.0)),
+            })
+        return normalized[:10]
+
+    def _normalize_string_entities(self, values: List[str]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            normalized.append({"type": "deal", "text": text, "confidence": 0.8})
+        return normalized[:10]
 
     def _get_candidate_deals(self, plan: Dict[str, Any]) -> List[Deal]:
+        return self._compute_candidate_deals(plan)
+
+    def _compute_candidate_deals(self, plan: Dict[str, Any]) -> List[Deal]:
         filter_settings = self._stage_settings("deal_filtering")
         rerank_settings = self._stage_settings("chunk_rerank")
-        queryset = Deal.objects.all().prefetch_related("phase_logs")
-        filters = plan.get("deal_filters", {})
+        result_limit = max(int(plan.get("deal_limit") or filter_settings.get("result_limit") or 8), 1)
+        base_queryset = Deal.objects.all().select_related("retrieval_profile").prefetch_related("phase_logs")
+        queryset = base_queryset
+        filters = self._align_hard_filters_to_known_values(base_queryset, plan.get("hard_filters", {}))
+        plan["hard_filters"] = filters
 
         if "is_female_led" in filters:
             queryset = queryset.filter(is_female_led=filters["is_female_led"])
@@ -464,90 +658,582 @@ class UniversalChatService:
             if value:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})
 
-        semantic_query = " | ".join(plan.get("rag_queries") or [plan["user_query"]])
-        semantic_limit = int(filter_settings.get("result_limit") or plan.get("deal_limit") or 20)
-        semantic_matches = self.embed_service.search_deal_profiles(
-            semantic_query,
-            limit=semantic_limit,
-            filters=filters,
+        semantic_limit = max(
+            int(filter_settings.get("result_limit") or plan.get("deal_limit") or 20),
+            int(plan.get("deal_limit") or 8) * 3,
         )
-        pool = list(queryset.order_by("-created_at")[: int(filter_settings.get("candidate_pool_limit") or 60)])
+        resolved_named_deals = self._resolve_named_entity_deals(queryset, plan, limit=max(result_limit, 8))
+        if resolved_named_deals:
+            plan["_resolved_named_deal_ids"] = [str(deal.id) for deal in resolved_named_deals]
+            self._promote_plan_from_resolved_named_deals(plan, resolved_named_deals)
+            result_limit = max(int(plan.get("deal_limit") or result_limit), 1)
+
+        if (plan.get("stats_mode") or "none") != "none":
+            plan["_stats_queryset_count"] = queryset.count()
+            if resolved_named_deals:
+                return resolved_named_deals[:result_limit]
+            if queryset.exists():
+                return list(queryset.order_by("-created_at")[:result_limit])
+
+            stats_semantic_matches: List[Deal] = []
+            for semantic_query in plan.get("semantic_queries") or [plan["user_query"]]:
+                results = self.embed_service.search_deal_profiles(
+                    semantic_query,
+                    limit=semantic_limit,
+                    filters=None,
+                )
+                stats_semantic_matches = self._merge_deal_pool(stats_semantic_matches, results)
+            return list(stats_semantic_matches[:result_limit])
+
+        semantic_matches: List[Deal] = []
+        semantic_rank_map: Dict[str, int] = {}
+        for semantic_query in plan.get("semantic_queries") or [plan["user_query"]]:
+            results = self.embed_service.search_deal_profiles(
+                semantic_query,
+                limit=semantic_limit,
+                filters=filters,
+            )
+            for idx, deal in enumerate(results):
+                deal_id = str(deal.id)
+                if deal_id not in semantic_rank_map:
+                    semantic_rank_map[deal_id] = idx
+                semantic_matches = self._merge_deal_pool(semantic_matches, [deal])
+        recent_pool = list(queryset.order_by("-created_at")[: int(filter_settings.get("candidate_pool_limit") or 60)])
+        named_entity_pool = self._keyword_candidate_pool(
+            queryset,
+            plan,
+            limit=int(filter_settings.get("candidate_pool_limit") or 60),
+        )
+        pool = self._merge_deal_pool(resolved_named_deals, semantic_matches, named_entity_pool, recent_pool)
         if not pool:
-            return semantic_matches[: plan.get("deal_limit", 8)] if semantic_matches else []
+            return list(semantic_matches[:result_limit]) if semantic_matches else []
 
-        scored = []
+        scored: List[Tuple[float, Deal]] = []
         for deal in pool:
-            haystacks = [
-                deal.title or "",
-                deal.industry or "",
-                deal.sector or "",
-                deal.city or "",
-                deal.deal_summary or "",
-                " ".join(deal.themes if isinstance(deal.themes, list) else []),
-            ]
-            combined = " ".join(haystacks).lower()
-            score = 0
-
-            for phrase in plan.get("exact_terms", []):
-                phrase_lower = phrase.lower()
-                if phrase_lower in (deal.title or "").lower():
-                    score += float(rerank_settings.get("deal_title_exact_boost") or 100)
-                if phrase_lower in combined:
-                    score += float(rerank_settings.get("deal_context_exact_boost") or 40)
-
-            for keyword in plan.get("keywords", []):
-                keyword_lower = keyword.lower()
-                if keyword_lower in (deal.title or "").lower():
-                    score += float(rerank_settings.get("deal_title_keyword_boost") or 30)
-                if keyword_lower in combined:
-                    score += float(rerank_settings.get("deal_context_keyword_boost") or 10)
-                if keyword_lower in " ".join(deal.themes if isinstance(deal.themes, list) else []).lower():
-                    score += float(rerank_settings.get("deal_context_keyword_boost") or 10) * 1.5
-
-            for metric in plan.get("metric_terms", []):
-                if metric.lower() in combined:
-                    score += float(rerank_settings.get("deal_metric_boost") or 20)
-
-            semantic_rank = next((idx for idx, semantic_deal in enumerate(semantic_matches) if semantic_deal.id == deal.id), None)
-            if semantic_rank is not None:
-                score += max(0, semantic_limit - semantic_rank) * 12
-
+            score, components = self._score_deal_candidate(
+                deal,
+                plan,
+                semantic_rank=semantic_rank_map.get(str(deal.id)),
+                semantic_limit=semantic_limit,
+                rerank_settings=rerank_settings,
+            )
+            setattr(deal, "_retrieval_score", score)
+            setattr(deal, "_retrieval_components", components)
             scored.append((score, deal))
 
         scored.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
-        top = [deal for score, deal in scored if score > 0][: plan.get("deal_limit", 8)]
-        if top:
-            return top
-        if semantic_matches:
-            return semantic_matches[: plan.get("deal_limit", 8)]
-        return pool[: min(plan.get("deal_limit", 8), int(filter_settings.get("result_limit") or plan.get("deal_limit", 8)))]
+        scored = self._rerank_deal_candidates(
+            scored,
+            plan,
+            result_limit=result_limit,
+            rerank_settings=rerank_settings,
+        )
+        scoped_scored = self._apply_result_shape_scope(scored, plan, result_limit=result_limit)
+        if scoped_scored:
+            scored = scoped_scored
+
+        selected_deals: List[Deal] = []
+        for score, deal in scored:
+            if score > 0:
+                selected_deals.append(deal)
+            if len(selected_deals) >= result_limit:
+                break
+
+        if not selected_deals:
+            if semantic_matches:
+                selected_deals = list(semantic_matches[:result_limit])
+            else:
+                selected_deals = list(pool[:result_limit])
+
+        return list(selected_deals)
+
+    def _promote_plan_from_resolved_named_deals(self, plan: Dict[str, Any], resolved_named_deals: List[Deal]) -> None:
+        if (plan.get("stats_mode") or "none") != "none":
+            return
+        resolved_count = len(resolved_named_deals or [])
+        if resolved_count <= 0:
+            return
+
+        planner_settings = self._stage_settings("query_planner")
+        assembly_settings = self._stage_settings("context_assembly")
+        max_total_chunks = int(assembly_settings.get("max_total_chunks") or 80)
+        planner_default_chunks = max(int(planner_settings.get("default_chunks_per_deal") or 8), 1)
+
+        if resolved_count == 1:
+            target_chunks = max(int(plan.get("chunks_per_deal") or 0), planner_default_chunks, 8)
+            plan["result_shape"] = "single_deal"
+            plan["selection_mode"] = "depth_first"
+            plan["deal_limit"] = 1
+            plan["chunks_per_deal"] = target_chunks
+            plan["global_chunk_limit"] = min(
+                max_total_chunks,
+                max(int(plan.get("global_chunk_limit") or 0), max(target_chunks * 3, 24)),
+            )
+            return
+
+        if resolved_count <= 3:
+            target_chunks = max(int(plan.get("chunks_per_deal") or 0), max(planner_default_chunks // 2, 6))
+            plan["result_shape"] = "named_set"
+            plan["selection_mode"] = "depth_first"
+            plan["deal_limit"] = resolved_count
+            plan["chunks_per_deal"] = target_chunks
+            plan["global_chunk_limit"] = min(
+                max_total_chunks,
+                max(int(plan.get("global_chunk_limit") or 0), target_chunks * resolved_count),
+            )
+
+    def _merge_deal_pool(self, *deal_lists: List[Deal]) -> List[Deal]:
+        merged: List[Deal] = []
+        seen_ids: set[str] = set()
+        for deal_list in deal_lists:
+            for deal in deal_list or []:
+                deal_id = str(deal.id)
+                if deal_id in seen_ids:
+                    continue
+                seen_ids.add(deal_id)
+                merged.append(deal)
+        return merged
+
+    def _build_deal_rerank_document(self, deal: Deal, plan: Dict[str, Any]) -> str:
+        retrieval_profile = getattr(deal, "retrieval_profile", None)
+        profile_text = str(getattr(retrieval_profile, "profile_text", "") or "") if retrieval_profile else ""
+        summary_block = f"Summary: {(deal.deal_summary or '')[:1200]}"
+        metrics_block = "\n".join(
+            [
+                f"Funding Ask: {deal.funding_ask or ''}",
+                f"Funding Ask For: {deal.funding_ask_for or ''}",
+            ]
+        ).strip()
+        risk_block = ""
+        if profile_text:
+            risk_matches = re.findall(r"(?im)^(?:key risks?|risks?)[:\s].*$", profile_text)
+            risk_block = "\n".join(risk_matches[:8]).strip()
+
+        evidence_preference = plan.get("evidence_preference")
+        ordered_blocks: List[str] = []
+        if evidence_preference == "metrics":
+            ordered_blocks.extend([metrics_block, summary_block, risk_block])
+        elif evidence_preference == "risks":
+            ordered_blocks.extend([risk_block, summary_block, metrics_block])
+        else:
+            ordered_blocks.extend([summary_block, metrics_block, risk_block])
+
+        parts = [
+            f"Title: {deal.title or ''}",
+            f"Industry: {deal.industry or ''}",
+            f"Sector: {deal.sector or ''}",
+            f"City: {deal.city or ''}",
+            f"Themes: {', '.join(deal.themes if isinstance(deal.themes, list) else [])}",
+        ]
+        parts.extend(block for block in ordered_blocks if block)
+        parts.extend([
+            f"Profile: {profile_text[:2200]}",
+        ])
+        return "\n".join(parts).strip()
+
+    def _rerank_deal_candidates(
+        self,
+        scored: List[Tuple[float, Deal]],
+        plan: Dict[str, Any],
+        *,
+        result_limit: int,
+        rerank_settings: Dict[str, Any],
+    ) -> List[Tuple[float, Deal]]:
+        reranker_model = getattr(self.embed_service, "reranker_model", "")
+        if not reranker_model or not scored:
+            return scored
+
+        candidate_limit = max(int(rerank_settings.get("deal_rerank_candidate_limit") or max(result_limit * 2, 24)), result_limit)
+        rerank_weight = float(rerank_settings.get("deal_rerank_weight") or 180)
+        rerank_input = scored[:candidate_limit]
+        documents = [self._build_deal_rerank_document(deal, plan) for _, deal in rerank_input]
+        query = self._build_rerank_query(plan)
+        try:
+            results = self.embed_service.reranker.rerank(
+                model=reranker_model,
+                query=query,
+                documents=documents,
+            )
+        except Exception as exc:
+            logger.warning("Deal reranker failed, falling back to heuristic deal ranking: %s", exc)
+            return scored
+
+        if not results:
+            return scored
+
+        rerank_scores: Dict[int, float] = {}
+        for item in results:
+            index = item.get("index")
+            score = item.get("score")
+            if index is None or score is None:
+                continue
+            rerank_scores[int(index)] = float(score)
+
+        blended: List[Tuple[float, Deal]] = []
+        for idx, (base_score, deal) in enumerate(rerank_input):
+            rerank_score = rerank_scores.get(idx)
+            if rerank_score is not None:
+                components = dict(getattr(deal, "_retrieval_components", {}) or {})
+                components["deal_rerank"] = round(rerank_score * rerank_weight, 3)
+                blended_score = round(base_score + components["deal_rerank"], 3)
+                setattr(deal, "_retrieval_score", blended_score)
+                setattr(deal, "_retrieval_components", components)
+                setattr(deal, "_deal_rerank_score", rerank_score)
+                blended.append((blended_score, deal))
+            else:
+                blended.append((base_score, deal))
+
+        blended.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
+        if len(scored) > candidate_limit:
+            blended.extend(scored[candidate_limit:])
+        return blended
+
+    def _keyword_candidate_pool(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
+        named_terms = self._extract_named_deal_terms(plan)
+        q = Q()
+        for phrase in named_terms[:8]:
+            q |= Q(title__icontains=phrase)
+            q |= Q(deal_summary__icontains=phrase)
+            q |= Q(retrieval_profile__profile_text__icontains=phrase)
+        if not q:
+            return []
+        return list(queryset.filter(q).distinct().order_by("-created_at")[:limit])
+
+    def _database_exact_match_pool(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
+        named_terms = self._extract_named_deal_terms(plan)
+        if not named_terms:
+            return []
+        q = Q()
+        for phrase in named_terms[:8]:
+            q |= Q(title__icontains=phrase)
+            q |= Q(deal_summary__icontains=phrase)
+            q |= Q(company_details__icontains=phrase)
+            q |= Q(retrieval_profile__profile_text__icontains=phrase)
+        if not q:
+            return []
+        return list(queryset.filter(q).distinct().order_by("-created_at")[:limit])
+
+    def _stats_keyword_candidate_pool(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
+        terms = [
+            term for term in self._tokenize_keywords(str(plan.get("user_query") or ""))
+            if term.lower() not in {
+                "how", "many", "count", "number", "total", "system", "deal", "deals",
+                "company", "companies", "business", "businesses", "pipeline",
+            }
+        ]
+        q = Q()
+        for term in terms[:10]:
+            q |= Q(title__icontains=term)
+            q |= Q(industry__icontains=term)
+            q |= Q(sector__icontains=term)
+            q |= Q(deal_summary__icontains=term)
+            q |= Q(company_details__icontains=term)
+            q |= Q(retrieval_profile__profile_text__icontains=term)
+        if not q:
+            return []
+        return list(queryset.filter(q).distinct().order_by("-created_at")[:limit])
+
+    def _align_hard_filters_to_known_values(self, queryset, filters: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(filters, dict) or not filters:
+            return {}
+
+        aligned: Dict[str, Any] = {}
+        passthrough_fields = {"is_female_led", "management_meeting"}
+        string_fields = ["title", "industry", "sector", "city", "priority", "current_phase"]
+
+        for field, value in filters.items():
+            if value in [None, "", "null", "None"]:
+                continue
+            if field in passthrough_fields:
+                aligned[field] = value
+                continue
+            if field not in string_fields:
+                aligned[field] = value
+                continue
+
+            raw_value = str(value).strip()
+            if not raw_value:
+                continue
+
+            direct_qs = queryset.filter(**{f"{field}__icontains": raw_value})
+            if direct_qs.exists():
+                aligned[field] = raw_value
+                continue
+
+            best_match = self._best_matching_field_value(queryset, field, raw_value)
+            if best_match:
+                aligned[field] = best_match
+
+        return aligned
+
+    def _best_matching_field_value(self, queryset, field: str, raw_value: str) -> str | None:
+        candidates = [
+            str(item).strip()
+            for item in queryset.exclude(**{f"{field}__isnull": True})
+            .exclude(**{field: ""})
+            .values_list(field, flat=True)
+            .distinct()[:500]
+            if str(item).strip()
+        ]
+        if not candidates:
+            return None
+
+        query_tokens = self._token_set(raw_value)
+        best_candidate = None
+        best_score = 0.0
+
+        for candidate in candidates:
+            candidate_tokens = self._token_set(candidate)
+            token_overlap = 0.0
+            if query_tokens and candidate_tokens:
+                token_overlap = len(query_tokens.intersection(candidate_tokens)) / len(query_tokens.union(candidate_tokens))
+            text_similarity = SequenceMatcher(None, raw_value.lower(), candidate.lower()).ratio()
+            contains_bonus = 0.15 if any(token in candidate.lower() for token in query_tokens if len(token) >= 4) else 0.0
+            score = (token_overlap * 0.6) + (text_similarity * 0.4) + contains_bonus
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+
+        if best_score >= 0.45:
+            return best_candidate
+        return None
+
+    def _resolve_named_entity_deals(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
+        entities = [
+            entity for entity in plan.get("named_entities", [])
+            if isinstance(entity, dict) and entity.get("type") == "deal" and str(entity.get("text") or "").strip()
+        ]
+        if not entities:
+            return []
+
+        resolved: List[Deal] = []
+        used_ids: set[str] = set()
+        for entity in entities[:10]:
+            term = str(entity.get("text") or "").strip()
+            direct_matches = self._database_exact_match_pool(queryset, {"named_entities": [entity], "exact_terms": [term]}, limit=limit)
+            candidate = direct_matches[0] if direct_matches else None
+            if candidate is None:
+                aligned_title = self._best_matching_field_value(queryset, "title", term)
+                if aligned_title:
+                    candidate = queryset.filter(title__icontains=aligned_title).order_by("-created_at").first()
+            if candidate is None:
+                continue
+            deal_id = str(candidate.id)
+            if deal_id in used_ids:
+                continue
+            used_ids.add(deal_id)
+            resolved.append(candidate)
+        return resolved[:limit]
+
+    def _token_set(self, text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[A-Za-z0-9&.\-']+", text or "")
+            if len(token) >= 3
+        }
+
+    def _extract_named_deal_terms(self, plan: Dict[str, Any]) -> List[str]:
+        terms = []
+        for entity in plan.get("named_entities", []):
+            if not isinstance(entity, dict) or entity.get("type") != "deal":
+                continue
+            value = str(entity.get("text") or "").strip()
+            if value and value not in terms:
+                terms.append(value)
+        for value in self._normalize_string_list(plan.get("exact_terms")):
+            if value not in terms:
+                terms.append(value)
+        return terms[:10]
+
+    def _deal_combined_text(self, deal: Deal) -> str:
+        retrieval_profile = getattr(deal, "retrieval_profile", None)
+        profile_text = getattr(retrieval_profile, "profile_text", "") if retrieval_profile else ""
+        fields = [
+            str(deal.title or ""),
+            str(deal.industry or ""),
+            str(deal.sector or ""),
+            str(deal.city or ""),
+            str(deal.funding_ask or ""),
+            str(deal.funding_ask_for or ""),
+            str(deal.deal_summary or ""),
+            " ".join(str(item) for item in (deal.themes if isinstance(deal.themes, list) else [])),
+            str(profile_text or ""),
+        ]
+        return " ".join(fields).lower()
+
+    def _deal_label_text(self, deal: Deal) -> str:
+        fields = [
+            str(deal.title or ""),
+            str(deal.industry or ""),
+            str(deal.sector or ""),
+        ]
+        return " ".join(fields).lower()
+
+    def _score_deal_candidate(
+        self,
+        deal: Deal,
+        plan: Dict[str, Any],
+        *,
+        semantic_rank: int | None,
+        semantic_limit: int,
+        rerank_settings: Dict[str, Any],
+    ) -> Tuple[float, Dict[str, float]]:
+        title_lower = (deal.title or "").lower()
+        combined = self._deal_combined_text(deal)
+        named_terms = [term.lower() for term in self._extract_named_deal_terms(plan)]
+        exact_terms = [term.lower() for term in plan.get("exact_terms", [])]
+        metric_terms = [term.lower() for term in plan.get("metric_terms", [])]
+        components: Dict[str, float] = {}
+
+        for phrase in exact_terms + named_terms:
+            if not phrase:
+                continue
+            if phrase == title_lower:
+                components["exact_title_match"] = components.get("exact_title_match", 0.0) + 500.0
+            elif phrase in title_lower:
+                components["title_phrase_match"] = components.get("title_phrase_match", 0.0) + 260.0
+            elif phrase in combined:
+                components["context_phrase_match"] = components.get("context_phrase_match", 0.0) + 80.0
+
+        for metric in metric_terms:
+            if metric in combined:
+                components["metric_term"] = components.get("metric_term", 0.0) + float(rerank_settings.get("deal_metric_boost") or 20) + 18.0
+
+        if semantic_rank is not None:
+            components["semantic_rank"] = max(0.0, float((semantic_limit - semantic_rank) * 14))
+        if plan.get("hard_filters"):
+            components["hard_filter_scope"] = 5.0 * len(plan.get("hard_filters", {}))
+
+        score = round(sum(components.values()), 3)
+        return score, components
+
+    def _apply_result_shape_scope(
+        self,
+        scored: List[Tuple[float, Deal]],
+        plan: Dict[str, Any],
+        *,
+        result_limit: int,
+    ) -> List[Tuple[float, Deal]]:
+        if not scored:
+            return scored
+
+        resolved_named_ids = [
+            str(deal_id)
+            for deal_id in plan.get("_resolved_named_deal_ids", [])
+            if str(deal_id).strip()
+        ]
+        if resolved_named_ids and (plan.get("stats_mode") or "none") == "none":
+            scoped = [
+                (score, deal)
+                for score, deal in scored
+                if str(deal.id) in resolved_named_ids
+            ]
+            if scoped:
+                return scoped[:result_limit]
+
+        if plan.get("result_shape") == "single_deal":
+            return scored[:1]
+
+        if plan.get("result_shape") == "named_set":
+            named_terms = self._extract_named_deal_terms(plan)
+            if not named_terms:
+                return scored[:result_limit]
+            scoped: List[Tuple[float, Deal]] = []
+            used_ids: set[str] = set()
+            for term in named_terms:
+                term_lower = term.lower()
+                for score, deal in scored:
+                    deal_id = str(deal.id)
+                    if deal_id in used_ids:
+                        continue
+                    if term_lower in self._deal_combined_text(deal):
+                        scoped.append((score, deal))
+                        used_ids.add(deal_id)
+                        break
+            return scoped[:result_limit] if scoped else scored[:result_limit]
+
+        return scored
+
+    def _scope_deals_for_chunk_retrieval(self, plan: Dict[str, Any], deals: List[Deal]) -> List[Deal]:
+        if not deals:
+            return []
+        resolved_named_ids = {
+            str(deal_id)
+            for deal_id in plan.get("_resolved_named_deal_ids", [])
+            if str(deal_id).strip()
+        }
+        if resolved_named_ids and (plan.get("stats_mode") or "none") == "none":
+            scoped = [deal for deal in deals if str(deal.id) in resolved_named_ids]
+            if scoped:
+                return scoped
+        if plan.get("result_shape") == "single_deal":
+            return deals[:1]
+        if plan.get("result_shape") == "named_set":
+            named_terms = self._extract_named_deal_terms(plan)
+            if not named_terms:
+                return deals
+            scoped: List[Deal] = []
+            used_ids: set[str] = set()
+            for term in named_terms:
+                term_lower = term.lower()
+                for deal in deals:
+                    deal_id = str(deal.id)
+                    if deal_id in used_ids:
+                        continue
+                    if term_lower in self._deal_combined_text(deal):
+                        scoped.append(deal)
+                        used_ids.add(deal_id)
+                        break
+            return scoped or deals
+        if not self._extract_named_deal_terms(plan):
+            return deals
+        return deals
 
     def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if (plan.get("stats_mode") or "none") != "none" and int(plan.get("global_chunk_limit") or 0) == 0:
+            return [], {
+                "candidate_chunk_count": 0,
+                "scored_chunk_count": 0,
+                "selected_chunk_count": 0,
+                "selected_chunk_count_by_deal": {},
+                "effective_chunks_per_deal": 0,
+                "max_total_chunks": 0,
+                "dropped_by_per_deal_cap": 0,
+                "dropped_by_total_cap": 0,
+                "dropped_as_duplicates": 0,
+                "dropped_by_zero_score": 0,
+                "chunk_scope_deal_ids": [],
+                "chunk_scope_deal_titles": [],
+                "selected_chunk_details": [],
+                "selected_sources": [],
+            }
+
         retrieval_settings = self._stage_settings("chunk_retrieval")
-        rerank_settings = self._stage_settings("chunk_rerank")
-        rag_query = " | ".join(plan.get("rag_queries") or [plan["user_query"]])
-        exact_terms = [term.lower() for term in plan.get("exact_terms", [])]
-        keywords = [term.lower() for term in plan.get("keywords", [])]
-        metric_terms = [term.lower() for term in plan.get("metric_terms", [])]
+        scoped_deals = self._scope_deals_for_chunk_retrieval(plan, deals)
+        deal_ids = [str(deal.id) for deal in scoped_deals]
+        candidate_limit = int(retrieval_settings.get("vector_limit") or 60)
+        candidate_chunks: List[DocumentChunk] = []
+        for semantic_query in plan.get("semantic_queries") or [plan["user_query"]]:
+            query_matches = self.embed_service.search_global_chunks(
+                semantic_query,
+                limit=candidate_limit,
+                deal_ids=deal_ids or None,
+            )
+            candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
+        candidate_chunks = self._augment_with_deal_summary_candidates(candidate_chunks, scoped_deals)
+        if not candidate_chunks:
+            queryset = DocumentChunk.objects.all().select_related("deal")
+            if scoped_deals:
+                queryset = queryset.filter(deal__in=scoped_deals)
+            candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("fallback_candidate_limit") or 120)])
+
+        rerank_query = self._build_rerank_query(plan)
+        candidate_chunks = self._rerank_candidate_chunks(candidate_chunks, rerank_query, plan)
         scored_items: List[Dict[str, Any]] = []
         dropped_by_zero_score = 0
 
-        deal_ids = [str(deal.id) for deal in deals]
-        candidate_limit = int(retrieval_settings.get("vector_limit") or 60)
-        candidate_chunks = self.embed_service.search_global_chunks(
-            rag_query,
-            limit=candidate_limit,
-            deal_ids=deal_ids or None,
-        )
-        if not candidate_chunks:
-            queryset = DocumentChunk.objects.all().select_related("deal")
-            if deals:
-                queryset = queryset.filter(deal__in=deals)
-            candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("fallback_candidate_limit") or 120)])
-
         for chunk in candidate_chunks:
-            content_lower = (chunk.content or "").lower()
-            title_lower = str((chunk.metadata or {}).get("title", "")).lower()
+            metadata = chunk.metadata or {}
             score = 0.0
 
             rerank_score = getattr(chunk, "rerank_score", None)
@@ -556,26 +1242,24 @@ class UniversalChatService:
 
             distance = getattr(chunk, "distance", None)
             if distance is not None:
-                score += max(0.0, 1.0 - float(distance)) * 100
+                score += max(0.0, 1.0 - float(distance)) * 15
 
-            for term in exact_terms:
-                if term in title_lower:
-                    score += float(rerank_settings.get("chunk_title_exact_boost") or 120)
-                if term in content_lower:
-                    score += float(rerank_settings.get("chunk_content_exact_boost") or 60)
+            source_type = (chunk.source_type or "").lower()
+            chunk_kind = str(metadata.get("chunk_kind") or "").lower()
+            single_deal_depth_first = (
+                len(scoped_deals) == 1
+                and (plan.get("selection_mode") or "balanced") == "depth_first"
+            )
+            if source_type == "deal_summary":
+                score += 10.0 if single_deal_depth_first else 35.0
+            elif source_type == "document":
+                score += 28.0 if single_deal_depth_first else 10.0
+            elif source_type == "extracted_source":
+                score += 24.0 if single_deal_depth_first else 5.0
+            elif source_type == "analysis_document":
+                score += 24.0 if single_deal_depth_first else 8.0
 
-            for term in metric_terms:
-                if term in content_lower:
-                    score += float(rerank_settings.get("chunk_metric_boost") or 50)
-
-            for term in keywords:
-                if term in title_lower:
-                    score += float(rerank_settings.get("chunk_title_keyword_boost") or 25)
-                if term in content_lower:
-                    score += float(rerank_settings.get("chunk_content_keyword_boost") or 12)
-
-            if plan.get("query_type") == "timeline" and any(token in content_lower for token in ["phase", "stage", "meeting", "ic", "timeline"]):
-                score += float(rerank_settings.get("timeline_bonus") or 25)
+            score += self._chunk_evidence_prior(chunk_kind, source_type=source_type, evidence_preference=plan.get("evidence_preference"))
 
             if score <= 0:
                 dropped_by_zero_score += 1
@@ -587,7 +1271,7 @@ class UniversalChatService:
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
         seen_keys = set()
-        max_per_deal, max_total = self._compute_chunk_budgets(plan, deals)
+        max_per_deal, max_total = self._compute_chunk_budgets(plan, scoped_deals)
         dropped_by_per_deal_cap = 0
         dropped_by_total_cap = 0
         dropped_as_duplicates = 0
@@ -596,7 +1280,7 @@ class UniversalChatService:
             chunk = item["chunk"]
             deal_key = str(chunk.deal_id)
             metadata = chunk.metadata or {}
-            chunk_key = (deal_key, chunk.source_id, metadata.get("chunk_index"))
+            chunk_key = self._chunk_selection_key(chunk)
             if chunk_key in seen_keys:
                 dropped_as_duplicates += 1
                 continue
@@ -620,12 +1304,265 @@ class UniversalChatService:
             "dropped_by_total_cap": dropped_by_total_cap,
             "dropped_as_duplicates": dropped_as_duplicates,
             "dropped_by_zero_score": dropped_by_zero_score,
+            "chunk_scope_deal_ids": [str(deal.id) for deal in scoped_deals],
+            "chunk_scope_deal_titles": [str(deal.title or "") for deal in scoped_deals],
+            "selected_chunk_details": [
+                {
+                    "deal_id": str(item["chunk"].deal_id),
+                    "deal_title": str(item["chunk"].deal.title or ""),
+                    "source_title": (
+                        (item["chunk"].metadata or {}).get("title")
+                        or (item["chunk"].metadata or {}).get("filename")
+                        or item["chunk"].source_type
+                    ),
+                    "source_type": item["chunk"].source_type,
+                    "chunk_index": (item["chunk"].metadata or {}).get("chunk_index"),
+                    "score": item["score"],
+                }
+                for item in selected
+            ],
             "selected_sources": [
                 f"{item['chunk'].deal.title}|{((item['chunk'].metadata or {}).get('title') or (item['chunk'].metadata or {}).get('filename') or item['chunk'].source_type)}"
                 for item in selected
             ],
         }
         return selected, diagnostics
+
+    def _build_chunk_rerank_document(self, chunk: DocumentChunk, plan: Dict[str, Any]) -> str:
+        metadata = chunk.metadata or {}
+        try:
+            document_metadata = self._document_metadata_for_chunk(chunk)
+        except Exception:
+            document_metadata = {}
+        source_title = (
+            metadata.get("title")
+            or metadata.get("filename")
+            or document_metadata.get("document_name")
+            or chunk.source_type
+        )
+        source_type = str(chunk.source_type or "")
+        chunk_kind = str(metadata.get("chunk_kind") or "")
+        metrics = document_metadata.get("metrics") or []
+        tables_summary = document_metadata.get("tables_summary") or []
+        risks = document_metadata.get("risks") or []
+        document_summary = str(document_metadata.get("document_summary") or "")
+
+        content_block = f"Chunk Text: {str(chunk.content or '')[:2400]}".strip()
+        summary_block = f"Document Summary: {document_summary[:1200]}".strip() if document_summary else ""
+        metrics_block = ""
+        if metrics:
+            metrics_block = "Metrics: " + json.dumps(metrics[:6], default=str, ensure_ascii=True)
+        tables_block = ""
+        if tables_summary:
+            tables_block = "Tables: " + json.dumps(tables_summary[:4], default=str, ensure_ascii=True)
+        risks_block = ""
+        if risks:
+            risks_block = "Risks: " + json.dumps(risks[:8], default=str, ensure_ascii=True)
+
+        evidence_preference = str(plan.get("evidence_preference") or "mixed")
+        ordered_blocks: List[str] = []
+        if evidence_preference == "metrics":
+            ordered_blocks.extend([metrics_block, tables_block, summary_block, content_block, risks_block])
+        elif evidence_preference == "risks":
+            ordered_blocks.extend([risks_block, summary_block, content_block, metrics_block, tables_block])
+        elif evidence_preference == "documents":
+            ordered_blocks.extend([summary_block, content_block, metrics_block, tables_block, risks_block])
+        else:
+            ordered_blocks.extend([summary_block, content_block, metrics_block, tables_block, risks_block])
+
+        parts = [
+            f"Deal: {chunk.deal.title or ''}",
+            f"Source Title: {source_title}",
+            f"Source Type: {source_type}",
+            f"Chunk Kind: {chunk_kind}",
+            f"Document Type: {document_metadata.get('document_type') or metadata.get('doc_type') or ''}",
+            f"Citation Label: {document_metadata.get('citation_label') or ''}",
+        ]
+        parts.extend(block for block in ordered_blocks if block)
+        return "\n".join(part for part in parts if part).strip()
+
+    def _rerank_candidate_chunks(
+        self,
+        candidate_chunks: List[DocumentChunk],
+        rerank_query: str,
+        plan: Dict[str, Any],
+    ) -> List[DocumentChunk]:
+        reranker_model = getattr(self.embed_service, "reranker_model", "")
+        reranker = getattr(self.embed_service, "reranker", None)
+        if not candidate_chunks:
+            return candidate_chunks
+        if not reranker_model or reranker is None:
+            return self.embed_service._rerank_chunks(candidate_chunks, rerank_query, limit=len(candidate_chunks))
+
+        documents = [self._build_chunk_rerank_document(chunk, plan) for chunk in candidate_chunks]
+        try:
+            results = reranker.rerank(
+                model=reranker_model,
+                query=rerank_query,
+                documents=documents,
+            )
+        except Exception as exc:
+            logger.warning("Chunk reranker failed on enriched documents, falling back to default chunk rerank: %s", exc)
+            return self.embed_service._rerank_chunks(candidate_chunks, rerank_query, limit=len(candidate_chunks))
+
+        if not results:
+            return self.embed_service._rerank_chunks(candidate_chunks, rerank_query, limit=len(candidate_chunks))
+
+        scored = []
+        for item in results:
+            index = item.get("index")
+            if index is None or index < 0 or index >= len(candidate_chunks):
+                continue
+            chunk = candidate_chunks[index]
+            setattr(chunk, "rerank_score", item.get("score"))
+            scored.append((float(item.get("score") or 0.0), chunk))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        deduped: List[DocumentChunk] = []
+        seen: set[tuple[str, str, int]] = set()
+        for _, chunk in scored:
+            metadata = chunk.metadata or {}
+            identity = (
+                str(chunk.source_id),
+                str(metadata.get("chunk_kind")),
+                int(metadata.get("chunk_index", 0) or 0),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(chunk)
+        return deduped or candidate_chunks
+
+    def _merge_chunk_pool(self, *chunk_lists: List[DocumentChunk]) -> List[DocumentChunk]:
+        merged: List[DocumentChunk] = []
+        seen_ids: set[str] = set()
+        for chunk_list in chunk_lists:
+            for chunk in chunk_list or []:
+                chunk_id = str(getattr(chunk, "id", ""))
+                if chunk_id and chunk_id in seen_ids:
+                    continue
+                if chunk_id:
+                    seen_ids.add(chunk_id)
+                merged.append(chunk)
+        return merged
+
+    def _augment_with_deal_summary_candidates(self, candidate_chunks: List[DocumentChunk], deals: List[Deal]) -> List[DocumentChunk]:
+        seen_ids = {str(chunk.id) for chunk in candidate_chunks}
+        augmented = list(candidate_chunks)
+        if not deals:
+            return augmented
+
+        summary_chunks = list(
+            DocumentChunk.objects.filter(deal__in=deals, source_type="deal_summary")
+            .select_related("deal")
+            .order_by("-created_at")[: max(len(deals) * 8, 24)]
+        )
+        for chunk in summary_chunks:
+            chunk_id = str(chunk.id)
+            if chunk_id in seen_ids:
+                continue
+            seen_ids.add(chunk_id)
+            augmented.append(chunk)
+        return augmented
+
+    def _chunk_evidence_prior(self, chunk_kind: str, *, source_type: str, evidence_preference: str | None) -> float:
+        evidence_preference = evidence_preference or "mixed"
+        if evidence_preference == "metrics":
+            priorities = {
+                "metric": 30.0,
+                "table_summary": 24.0,
+                "claim": 10.0,
+                "normalized_text": 8.0,
+                "risk": 4.0,
+            }
+        elif evidence_preference == "risks":
+            priorities = {
+                "risk": 30.0,
+                "claim": 14.0,
+                "normalized_text": 10.0,
+                "metric": 6.0,
+                "table_summary": 4.0,
+            }
+        elif evidence_preference == "documents":
+            priorities = {
+                "normalized_text": 18.0,
+                "claim": 14.0,
+                "table_summary": 10.0,
+                "metric": 8.0,
+                "risk": 8.0,
+            }
+        elif evidence_preference == "timeline":
+            priorities = {
+                "claim": 18.0,
+                "normalized_text": 12.0,
+                "metric": 8.0,
+                "risk": 6.0,
+                "table_summary": 6.0,
+            }
+        else:
+            priorities = {
+                "claim": 14.0,
+                "normalized_text": 10.0,
+                "metric": 8.0,
+                "table_summary": 8.0,
+                "risk": 8.0,
+            }
+            if evidence_preference == "summary" and source_type == "deal_summary":
+                return 42.0
+
+        bonus = priorities.get(chunk_kind, 0.0)
+        if source_type == "deal_summary" and evidence_preference in {"summary", "mixed"}:
+            bonus += 12.0
+        return bonus
+
+    def _build_rerank_query(self, plan: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        named_entities = [
+            str(entity.get("text") or "").strip()
+            for entity in plan.get("named_entities", [])
+            if isinstance(entity, dict) and str(entity.get("text") or "").strip()
+        ]
+        if named_entities:
+            parts.append("named_entities: " + ", ".join(named_entities[:8]))
+        semantic_queries = self._normalize_string_list(plan.get("semantic_queries"))
+        if semantic_queries:
+            parts.append(" | ".join(semantic_queries[:3]))
+        metric_terms = self._normalize_string_list(plan.get("metric_terms"))
+        if metric_terms:
+            parts.append("metrics: " + ", ".join(metric_terms[:10]))
+        evidence_preference = str(plan.get("evidence_preference") or "").strip()
+        if evidence_preference:
+            parts.append(f"evidence: {evidence_preference}")
+        result_shape = str(plan.get("result_shape") or "").strip()
+        if result_shape:
+            parts.append(f"result_shape: {result_shape}")
+        selection_mode = str(plan.get("selection_mode") or "").strip()
+        if selection_mode:
+            parts.append(f"selection_mode: {selection_mode}")
+        stats_mode = str(plan.get("stats_mode") or "").strip()
+        if stats_mode and stats_mode != "none":
+            parts.append(f"stats_mode: {stats_mode}")
+        return " | ".join(part for part in parts if part).strip() or str(plan.get("user_query") or "").strip()
+
+    def _normalized_source_title(self, chunk: DocumentChunk) -> str:
+        metadata = chunk.metadata or {}
+        title = str(metadata.get("title") or metadata.get("filename") or "").strip().lower()
+        if title.endswith(".json"):
+            title = title[:-5]
+        return title
+
+    def _chunk_selection_key(self, chunk: DocumentChunk):
+        metadata = chunk.metadata or {}
+        chunk_index = int(metadata.get("chunk_index", 0) or 0)
+        chunk_kind = str(metadata.get("chunk_kind") or "").lower()
+        normalized_title = self._normalized_source_title(chunk)
+        return (
+            str(chunk.deal_id),
+            (chunk.source_type or "").lower(),
+            normalized_title,
+            chunk_kind,
+            chunk_index,
+        )
 
     def _build_pipeline_overview(self, deals: List[Deal]) -> str:
         total = Deal.objects.count()
@@ -660,6 +1597,8 @@ class UniversalChatService:
             "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
             "current_analysis": current_analysis,
             "recent_timeline": recent_timeline,
+            "retrieval_score": getattr(deal, "_retrieval_score", None),
+            "retrieval_components": getattr(deal, "_retrieval_components", None),
         }
 
     def _serialize_chunk(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -766,12 +1705,16 @@ class UniversalChatService:
     def _tokenize_keywords(self, text: str) -> List[str]:
         tokens = re.findall(r"[A-Za-z0-9%./-]+", text)
         cleaned = []
+        seen = set()
         for token in tokens:
             lowered = token.lower()
             if len(lowered) < 3 and lowered.upper() not in {"IC", "CM1", "CM2"}:
                 continue
-            if lowered in {"what", "which", "with", "from", "that", "this", "have", "show", "about"}:
+            if lowered in QUERY_STOPWORDS:
                 continue
+            if lowered in seen:
+                continue
+            seen.add(lowered)
             cleaned.append(token)
         return cleaned[:20]
 
@@ -784,13 +1727,123 @@ class UniversalChatService:
                 return bool(stage.get("enabled", True))
         return False
 
-    def simulate_query(self, user_message: str, conversation_id: str = "admin-preview") -> Dict[str, Any]:
+    def _build_analysis_input_summary(
+        self,
+        *,
+        deals: List[Dict[str, Any]],
+        chunks: List[Dict[str, Any]],
+        context_data: str,
+    ) -> Dict[str, Any]:
+        selected_deals = [
+            {
+                "deal_id": str(deal.get("deal_id") or ""),
+                "title": str(deal.get("title") or ""),
+            }
+            for deal in deals
+        ]
+        selected_chunks = [
+            {
+                "deal_id": str(chunk.get("deal_id") or ""),
+                "deal_title": str(chunk.get("deal") or ""),
+                "source_title": str(chunk.get("source_title") or chunk.get("source_type") or ""),
+                "source_type": str(chunk.get("source_type") or ""),
+                "source_id": str(chunk.get("source_id") or ""),
+            }
+            for chunk in chunks
+        ]
+        return {
+            "selected_deal_count": len(selected_deals),
+            "selected_deals": selected_deals,
+            "selected_chunk_count": len(selected_chunks),
+            "selected_chunk_sources": [chunk["source_title"] for chunk in selected_chunks],
+            "selected_chunk_mappings": selected_chunks,
+            "context_chars": len(context_data or ""),
+        }
+
+    def _run_analysis_debug(
+        self,
+        *,
+        user_message: str,
+        conversation_id: str,
+        plan: Dict[str, Any],
+        context_data: str,
+        history_context: str = "",
+        include_prompt: bool = False,
+    ) -> Dict[str, Any]:
+        answer_prompt = self._stage_settings("answer_generation").get("prompt_template") or ""
+        prompt_metadata = {
+            "history_context": history_context,
+            "context_data": context_data,
+            "query_plan": json.dumps(plan, default=str, indent=2),
+        }
+        rendered_prompt, cleaned_context = PromptBuilderService.build_user_prompt(
+            answer_prompt,
+            user_message,
+            metadata=prompt_metadata,
+        )
+        analysis_model = AIRuntimeService.get_planner_model()
+        personality = AIRuntimeService.get_personality("default")
+        system_instructions = PromptBuilderService.build_system_instructions(
+            personality,
+            skill=None,
+            stream=True,
+        )
+        payload = {
+            "model": analysis_model,
+            "prompt": rendered_prompt,
+            "system": system_instructions,
+            "stream": False,
+            "options": {
+                "max_tokens": 8192,
+                "temperature": 0.1,
+            },
+        }
+        result = self.ai_service.provider.execute_standard(payload)
+        analysis_answer = result.get("response") or result.get("thinking") or ""
+        return {
+            "analysis_answer": analysis_answer,
+            "analysis_model_used": analysis_model,
+            "analysis_context_preview": context_data[:4000],
+            "analysis_prompt_preview": rendered_prompt[:8000] if include_prompt else None,
+        }
+
+    def simulate_query(
+        self,
+        user_message: str,
+        conversation_id: str = "admin-preview",
+        *,
+        run_analysis: bool = False,
+        include_analysis_prompt: bool = False,
+    ) -> Dict[str, Any]:
         plan = self._build_query_plan(user_message, conversation_id)
         deals = self._get_candidate_deals(plan)
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         serialized_deals = [self._serialize_deal(deal) for deal in deals]
         serialized_chunks = [self._serialize_chunk(item) for item in chunks]
         context_preview, context_diagnostics = self._format_context_data(plan, serialized_deals, serialized_chunks, diagnostics=chunk_diagnostics)
+        analysis_input_summary = self._build_analysis_input_summary(
+            deals=serialized_deals,
+            chunks=serialized_chunks,
+            context_data=context_preview,
+        )
+        analysis_payload = {
+            "analysis_answer": None,
+            "analysis_model_used": None,
+            "analysis_input_summary": analysis_input_summary,
+            "analysis_context_preview": context_preview[:4000],
+            "analysis_prompt_preview": None,
+        }
+        if run_analysis:
+            analysis_payload.update(
+                self._run_analysis_debug(
+                    user_message=user_message,
+                    conversation_id=conversation_id,
+                    plan=plan,
+                    context_data=context_preview,
+                    history_context="",
+                    include_prompt=include_analysis_prompt,
+                )
+            )
         return {
             "flow_version": getattr(self.flow_version, "version", None),
             "query_plan": plan,
@@ -802,9 +1855,13 @@ class UniversalChatService:
                 **context_diagnostics,
                 "planner_requested_deal_limit": plan.get("deal_limit"),
                 "planner_requested_chunks_per_deal": plan.get("chunks_per_deal"),
+                "selection_mode": plan.get("selection_mode"),
+                "stats_mode": plan.get("stats_mode"),
+                "resolved_named_deal_ids": plan.get("_resolved_named_deal_ids", []),
                 "deals_selected": len(serialized_deals),
             },
             "answer_prompt_preview": self._stage_settings("answer_generation").get("prompt_template"),
+            **analysis_payload,
         }
 
     def _compute_chunk_budgets(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[int, int]:
@@ -819,7 +1876,12 @@ class UniversalChatService:
         deal_count = max(len(deals), 1)
 
         effective_per_deal = max(requested, min_per_deal)
-        if deal_count == 1:
+        selection_mode = plan.get("selection_mode") or "balanced"
+        if selection_mode == "depth_first":
+            effective_per_deal += max(single_deal_boost, few_deal_boost)
+        elif selection_mode == "breadth_first":
+            effective_per_deal = max(min_per_deal, min(effective_per_deal, requested))
+        elif deal_count == 1:
             effective_per_deal += single_deal_boost
         elif deal_count <= few_deal_threshold:
             effective_per_deal += few_deal_boost
@@ -832,6 +1894,12 @@ class UniversalChatService:
             effective_total = min(hard_total, max(effective_per_deal, soft_total))
         else:
             effective_total = min(hard_total, max(effective_per_deal * deal_count, fallback_total, soft_total))
+        if plan.get("result_shape") == "single_deal":
+            effective_per_deal = max(effective_per_deal, 6)
+            effective_total = max(effective_total, effective_per_deal)
+        global_chunk_limit = int(plan.get("global_chunk_limit") or 0)
+        if global_chunk_limit > 0:
+            effective_total = min(effective_total, global_chunk_limit)
         return effective_per_deal, effective_total
 
     def _trim_sections_to_budget(self, sections: List[str]) -> Tuple[List[str], int]:

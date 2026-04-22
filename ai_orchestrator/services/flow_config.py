@@ -67,7 +67,9 @@ DEFAULT_PLANNER_PROMPT = """Translate the user query into retrieval JSON.
 Return only JSON with this shape:
 {
   "query_type": "exact_lookup|comparison|stats|pipeline_search|timeline|narrative",
-  "deal_filters": {
+  "result_shape": "single_deal|named_set|shortlist|cross_pipeline",
+  "selection_mode": "depth_first|balanced|breadth_first",
+  "hard_filters": {
     "title": null,
     "industry": null,
     "sector": null,
@@ -77,17 +79,85 @@ Return only JSON with this shape:
     "is_female_led": null,
     "management_meeting": null
   },
-  "exact_terms": ["exact company names or phrases"],
-  "keywords": ["important keywords"],
+  "named_entities": [
+    {
+      "type": "deal",
+      "text": "Named Deal",
+      "confidence": 0.98
+    }
+  ],
+  "exact_terms": ["exact company names or phrases kept only for compatibility"],
+  "semantic_queries": ["semantic search query variants"],
+  "soft_constraints": ["semantic preferences that should not become DB filters"],
   "metric_terms": ["ARR", "revenue", "CM1"],
-  "rag_queries": ["semantic search query variants"],
+  "evidence_preference": "summary|metrics|risks|mixed|documents|timeline",
   "needs_stats": false,
-  "deal_limit": 8,
-  "chunks_per_deal": 2
+  "stats_mode": "none|count|group|aggregate",
+  "deal_limit": 20,
+  "chunks_per_deal": 8,
+  "global_chunk_limit": 24
 }
 
 Conversation ID: {{conversation_id}}
 User query: {{user_message}}
+
+Important planner rules:
+- The planner is the main semantic interpreter. Downstream retrieval will execute your structure mechanically.
+- Populate "named_entities" whenever a specific deal or set of deals is referenced.
+- Use "single_deal" for one named deal, "named_set" for explicitly named 2-3 deal comparisons, "shortlist" for thematic searches, and "cross_pipeline" for system-wide questions.
+- Use "selection_mode":
+  - "depth_first" when the answer should go deep into one or a few deals
+  - "balanced" for normal comparisons and shortlist questions
+  - "breadth_first" for wide searches across many deals
+- Use "stats" only for aggregate database questions such as counts, totals, grouped views, or filtered system-wide summaries.
+- Do not use "stats" for entity-specific temporal questions like "how many years since X's last data"; those are entity/timeline lookups.
+- Use "stats_mode":
+  - "count" for questions like "how many deals"
+  - "group" for grouped/category breakdowns
+  - "aggregate" for pipeline-wide numeric summaries
+  - "none" for non-stats questions
+- Only populate "hard_filters" when the user clearly asks for a direct structured field filter that plausibly maps to the database. Otherwise prefer "soft_constraints".
+- Do not invent financial metrics, filters, risks, or themes not asked for by the user.
+- Keep semantic queries literal and narrow for named-deal lookups and document-centric questions.
+
+Examples:
+1. User: "Tell me about a specific named company"
+   Output intent:
+   - query_type="exact_lookup"
+   - result_shape="single_deal"
+   - selection_mode="depth_first"
+   - named_entities=[{"type":"deal","text":"Named Deal","confidence":0.98}]
+   - semantic_queries=["Named Deal company overview","Named Deal investment summary"]
+   - evidence_preference="summary"
+   - stats_mode="none"
+
+2. User: "What is a better pick between two named companies?"
+   Output intent:
+   - query_type="comparison"
+   - result_shape="named_set"
+   - selection_mode="depth_first"
+   - named_entities for both named deals
+   - semantic_queries centered on those named deals
+   - deal_limit=2
+
+3. User: "How many category-specific deals do we have in the system?"
+   Output intent:
+   - query_type="stats"
+   - result_shape="cross_pipeline"
+   - selection_mode="breadth_first"
+   - needs_stats=true
+   - stats_mode="count"
+   - hard_filters only if a real structured filter is appropriate; otherwise use soft_constraints for the thematic category
+   - global_chunk_limit=0
+
+4. User: "Go through the annual reports for a named company"
+   Output intent:
+   - query_type="exact_lookup"
+   - result_shape="single_deal"
+   - selection_mode="depth_first"
+   - named_entities for the named deal
+   - semantic_queries=["Named Deal annual report","Named Deal financial statements"]
+   - evidence_preference="documents"
 """
 
 
@@ -128,9 +198,9 @@ class UniversalChatFlowService:
                         "prompt_template": DEFAULT_PLANNER_PROMPT,
                         "fallback_query_type": "pipeline_search",
                         "default_deal_limit": 20,
-                        "default_chunks_per_deal": 8,
+                        "default_chunks_per_deal": 12,
                         "max_deal_limit": 30,
-                        "max_chunks_per_deal": 12,
+                        "max_chunks_per_deal": 20,
                     },
                 },
                 {
@@ -145,16 +215,19 @@ class UniversalChatFlowService:
                     "id": "chunk_retrieval",
                     "enabled": True,
                     "settings": {
-                        "vector_limit": 300,
-                        "sqlite_candidate_limit": 600,
-                        "fallback_candidate_limit": 400,
-                        "default_chunks_per_deal": 8,
+                        "vector_limit": 500,
+                        "sqlite_candidate_limit": 800,
+                        "fallback_candidate_limit": 600,
+                        "default_chunks_per_deal": 12,
                     },
                 },
                 {
                     "id": "chunk_rerank",
                     "enabled": True,
                     "settings": {
+                        "deal_rerank_candidate_limit": 36,
+                        "deal_rerank_final_limit": 20,
+                        "deal_rerank_weight": 180,
                         "deal_title_exact_boost": 100,
                         "deal_context_exact_boost": 40,
                         "deal_title_keyword_boost": 30,
@@ -179,17 +252,17 @@ class UniversalChatFlowService:
                     "id": "context_assembly",
                     "enabled": True,
                     "settings": {
-                        "max_total_chunks": 80,
-                        "soft_max_total_chunks": 60,
-                        "fallback_max_total_chunks": 80,
-                        "max_context_chars": 180000,
-                        "chunk_excerpt_chars": 2200,
+                        "max_total_chunks": 120,
+                        "soft_max_total_chunks": 90,
+                        "fallback_max_total_chunks": 120,
+                        "max_context_chars": 260000,
+                        "chunk_excerpt_chars": 2600,
                         "deal_summary_excerpt_chars": 1400,
-                        "min_chunks_per_selected_deal": 3,
-                        "max_chunks_per_selected_deal": 24,
+                        "min_chunks_per_selected_deal": 4,
+                        "max_chunks_per_selected_deal": 32,
                         "few_deal_chunk_boost_threshold": 4,
-                        "few_deal_chunk_boost": 4,
-                        "single_deal_chunk_boost": 12,
+                        "few_deal_chunk_boost": 6,
+                        "single_deal_chunk_boost": 16,
                         "overflow_reporting_enabled": True,
                     },
                 },
@@ -209,6 +282,11 @@ class UniversalChatFlowService:
         if not isinstance(stages, list) or not stages:
             raise ValueError("Flow config must include a non-empty 'stages' array.")
 
+        default_config = cls.build_default_config()
+        default_stage_settings = {
+            stage["id"]: copy.deepcopy(stage.get("settings") or {})
+            for stage in default_config.get("stages", [])
+        }
         allowed_ids = {stage["id"] for stage in STAGE_CATALOG}
         required_ids = {stage["id"] for stage in STAGE_CATALOG if stage["required"]}
         seen_ids = []
@@ -221,11 +299,15 @@ class UniversalChatFlowService:
             if stage_id in seen_ids:
                 raise ValueError(f"Duplicate flow stage: {stage_id}")
             seen_ids.append(stage_id)
+            merged_settings = {
+                **default_stage_settings.get(stage_id, {}),
+                **(stage.get("settings") or {}),
+            }
             normalized.append(
                 {
                     "id": stage_id,
                     "enabled": bool(stage.get("enabled", True)),
-                    "settings": stage.get("settings") or {},
+                    "settings": merged_settings,
                 }
             )
 
