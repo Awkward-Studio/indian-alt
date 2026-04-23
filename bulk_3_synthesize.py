@@ -390,8 +390,9 @@ def run():
     
     choice = input("\nEnter indices or 'all': ")
     to_process = []
+    selected_all = choice.strip().lower() == 'all'
     try:
-        if choice.lower() == 'all': to_process = deals_metadata
+        if selected_all: to_process = deals_metadata
         else:
             indices = []
             for part in choice.split(','):
@@ -403,8 +404,19 @@ def run():
             to_process = [deals_metadata[i] for i in sorted(list(set(indices))) if 0 <= i < len(deals_metadata)]
     except: return
 
-    redo_choice = input("Redo existing synthesis for selected deals? (y/n): ").lower().strip()
+    print(
+        "\nPhase 3 uses existing per-document *.artifact.json files as source evidence "
+        "and overwrites DEAL_SYNTHESIS.artifact.json + INVESTMENT_REPORT.md when redo is enabled."
+    )
+    redo_choice = input("Refresh/redo existing Phase 3 synthesis for selected deals? (y/n): ").lower().strip()
     redo_all = (redo_choice == 'y')
+    if selected_all and redo_all:
+        confirm = input(
+            "You selected ALL deals. Type 'REFRESH PHASE 3' to regenerate every synthesis artifact: "
+        ).strip()
+        if confirm != "REFRESH PHASE 3":
+            print("Aborted all-deal Phase 3 refresh.")
+            return
 
     v_cfg = get_vllm_config(); session = get_robust_session(pool_size=CONNECTION_POOL_SIZE)
     base_dir = Path("data/extractions"); task_queue = queue.Queue()
