@@ -30,6 +30,7 @@ from .services.graph_service import GraphAPIService, DMS_USER_EMAIL, DMS_DRIVE_I
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +147,7 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
 
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_extraction').first()
-            default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-
-            audit_log = AIAuditLog.objects.create(
+            audit_log = AIRuntimeService.create_audit_log(
                 source_type='email',
                 source_id=str(email.id),
                 context_label=f"Email: {email.subject}",
@@ -156,7 +155,6 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
                 skill=skill,
                 status='PENDING',
                 is_success=False,
-                model_used=default_model,
                 system_prompt="Queued forensic email analysis...",
                 user_prompt=f"Analyzing email signal: {email.subject}",
                 source_metadata={
@@ -962,8 +960,7 @@ class AnalyzeEmailView(APIView):
 
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_extraction').first()
-        default_model = personality.text_model_name if personality else 'qwen3.5:latest'
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='email',
             source_id=str(email.id),
             context_label=f"Email: {email.subject}",
@@ -971,7 +968,6 @@ class AnalyzeEmailView(APIView):
             skill=skill,
             status='PENDING',
             is_success=False,
-            model_used=default_model,
             system_prompt="Queued forensic email analysis...",
             user_prompt=f"Analyzing email signal: {email.subject}",
             source_metadata={

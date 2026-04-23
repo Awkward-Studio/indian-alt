@@ -163,7 +163,6 @@ class DealCreationService:
         changed_fields = []
 
         field_mapping = {
-            'title': 'title',
             'industry': 'industry',
             'sector': 'sector',
             'funding_ask': 'funding_ask',

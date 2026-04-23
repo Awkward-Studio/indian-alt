@@ -30,35 +30,17 @@ from deals.models import (
     TranscriptionStatus,
 )
 from deals.services.contact_linking import sync_deal_contact_links
+from deals.services.bulk_sync_resolution import (
+    normalize_placeholder,
+    normalized_deal_name,
+    resolve_existing_deal,
+)
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = SCRIPT_DIR / "data" / "extractions"
-NULL_MARKERS = {
-    "",
-    "not specified",
-    "not identified",
-    "none",
-    "null",
-    "unknown",
-    "n/a",
-    "na",
-}
-
-
-def normalize_placeholder(value):
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        return value
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned.lower() in NULL_MARKERS:
-        return None
-    return cleaned
 
 
 def normalize_string_list(values):
@@ -68,15 +50,6 @@ def normalize_string_list(values):
         if isinstance(cleaned, str) and cleaned not in result:
             result.append(cleaned)
     return result
-
-
-def normalized_deal_name(folder_name, artifact_data):
-    artifact_name = normalize_placeholder((artifact_data or {}).get("deal_name"))
-    if artifact_name:
-        return artifact_name
-
-    pretty = folder_name.replace("_-_", " - ").replace("_", " ")
-    return pretty.strip()
 
 
 def iter_target_dirs(base_dir, target_deals=None):
@@ -90,26 +63,21 @@ def iter_target_dirs(base_dir, target_deals=None):
 
 
 def lookup_or_create_deal(deal_dir, artifact_data, dry_run=False):
-    candidates = []
-    artifact_name = normalize_placeholder((artifact_data or {}).get("deal_name"))
-    if artifact_name:
-        candidates.append(artifact_name)
-    folder_pretty = normalized_deal_name(deal_dir.name, artifact_data)
-    if folder_pretty and folder_pretty not in candidates:
-        candidates.append(folder_pretty)
-    legacy_pretty = deal_dir.name.replace("_", " ").replace("-", "/").strip()
-    if legacy_pretty and legacy_pretty not in candidates:
-        candidates.append(legacy_pretty)
-
-    for candidate in candidates:
-        deal = Deal.objects.filter(title__iexact=candidate).first()
-        if deal:
-            return deal, False
+    resolution = resolve_existing_deal(deal_dir.name, artifact_data)
+    if resolution.deal:
+        if resolution.duplicates:
+            print(
+                f"[WARN] {resolution.canonical_title}: found {len(resolution.duplicates) + 1} matching deal rows; "
+                f"using canonical deal {resolution.deal.id} matched by {resolution.matched_by!r}",
+                flush=True,
+            )
+        return resolution.deal, False
 
     if dry_run:
-        return Deal(title=candidates[0] if candidates else deal_dir.name), True
+        preview_title = resolution.canonical_title or normalized_deal_name(deal_dir.name, artifact_data) or deal_dir.name
+        return Deal(title=preview_title), True
 
-    created_title = candidates[0] if candidates else deal_dir.name
+    created_title = resolution.canonical_title or normalized_deal_name(deal_dir.name, artifact_data) or deal_dir.name
     return Deal.objects.get_or_create(title=created_title)
 
 
@@ -193,7 +161,11 @@ def iter_document_artifact_paths(deal_dir):
         yield artifact_path
 
 
-def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
+def artifact_fingerprint(payload):
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def build_document_sync_items(deal, deal_dir, synth_artifact):
     documents_used = (
         ((synth_artifact.get("metadata") or {}).get("documents_used") or [])
         if isinstance(synth_artifact, dict)
@@ -205,13 +177,7 @@ def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
         if isinstance(item, dict) and item.get("document_name")
     }
 
-    if dry_run:
-        doc_count = sum(1 for _ in iter_document_artifact_paths(deal_dir))
-        return f"Would sync {doc_count} document artifacts into DealDocument and DocumentChunk records"
-
-    embed_service = EmbeddingService()
-    synced_docs = []
-    indexed_docs = 0
+    items = []
 
     for artifact_path in iter_document_artifact_paths(deal_dir):
         with open(artifact_path, "r") as f:
@@ -229,12 +195,16 @@ def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
         title = normalize_placeholder(artifact.get("document_name")) or artifact_path.name.replace(".artifact.json", "")
         normalized_text = (artifact.get("normalized_text") or "").strip()
         source_id = artifact_source_id(artifact)
+        raw_fingerprint = artifact_fingerprint(raw_artifact)
 
         lookup = {"deal": deal, "title": title}
+        existing_doc = None
         if source_id:
             existing_doc = DealDocument.objects.filter(deal=deal, onedrive_id=source_id).first()
             if existing_doc:
                 lookup = {"id": existing_doc.id}
+        if not existing_doc:
+            existing_doc = DealDocument.objects.filter(**lookup).first()
 
         defaults = {
             "document_type": normalize_document_type(artifact.get("document_type")),
@@ -258,10 +228,58 @@ def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
             "chunking_status": ChunkingStatus.NOT_CHUNKED,
             "last_transcribed_at": timezone.now() if normalized_text else None,
         }
+        artifact_with_fingerprint = dict(artifact)
+        artifact_with_fingerprint["_sync_artifact_fingerprint"] = raw_fingerprint
+        defaults["evidence_json"] = artifact_with_fingerprint
 
-        doc, _ = DealDocument.objects.update_or_create(defaults=defaults, **lookup)
+        existing_fingerprint = None
+        if existing_doc and isinstance(existing_doc.evidence_json, dict):
+            existing_fingerprint = existing_doc.evidence_json.get("_sync_artifact_fingerprint")
+            if not existing_fingerprint and existing_doc.evidence_json == artifact:
+                existing_fingerprint = raw_fingerprint
+
+        item = {
+            "artifact_path": artifact_path,
+            "raw_artifact": raw_artifact,
+            "artifact": artifact,
+            "title": title,
+            "normalized_text": normalized_text,
+            "source_id": source_id,
+            "lookup": lookup,
+            "defaults": defaults,
+            "existing_doc": existing_doc,
+            "artifact_fingerprint": raw_fingerprint,
+            "unchanged": bool(existing_doc and existing_fingerprint == raw_fingerprint),
+        }
+        items.append(item)
+
+    return items
+
+
+def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
+    items = build_document_sync_items(deal, deal_dir, synth_artifact)
+    if dry_run:
+        changed_count = sum(1 for item in items if not item["unchanged"])
+        return changed_count > 0, f"Would sync {len(items)} document artifacts ({changed_count} changed)"
+
+    embed_service = EmbeddingService()
+    synced_docs = []
+    indexed_docs = 0
+    changed_docs = 0
+    skipped_docs = 0
+
+    for item in items:
+        if item["unchanged"]:
+            skipped_docs += 1
+            if item["existing_doc"]:
+                synced_docs.append(item["existing_doc"])
+            continue
+
+        changed_docs += 1
+        doc, _ = DealDocument.objects.update_or_create(defaults=item["defaults"], **item["lookup"])
         synced_docs.append(doc)
 
+        normalized_text = item["normalized_text"]
         if normalized_text and embed_service.vectorize_document(doc):
             indexed_docs += 1
             doc.refresh_from_db(fields=["is_indexed", "chunking_status", "last_chunked_at"])
@@ -270,24 +288,20 @@ def sync_deal_documents(deal, deal_dir, synth_artifact, dry_run=False):
             doc.chunking_status = ChunkingStatus.FAILED
             doc.save(update_fields=["is_indexed", "chunking_status"])
 
-    embed_service.vectorize_deal(deal)
-    embed_service.refresh_deal_profile(deal)
-
-    existing = deal.extracted_text or ""
-    additions = []
-    for doc in synced_docs:
-        text = (doc.normalized_text or doc.extracted_text or "").strip()
-        if not text:
-            continue
-        marker = f"--- DOCUMENT: {doc.title} ---"
-        if marker in existing:
-            continue
-        additions.append(f"\n\n{marker}\n{text}")
-    if additions:
-        deal.extracted_text = existing + "".join(additions)
+    if changed_docs:
+        all_docs = list(deal.documents.order_by("created_at", "id"))
+        extracted_segments = []
+        for doc in all_docs:
+            text = (doc.normalized_text or doc.extracted_text or "").strip()
+            if not text:
+                continue
+            extracted_segments.append(f"--- DOCUMENT: {doc.title} ---\n{text}")
+        deal.extracted_text = "\n\n".join(extracted_segments) if extracted_segments else ""
         deal.save(update_fields=["extracted_text"])
 
-    return f"Synced {len(synced_docs)} documents, indexed {indexed_docs}, refreshed deal profile"
+    return changed_docs > 0, (
+        f"Synced {len(items)} documents, changed {changed_docs}, skipped {skipped_docs}, indexed {indexed_docs}"
+    )
 
 
 def payload_fingerprint(payload, thinking):
@@ -296,6 +310,29 @@ def payload_fingerprint(payload, thinking):
         "thinking": thinking or "",
     }
     return hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def current_synthesis_fingerprint(deal, synth_artifact, investment_report_text=None, investment_report_path=None):
+    latest_analysis = deal.analyses.order_by("-version", "-created_at").first() if getattr(deal, "pk", None) else None
+    if not latest_analysis:
+        return None, None, None, None
+    analysis_payload = build_analysis_payload(
+        synth_artifact,
+        investment_report_text=investment_report_text,
+        investment_report_path=investment_report_path,
+    )
+    previous_snapshot = ((deal.current_analysis or {}).get("canonical_snapshot") or {}) if getattr(deal, "pk", None) else {}
+    normalized_analysis = DealCreationService.normalize_analysis_payload(
+        analysis_payload,
+        previous_snapshot=previous_snapshot,
+        analysis_kind=AnalysisKind.SUPPLEMENTAL,
+        documents_analyzed=(analysis_payload.get("metadata") or {}).get("documents_analyzed"),
+        analysis_input_files=(analysis_payload.get("metadata") or {}).get("analysis_input_files"),
+        failed_files=(analysis_payload.get("metadata") or {}).get("failed_files"),
+    )
+    incoming_fingerprint = payload_fingerprint(normalized_analysis, synth_artifact.get("thinking_process") or "")
+    existing_fingerprint = payload_fingerprint(latest_analysis.analysis_json or {}, latest_analysis.thinking or "")
+    return latest_analysis, normalized_analysis, incoming_fingerprint, existing_fingerprint
 
 
 def resolve_bank(bank_payload, dry_run=False):
@@ -431,15 +468,6 @@ def apply_extended_deal_fields(deal, model_data, overwrite=True, dry_run=False):
                 deal.is_female_led = bool_value
                 changed_fields.append("is_female_led")
 
-    title_value = normalize_placeholder(model_data.get("title"))
-    if isinstance(title_value, str):
-        current_title = deal.title
-        if overwrite or not current_title:
-            if current_title != title_value:
-                deal.title = title_value
-                changed_fields.append("title")
-                rename_message = f"[RENAME] {current_title or '<empty>'} -> {title_value}"
-
     if changed_fields and not dry_run:
         deal.save(update_fields=list(dict.fromkeys(changed_fields)))
     return changed_fields, rename_message
@@ -515,8 +543,8 @@ def sync_synthesis_artifact(deal, synth_artifact, investment_report_text=None, i
 
     if dry_run:
         if latest_analysis and incoming_fingerprint == existing_fingerprint:
-            return "DRY-RUN", "Would resync Deal fields and relationships from unchanged synthesis"
-        return "DRY-RUN", f"Would import synthesis as v{next_version}"
+            return "DRY-RUN", "Would skip unchanged synthesis", False
+        return "DRY-RUN", f"Would import synthesis as v{next_version}", True
 
     DealCreationService.apply_analysis_to_deal(
         deal,
@@ -535,7 +563,7 @@ def sync_synthesis_artifact(deal, synth_artifact, investment_report_text=None, i
     import_relationships(deal, normalized_analysis, dry_run=False)
 
     if latest_analysis and incoming_fingerprint == existing_fingerprint:
-        return "OK", "Resynced Deal fields and relationships from unchanged synthesis"
+        return "OK", "Synthesis unchanged", False
 
     DealAnalysis.objects.create(
         deal=deal,
@@ -545,14 +573,31 @@ def sync_synthesis_artifact(deal, synth_artifact, investment_report_text=None, i
         ambiguities=((normalized_analysis.get("metadata") or {}).get("ambiguous_points") or []),
         analysis_json=normalized_analysis,
     )
-    return "OK", f"Imported synthesis as v{next_version}"
+    return "OK", f"Imported synthesis as v{next_version}", True
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Import DEAL_SYNTHESIS.artifact.json files into DealAnalysis and related models.")
     parser.add_argument("--deals", nargs="*", help="Optional extraction folder names to import. Defaults to all.")
     parser.add_argument("--dry-run", action="store_true", help="Preview what would be imported without writing to the database.")
+    parser.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip deals whose synthesis and document artifacts are already present and unchanged.",
+    )
     return parser.parse_args()
+
+
+def prompt_skip_existing(default=True):
+    prompt = "Skip deals that are already present and unchanged? [Y/n]: " if default else "Skip deals that are already present and unchanged? [y/N]: "
+    try:
+        response = input(prompt).strip().lower()
+    except EOFError:
+        return default
+    if not response:
+        return default
+    return response in {"y", "yes"}
 
 
 def run():
@@ -564,6 +609,12 @@ def run():
 
     print("\n>>> SYNTHESIS SYNC: LOADING PHASE 3 DEAL SYNTHESIS")
     print("-" * 72)
+
+    if args.skip_existing is None:
+        skip_existing = True if args.dry_run else prompt_skip_existing(default=True)
+    else:
+        skip_existing = args.skip_existing
+    print(f"Skip unchanged existing deals: {'yes' if skip_existing else 'no'}")
 
     processed = 0
     skipped = 0
@@ -583,19 +634,39 @@ def run():
                 investment_report_text = investment_report_path.read_text(encoding="utf-8").strip()
 
             deal_obj, created = lookup_or_create_deal(deal_dir, synth_artifact, dry_run=args.dry_run)
-            status, message = sync_synthesis_artifact(
+            latest_analysis, _, incoming_fingerprint, existing_fingerprint = current_synthesis_fingerprint(
+                deal_obj,
+                synth_artifact,
+                investment_report_text=investment_report_text,
+                investment_report_path=str(investment_report_path.name) if investment_report_text else None,
+            )
+            doc_items = build_document_sync_items(deal_obj, deal_dir, synth_artifact)
+            docs_changed = any(not item["unchanged"] for item in doc_items)
+            synthesis_changed = not latest_analysis or incoming_fingerprint != existing_fingerprint
+
+            if skip_existing and not created and not synthesis_changed and not docs_changed and not args.dry_run:
+                skipped += 1
+                print(f"[SKIP] {deal_obj.title}: synthesis and document artifacts unchanged")
+                continue
+
+            status, message, synthesis_applied = sync_synthesis_artifact(
                 deal_obj,
                 synth_artifact,
                 investment_report_text=investment_report_text,
                 investment_report_path=str(investment_report_path.name) if investment_report_text else None,
                 dry_run=args.dry_run,
             )
-            doc_message = sync_deal_documents(
+            docs_applied, doc_message = sync_deal_documents(
                 deal_obj,
                 deal_dir,
                 synth_artifact,
                 dry_run=args.dry_run,
             )
+            if docs_applied or synthesis_applied:
+                embed_service = EmbeddingService()
+                if synthesis_applied:
+                    embed_service.vectorize_deal(deal_obj)
+                embed_service.refresh_deal_profile(deal_obj)
             if status == "SKIP":
                 skipped += 1
             else:

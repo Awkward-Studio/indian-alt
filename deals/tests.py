@@ -1,11 +1,15 @@
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from django.core.management import call_command
 from django.core.cache import cache
 from django.test import TestCase
 
-from ai_orchestrator.models import AIAuditLog, DocumentChunk
+from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
 from ai_orchestrator.services.embedding_processor import EmbeddingService
-from deals.models import AnalysisKind, Deal, DealDocument, InitialAnalysisStatus
+from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument, InitialAnalysisStatus
 from deals.serializers import DealDetailSerializer, DealSerializer
 from contacts.serializers import ContactSerializer
 from contacts.models import Contact
@@ -15,6 +19,7 @@ from deals.services.document_artifacts import DocumentArtifactService
 from deals.services.deal_flow import DealFlowService
 from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
+from deals.services.bulk_sync_resolution import folder_aliases, synthesis_canonical_title
 from deals.tasks import analyze_additional_documents_async, analyze_selection_async, process_single_document_async
 
 
@@ -49,12 +54,12 @@ class DealAnalysisMappingTests(TestCase):
         DealCreationService.apply_analysis_to_deal(deal, self.analysis_json)
 
         deal.refresh_from_db()
-        self.assertEqual(deal.title, "Acme Finance")
+        self.assertFalse(deal.title)
         self.assertEqual(deal.industry, "NBFC")
         self.assertEqual(deal.sector, "Fintech")
         self.assertEqual(deal.funding_ask, "125")
         self.assertEqual(deal.funding_ask_for, "Growth capital")
-        self.assertEqual(deal.priority, "High")
+        self.assertEqual(deal.priority, "Medium")
         self.assertEqual(deal.city, "Mumbai")
         self.assertEqual(deal.state, "Maharashtra")
         self.assertEqual(deal.country, "India")
@@ -78,6 +83,15 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(deal.themes, ["Existing Theme"])
         self.assertEqual(deal.industry, "NBFC")
         self.assertEqual(deal.city, "Mumbai")
+
+    def test_apply_analysis_to_deal_never_overwrites_title_even_with_overwrite(self):
+        deal = Deal.objects.create(title="Canonical Title")
+
+        DealCreationService.apply_analysis_to_deal(deal, self.analysis_json, overwrite=True)
+
+        deal.refresh_from_db()
+        self.assertEqual(deal.title, "Canonical Title")
+        self.assertEqual(deal.industry, "NBFC")
 
     def test_process_deal_creation_creates_analysis_and_maps_ambiguities(self):
         deal = Deal.objects.create()
@@ -236,7 +250,6 @@ class DealStatusSyncTests(TestCase):
         self.assertEqual(deal.bank_id, bank.id)
         self.assertEqual(list(deal.additional_contacts.values_list("id", flat=True)), [secondary_contact.id])
         self.assertEqual(deal.other_contacts, [str(secondary_contact.id)])
-
     def test_contact_serializer_updates_linked_deals_bidirectionally(self):
         bank = Bank.objects.create(name="Avendus")
         contact = Contact.objects.create(name="Banker", bank=bank)
@@ -292,7 +305,6 @@ class DealStatusSyncTests(TestCase):
         self.assertEqual(deal.deal_status, "Passed")
         self.assertEqual(deal.current_phase, "Passed")
         self.assertEqual(deal.rejection_stage_id, 5)
-
 
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document")
     @patch("deals.tasks.process_deal_folder_background.apply_async")
@@ -758,3 +770,279 @@ class DealStatusSyncTests(TestCase):
         result = FolderAnalysisService.trigger_vdr_processing(deal)
 
         self.assertIn("error", result)
+
+
+class BulkSyncResolutionAliasTests(TestCase):
+    def test_synthesis_canonical_title_prefers_folder_identity_over_synthesized_title(self):
+        artifact = {
+            "deal_name": "Folder Backed Canonical Name",
+            "portable_deal_data": {
+                "deal_model_data": {
+                    "title": "Investment Report: Renamed By Synthesis",
+                }
+            },
+        }
+
+        canonical = synthesis_canonical_title(artifact, "Folder_Backed_Canonical_Name")
+
+        self.assertEqual(canonical, "Folder Backed Canonical Name")
+
+    def test_folder_aliases_keeps_synthesized_title_only_as_compatibility_alias(self):
+        artifact = {
+            "deal_name": "Folder Backed Canonical Name",
+            "portable_deal_data": {
+                "deal_model_data": {
+                    "title": "Investment Report: Renamed By Synthesis",
+                }
+            },
+        }
+
+        aliases = folder_aliases("Folder_Backed_Canonical_Name", artifact)
+
+        self.assertEqual(aliases[0], "Folder Backed Canonical Name")
+        self.assertIn("Investment Report: Renamed By Synthesis", aliases)
+
+
+class RebuildDerivedDealStateCommandTests(TestCase):
+    def _write_synthesis_fixture(self, base_dir: Path, folder_name: str, artifact: dict, report_text: str):
+        deal_dir = base_dir / folder_name
+        deal_dir.mkdir(parents=True, exist_ok=True)
+        (deal_dir / "DEAL_SYNTHESIS.artifact.json").write_text(json.dumps(artifact), encoding="utf-8")
+        (deal_dir / "INVESTMENT_REPORT.md").write_text(report_text, encoding="utf-8")
+        return deal_dir
+
+    @patch("deals.management.commands.rebuild_derived_deal_state.refresh_deal_embeddings")
+    def test_rebuild_command_repairs_title_and_rebuilds_derived_state(self, mock_refresh_embeddings):
+        deal = Deal.objects.create(
+            title="Investment Report: Acme Finance",
+            current_phase="5: Financial Model Call",
+            deal_status="5: Financial Model Call",
+            deal_summary="Old summary",
+            funding_ask="999",
+            industry="Old Industry",
+            sector="Old Sector",
+            city="Old City",
+            state="Old State",
+            country="Old Country",
+            priority="High",
+            deal_details="Old deal details",
+            company_details="Old company details",
+            priority_rationale="Old rationale",
+            themes=["Old Theme"],
+            legacy_investment_bank="Old Bank",
+            extracted_text="Raw document corpus",
+            is_indexed=True,
+        )
+        DealAnalysis.objects.create(
+            deal=deal,
+            version=1,
+            analysis_kind=AnalysisKind.INITIAL,
+            thinking="old thinking",
+            ambiguities=["old ambiguity"],
+            analysis_json={"deal_model_data": {"title": "Old Title"}, "analyst_report": "Old summary"},
+        )
+        DocumentChunk.objects.create(
+            deal=deal,
+            source_type="extracted_source",
+            source_id="doc-1",
+            content="Preserve me",
+            metadata={"chunk_kind": "normalized_text", "chunk_index": 0},
+        )
+        DocumentChunk.objects.create(
+            deal=deal,
+            source_type="deal_summary",
+            source_id=str(deal.id),
+            content="Old derived summary",
+            metadata={"title": deal.title, "chunk_index": 0},
+        )
+        DealRetrievalProfile.objects.create(
+            deal=deal,
+            profile_text="Old retrieval profile",
+            embedding_model="test",
+            metadata={"title": deal.title},
+        )
+
+        def fake_refresh_embeddings(refreshed_deal, embed_service=None):
+            DocumentChunk.objects.create(
+                deal=refreshed_deal,
+                source_type="deal_summary",
+                source_id=str(refreshed_deal.id),
+                content=refreshed_deal.deal_summary,
+                metadata={"title": refreshed_deal.title, "chunk_index": 0, "total_chunks": 1},
+            )
+            DealRetrievalProfile.objects.update_or_create(
+                deal=refreshed_deal,
+                defaults={
+                    "profile_text": f"profile::{refreshed_deal.title}",
+                    "embedding_model": "test",
+                    "metadata": {"title": refreshed_deal.title},
+                },
+            )
+            refreshed_deal.is_indexed = True
+            refreshed_deal.save(update_fields=["is_indexed"])
+            return True, True
+
+        mock_refresh_embeddings.side_effect = fake_refresh_embeddings
+
+        artifact = {
+            "deal_name": "Acme Finance",
+            "thinking_process": "Fresh synthesis reasoning",
+            "portable_deal_data": {
+                "deal_model_data": {
+                    "title": "Acme Finance",
+                    "industry": "NBFC",
+                    "sector": "Fintech",
+                    "funding_ask": "125",
+                    "funding_ask_for": "Growth capital",
+                    "priority": "Medium",
+                    "city": "Mumbai",
+                    "state": "Maharashtra",
+                    "country": "India",
+                    "themes": ["Digital Lending", "Embedded Finance"],
+                    "deal_details": "Fresh deal details",
+                    "company_details": "Fresh company details",
+                    "priority_rationale": "Fresh rationale",
+                },
+                "metadata": {
+                    "ambiguous_points": ["Verify collection efficiency"],
+                    "documents_analyzed": ["Deck.pdf"],
+                    "analysis_input_files": [{"file_name": "Deck.pdf"}],
+                    "failed_files": [],
+                },
+                "analyst_report": "Artifact report body",
+            },
+            "metadata": {
+                "documents_used": [{"document_name": "Deck.pdf", "document_type": "Pitch Deck"}],
+                "documents_used_count": 1,
+            },
+        }
+        report_text = "## Executive Summary\n\nThis is the rebuilt markdown report."
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            self._write_synthesis_fixture(base_dir, "Acme_Finance", artifact, report_text)
+
+            call_command(
+                "rebuild_derived_deal_state",
+                "--apply",
+                "--base-dir",
+                str(base_dir),
+            )
+
+        deal.refresh_from_db()
+        self.assertEqual(deal.title, "Acme Finance")
+        self.assertEqual(deal.current_phase, "5: Financial Model Call")
+        self.assertEqual(deal.deal_status, "5: Financial Model Call")
+        self.assertEqual(deal.funding_ask, "125")
+        self.assertEqual(deal.industry, "NBFC")
+        self.assertEqual(deal.sector, "Fintech")
+        self.assertEqual(deal.city, "Mumbai")
+        self.assertEqual(deal.priority, "Medium")
+        self.assertEqual(deal.deal_summary, report_text)
+        self.assertEqual(deal.themes, ["Digital Lending", "Embedded Finance"])
+        self.assertEqual(deal.extracted_text, "Raw document corpus")
+
+        self.assertEqual(deal.analyses.count(), 1)
+        rebuilt_analysis = deal.latest_analysis
+        self.assertEqual(rebuilt_analysis.version, 1)
+        self.assertEqual(rebuilt_analysis.analysis_kind, AnalysisKind.INITIAL)
+        self.assertEqual(rebuilt_analysis.thinking, "Fresh synthesis reasoning")
+
+        self.assertEqual(
+            DocumentChunk.objects.filter(deal=deal, source_type="extracted_source").count(),
+            1,
+        )
+        self.assertGreater(
+            DocumentChunk.objects.filter(deal=deal, source_type="deal_summary").count(),
+            0,
+        )
+        self.assertEqual(DealRetrievalProfile.objects.filter(deal=deal).count(), 1)
+        mock_refresh_embeddings.assert_called_once()
+
+    def test_rebuild_command_dry_run_does_not_mutate(self):
+        deal = Deal.objects.create(
+            title="Investment Report: Dry Run Finance",
+            deal_summary="Old summary",
+            funding_ask="999",
+            current_phase="1: Deal Sourced",
+            deal_status="1: Deal Sourced",
+        )
+        DealAnalysis.objects.create(
+            deal=deal,
+            version=1,
+            analysis_kind=AnalysisKind.INITIAL,
+            thinking="old thinking",
+            ambiguities=[],
+            analysis_json={"deal_model_data": {"title": "Old Title"}, "analyst_report": "Old summary"},
+        )
+        DocumentChunk.objects.create(
+            deal=deal,
+            source_type="deal_summary",
+            source_id=str(deal.id),
+            content="Old derived summary",
+            metadata={"title": deal.title, "chunk_index": 0},
+        )
+        DealRetrievalProfile.objects.create(
+            deal=deal,
+            profile_text="Old retrieval profile",
+            embedding_model="test",
+            metadata={"title": deal.title},
+        )
+
+        artifact = {
+            "deal_name": "Dry Run Finance",
+            "portable_deal_data": {
+                "deal_model_data": {
+                    "title": "Dry Run Finance",
+                    "industry": "Lending",
+                },
+                "metadata": {"ambiguous_points": []},
+                "analyst_report": "New report",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            self._write_synthesis_fixture(base_dir, "Dry_Run_Finance", artifact, "## New report")
+
+            call_command(
+                "rebuild_derived_deal_state",
+                "--base-dir",
+                str(base_dir),
+            )
+
+        deal.refresh_from_db()
+        self.assertEqual(deal.title, "Investment Report: Dry Run Finance")
+        self.assertEqual(deal.deal_summary, "Old summary")
+        self.assertEqual(deal.funding_ask, "999")
+        self.assertEqual(deal.analyses.count(), 1)
+        self.assertEqual(DocumentChunk.objects.filter(deal=deal, source_type="deal_summary").count(), 1)
+        self.assertEqual(DealRetrievalProfile.objects.filter(deal=deal).count(), 1)
+
+    def test_rebuild_command_prunes_deals_without_synthesis_artifacts(self):
+        matched_deal = Deal.objects.create(title="Matched Finance")
+        unmatched_deal = Deal.objects.create(title="Unmatched Finance")
+        artifact = {
+            "deal_name": "Matched Finance",
+            "portable_deal_data": {
+                "deal_model_data": {"title": "Matched Finance"},
+                "metadata": {"ambiguous_points": []},
+                "analyst_report": "Matched report",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            self._write_synthesis_fixture(base_dir, "Matched_Finance", artifact, "## Matched report")
+
+            call_command(
+                "rebuild_derived_deal_state",
+                "--apply",
+                "--prune-unmatched-deals",
+                "--prune-only",
+                "--base-dir",
+                str(base_dir),
+            )
+
+        self.assertTrue(Deal.objects.filter(id=matched_deal.id).exists())
+        self.assertFalse(Deal.objects.filter(id=unmatched_deal.id).exists())

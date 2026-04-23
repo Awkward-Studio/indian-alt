@@ -26,6 +26,10 @@ echo "=== RUNNING MIGRATIONS ==="
 python manage.py migrate --noinput
 
 if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
+    CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
+    CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
+    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,low_priority,default}"
+
     echo ""
     echo "=== STARTING WORKER HEALTHCHECK SERVER ON PORT ${PORT:-8000} ==="
     python - <<'PY' &
@@ -54,8 +58,15 @@ HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 PY
 
     echo ""
-    echo "=== STARTING CELERY WORKER (SINGLETON MODE) ==="
-    exec celery -A config worker --loglevel=info -Q high_priority,low_priority,default --concurrency=1
+    echo "=== STARTING CELERY WORKER ==="
+    echo "Pool: ${CELERY_POOL_VALUE}"
+    echo "Concurrency: ${CELERY_CONCURRENCY_VALUE}"
+    echo "Queues: ${CELERY_QUEUES_VALUE}"
+    exec celery -A config worker \
+        --loglevel="${CELERY_LOGLEVEL:-info}" \
+        --pool="${CELERY_POOL_VALUE}" \
+        -Q "${CELERY_QUEUES_VALUE}" \
+        --concurrency="${CELERY_CONCURRENCY_VALUE}"
 else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="

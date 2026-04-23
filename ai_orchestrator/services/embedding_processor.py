@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from django.db import connection
 from django.db.models import Count
@@ -58,6 +59,15 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Error generating embedding: {str(e)}")
             return []
+
+    @staticmethod
+    def _normalize_query_text(query: str) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        text = text.replace("|", " ")
+        return text.strip()
 
     @staticmethod
     def _embedding_dimensions(embedding: Optional[List[float]]) -> Optional[int]:
@@ -420,6 +430,12 @@ class EmbeddingService:
                 break
         return deduped
 
+    def _candidate_fetch_limit(self, limit: int) -> int:
+        safe_limit = max(int(limit or 0), 1)
+        if self.reranker_model:
+            return min(max(safe_limit * 2, 24), 96)
+        return safe_limit * 6
+
     def _model_rerank_chunks(self, chunks: List[DocumentChunk], *, query: str, limit: int) -> List[DocumentChunk]:
         try:
             results = self.reranker.rerank(
@@ -600,9 +616,10 @@ class EmbeddingService:
 
     def search_similar_chunks(self, query: str, deal: Deal, limit: int = 5) -> List[DocumentChunk]:
         """Hybrid Search: Vector for Postgres, Ranked Keyword for SQLite."""
+        normalized_query = self._normalize_query_text(query)
         if self.is_sqlite:
             from django.db.models import Q
-            words = [w.lower() for w in query.split() if len(w) >= 3]
+            words = [w.lower() for w in normalized_query.split() if len(w) >= 3]
             if not words: return []
 
             queryset = self._retrievable_chunk_queryset().filter(deal=deal)
@@ -614,25 +631,26 @@ class EmbeddingService:
             else:
                 for word in words[:5]:
                     q_obj |= Q(content__icontains=word)
-            candidates = list(queryset.filter(q_obj)[: limit * 6])
-            return self._rerank_chunks(candidates, query, limit)
+            candidates = list(queryset.filter(q_obj)[: self._candidate_fetch_limit(limit)])
+            return self._rerank_chunks(candidates, normalized_query, limit)
         
         from pgvector.django import CosineDistance
-        query_embedding = self._get_embedding(query)
+        query_embedding = self._get_embedding(normalized_query)
         if not query_embedding: return []
         candidates = list(
             self._retrievable_chunk_queryset()
             .filter(deal=deal)
             .annotate(distance=CosineDistance('embedding', query_embedding))
-            .order_by('distance')[: limit * 6]
+            .order_by('distance')[: self._candidate_fetch_limit(limit)]
         )
-        return self._rerank_chunks(candidates, query, limit)
+        return self._rerank_chunks(candidates, normalized_query, limit)
 
     def search_global_chunks(self, query: str, limit: int = 10, deal_ids: Optional[List[str]] = None) -> List[DocumentChunk]:
         """Global search across all deals with term priority for SQLite."""
+        normalized_query = self._normalize_query_text(query)
         if self.is_sqlite:
             from django.db.models import Q
-            words = [w.lower() for w in query.split() if len(w) >= 3]
+            words = [w.lower() for w in normalized_query.split() if len(w) >= 3]
             if not words: return []
             
             important_terms = [w for w in words if any(x in w.upper() for x in ['CM', 'ARR', 'INR', 'CR'])]
@@ -644,20 +662,24 @@ class EmbeddingService:
             queryset = self._retrievable_chunk_queryset().filter(q_obj)
             if deal_ids:
                 queryset = queryset.filter(deal_id__in=deal_ids)
-            candidates = list(queryset[: limit * 6])
-            return self._rerank_chunks(candidates, query, limit)
+            candidates = list(queryset[: self._candidate_fetch_limit(limit)])
+            return self._rerank_chunks(candidates, normalized_query, limit)
 
         from pgvector.django import CosineDistance
-        query_embedding = self._get_embedding(query)
+        query_embedding = self._get_embedding(normalized_query)
         if not query_embedding: return []
         queryset = self._retrievable_chunk_queryset()
         if deal_ids:
             queryset = queryset.filter(deal_id__in=deal_ids)
-        candidates = list(queryset.annotate(distance=CosineDistance('embedding', query_embedding)).order_by('distance')[: limit * 6])
-        return self._rerank_chunks(candidates, query, limit)
+        candidates = list(
+            queryset.annotate(distance=CosineDistance('embedding', query_embedding))
+            .order_by('distance')[: self._candidate_fetch_limit(limit)]
+        )
+        return self._rerank_chunks(candidates, normalized_query, limit)
 
     def search_deal_profiles(self, query: str, *, limit: int = 10, filters: Optional[Dict[str, Any]] = None) -> List[Deal]:
         filters = filters or {}
+        normalized_query = self._normalize_query_text(query)
         queryset = Deal.objects.all()
         if "is_female_led" in filters:
             queryset = queryset.filter(is_female_led=filters["is_female_led"])
@@ -669,7 +691,7 @@ class EmbeddingService:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})
 
         if self.is_sqlite:
-            words = [word for word in query.split() if len(word) >= 3]
+            words = [word for word in normalized_query.split() if len(word) >= 3]
             if not words:
                 return list(queryset.order_by("-created_at")[:limit])
             q = None
@@ -682,7 +704,7 @@ class EmbeddingService:
             return list(queryset.filter(q).distinct()[:limit])
 
         from pgvector.django import CosineDistance
-        query_embedding = self._get_embedding(query)
+        query_embedding = self._get_embedding(normalized_query)
         if not query_embedding:
             return list(queryset.order_by("-created_at")[:limit])
 

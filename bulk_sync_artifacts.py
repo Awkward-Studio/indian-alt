@@ -13,6 +13,7 @@ django.setup()
 from deals.models import Deal
 from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from deals.services.bulk_sync_resolution import load_synthesis_artifact, resolve_existing_deal
 from django.db import connections
 
 # ==============================================================================
@@ -90,12 +91,27 @@ def run():
     # 1. Gather all deals
     for deal_dir in sorted(base_dir.iterdir()):
         if not deal_dir.is_dir(): continue
-        
-        deal_name = deal_dir.name.replace("_", " ").replace("-", "/")
-        print(f"Scanning Folder: {deal_name}...")
-        
-        # Fast Get/Create Deal
-        deal_obj, _ = Deal.objects.get_or_create(title=deal_name)
+
+        print(f"Scanning Folder: {deal_dir.name}...")
+
+        synth_artifact = load_synthesis_artifact(deal_dir)
+        resolution = resolve_existing_deal(deal_dir.name, synth_artifact)
+        canonical_title = resolution.canonical_title or deal_dir.name
+
+        if resolution.duplicates:
+            print(
+                f"  [WARN] {canonical_title}: found {len(resolution.duplicates) + 1} matching deal rows; "
+                f"attaching chunks to canonical deal {resolution.deal.id if resolution.deal else 'new'}"
+            )
+
+        deal_obj = resolution.deal
+        if not deal_obj:
+            if synth_artifact is None:
+                print(f"  [SKIP] {deal_dir.name}: no synthesis artifact, refusing to create a deal from folder name alone")
+                continue
+            deal_obj = Deal.objects.create(title=canonical_title)
+            print(f"  [NEW] Created canonical deal: {canonical_title}")
+
         touched_deals[str(deal_obj.id)] = deal_obj
         
         # 2. Find all finalized artifacts

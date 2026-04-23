@@ -1,0 +1,72 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ipc: host
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
+    command:
+      - --model
+      - ${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${VLLM_API_KEY:-local-dev-key}
+      - --gpu-memory-utilization
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.85} # Leave 15% for TEI and system overhead
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-32768} # Adjusted for MoE stability on single 80GB
+      - --max-num-seqs
+      - ${VLLM_MAX_NUM_SEQS:-64}
+      - --enable-chunked-prefill
+      - --trust-remote-code
+
+  tei-embedding:
+    image: ghcr.io/huggingface/text-embeddings-inference:hopper-1.9
+    container_name: tei-embedding
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: 1g
+    ports:
+      - "8081:80"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    command:
+      - --model-id
+      - ${EMBEDDING_MODEL_ID:-Qwen/Qwen3-Embedding-0.6B}
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "16384"
+      - --auto-truncate
+
+  tei-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:hopper-1.9
+    container_name: tei-reranker
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: 1g
+    ports:
+      - "8082:80"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    command:
+      - --model-id
+      - ${RERANKER_MODEL_ID:-BAAI/bge-reranker-v2-m3}
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "16384"
+      - --auto-truncate

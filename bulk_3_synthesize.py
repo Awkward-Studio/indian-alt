@@ -190,6 +190,32 @@ RELATIONSHIP RULES:
 - Keep deal attributes in deal_model_data and relationship data in source_relationships. Do not mix them.
 - Do not assume access to raw normalized document text. Use only the extracted metadata provided per document."""
 
+REPORT_FORMAT_REQUIREMENTS = """
+ANALYST_REPORT REQUIREMENTS:
+- The `analyst_report` field must be well-formatted markdown, not plain paragraphs.
+- Write like an institutional investment memo suitable for internal IC circulation.
+- Use clear section headings with `##` markdown headers.
+- Use bullets and compact tables where they improve readability.
+- If a section has limited evidence, say that explicitly rather than fabricating detail.
+- Every report must follow this exact section order:
+  1. `## Executive Summary`
+     - Start with `**Verdict:** Buy / Hold / Pass`
+     - Then include `**Top 3 Reasons**`
+  2. `## Strategic Fit & Market Opportunity`
+  3. `## Operational Due Diligence`
+  4. `## Financial Deep Dive`
+  5. `## Risk Matrix (Top 5 Risks)`
+  6. `## Valuation & Exit Range`
+  7. `## Red Flags & Warning Signs`
+  8. `## Next Steps / Data Requests`
+- In `Risk Matrix (Top 5 Risks)`, format risks as a numbered list with risk, why it matters, and mitigation / validation ask.
+- In `Financial Deep Dive`, separate historical facts from inferred conclusions.
+- In `Valuation & Exit Range`, give a range only if grounded in the provided evidence; otherwise explicitly state valuation cannot yet be anchored.
+- In `Next Steps / Data Requests`, list concrete missing items needed to underwrite the deal properly.
+- Do not wrap the markdown in code fences.
+- Keep the report crisp, decision-oriented, and readable.
+"""
+
 def is_relationship_document(name, doc_type):
     doc_name = (name or "").lower()
     doc_type = (doc_type or "").lower()
@@ -310,7 +336,7 @@ def swarm_worker(task_queue, v_cfg, session):
                     payload = {
                         "model": v_cfg['model'],
                         "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{REPORT_FORMAT_REQUIREMENTS}"},
                             {"role": "user", "content": f"STRUCTURED INTEL FROM ALL DEAL DOCUMENTS:\n\n{combined_evidence}"}
                         ],
                         "response_format": {"type": "json_schema", "json_schema": {"name": "deal_synth", "schema": DEAL_SCHEMA, "strict": True}},

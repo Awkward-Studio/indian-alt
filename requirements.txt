@@ -42,7 +42,6 @@ msal
 pgvector
 langchain
 langchain-community
-langchain-ollama
 
 # Azure Management
 azure-mgmt-compute

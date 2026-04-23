@@ -14,25 +14,53 @@ class ResponseParserService:
     @staticmethod
     def repair_json(json_str: str) -> str:
         """
-        Attempts to fix common AI JSON issues like unescaped quotes in long text blocks.
+        Professional stack-based repair for truncated or malformed AI JSON.
+        Handles unterminated strings, mismatched braces, and trailing commas.
         """
         if not json_str:
             return ""
 
-        # 1. Handle unescaped double quotes inside values
-        # This is a heuristic: it looks for quotes that are NOT followed by , or } or ] or :
-        # and NOT preceded by : or [ or {
-        # Actually, a better way is to use a state machine, but let's try a robust regex first.
-        
-        # 2. Remove trailing commas
+        # 1. Basic cleanup
+        json_str = json_str.strip()
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
-        
-        # 3. Handle illegal control characters
         json_str = json_str.replace('\t', '    ')
-        # We don't want to replace \n because it might be a valid newline in a string (which is still illegal JSON but common)
-        # but let's at least ensure they are escaped if they are raw.
+
+        # 2. Stack-based repair
+        stack = []
+        in_string = False
+        escaped = False
         
-        return json_str.strip()
+        for char in json_str:
+            if escaped:
+                escaped = False
+                continue
+            
+            if char == '\\':
+                escaped = True
+                continue
+                
+            if char == '"':
+                in_string = not in_string
+                continue
+                
+            if not in_string:
+                if char == '{':
+                    stack.append('}')
+                elif char == '[':
+                    stack.append(']')
+                elif char in ('}', ']'):
+                    if stack and stack[-1] == char:
+                        stack.pop()
+
+        # 3. Apply repairs in correct order
+        if in_string:
+            json_str += '"'
+            
+        # Close remaining structures from the stack (in reverse order of opening)
+        while stack:
+            json_str += stack.pop()
+            
+        return json_str
 
     @staticmethod
     def extract_json(text: str) -> str:
@@ -244,8 +272,10 @@ class ResponseParserService:
         and extracts JSON payloads.
         """
         thinking = thinking_text
-        if not thinking and "<thinking>" in raw_response:
+        if not thinking and ("<thinking>" in raw_response or "<think>" in raw_response):
             t_match = re.search(r'<thinking>(.*?)</thinking>', raw_response, re.DOTALL)
+            if not t_match:
+                t_match = re.search(r'<think>(.*?)</think>', raw_response, re.DOTALL)
             if t_match:
                 thinking = t_match.group(1).strip()
 
@@ -261,6 +291,7 @@ class ResponseParserService:
                 clean_response = r_match.group(1).strip()
                 
         clean_response = re.sub(r'<thinking>.*?</thinking>', '', clean_response, flags=re.DOTALL).strip()
+        clean_response = re.sub(r'<think>.*?</think>', '', clean_response, flags=re.DOTALL).strip()
         clean_response = clean_response.replace("<response>", "").replace("</response>", "").strip()
         # Also strip the <json> block from the display text if it's there
         clean_response = re.sub(r'<json>.*?</json>', '', clean_response, flags=re.DOTALL).strip()
@@ -312,7 +343,7 @@ class ResponseParserService:
     @staticmethod
     def parse_stream(stream_iterator):
         """
-        Stateful streaming parser for <thinking> and <response> tags.
+        Stateful streaming parser for <thinking>/<think> and <response> tags.
         Yields structured chunks for the frontend.
         """
         full_response = ""
@@ -324,12 +355,16 @@ class ResponseParserService:
         for line in stream_iterator:
             chunk = json.loads(line)
             raw_text = chunk.get("response") or ""
+            raw_thinking = chunk.get("thinking") or ""
+            if raw_thinking:
+                yield {"response": "", "thinking": raw_thinking, "done": False}, raw_thinking, ""
             buffer += raw_text
             
             while True:
                 if is_thinking_mode:
-                    if "</thinking>" in buffer:
-                        parts = buffer.split("</thinking>", 1)
+                    closing_tag = ResponseParserService._first_tag(buffer, ("</thinking>", "</think>"))
+                    if closing_tag:
+                        parts = buffer.split(closing_tag, 1)
                         content = parts[0]
                         yield {"response": "", "thinking": content, "done": False}, content, ""
                         full_thinking += content
@@ -372,10 +407,11 @@ class ResponseParserService:
                                 yield {"response": buffer, "thinking": "", "done": False}, "", buffer
                                 full_response += buffer
                                 buffer = ""
-                            break
+                        break
                 else:
-                    if "<thinking>" in buffer:
-                        parts = buffer.split("<thinking>", 1)
+                    thinking_tag = ResponseParserService._first_tag(buffer, ("<thinking>", "<think>"))
+                    if thinking_tag:
+                        parts = buffer.split(thinking_tag, 1)
                         if parts[0]:
                             yield {"response": parts[0], "thinking": "", "done": False}, "", parts[0]
                             full_response += parts[0]
@@ -407,3 +443,14 @@ class ResponseParserService:
                 if buffer:
                     yield {"response": buffer, "thinking": "", "done": False}, "", buffer
                 break
+
+    @staticmethod
+    def _first_tag(text: str, tags: tuple[str, ...]) -> str | None:
+        positions = [
+            (text.find(tag), tag)
+            for tag in tags
+            if text.find(tag) != -1
+        ]
+        if not positions:
+            return None
+        return min(positions, key=lambda item: item[0])[1]

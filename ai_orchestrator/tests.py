@@ -68,6 +68,19 @@ class ResponseParserServiceTests(TestCase):
         )
         self.assertIsNone(salvaged)
 
+    def test_parse_stream_routes_qwen_think_tags_to_thinking(self):
+        stream = [
+            '{"response": "<think>internal plan</think><response>final answer", "done": false}',
+            '{"response": "</response>", "done": true}',
+        ]
+
+        chunks = list(ResponseParserService.parse_stream(stream))
+        thinking = "".join(item[1] for item in chunks)
+        response = "".join(item[2] for item in chunks)
+
+        self.assertEqual(thinking, "internal plan")
+        self.assertEqual(response, "final answer")
+
     @patch("ai_orchestrator.services.ai_processor.broadcast_audit_log_update")
     def test_standard_response_marks_salvaged_extraction_as_completed(self, _broadcast):
         audit_log = AIAuditLog.objects.create(

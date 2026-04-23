@@ -38,22 +38,39 @@ class AIRuntimeService:
     @classmethod
     def get_text_model(cls, personality: Optional[AIPersonality] = None) -> str:
         personality_model = getattr(personality, "text_model_name", None)
-        return (
-            personality_model if personality_model and personality_model != "default"
-            else getattr(settings, "VLLM_TEXT_MODEL", "")
-        )
+        # This deployment resolves all text traffic through vLLM. Legacy
+        # personality rows may still carry old Ollama-era model overrides,
+        # which should not supersede the configured vLLM model.
+        if (
+            cls.get_provider(personality) == cls.PROVIDER_VLLM
+            and personality_model
+            and personality_model != "default"
+        ):
+            return personality_model
+        return getattr(settings, "VLLM_TEXT_MODEL", "")
 
     @classmethod
     def get_vision_model(cls, personality: Optional[AIPersonality] = None) -> str:
         personality_model = getattr(personality, "vision_model_name", None)
-        return (
-            personality_model if personality_model and personality_model != "default"
-            else getattr(settings, "VLLM_VISION_MODEL", "")
-        )
+        if (
+            cls.get_provider(personality) == cls.PROVIDER_VLLM
+            and personality_model
+            and personality_model != "default"
+        ):
+            return personality_model
+        return getattr(settings, "VLLM_VISION_MODEL", "")
 
     @classmethod
     def get_embedding_model(cls) -> str:
-        return getattr(settings, "VLLM_EMBEDDING_MODEL", "")
+        return getattr(settings, "EMBEDDING_MODEL", "") or getattr(settings, "VLLM_EMBEDDING_MODEL", "")
+
+    @classmethod
+    def get_reranker_model(cls) -> str:
+        return getattr(settings, "RERANKER_MODEL", "")
+
+    @classmethod
+    def get_planner_model(cls, personality: Optional[AIPersonality] = None) -> str:
+        return getattr(settings, "VLLM_PLANNER_MODEL", "") or cls.get_text_model(personality)
 
     @classmethod
     def create_audit_log(

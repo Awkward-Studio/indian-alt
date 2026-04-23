@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+import re
 from celery import shared_task
 from .models import AIAuditLog, AIMessage, AIConversation, AIPersonality, AISkill
 from .services.ai_processor import AIProcessorService
@@ -10,6 +11,44 @@ logger = logging.getLogger(__name__)
 
 CHAT_HISTORY_MESSAGE_LIMIT = 3
 CHAT_HISTORY_CHAR_LIMIT = 12000
+
+
+def _split_leaked_thinking(response: str, thinking: str = "") -> tuple[str, str]:
+    response = response or ""
+    thinking_parts = [thinking.strip()] if thinking and thinking.strip() else []
+
+    def capture_thinking(match):
+        body = (match.group(2) or "").strip()
+        if body:
+            thinking_parts.append(body)
+        return ""
+
+    cleaned_response = re.sub(
+        r"<(thinking|think)>(.*?)</\1>",
+        capture_thinking,
+        response,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    lower_response = cleaned_response.lower()
+    close_positions = [
+        (lower_response.rfind("</think>"), "</think>"),
+        (lower_response.rfind("</thinking>"), "</thinking>"),
+    ]
+    close_index, close_tag = max(close_positions, key=lambda item: item[0])
+    if close_index >= 0:
+        leaked_thinking = cleaned_response[:close_index].strip()
+        if leaked_thinking:
+            thinking_parts.append(leaked_thinking)
+        cleaned_response = cleaned_response[close_index + len(close_tag):]
+
+    response_match = re.search(r"<response>(.*?)(?:</response>|$)", cleaned_response, flags=re.IGNORECASE | re.DOTALL)
+    if response_match:
+        cleaned_response = response_match.group(1)
+
+    cleaned_response = re.sub(r"</?(thinking|think|response)>", "", cleaned_response, flags=re.IGNORECASE).strip()
+    cleaned_thinking = "\n\n".join(part for part in thinking_parts if part)
+    return cleaned_response, cleaned_thinking
 
 
 def _build_history_context(conversation: AIConversation) -> tuple[str, int, int]:
@@ -150,6 +189,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     last_save_time = time.time()
             except:
                 pass
+
+        full_text, full_thinking = _split_leaked_thinking(full_text, full_thinking)
 
         if full_text:
             # Commit final message to conversation history

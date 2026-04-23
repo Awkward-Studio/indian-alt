@@ -4,6 +4,7 @@ from .models import Email
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+from ai_orchestrator.services.runtime import AIRuntimeService
 from .services.graph_service import GraphAPIService
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
 
     personality = AIPersonality.objects.filter(is_default=True).first()
     skill = AISkill.objects.filter(name='deal_extraction').first()
-    default_model = personality.text_model_name if personality else 'qwen3.5:latest'
+    default_model = AIRuntimeService.get_text_model(personality)
 
     if audit_log_id:
         try:
@@ -37,7 +38,7 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             audit_log_id = None
 
     if not audit_log_id:
-        audit_log = AIAuditLog.objects.create(
+        audit_log = AIRuntimeService.create_audit_log(
             source_type='email',
             source_id=email_id,
             context_label=f"Email: {email.subject}",
@@ -48,7 +49,7 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             model_used=default_model,
             system_prompt="Initializing forensic email traversal...",
             user_prompt=f"Analyzing email signal: {email.subject}",
-            celery_task_id=self.request.id
+            celery_task_id=self.request.id,
         )
         log_worker_event(audit_log, f"Initialized traversal log for email {email.subject}")
 

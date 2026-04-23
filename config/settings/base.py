@@ -197,6 +197,9 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+CELERY_WORKER_PREFETCH_MULTIPLIER = config('CELERY_WORKER_PREFETCH_MULTIPLIER', default=1, cast=int)
+CELERY_TASK_ACKS_LATE = config('CELERY_TASK_ACKS_LATE', default=True, cast=bool)
+CELERY_WORKER_MAX_TASKS_PER_CHILD = config('CELERY_WORKER_MAX_TASKS_PER_CHILD', default=25, cast=int)
 
 # Cache Configuration
 CACHES = {
@@ -235,9 +238,24 @@ CORS_ALLOW_CREDENTIALS = True
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=_allowed_hosts)
 
 # AI Orchestrator Settings
-OLLAMA_URL = config('OLLAMA_URL', default='http://localhost:11434')
-OLLAMA_DEFAULT_TEXT_MODEL = config('OLLAMA_DEFAULT_TEXT_MODEL', default='llama3.1:latest')
-OLLAMA_DEFAULT_VISION_MODEL = config('OLLAMA_DEFAULT_VISION_MODEL', default='llava:latest')
+VLLM_BASE_URL = config('VLLM_BASE_URL', default='http://localhost:8000/v1')
+VLLM_EMBEDDING_URL = config('VLLM_EMBEDDING_URL', default=VLLM_BASE_URL)
+VLLM_API_KEY = config('VLLM_API_KEY', default='')
+VLLM_TEXT_MODEL = config('VLLM_TEXT_MODEL', default='')
+VLLM_PLANNER_MODEL = config('VLLM_PLANNER_MODEL', default=VLLM_TEXT_MODEL)
+VLLM_VISION_MODEL = config('VLLM_VISION_MODEL', default='')
+VLLM_EMBEDDING_MODEL = config('VLLM_EMBEDDING_MODEL', default='')
+EMBEDDING_BASE_URL = config('EMBEDDING_BASE_URL', default=VLLM_EMBEDDING_URL).rstrip('/')
+EMBEDDING_API_KEY = config('EMBEDDING_API_KEY', default=VLLM_API_KEY)
+EMBEDDING_MODEL = config('EMBEDDING_MODEL', default=VLLM_EMBEDDING_MODEL)
+EMBEDDING_TIMEOUT = config('EMBEDDING_TIMEOUT', default=30, cast=int)
+RERANKER_BASE_URL = config('RERANKER_BASE_URL', default='').rstrip('/')
+RERANKER_API_KEY = config('RERANKER_API_KEY', default='')
+RERANKER_MODEL = config('RERANKER_MODEL', default='')
+RERANKER_TIMEOUT = config('RERANKER_TIMEOUT', default=30, cast=int)
+DOC_PROCESSOR_URL = config('DOC_PROCESSOR_URL', default='')
+DOC_PROCESSOR_API_KEY = config('DOC_PROCESSOR_API_KEY', default='')
+DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 
 # Database Configuration
 # 

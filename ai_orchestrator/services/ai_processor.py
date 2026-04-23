@@ -50,11 +50,12 @@ class AIProcessorService:
         personality = AIRuntimeService.get_personality(personality_name)
         skill = AIRuntimeService.get_skill(skill_name)
         vision_model = AIRuntimeService.get_vision_model(personality)
+        resolved_text_model = model_override or AIRuntimeService.get_text_model(personality)
 
         # Audit Log Setup (Internal bookkeeping) - Initialize early to avoid UnboundLocalError in log_worker_event
         audit_log = self._setup_audit_log(
             source_type, source_id, personality, skill, 
-            "", "", metadata
+            "", "", metadata, resolved_model=resolved_text_model
         )
 
         # PHASE 1: OCR (Optional, delegated to OCRService)
@@ -65,7 +66,7 @@ class AIProcessorService:
             log_worker_event(audit_log, "OCR analysis complete.")
 
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
-        log_worker_event(audit_log, f"Preparing prompt for {AIRuntimeService.get_text_model(personality)}.")
+        log_worker_event(audit_log, f"Preparing prompt for {resolved_text_model}.")
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         prompt_template = skill.prompt_template if skill else "{{ content }}"
         
@@ -79,7 +80,7 @@ class AIProcessorService:
         log_worker_event(audit_log, "Sending request to AI model server.")
 
         payload = {
-            "model": model_override or AIRuntimeService.get_text_model(personality),
+            "model": resolved_text_model,
             "prompt": user_prompt,
             "system": system_instructions,
             "stream": stream,
@@ -97,7 +98,17 @@ class AIProcessorService:
         result["_full_context"] = cleaned_text
         return result
 
-    def _setup_audit_log(self, source_type, source_id, personality, skill, system_prompt, user_prompt, metadata) -> AIAuditLog:
+    def _setup_audit_log(
+        self,
+        source_type,
+        source_id,
+        personality,
+        skill,
+        system_prompt,
+        user_prompt,
+        metadata,
+        resolved_model: Optional[str] = None,
+    ) -> AIAuditLog:
         audit_log_id = metadata.get('audit_log_id') if metadata else None
         source_meta = metadata.get('_source_metadata') if metadata else None
         celery_task_id = metadata.get('celery_task_id') if metadata else None
@@ -109,6 +120,8 @@ class AIProcessorService:
                 audit_log.system_prompt = system_prompt
                 audit_log.user_prompt = user_prompt
                 audit_log.status = 'PROCESSING'
+                if resolved_model:
+                    audit_log.model_used = resolved_model
                 if source_meta: audit_log.source_metadata = source_meta
                 if celery_task_id: audit_log.celery_task_id = celery_task_id
                 if ctx_label: audit_log.context_label = ctx_label
@@ -124,7 +137,7 @@ class AIProcessorService:
             context_label=ctx_label,
             personality=personality,
             skill=skill,
-            model_used=AIRuntimeService.get_text_model(personality),
+            model_used=resolved_model or AIRuntimeService.get_text_model(personality),
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             is_success=False,

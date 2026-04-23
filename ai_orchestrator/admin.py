@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     AIPersonality, AISkill, AIConversation, AIMessage, 
-    AIAuditLog, DocumentChunk, AnalysisProtocol, 
+    AIAuditLog, DocumentChunk, DealRetrievalProfile, AnalysisProtocol, 
     AIFlowDefinition, AIFlowVersion
 )
 
@@ -64,3 +64,15 @@ class DocumentChunkAdmin(admin.ModelAdmin):
     def get_filename(self, obj):
         return obj.metadata.get('filename', 'Unknown')
     get_filename.short_description = 'Filename'
+
+
+@admin.register(DealRetrievalProfile)
+class DealRetrievalProfileAdmin(admin.ModelAdmin):
+    list_display = ('get_deal_title', 'embedding_model', 'embedding_dimensions', 'indexed_at', 'updated_at')
+    list_filter = ('embedding_model', 'embedding_dimensions', 'updated_at')
+    search_fields = ('deal__title', 'deal__sector', 'deal__industry', 'profile_text')
+    readonly_fields = ('created_at', 'updated_at', 'indexed_at')
+
+    def get_deal_title(self, obj):
+        return obj.deal.title if obj.deal else "N/A"
+    get_deal_title.short_description = 'Deal'

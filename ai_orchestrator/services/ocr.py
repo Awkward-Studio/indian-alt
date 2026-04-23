@@ -1,22 +1,23 @@
 import logging
-import requests
 from typing import List
-from .llm_providers import OllamaProviderService
+from .llm_providers import VLLMProviderService
+from .runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
 class OCRService:
     """
-    Isolates the `glm-ocr:latest` visual transcription logic.
+    Isolates visual transcription logic for page-level OCR.
     Provides high-fidelity text extraction from document images.
     """
 
     def __init__(self):
-        self.provider = OllamaProviderService()
+        self.provider = VLLMProviderService()
 
-    def transcribe(self, images: List[str], model: str = 'glm-ocr:latest') -> str:
+    def transcribe(self, images: List[str], model: str | None = None) -> str:
         """Specialized OCR using visual model."""
         if not images: return ""
+        model = model or AIRuntimeService.get_vision_model()
         
         print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via {model}...")
         transcription = ""

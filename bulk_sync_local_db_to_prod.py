@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+import subprocess
 from copy import deepcopy
 from typing import Iterable
 
@@ -11,12 +13,12 @@ django.setup()
 
 from django.conf import settings
 from django.db import connections, transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 
-from ai_orchestrator.models import DealRetrievalProfile, DocumentChunk
+from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
 from banks.models import Bank
 from contacts.models import Contact
-from deals.models import Deal, DealAnalysis, DealDocument
+from deals.models import Deal, DealAnalysis, DealDocument, DealPhaseLog, FolderAnalysisDocument
 
 
 SOURCE_DB = "default"
@@ -43,6 +45,21 @@ def parse_args():
         help="Target production DATABASE_URL. Defaults to PROD_DATABASE_URL only.",
     )
     parser.add_argument(
+        "--railway-cli",
+        action="store_true",
+        help="Read DATABASE_URL from `railway variables --json` if --prod-database-url/PROD_DATABASE_URL is not set.",
+    )
+    parser.add_argument(
+        "--railway-project-dir",
+        default=".",
+        help="Directory where Railway CLI should run. Defaults to current directory.",
+    )
+    parser.add_argument(
+        "--prune-production-deals",
+        action="store_true",
+        help="Delete production deals that are not present in the selected local deal set. Dry-run unless --dry-run is omitted.",
+    )
+    parser.add_argument(
         "--prod-db-ssl-require",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -51,9 +68,56 @@ def parse_args():
     return parser.parse_args()
 
 
+def database_url_from_railway_cli(project_dir: str = ".") -> str | None:
+    command = ["railway", "variables", "--json"]
+    result = subprocess.run(
+        command,
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout or "{}")
+    preferred_keys = (
+        "DATABASE_PUBLIC_URL",
+        "DATABASE_URL_PUBLIC",
+        "POSTGRES_PUBLIC_URL",
+        "PGDATABASE_PUBLIC_URL",
+        "DATABASE_URL",
+    )
+
+    if isinstance(payload, dict):
+        for key in preferred_keys:
+            value = payload.get(key)
+            if value:
+                return value
+        for item in payload.values():
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") in preferred_keys:
+                return item.get("value")
+            for key in preferred_keys:
+                if item.get(key):
+                    return item.get(key)
+
+    if isinstance(payload, list):
+        for key in preferred_keys:
+            for item in payload:
+                if isinstance(item, dict) and item.get("name") == key:
+                    return item.get("value")
+
+    return None
+
+
 def configure_target_database(database_url: str, ssl_require: bool = True):
     if not database_url:
         raise RuntimeError("Missing production database URL. Set PROD_DATABASE_URL or pass --prod-database-url.")
+    if ".railway.internal" in database_url:
+        raise RuntimeError(
+            "Railway returned an internal database URL (*.railway.internal), which cannot be resolved from this "
+            "machine. Use Railway's public TCP proxy/database URL instead: set PROD_DATABASE_URL to the public "
+            "Postgres URL, pass --prod-database-url, or expose/copy DATABASE_PUBLIC_URL from Railway."
+        )
 
     source_url = settings.DATABASES[SOURCE_DB]
     parsed = dj_database_url.parse(database_url, conn_max_age=600, ssl_require=ssl_require)
@@ -317,6 +381,33 @@ def replace_deal_analyses(local_deal: Deal, prod_deal: Deal, dry_run: bool = Fal
     return len(analyses)
 
 
+def replace_phase_logs(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
+    phase_logs = list(local_deal.phase_logs.using(SOURCE_DB).all().order_by("changed_at"))
+    if dry_run:
+        return len(phase_logs)
+
+    DealPhaseLog.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    if not phase_logs:
+        return 0
+
+    DealPhaseLog.objects.using(TARGET_DB).bulk_create(
+        [
+            DealPhaseLog(
+                id=phase_log.id,
+                deal=prod_deal,
+                from_phase=phase_log.from_phase,
+                to_phase=phase_log.to_phase,
+                rationale=phase_log.rationale,
+                changed_at=phase_log.changed_at,
+                changed_by=None,
+            )
+            for phase_log in phase_logs
+        ],
+        batch_size=200,
+    )
+    return len(phase_logs)
+
+
 def replace_deal_documents(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
     documents = list(local_deal.documents.using(SOURCE_DB).all().order_by("created_at"))
     if dry_run:
@@ -393,6 +484,101 @@ def replace_deal_chunks(local_deal: Deal, prod_deal: Deal, dry_run: bool = False
     return len(chunks)
 
 
+def upsert_audit_log(local_audit_log: AIAuditLog, dry_run: bool = False):
+    if dry_run:
+        return 1
+
+    payload = {
+        "source_type": local_audit_log.source_type,
+        "source_id": local_audit_log.source_id,
+        "context_label": local_audit_log.context_label,
+        "personality": None,
+        "skill": None,
+        "model_provider": local_audit_log.model_provider,
+        "model_used": local_audit_log.model_used,
+        "system_prompt": local_audit_log.system_prompt,
+        "user_prompt": local_audit_log.user_prompt,
+        "raw_response": local_audit_log.raw_response,
+        "raw_thinking": local_audit_log.raw_thinking,
+        "parsed_json": local_audit_log.parsed_json,
+        "request_duration_ms": local_audit_log.request_duration_ms,
+        "tokens_used": local_audit_log.tokens_used,
+        "source_metadata": local_audit_log.source_metadata,
+        "celery_task_id": local_audit_log.celery_task_id,
+        "error_message": local_audit_log.error_message,
+        "worker_logs": list(local_audit_log.worker_logs or []),
+        "is_success": local_audit_log.is_success,
+        "status": local_audit_log.status,
+        "created_at": local_audit_log.created_at,
+    }
+    AIAuditLog.objects.using(TARGET_DB).update_or_create(
+        id=local_audit_log.id,
+        defaults=payload,
+    )
+    return 1
+
+
+def sync_referenced_analysis_documents(local_deal: Deal, dry_run: bool = False):
+    source_ids = list(
+        DocumentChunk.objects.using(SOURCE_DB)
+        .filter(deal=local_deal, source_type="analysis_document")
+        .exclude(source_id="")
+        .values_list("source_id", flat=True)
+        .distinct()
+    )
+    if not source_ids:
+        return {"audit_logs": 0, "analysis_documents": 0}
+
+    analysis_documents = list(
+        FolderAnalysisDocument.objects.using(SOURCE_DB)
+        .filter(id__in=source_ids)
+        .select_related("audit_log")
+        .order_by("created_at")
+    )
+    if dry_run:
+        audit_log_ids = {str(doc.audit_log_id) for doc in analysis_documents if doc.audit_log_id}
+        return {"audit_logs": len(audit_log_ids), "analysis_documents": len(analysis_documents)}
+
+    synced_audit_ids = set()
+    for document in analysis_documents:
+        if document.audit_log_id and str(document.audit_log_id) not in synced_audit_ids:
+            upsert_audit_log(document.audit_log, dry_run=False)
+            synced_audit_ids.add(str(document.audit_log_id))
+
+        FolderAnalysisDocument.objects.using(TARGET_DB).update_or_create(
+            id=document.id,
+            defaults={
+                "audit_log_id": document.audit_log_id,
+                "source_file_id": document.source_file_id,
+                "source_drive_id": document.source_drive_id,
+                "file_name": document.file_name,
+                "file_path": document.file_path,
+                "document_type": document.document_type,
+                "raw_extracted_text": document.raw_extracted_text,
+                "normalized_text": document.normalized_text,
+                "evidence_json": dict(document.evidence_json or {}),
+                "source_map_json": dict(document.source_map_json or {}),
+                "table_json": list(document.table_json or []),
+                "key_metrics_json": list(document.key_metrics_json or []),
+                "reasoning": document.reasoning,
+                "extraction_mode": document.extraction_mode,
+                "transcription_status": document.transcription_status,
+                "chunking_status": document.chunking_status,
+                "quality_flags": list(document.quality_flags or []),
+                "render_metadata": dict(document.render_metadata or {}),
+                "is_indexed": document.is_indexed,
+                "chunk_count": document.chunk_count,
+                "error_message": document.error_message,
+                "last_transcribed_at": document.last_transcribed_at,
+                "last_chunked_at": document.last_chunked_at,
+                "created_at": document.created_at,
+                "updated_at": document.updated_at,
+            },
+        )
+
+    return {"audit_logs": len(synced_audit_ids), "analysis_documents": len(analysis_documents)}
+
+
 def replace_retrieval_profile(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
     profile = DealRetrievalProfile.objects.using(SOURCE_DB).filter(deal=local_deal).first()
     if dry_run:
@@ -447,33 +633,67 @@ def sync_single_deal(local_deal: Deal, dry_run: bool = False):
 
     if dry_run:
         prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=True)
+        analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=True)
         return {
             "deal": prod_deal.title if hasattr(prod_deal, "title") else local_deal.title,
             "analyses": replace_deal_analyses(local_deal, local_deal, dry_run=True),
+            "phase_logs": replace_phase_logs(local_deal, local_deal, dry_run=True),
             "documents": replace_deal_documents(local_deal, local_deal, dry_run=True),
             "chunks": replace_deal_chunks(local_deal, local_deal, dry_run=True),
             "profile": replace_retrieval_profile(local_deal, local_deal, dry_run=True),
+            "audit_logs": analysis_docs["audit_logs"],
+            "analysis_documents": analysis_docs["analysis_documents"],
         }
 
     with transaction.atomic(using=TARGET_DB):
         prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=False)
         analyses = replace_deal_analyses(local_deal, prod_deal, dry_run=False)
+        phase_logs = replace_phase_logs(local_deal, prod_deal, dry_run=False)
         documents = replace_deal_documents(local_deal, prod_deal, dry_run=False)
+        analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=False)
         chunks = replace_deal_chunks(local_deal, prod_deal, dry_run=False)
         profile = replace_retrieval_profile(local_deal, prod_deal, dry_run=False)
 
     return {
         "deal": prod_deal.title,
         "analyses": analyses,
+        "phase_logs": phase_logs,
         "documents": documents,
         "chunks": chunks,
         "profile": profile,
+        "audit_logs": analysis_docs["audit_logs"],
+        "analysis_documents": analysis_docs["analysis_documents"],
     }
+
+
+def prune_production_deals(local_deals: list[Deal], dry_run: bool = False):
+    keep_ids = [deal.id for deal in local_deals]
+    queryset = Deal.objects.using(TARGET_DB).exclude(id__in=keep_ids).order_by("title", "id")
+    candidates = list(
+        queryset.values("id", "title")
+        .annotate(
+            documents_count=Count("documents", distinct=True),
+            chunks_count=Count("chunks", distinct=True),
+            analyses_count=Count("analyses", distinct=True),
+        )
+    )
+    if not dry_run and candidates:
+        queryset.delete()
+    return candidates
 
 
 def run():
     args = parse_args()
-    configure_target_database(args.prod_database_url, ssl_require=args.prod_db_ssl_require)
+    if args.prune_production_deals and args.deals:
+        raise RuntimeError(
+            "--prune-production-deals cannot be combined with --deals because it would delete "
+            "production deals outside the selected subset. Run a full sync or omit pruning."
+        )
+
+    prod_database_url = args.prod_database_url
+    if not prod_database_url and args.railway_cli:
+        prod_database_url = database_url_from_railway_cli(args.railway_project_dir)
+    configure_target_database(prod_database_url, ssl_require=args.prod_db_ssl_require)
     compare_schema_state()
 
     source_vendor = connections[SOURCE_DB].vendor
@@ -508,11 +728,26 @@ def run():
             processed += 1
             print(
                 f"[OK] {result['deal']}: analyses={result['analyses']} "
-                f"documents={result['documents']} chunks={result['chunks']} profile={result['profile']}"
+                f"phase_logs={result['phase_logs']} documents={result['documents']} "
+                f"analysis_documents={result['analysis_documents']} chunks={result['chunks']} "
+                f"profile={result['profile']}"
             )
         except Exception as exc:
             errors += 1
             print(f"[ERROR] {local_deal.title or local_deal.id}: {exc}")
+
+    if args.prune_production_deals:
+        prune_candidates = prune_production_deals(deals, dry_run=args.dry_run)
+        print("-" * 72)
+        print(
+            f"Production prune candidates not present in selected local deal set: {len(prune_candidates)}"
+        )
+        for candidate in prune_candidates:
+            print(
+                f"[PRUNE{'-DRY-RUN' if args.dry_run else ''}] {candidate['title']} "
+                f"id={candidate['id']} documents={candidate['documents_count']} "
+                f"chunks={candidate['chunks_count']} analyses={candidate['analyses_count']}"
+            )
 
     print("-" * 72)
     print(f"Complete. Processed={processed} Errors={errors}")
