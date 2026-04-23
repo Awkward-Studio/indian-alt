@@ -15,10 +15,15 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--file', type=str, required=True, help='Path to the deals CSV file')
         parser.add_argument('--fund', type=str, default='FUND3', help='Fund name (e.g., FUND1, FUND2, FUND3)')
+        parser.add_argument('--dry-run', action='store_true', help='Show what would be imported without writing to the database')
 
     def handle(self, *args, **options):
         file_path = options['file']
         fund_name = options['fund']
+        dry_run = options['dry_run']
+
+        if dry_run:
+            self.stdout.write(self.style.MIGRATE_HEADING("DRY RUN MODE - No database changes will be saved"))
 
         try:
             with open(file_path, 'r', encoding='utf-8-sig') as csvfile:
@@ -36,14 +41,12 @@ class Command(BaseCommand):
                         parsed_date = timezone.now()
                         if raw_date and raw_date != '-':
                             try:
-                                # Try DD-Mon-YYYY
                                 parsed_date = timezone.make_aware(datetime.strptime(raw_date, '%d-%b-%Y'))
                             except ValueError:
                                 try:
-                                    # Fallback to other common formats if needed
                                     parsed_date = timezone.make_aware(datetime.strptime(raw_date, '%Y-%m-%d'))
                                 except ValueError:
-                                    self.stdout.write(self.style.WARNING(f"Could not parse date '{raw_date}' for deal '{title}', using current time."))
+                                    pass
 
                         # 2. Parse Booleans
                         def to_bool(val):
@@ -78,70 +81,78 @@ class Command(BaseCommand):
                             deal_status = DealStatus.PORTFOLIO
                             current_phase = DealPhase.PORTFOLIO
 
-                        # 5. Create Deal
-                        deal = Deal.objects.create(
-                            title=title,
-                            deal_status=deal_status,
-                            current_phase=current_phase,
-                            funding_ask=(row.get('Ask (INR Million)') or '').strip(),
-                            industry=industry.strip(),
-                            sector=sector.strip(),
-                            deal_summary=(row.get('Summary Details') or '').strip(),
-                            company_details=(row.get('Company Info') or '').strip(),
-                            reasons_for_passing=(row.get('Reasons for Passing') or '').strip(),
-                            city=(row.get('City') or '').strip(),
-                            is_female_led=is_female_led,
-                            management_meeting=management_meeting,
-                            business_proposal_stage=business_proposal_stage,
-                            ic_stage=ic_stage,
-                            fund=fund_name,
-                            deal_details=f"Source: {row.get('Source')}\nFunding Type: {row.get('Funding Type')}\nNext Steps: {row.get('Next Steps')}"
-                        )
+                        # 5. Create Deal (Dry run check)
+                        if dry_run:
+                            self.stdout.write(f"[Create] Deal: {title} ({industry} | {sector}) - Status: {deal_status}")
+                        else:
+                            deal = Deal.objects.create(
+                                title=title,
+                                deal_status=deal_status,
+                                current_phase=current_phase,
+                                funding_ask=(row.get('Ask (INR Million)') or '').strip(),
+                                industry=industry.strip(),
+                                sector=sector.strip(),
+                                deal_summary=(row.get('Summary Details') or '').strip(),
+                                company_details=(row.get('Company Info') or '').strip(),
+                                reasons_for_passing=(row.get('Reasons for Passing') or '').strip(),
+                                city=(row.get('City') or '').strip(),
+                                is_female_led=is_female_led,
+                                management_meeting=management_meeting,
+                                business_proposal_stage=business_proposal_stage,
+                                ic_stage=ic_stage,
+                                fund=fund_name,
+                                deal_details=f"Source: {row.get('Source')}\nFunding Type: {row.get('Funding Type')}\nNext Steps: {row.get('Next Steps')}"
+                            )
+                            # Explicitly set created_at
+                            Deal.objects.filter(pk=deal.pk).update(created_at=parsed_date)
 
-                        # Explicitly set created_at
-                        Deal.objects.filter(pk=deal.pk).update(created_at=parsed_date)
-
-                        # 6. Link Contacts
+                        # 6. Link Contacts (Dry run logic)
                         contact_names_raw = (row.get('Contacts') or '').strip()
                         if contact_names_raw and contact_names_raw != '-':
-                            # Contacts might be comma separated
                             names = [n.strip() for n in contact_names_raw.split(',') if n.strip()]
                             for name in names:
-                                # Try to find contact by name
                                 contact = Contact.objects.filter(name__icontains=name).first()
-                                if contact:
-                                    deal.additional_contacts.add(contact)
-                                else:
-                                    # If not found, append to comments to preserve data
-                                    if deal.comments:
-                                        deal.comments += f"\nLegacy Contact: {name}"
+                                if dry_run:
+                                    if contact:
+                                        self.stdout.write(f"  - Link Contact: {contact.name}")
                                     else:
-                                        deal.comments = f"Legacy Contact: {name}"
-                                    deal.save()
+                                        self.stdout.write(f"  - Contact not found (will add to comments): {name}")
+                                else:
+                                    if contact:
+                                        deal.additional_contacts.add(contact)
+                                    else:
+                                        if deal.comments: deal.comments += f"\nLegacy Contact: {name}"
+                                        else: deal.comments = f"Legacy Contact: {name}"
+                                        deal.save()
 
-                        # 7. Link Deal Team
+                        # 7. Link Deal Team (Dry run logic)
                         team_name = (row.get('Deal Team') or '').strip()
                         if team_name and team_name != '-':
-                            # Get or create Profile
                             profile = Profile.objects.filter(user__first_name__icontains=team_name).first()
-                            if not profile:
-                                # Create a placeholder user/profile if it doesn't exist
-                                username = f"legacy_{team_name.lower().replace(' ', '_')}"
-                                user, created = User.objects.get_or_create(
-                                    username=username,
-                                    defaults={'first_name': team_name}
-                                )
-                                if created:
-                                    profile = Profile.objects.create(user=user)
+                            if dry_run:
+                                if profile:
+                                    self.stdout.write(f"  - Link Team: {profile.user.first_name}")
                                 else:
+                                    self.stdout.write(f"  - Will create legacy Team Profile for: {team_name}")
+                            else:
+                                if not profile:
+                                    username = f"legacy_{team_name.lower().replace(' ', '_')}"
+                                    user, created = User.objects.get_or_create(
+                                        username=username,
+                                        defaults={'first_name': team_name}
+                                    )
                                     profile = getattr(user, 'profile', None) or Profile.objects.create(user=user)
-                            
-                            if profile:
-                                deal.responsibility.add(profile)
+                                
+                                if profile:
+                                    deal.responsibility.add(profile)
 
                         count += 1
 
-                    self.stdout.write(self.style.SUCCESS(f'Successfully imported {count} deals for {fund_name}'))
+                    if dry_run:
+                        self.stdout.write(self.style.SUCCESS(f"Dry run complete. Would process {count} deals for {fund_name}."))
+                        transaction.set_rollback(True)
+                    else:
+                        self.stdout.write(self.style.SUCCESS(f'Successfully imported {count} deals for {fund_name}'))
 
         except FileNotFoundError:
             self.stdout.write(self.style.ERROR(f'File not found: {file_path}'))

@@ -10,9 +10,14 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--file', type=str, required=True, help='Path to the banker CSV file')
+        parser.add_argument('--dry-run', action='store_true', help='Show what would be imported without writing to the database')
 
     def handle(self, *args, **options):
         file_path = options['file']
+        dry_run = options['dry_run']
+
+        if dry_run:
+            self.stdout.write(self.style.MIGRATE_HEADING("DRY RUN MODE - No database changes will be saved"))
 
         try:
             with open(file_path, 'r', encoding='utf-8-sig') as csvfile:
@@ -25,16 +30,19 @@ class Command(BaseCommand):
                         bank_name = (row.get('Covering Bank/Advisor') or row.get('Investment Bank') or '').strip()
                         bank = None
                         if bank_name and bank_name != '-':
-                            bank, _ = Bank.objects.get_or_create(name=bank_name)
+                            if dry_run:
+                                bank = Bank.objects.filter(name=bank_name).first()
+                                if not bank:
+                                    self.stdout.write(f"Will create Bank: {bank_name}")
+                            else:
+                                bank, _ = Bank.objects.get_or_create(name=bank_name)
 
                         # 2. Resolve Contact Name
                         contact_name = (row.get('Contact Person') or row.get('Primary Person Covering') or '').strip()
                         if not contact_name or contact_name == '-':
-                            # Try Secondary if primary is empty
                             contact_name = (row.get('Secondary Investor') or '').strip()
                         
                         if not contact_name or contact_name == '-':
-                            self.stdout.write(self.style.WARNING(f"Skipping row with no contact name: {row}"))
                             continue
 
                         # 3. Sector Coverage
@@ -45,8 +53,7 @@ class Command(BaseCommand):
 
                         # 4. Create or Update Contact
                         email = (row.get('Email') or '').strip()
-                        if email == '-':
-                            email = None
+                        if email == '-': email = None
 
                         contact_data = {
                             'name': contact_name,
@@ -61,27 +68,33 @@ class Command(BaseCommand):
 
                         # Clean up '-' values
                         for key, value in contact_data.items():
-                            if value == '-':
-                                contact_data[key] = ''
+                            if value == '-': contact_data[key] = ''
 
-                        # Try to get by email if available, otherwise by name and bank
                         contact = None
                         if email:
                             contact = Contact.objects.filter(email=email).first()
-                        
                         if not contact:
                             contact = Contact.objects.filter(name=contact_name, bank=bank).first()
 
-                        if contact:
-                            for key, value in contact_data.items():
-                                setattr(contact, key, value)
-                            contact.save()
+                        if dry_run:
+                            action = "Update" if contact else "Create"
+                            self.stdout.write(f"[{action}] Contact: {contact_name} ({email or 'no email'})")
                         else:
-                            Contact.objects.create(**contact_data)
+                            if contact:
+                                for key, value in contact_data.items():
+                                    setattr(contact, key, value)
+                                contact.save()
+                            else:
+                                Contact.objects.create(**contact_data)
                         
                         count += 1
 
-                    self.stdout.write(self.style.SUCCESS(f'Successfully imported {count} banker contacts'))
+                    if dry_run:
+                        self.stdout.write(self.style.SUCCESS(f"Dry run complete. Would process {count} banker contacts."))
+                        # Force rollback in dry run
+                        transaction.set_rollback(True)
+                    else:
+                        self.stdout.write(self.style.SUCCESS(f'Successfully imported {count} banker contacts'))
 
         except FileNotFoundError:
             self.stdout.write(self.style.ERROR(f'File not found: {file_path}'))

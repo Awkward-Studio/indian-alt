@@ -1749,6 +1749,10 @@ class UniversalChatService:
             "management_meeting": deal.management_meeting,
             "funding_ask": deal.funding_ask,
             "themes": deal.themes if isinstance(deal.themes, list) else [],
+            "comments": deal.comments,
+            "deal_details": deal.deal_details,
+            "reasons_for_passing": deal.reasons_for_passing,
+            "has_extracted_documents": getattr(deal, "is_indexed", False) or bool(deal.extracted_text),
             "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
             "current_analysis": current_analysis,
             "recent_timeline": recent_timeline,
@@ -1782,17 +1786,27 @@ class UniversalChatService:
             json.dumps(plan, default=str, indent=2),
             "",
             "[CANDIDATE DEALS]",
+            "* NOTE: Deals marked 'Has Extracted Docs: NO' are legacy records containing ONLY high-level metadata, stats, and comments.",
+            "* DO NOT hallucinate or assume the existence of deep-dive financial models or full documents for these deals.",
+            "",
         ]
 
         if deals:
             for deal in deals:
+                has_docs_str = "YES" if deal.get("has_extracted_documents") else "NO"
                 sections.append(
-                    f"- {deal['title']} | Industry: {deal.get('industry') or 'N/A'} | "
+                    f"- {deal['title']} | Has Extracted Docs: {has_docs_str} | Industry: {deal.get('industry') or 'N/A'} | "
                     f"Sector: {deal.get('sector') or 'N/A'} | Priority: {deal.get('priority') or 'N/A'} | "
                     f"Phase: {deal.get('current_phase') or 'N/A'} | Themes: {', '.join(deal.get('themes') or []) or 'N/A'}"
                 )
                 if deal.get("summary_excerpt"):
                     sections.append(f"  Summary: {deal['summary_excerpt']}")
+                if deal.get("reasons_for_passing"):
+                    sections.append(f"  Reasons for Passing: {deal['reasons_for_passing']}")
+                if deal.get("comments"):
+                    sections.append(f"  Institutional Comments: {deal['comments']}")
+                if deal.get("deal_details"):
+                    sections.append(f"  Legacy Details: {deal['deal_details']}")
         else:
             sections.append("- No strong candidate deals found.")
 
