@@ -47,7 +47,6 @@ List all sources used at the end of the narrative.""",
         AISkill.objects.update_or_create(
             name="deal_extraction",
             defaults={
-                "personality": senior_pe_personality,
                 "description": "Forensic deal extraction from folders and emails.",
                 "output_schema": {
                     "deal_model_data": {
@@ -134,7 +133,6 @@ RULES:
         AISkill.objects.update_or_create(
             name="deal_chat",
             defaults={
-                "personality": senior_pe_personality,
                 "description": "Evidence-backed chat using Hybrid RAG context. Uses Indian metrics.",
                 "prompt_template": """### TASK: ANALYST INQUIRY
 Provide a detailed and thorough report to your team based on the Dataroom context below. Use the Senior PE Analyst framework.
@@ -159,7 +157,6 @@ Provide a detailed and thorough report to your team based on the Dataroom contex
         AISkill.objects.update_or_create(
             name="document_evidence_extraction",
             defaults={
-                "personality": senior_pe_personality,
                 "description": "Extracts structured evidence from a single document before final deal synthesis.",
                 "output_schema": {
                     "document_name": "string",
@@ -245,7 +242,6 @@ Rules:
         AISkill.objects.update_or_create(
             name="deal_synthesis",
             defaults={
-                "personality": senior_pe_personality,
                 "description": "Synthesizes a final deal analysis from document evidence objects and supporting raw chunks.",
                 "output_schema": {
                     "deal_model_data": "object",
