@@ -64,6 +64,9 @@ STAGE_CATALOG = [
 
 DEFAULT_PLANNER_PROMPT = """Translate the user query into retrieval JSON.
 
+CRITICAL: Extract all company names or entities mentioned in the query into the "named_entities" array.
+If the user mentions a specific company, it MUST appear in "named_entities".
+
 Return only JSON with this shape:
 {
   "query_type": "exact_lookup|comparison|stats|pipeline_search|timeline|narrative",
@@ -99,6 +102,7 @@ Return only JSON with this shape:
 }
 
 Conversation ID: {{conversation_id}}
+Active Context: {{active_context}}
 User query: {{user_message}}
 
 Important planner rules:
@@ -334,7 +338,8 @@ class UniversalChatFlowService:
             raise ValueError("The answer_generation prompt must include {{ content }}.")
 
         planner_stage = next(stage for stage in normalized if stage["id"] == "query_planner")
-        if "{{user_message}}" not in planner_stage["settings"].get("prompt_template", ""):
+        planner_template = planner_stage["settings"].get("prompt_template", "")
+        if "{{user_message}}" not in planner_template and "{{ user_message }}" not in planner_template:
             raise ValueError("The query_planner prompt must include {{user_message}}.")
 
         return {"stages": normalized}

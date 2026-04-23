@@ -12,6 +12,7 @@ from ..models import DocumentChunk
 from .ai_processor import AIProcessorService
 from .embedding_processor import EmbeddingService
 from .flow_config import UniversalChatFlowService
+from .parsers import ResponseParserService
 from .prompts import PromptBuilderService
 from .runtime import AIRuntimeService
 from deals.services.document_artifacts import DocumentArtifactService
@@ -78,11 +79,15 @@ QUERY_STOPWORDS = {
 }
 
 PLACEHOLDER_PLAN_VALUES = {
+    "the company name",
+    "named deal",
     "exact company names or phrases",
     "exact company names or phrases kept only for compatibility",
+    "non-company phrases only",
     "semantic search query variants",
     "important keywords",
     "semantic preferences that should not become db filters",
+    "thematic preferences",
     "arman financial services",
     "summary|metrics|risks|mixed|documents|timeline",
     "single_deal|named_set|shortlist|cross_pipeline",
@@ -210,7 +215,7 @@ class UniversalChatService:
                 "selected_sources": [],
             }
 
-        plan = self._build_query_plan(user_message, conversation_id)
+        plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
         deals = self._get_candidate_deals(plan)
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         if not isinstance(chunk_diagnostics, dict):
@@ -285,7 +290,7 @@ class UniversalChatService:
     ) -> dict:
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
         deal = Deal.objects.get(id=deal_id)
-        plan = self._build_query_plan(user_message, conversation_id)
+        plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
         plan["deal_limit"] = 1
 
         deals = [deal]
@@ -399,29 +404,61 @@ class UniversalChatService:
         ]
         return any(term in lowered_message for term in conversational_terms)
 
-    def _build_query_plan(self, user_message: str, conversation_id: str) -> Dict[str, Any]:
+    def _build_query_plan(self, user_message: str, conversation_id: str, active_context: str = "") -> Dict[str, Any]:
         planner_template = self._stage_settings("query_planner").get("prompt_template") or UniversalChatFlowService.build_default_config()["stages"][0]["settings"]["prompt_template"]
+        active_context = (active_context or "").strip()
+        if len(active_context) > 4000:
+            active_context = active_context[-4000:]
         planner_prompt = (
             planner_template
             .replace("{{conversation_id}}", str(conversation_id))
             .replace("{{ conversation_id }}", str(conversation_id))
+            .replace("{{active_context}}", active_context or "None")
+            .replace("{{ active_context }}", active_context or "None")
             .replace("{{user_message}}", user_message)
             .replace("{{ user_message }}", user_message)
         )
         try:
-            result = self.ai_service.process_content(
-                content=planner_prompt,
-                stream=False,
-                source_type="universal_chat_intent",
-                source_id=conversation_id,
-                model_override=AIRuntimeService.get_planner_model(),
-            )
-            if isinstance(result, dict):
+            result = self._execute_planner_request(planner_prompt)
+            if isinstance(result, dict) and not result.get("error"):
                 return self._normalize_plan(result, user_message)
         except Exception as e:
             logger.warning("Universal chat planner failed, falling back to heuristics: %s", e)
 
         return self._heuristic_plan(user_message)
+
+    def _execute_planner_request(self, planner_prompt: str) -> Dict[str, Any]:
+        payload = {
+            "model": AIRuntimeService.get_planner_model(),
+            "prompt": planner_prompt,
+            "system": "Return exactly one valid JSON object. Do not include markdown, comments, prose, or thinking.",
+            "response_format": {"type": "json_object"},
+            "options": {
+                "max_tokens": 1800,
+                "temperature": 0.0,
+            },
+        }
+        try:
+            data = self.ai_service.provider.execute_standard(payload, timeout=180)
+        except Exception:
+            # Some OpenAI-compatible servers reject response_format. Retry with
+            # prompt-only JSON enforcement before falling back to heuristics.
+            payload.pop("response_format", None)
+            data = self.ai_service.provider.execute_standard(payload, timeout=180)
+        raw_response = (data.get("response") or "").strip()
+        parsed = self._parse_planner_response(raw_response)
+        if not isinstance(parsed, dict):
+            raise ValueError("Planner did not return a JSON object")
+        return parsed
+
+    def _parse_planner_response(self, raw_response: str) -> Dict[str, Any]:
+        if not raw_response:
+            raise ValueError("Planner returned an empty response")
+        try:
+            return json.loads(raw_response)
+        except json.JSONDecodeError:
+            extracted = ResponseParserService.extract_json(raw_response)
+            return json.loads(extracted)
 
     def _normalize_plan(self, plan: Dict[str, Any], user_message: str) -> Dict[str, Any]:
         if self._plan_contains_placeholder_values(plan):
@@ -637,6 +674,116 @@ class UniversalChatService:
             normalized.append({"type": "deal", "text": text, "confidence": 0.8})
         return normalized[:10]
 
+    def _infer_named_deal_from_query_if_needed(self, queryset, plan: Dict[str, Any]) -> None:
+        if self._extract_named_deal_terms(plan):
+            return
+        if (plan.get("stats_mode") or "none") != "none":
+            return
+        if plan.get("result_shape") in {"cross_pipeline", "shortlist"} and plan.get("query_type") == "stats":
+            return
+
+        user_query = str(plan.get("user_query") or "").strip()
+        if not self._looks_like_single_deal_question(user_query):
+            return
+
+        match = self._best_deal_title_mention(queryset, user_query)
+        if not match:
+            return
+
+        title, confidence = match
+        plan["named_entities"] = [{"type": "deal", "text": title, "confidence": confidence}]
+        plan["exact_terms"] = [title]
+        plan["result_shape"] = "single_deal"
+        plan["selection_mode"] = "depth_first"
+        plan["deal_limit"] = 1
+        plan["chunks_per_deal"] = max(int(plan.get("chunks_per_deal") or 0), 8)
+        plan["global_chunk_limit"] = max(
+            int(plan.get("global_chunk_limit") or 0),
+            min(int(self._stage_settings("context_assembly").get("max_total_chunks") or 80), 24),
+        )
+
+    def _looks_like_single_deal_question(self, user_query: str) -> bool:
+        lowered = user_query.lower()
+        single_deal_markers = [
+            "tell me about",
+            "what do you think about",
+            "deep dive",
+            "go through",
+            "documents",
+            "document",
+            "financial reports",
+            "annual reports",
+            "metrics",
+            "risks in",
+            "risks for",
+            "about",
+        ]
+        broad_markers = [
+            "best",
+            "top",
+            "shortlist",
+            "how many",
+            "count",
+            "compare",
+            "between",
+            "all deals",
+            "in the system",
+        ]
+        return any(marker in lowered for marker in single_deal_markers) and not any(
+            marker in lowered for marker in broad_markers
+        )
+
+    def _best_deal_title_mention(self, queryset, user_query: str) -> tuple[str, float] | None:
+        query_tokens = {
+            token
+            for token in self._token_set(user_query)
+            if token not in {
+                "tell", "about", "what", "think", "deep", "dive", "into", "from",
+                "documents", "document", "financial", "reports", "report", "metrics",
+                "deal", "company", "have", "system", "please", "can", "you",
+            }
+        }
+        if not query_tokens:
+            return None
+
+        best_title = None
+        best_score = 0.0
+        second_score = 0.0
+
+        for title in queryset.exclude(title__isnull=True).exclude(title="").values_list("title", flat=True).distinct()[:1000]:
+            title = str(title or "").strip()
+            title_tokens = self._token_set(title)
+            if not title_tokens:
+                continue
+
+            exact_overlap = query_tokens & title_tokens
+            fuzzy_hits = 0
+            for query_token in query_tokens:
+                if query_token in title_tokens:
+                    continue
+                if any(SequenceMatcher(None, query_token, title_token).ratio() >= 0.86 for title_token in title_tokens):
+                    fuzzy_hits += 1
+
+            overlap_count = len(exact_overlap) + fuzzy_hits
+            if overlap_count <= 0:
+                continue
+
+            containment = overlap_count / max(len(query_tokens), 1)
+            title_coverage = overlap_count / max(min(len(title_tokens), 6), 1)
+            text_similarity = SequenceMatcher(None, user_query.lower(), title.lower()).ratio()
+            score = (containment * 0.55) + (title_coverage * 0.3) + (text_similarity * 0.15)
+
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best_title = title
+            elif score > second_score:
+                second_score = score
+
+        if best_title and best_score >= 0.42 and best_score - second_score >= 0.08:
+            return best_title, min(0.95, max(0.75, best_score))
+        return None
+
     def _get_candidate_deals(self, plan: Dict[str, Any]) -> List[Deal]:
         return self._compute_candidate_deals(plan)
 
@@ -648,6 +795,7 @@ class UniversalChatService:
         queryset = base_queryset
         filters = self._align_hard_filters_to_known_values(base_queryset, plan.get("hard_filters", {}))
         plan["hard_filters"] = filters
+        self._infer_named_deal_from_query_if_needed(base_queryset, plan)
 
         if "is_female_led" in filters:
             queryset = queryset.filter(is_female_led=filters["is_female_led"])
