@@ -74,7 +74,7 @@ else
 
     echo ""
     echo "=== SEEDING AI SKILLS ==="
-    python init_skill.py
+    python manage.py seed_ai_prompts
 
     echo ""
     echo "=== CHECKING TABLES ==="
