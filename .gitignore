@@ -88,4 +88,5 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
-.pytest_cache/data/
+.pytest_cache/
+data/
