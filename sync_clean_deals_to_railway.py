@@ -98,7 +98,7 @@ def main() -> int:
 
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f">>> CLEAN DEAL DB RAILWAY SYNC ({mode})", flush=True)
-    print("This sync includes deal rows, analyses, phase logs, documents, chunks, embeddings, and retrieval profiles.", flush=True)
+    print("This sync includes deal rows, linked banks/bankers/contacts, analyses, phase logs, documents, chunks, embeddings, and retrieval profiles.", flush=True)
     if not args.no_prune_production:
         if args.deals:
             print("ERROR: production pruning is only allowed for full-dataset syncs. Use --no-prune-production with --deal.", flush=True)

@@ -108,17 +108,26 @@ def folder_aliases(folder_name: str, artifact_data: dict[str, Any] | None) -> li
 
 
 def _normalize_match_text(value: str | None) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
+    text = (value or "").lower()
+    # Remove "Project " prefix if it exists at the start
+    text = re.sub(r"^project\s+", "", text)
+    # Remove common suffixes that clutter folder names and prevent matches
+    text = re.sub(r"[\s_/-]+(intequant|advisors|growth|round|series|investment|opportunity|private|limited|ltd).*", "", text)
+    # Standard normalization
+    normalized = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(normalized.split())
 
 
 def _title_tokens(value: str | None) -> set[str]:
     normalized = _normalize_match_text(value)
-    return {
+    tokens = {
         token
         for token in normalized.split()
         if len(token) >= 3 and token not in TITLE_MATCH_STOPWORDS
     }
+    # Special case: Keep short numeric tokens like "777" which are highly unique
+    numeric_tokens = set(re.findall(r"\d+", (value or "").lower()))
+    return tokens | numeric_tokens
 
 
 def _title_match_score(alias: str, title: str) -> float:

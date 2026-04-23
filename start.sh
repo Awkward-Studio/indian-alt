@@ -29,6 +29,12 @@ if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
     CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,low_priority,default}"
+    CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
+
+    if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 2 ] 2>/dev/null; then
+        echo "Capping thread-pool concurrency from ${CELERY_CONCURRENCY_VALUE} to 2 for memory safety."
+        CELERY_CONCURRENCY_VALUE="2"
+    fi
 
     echo ""
     echo "=== STARTING WORKER HEALTHCHECK SERVER ON PORT ${PORT:-8000} ==="
@@ -62,10 +68,12 @@ PY
     echo "Pool: ${CELERY_POOL_VALUE}"
     echo "Concurrency: ${CELERY_CONCURRENCY_VALUE}"
     echo "Queues: ${CELERY_QUEUES_VALUE}"
+    echo "Prefetch multiplier: ${CELERY_PREFETCH_MULTIPLIER_VALUE}"
     exec celery -A config worker \
         --loglevel="${CELERY_LOGLEVEL:-info}" \
         --pool="${CELERY_POOL_VALUE}" \
         -Q "${CELERY_QUEUES_VALUE}" \
+        --prefetch-multiplier="${CELERY_PREFETCH_MULTIPLIER_VALUE}" \
         --concurrency="${CELERY_CONCURRENCY_VALUE}"
 else
     echo ""

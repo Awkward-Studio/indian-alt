@@ -1,6 +1,9 @@
 import json
 import logging
+import os
 import re
+import resource
+import sys
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple
 
@@ -15,9 +18,18 @@ from .flow_config import UniversalChatFlowService
 from .parsers import ResponseParserService
 from .prompts import PromptBuilderService
 from .runtime import AIRuntimeService
-from deals.services.document_artifacts import DocumentArtifactService
 
 logger = logging.getLogger(__name__)
+
+HARD_MAX_DEAL_LIMIT = 20
+HARD_MAX_CHUNKS_PER_DEAL = 12
+HARD_MAX_GLOBAL_CHUNKS = 60
+HARD_MAX_SEMANTIC_QUERIES = 4
+HARD_MAX_VECTOR_CANDIDATES = 120
+HARD_MAX_FALLBACK_CANDIDATES = 160
+HARD_MAX_RERANK_CANDIDATES = 96
+HARD_MAX_SYNTHESIS_CANDIDATES_PER_DEAL = 72
+HARD_MAX_CONTEXT_CHARS = 120000
 
 
 QUERY_TYPES = {
@@ -121,6 +133,38 @@ class UniversalChatService:
             self.flow_version = flow_version
         else:
             self.flow_config, self.flow_version = UniversalChatFlowService.get_runtime_config()
+        self.disable_hard_caps = str(os.environ.get("UNIVERSAL_CHAT_DISABLE_HARD_CAPS", "")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+    def _cap(self, value: int, hard_max: int) -> int:
+        return int(value) if self.disable_hard_caps else min(int(value), hard_max)
+
+    def _min_with_optional_hard_cap(self, values: List[int], hard_max: int) -> int:
+        bounded_values = [int(value) for value in values]
+        if not self.disable_hard_caps:
+            bounded_values.append(hard_max)
+        return min(bounded_values)
+
+    def _trace_chunks(self, label: str, **extra: Any) -> None:
+        if not os.environ.get("UNIVERSAL_CHAT_TRACE_CHUNKS"):
+            return
+        vmrss_kb = None
+        try:
+            with open("/proc/self/status", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            vmrss_kb = int(parts[1])
+                        break
+        except Exception:
+            vmrss_kb = None
+        maxrss_kb = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss or 0)
+        details = " ".join(f"{key}={value}" for key, value in extra.items())
+        print(f"[chunk-trace] {label} vmrss_kb={vmrss_kb} maxrss_kb={maxrss_kb} {details}", file=sys.stderr, flush=True)
 
     def _compact_document_metadata(self, artifact: Dict[str, Any], *, fallback_metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
         fallback_metadata = fallback_metadata or {}
@@ -162,13 +206,45 @@ class UniversalChatService:
 
         artifact: Dict[str, Any] | None = None
         if chunk.source_type == "document" and chunk.source_id:
-            doc = DealDocument.objects.filter(id=chunk.source_id).first()
+            doc = (
+                DealDocument.objects
+                .only("id", "title", "document_type", "evidence_json", "source_map_json", "table_json", "key_metrics_json")
+                .filter(id=chunk.source_id)
+                .first()
+            )
             if doc:
-                artifact = DocumentArtifactService.artifact_from_document(doc)
+                stored = doc.evidence_json if isinstance(doc.evidence_json, dict) else {}
+                artifact = {
+                    "document_name": stored.get("document_name") or doc.title,
+                    "document_type": stored.get("document_type") or doc.document_type,
+                    "document_summary": stored.get("document_summary") or "",
+                    "metrics": stored.get("metrics") or doc.key_metrics_json or [],
+                    "tables_summary": stored.get("tables_summary") or doc.table_json or [],
+                    "risks": stored.get("risks") or [],
+                    "claims": stored.get("claims") or [],
+                    "source_map": stored.get("source_map") or doc.source_map_json or {},
+                    "citation_label": stored.get("citation_label") or doc.title,
+                }
         elif chunk.source_type == "analysis_document" and chunk.source_id:
-            doc = FolderAnalysisDocument.objects.filter(id=chunk.source_id).first()
+            doc = (
+                FolderAnalysisDocument.objects
+                .only("id", "file_name", "document_type", "evidence_json", "source_map_json", "table_json", "key_metrics_json")
+                .filter(id=chunk.source_id)
+                .first()
+            )
             if doc:
-                artifact = DocumentArtifactService.artifact_from_analysis_document(doc)
+                stored = doc.evidence_json if isinstance(doc.evidence_json, dict) else {}
+                artifact = {
+                    "document_name": stored.get("document_name") or doc.file_name,
+                    "document_type": stored.get("document_type") or doc.document_type,
+                    "document_summary": stored.get("document_summary") or "",
+                    "metrics": stored.get("metrics") or doc.key_metrics_json or [],
+                    "tables_summary": stored.get("tables_summary") or doc.table_json or [],
+                    "risks": stored.get("risks") or [],
+                    "claims": stored.get("claims") or [],
+                    "source_map": stored.get("source_map") or doc.source_map_json or {},
+                    "citation_label": stored.get("citation_label") or doc.file_name,
+                }
         elif chunk.source_type == "extracted_source":
             artifact = {
                 "document_name": metadata.get("filename") or metadata.get("title"),
@@ -470,8 +546,14 @@ class UniversalChatService:
             query_type = fallback_query_type if fallback_query_type in QUERY_TYPES else "pipeline_search"
 
         planner_settings = self._stage_settings("query_planner")
-        max_deal_limit = max(int(planner_settings.get("max_deal_limit") or planner_settings.get("default_deal_limit") or 8), 3)
-        max_chunks_per_deal = max(int(planner_settings.get("max_chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 4), 1)
+        max_deal_limit = self._cap(
+            max(int(planner_settings.get("max_deal_limit") or planner_settings.get("default_deal_limit") or 8), 3),
+            HARD_MAX_DEAL_LIMIT,
+        )
+        max_chunks_per_deal = self._cap(
+            max(int(planner_settings.get("max_chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 4), 1),
+            HARD_MAX_CHUNKS_PER_DEAL,
+        )
         hard_filters = plan.get("hard_filters")
         if not isinstance(hard_filters, dict):
             hard_filters = plan.get("deal_filters") or {}
@@ -479,6 +561,8 @@ class UniversalChatService:
         semantic_queries = self._normalize_string_list(plan.get("semantic_queries"))
         if not semantic_queries:
             semantic_queries = self._normalize_string_list(plan.get("rag_queries"))
+        if not self.disable_hard_caps:
+            semantic_queries = semantic_queries[:HARD_MAX_SEMANTIC_QUERIES]
 
         result_shape = str(plan.get("result_shape") or "").lower().strip()
         if result_shape not in RESULT_SHAPES:
@@ -542,7 +626,16 @@ class UniversalChatService:
             "stats_mode": stats_mode,
             "deal_limit": min(max(int(plan.get("deal_limit") or planner_settings.get("default_deal_limit") or 8), 3), max_deal_limit),
             "chunks_per_deal": min(max(int(plan.get("chunks_per_deal") or planner_settings.get("default_chunks_per_deal") or 2), 1), max_chunks_per_deal),
-            "global_chunk_limit": max(0, min(int(plan.get("global_chunk_limit") or default_global_chunk_limit), int(self._stage_settings("context_assembly").get("max_total_chunks") or 80))),
+            "global_chunk_limit": max(
+                0,
+                self._min_with_optional_hard_cap(
+                    [
+                        int(plan.get("global_chunk_limit") or default_global_chunk_limit),
+                        int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
+                    ],
+                    HARD_MAX_GLOBAL_CHUNKS,
+                ),
+            ),
             "user_query": user_message,
         }
 
@@ -590,6 +683,9 @@ class UniversalChatService:
             )
         if normalized["stats_mode"] != "none":
             normalized["needs_stats"] = True
+        normalized["global_chunk_limit"] = self._cap(int(normalized["global_chunk_limit"] or 0), HARD_MAX_GLOBAL_CHUNKS)
+        normalized["deal_limit"] = self._cap(int(normalized["deal_limit"] or 0), HARD_MAX_DEAL_LIMIT)
+        normalized["chunks_per_deal"] = self._cap(int(normalized["chunks_per_deal"] or 0), HARD_MAX_CHUNKS_PER_DEAL)
         return normalized
 
     def _heuristic_plan(self, user_message: str) -> Dict[str, Any]:
@@ -608,14 +704,15 @@ class UniversalChatService:
             "selection_mode": "balanced",
             "needs_stats": False,
             "stats_mode": "none",
-            "deal_limit": int(planner_settings.get("default_deal_limit") or 8),
-            "chunks_per_deal": int(planner_settings.get("default_chunks_per_deal") or 2),
+            "deal_limit": self._cap(int(planner_settings.get("default_deal_limit") or 8), HARD_MAX_DEAL_LIMIT),
+            "chunks_per_deal": self._cap(int(planner_settings.get("default_chunks_per_deal") or 2), HARD_MAX_CHUNKS_PER_DEAL),
             "global_chunk_limit": min(
                 int(self._stage_settings("context_assembly").get("max_total_chunks") or 80),
                 int(planner_settings.get("default_deal_limit") or 8) * int(planner_settings.get("default_chunks_per_deal") or 2),
             ),
             "user_query": user_message,
         }
+        plan["global_chunk_limit"] = self._cap(plan["global_chunk_limit"], HARD_MAX_GLOBAL_CHUNKS)
         return plan
 
     def _plan_contains_placeholder_values(self, plan: Dict[str, Any]) -> bool:
@@ -1338,6 +1435,7 @@ class UniversalChatService:
         return deals
 
     def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        self._trace_chunks("start_search_ranked_chunks", deals=len(deals), selection_mode=plan.get("selection_mode"))
         if (plan.get("stats_mode") or "none") != "none" and int(plan.get("global_chunk_limit") or 0) == 0:
             return [], {
                 "candidate_chunk_count": 0,
@@ -1359,29 +1457,59 @@ class UniversalChatService:
         retrieval_settings = self._stage_settings("chunk_retrieval")
         scoped_deals = self._scope_deals_for_chunk_retrieval(plan, deals)
         deal_ids = [str(deal.id) for deal in scoped_deals]
-        candidate_limit = int(retrieval_settings.get("vector_limit") or 60)
+        candidate_limit = self._cap(int(retrieval_settings.get("vector_limit") or 60), HARD_MAX_VECTOR_CANDIDATES)
+        self._trace_chunks("scoped_deals", scoped_deals=len(scoped_deals), candidate_limit=candidate_limit)
         candidate_chunks: List[DocumentChunk] = []
-        for semantic_query in plan.get("semantic_queries") or [plan["user_query"]]:
+        semantic_queries = plan.get("semantic_queries") or [plan["user_query"]]
+        if not self.disable_hard_caps:
+            semantic_queries = semantic_queries[:HARD_MAX_SEMANTIC_QUERIES]
+        for semantic_query in semantic_queries:
+            self._trace_chunks("semantic_search_start", query=str(semantic_query)[:80])
             query_matches = self.embed_service.search_global_chunks(
                 semantic_query,
                 limit=candidate_limit,
                 deal_ids=deal_ids or None,
             )
             candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
+            self._trace_chunks("semantic_search_done", query_matches=len(query_matches), candidate_chunks=len(candidate_chunks))
+        self._trace_chunks("synthesis_augment_start", candidate_chunks=len(candidate_chunks))
         synthesis_document_candidates = self._augment_with_synthesis_document_candidates(candidate_chunks, scoped_deals, plan)
         candidate_chunks = self._merge_chunk_pool(candidate_chunks, synthesis_document_candidates)
+        self._trace_chunks(
+            "synthesis_augment_done",
+            synthesis_document_candidates=len(synthesis_document_candidates),
+            candidate_chunks=len(candidate_chunks),
+        )
+        self._trace_chunks("deal_summary_augment_start", candidate_chunks=len(candidate_chunks))
         candidate_chunks = self._augment_with_deal_summary_candidates(candidate_chunks, scoped_deals)
+        self._trace_chunks("deal_summary_augment_done", candidate_chunks=len(candidate_chunks))
         if not candidate_chunks:
             queryset = DocumentChunk.objects.all().select_related("deal")
             if scoped_deals:
                 queryset = queryset.filter(deal__in=scoped_deals)
-            candidate_chunks = list(queryset.order_by("-created_at")[: int(retrieval_settings.get("fallback_candidate_limit") or 120)])
+            fallback_limit = self._cap(
+                int(retrieval_settings.get("fallback_candidate_limit") or 120),
+                HARD_MAX_FALLBACK_CANDIDATES,
+            )
+            candidate_chunks = list(queryset.order_by("-created_at")[:fallback_limit])
+            self._trace_chunks("fallback_chunks_done", candidate_chunks=len(candidate_chunks), fallback_limit=fallback_limit)
+
+        rerank_settings = self._stage_settings("chunk_rerank")
+        chunk_rerank_candidate_limit = self._cap(
+            int(rerank_settings.get("chunk_rerank_candidate_limit") or candidate_limit),
+            HARD_MAX_RERANK_CANDIDATES,
+        )
+        if len(candidate_chunks) > chunk_rerank_candidate_limit:
+            candidate_chunks = candidate_chunks[:chunk_rerank_candidate_limit]
 
         rerank_query = self._build_rerank_query(plan)
+        self._trace_chunks("rerank_start", candidate_chunks=len(candidate_chunks))
         candidate_chunks = self._rerank_candidate_chunks(candidate_chunks, rerank_query, plan)
+        self._trace_chunks("rerank_done", candidate_chunks=len(candidate_chunks))
         scored_items: List[Dict[str, Any]] = []
         dropped_by_zero_score = 0
 
+        self._trace_chunks("score_start", candidate_chunks=len(candidate_chunks))
         for chunk in candidate_chunks:
             metadata = chunk.metadata or {}
             score = 0.0
@@ -1423,6 +1551,7 @@ class UniversalChatService:
             scored_items.append({"chunk": chunk, "score": round(score, 3)})
 
         scored_items.sort(key=lambda item: item["score"], reverse=True)
+        self._trace_chunks("score_done", scored_items=len(scored_items), dropped_by_zero_score=dropped_by_zero_score)
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
         seen_keys = set()
@@ -1448,6 +1577,7 @@ class UniversalChatService:
             seen_keys.add(chunk_key)
             per_deal_counts[deal_key] = per_deal_counts.get(deal_key, 0) + 1
             selected.append(item)
+        self._trace_chunks("select_done", selected=len(selected), max_total=max_total, max_per_deal=max_per_deal)
         diagnostics = {
             "candidate_chunk_count": len(candidate_chunks),
             "scored_chunk_count": len(scored_items),
@@ -1550,13 +1680,32 @@ class UniversalChatService:
         if not reranker_model or reranker is None:
             return self.embed_service._rerank_chunks(candidate_chunks, rerank_query, limit=len(candidate_chunks))
 
-        documents = [self._build_chunk_rerank_document(chunk, plan) for chunk in candidate_chunks]
+        rerank_settings = self._stage_settings("chunk_rerank")
+        batch_size = max(1, int(rerank_settings.get("chunk_rerank_batch_size") or 32))
+        results: List[Dict[str, Any]] = []
         try:
-            results = reranker.rerank(
-                model=reranker_model,
-                query=rerank_query,
-                documents=documents,
-            )
+            for start in range(0, len(candidate_chunks), batch_size):
+                batch_chunks = candidate_chunks[start:start + batch_size]
+                batch_documents = [
+                    self._build_chunk_rerank_document(chunk, plan)
+                    for chunk in batch_chunks
+                ]
+                batch_results = reranker.rerank(
+                    model=reranker_model,
+                    query=rerank_query,
+                    documents=batch_documents,
+                )
+                for item in batch_results or []:
+                    index = item.get("index")
+                    if index is None:
+                        continue
+                    results.append({**item, "index": start + int(index)})
+                self._trace_chunks(
+                    "rerank_batch_done",
+                    batch_start=start,
+                    batch_size=len(batch_chunks),
+                    results=len(batch_results or []),
+                )
         except Exception as exc:
             logger.warning("Chunk reranker failed on enriched documents, falling back to default chunk rerank: %s", exc)
             return self.embed_service._rerank_chunks(candidate_chunks, rerank_query, limit=len(candidate_chunks))
@@ -1677,18 +1826,11 @@ class UniversalChatService:
 
     def _chunk_matches_synthesis_document(self, chunk: DocumentChunk, document_entries: List[Dict[str, Any]]) -> int | None:
         metadata = chunk.metadata or {}
-        try:
-            document_metadata = self._document_metadata_for_chunk(chunk)
-        except Exception:
-            document_metadata = {}
-
         chunk_names = [
             metadata.get("title"),
             metadata.get("filename"),
             metadata.get("document_name"),
             metadata.get("citation_label"),
-            document_metadata.get("document_name"),
-            document_metadata.get("citation_label"),
             chunk.source_id,
         ]
         normalized_chunk_names = [
@@ -1718,13 +1860,22 @@ class UniversalChatService:
             return []
 
         retrieval_settings = self._stage_settings("chunk_retrieval")
-        per_deal_limit = max(int(retrieval_settings.get("synthesis_document_candidate_limit") or 240), 24)
+        per_deal_limit = self._cap(
+            max(int(retrieval_settings.get("synthesis_document_candidate_limit") or 240), 24),
+            HARD_MAX_SYNTHESIS_CANDIDATES_PER_DEAL,
+        )
         existing_ids = {str(chunk.id) for chunk in candidate_chunks if getattr(chunk, "id", None)}
         augmented: List[DocumentChunk] = []
         evidence_preference = str(plan.get("evidence_preference") or "mixed")
+        self._trace_chunks("synthesis_candidates_config", deals=len(deals), per_deal_limit=per_deal_limit)
 
         for deal in deals:
             document_entries = self._deal_synthesis_document_entries(deal)
+            self._trace_chunks(
+                "synthesis_deal_entries",
+                deal_id=str(deal.id),
+                document_entries=len(document_entries),
+            )
             if not document_entries:
                 continue
 
@@ -1734,10 +1885,20 @@ class UniversalChatService:
                     source_type__in=["document", "extracted_source", "analysis_document"],
                 )
                 .select_related("deal")
+                .only("id", "deal_id", "deal__id", "deal__title", "source_type", "source_id", "metadata", "created_at")
                 .order_by("-created_at")
             )
             matched: List[DocumentChunk] = []
-            for chunk in queryset[: max(per_deal_limit * 6, 300)]:
+            scan_limit = max(per_deal_limit * 6, 300)
+            self._trace_chunks("synthesis_scan_start", deal_id=str(deal.id), scan_limit=scan_limit)
+            for index, chunk in enumerate(queryset[:scan_limit].iterator(chunk_size=50), start=1):
+                if index % 100 == 0:
+                    self._trace_chunks(
+                        "synthesis_scan_progress",
+                        deal_id=str(deal.id),
+                        scanned=index,
+                        matched=len(matched),
+                    )
                 chunk_id = str(chunk.id)
                 if chunk_id in existing_ids:
                     continue
@@ -1746,6 +1907,7 @@ class UniversalChatService:
                     continue
                 setattr(chunk, "_synthesis_document_rank", rank)
                 matched.append(chunk)
+            self._trace_chunks("synthesis_scan_done", deal_id=str(deal.id), matched=len(matched))
 
             def sort_key(chunk: DocumentChunk):
                 metadata = chunk.metadata or {}
@@ -2203,6 +2365,7 @@ class UniversalChatService:
         elif deal_count <= few_deal_threshold:
             effective_per_deal += few_deal_boost
         effective_per_deal = min(effective_per_deal, max_per_deal)
+        effective_per_deal = self._cap(effective_per_deal, HARD_MAX_CHUNKS_PER_DEAL)
 
         soft_total = max(int(assembly_settings.get("soft_max_total_chunks") or effective_per_deal * deal_count), effective_per_deal)
         hard_total = max(int(assembly_settings.get("max_total_chunks") or soft_total), effective_per_deal)
@@ -2217,11 +2380,15 @@ class UniversalChatService:
         global_chunk_limit = int(plan.get("global_chunk_limit") or 0)
         if global_chunk_limit > 0:
             effective_total = min(effective_total, global_chunk_limit)
+        effective_total = self._cap(effective_total, HARD_MAX_GLOBAL_CHUNKS)
         return effective_per_deal, effective_total
 
     def _trim_sections_to_budget(self, sections: List[str]) -> Tuple[List[str], int]:
         assembly_settings = self._stage_settings("context_assembly")
-        max_context_chars = int(assembly_settings.get("max_context_chars", 60000) or 60000)
+        max_context_chars = self._cap(
+            int(assembly_settings.get("max_context_chars", 60000) or 60000),
+            HARD_MAX_CONTEXT_CHARS,
+        )
         if len("\n".join(sections).strip()) <= max_context_chars:
             return sections, self._count_rendered_chunks(sections)
 

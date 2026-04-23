@@ -64,15 +64,33 @@ def _build_history_context(conversation: AIConversation) -> tuple[str, int, int]
     history_context = "".join(entries)
     return history_context, len(entries), len(history_context)
 
-@shared_task(bind=True, autoretry_for=(AIConversation.DoesNotExist, AIAuditLog.DoesNotExist), retry_backoff=True, max_retries=3)
+@shared_task(bind=True)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
     """
     Background task to generate and save an AI chat response.
     Includes autoretry to handle DB commit race conditions.
     """
     try:
-        conversation = AIConversation.objects.get(id=conversation_id)
-        audit_log = AIAuditLog.objects.get(id=audit_log_id)
+        conversation = AIConversation.objects.filter(id=conversation_id).first()
+        audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if not conversation:
+            logger.warning(
+                "Chat task %s skipped: conversation %s no longer exists.",
+                self.request.id,
+                conversation_id,
+            )
+            if audit_log:
+                audit_log.status = 'FAILED'
+                audit_log.error_message = "Conversation no longer exists."
+                audit_log.save(update_fields=['status', 'error_message'])
+            return {"status": "error", "error": "conversation_not_found"}
+        if not audit_log:
+            logger.warning(
+                "Chat task %s skipped: audit log %s no longer exists.",
+                self.request.id,
+                audit_log_id,
+            )
+            return {"status": "error", "error": "audit_log_not_found"}
         
         # Update log with worker info
         audit_log.celery_task_id = self.request.id

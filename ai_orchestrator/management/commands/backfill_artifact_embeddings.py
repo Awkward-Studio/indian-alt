@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -50,24 +51,103 @@ class Command(BaseCommand):
         return folder_name.replace("_", " ").replace("-", "/")
 
     @staticmethod
+    def _normalize_title(value: str | None) -> str:
+        text = (value or "").strip().lower()
+        text = re.sub(r"[\s_/-]+", " ", text)
+        text = re.sub(r"[^a-z0-9 ]+", "", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _resolve_deal_for_folder(self, folder_name: str) -> Deal | None:
+        exact_title = self._folder_to_deal_title(folder_name)
+        normalized_folder = self._normalize_title(folder_name)
+        normalized_exact = self._normalize_title(exact_title)
+
+        # Fallback for numeric prefixes like 777_Masala
+        numeric_prefix = None
+        match = re.match(r"^(\d+)", folder_name)
+        if match:
+            numeric_prefix = match.group(1)
+
+        candidates = list(
+            Deal.objects.filter(title__icontains=exact_title).order_by("title")[:10]
+        )
+        if not candidates:
+            candidates = list(
+                Deal.objects.filter(title__icontains=folder_name.replace("_", " ")).order_by("title")[:10]
+            )
+        if not candidates:
+            candidates = list(Deal.objects.filter(title__icontains=folder_name).order_by("title")[:10])
+
+        if not candidates and numeric_prefix:
+            candidates = list(Deal.objects.filter(title__startswith=numeric_prefix).order_by("title")[:10])
+
+        if not candidates:
+            candidates = list(Deal.objects.all().only("id", "title").order_by("title")[:200])
+
+        best_match: Deal | None = None
+        best_score = -1
+        for deal in candidates:
+            title = deal.title or ""
+            normalized_title = self._normalize_title(title)
+            score = 0
+            if normalized_title == normalized_folder or normalized_title == normalized_exact:
+                score += 100
+            if normalized_folder and normalized_folder in normalized_title:
+                score += 40
+            if normalized_title and normalized_title in normalized_folder:
+                score += 35
+            if exact_title.lower() in title.lower():
+                score += 30
+            if folder_name.replace("_", " ").lower() in title.lower():
+                score += 20
+
+            # Numeric prefix bonus
+            if numeric_prefix and title.startswith(numeric_prefix):
+                score += 50
+
+            if score > best_score:
+                best_match = deal
+                best_score = score
+
+        return best_match if best_score > 0 else None
+
+    @staticmethod
     def _normalize_document_type(raw_value: str | None) -> str:
         candidate = (raw_value or "").strip()
         valid = {choice for choice, _ in DocumentType.choices}
         return candidate if candidate in valid else DocumentType.OTHER
 
     def handle(self, *args, **options):
-        base_dir = Path("data/extractions")
+        base_dir = Path("indian-alt/data/extractions")
         if not base_dir.exists():
-            self.stderr.write(self.style.ERROR(f"{base_dir} does not exist"))
+            # Fallback for if running from within the indian-alt directory
+            base_dir = Path("data/extractions")
+
+        if not base_dir.exists():
+            self.stderr.write(self.style.ERROR(f"Extraction directory not found in indian-alt/data/extractions or data/extractions"))
             return
 
-        embed_service = EmbeddingService()
         deal_filter = (options.get("deal") or "").strip().lower()
         limit = int(options.get("limit") or 0)
         force = bool(options.get("force"))
         profiles_only = bool(options.get("profiles_only"))
         dry_run = bool(options.get("dry_run"))
         include_images = bool(options.get("include_images"))
+
+        embed_service = EmbeddingService()
+
+        # Connection check to prevent hanging if VM is off
+        if not dry_run and not profiles_only:
+            self.stdout.write("Checking embedding service connectivity...")
+            try:
+                # Try a tiny dummy embedding to see if endpoint is alive
+                embed_service.provider.embed(model=embed_service.model_name, text="test", timeout=3)
+                self.stdout.write(self.style.SUCCESS("Embedding service is online."))
+            except Exception as exc:
+                self.stderr.write(self.style.ERROR(f"Embedding service is UNREACHABLE: {exc}"))
+                self.stderr.write(self.style.WARNING("The script will likely hang or fail. Please turn on the VM or use --dry-run."))
+                if not force: # Let them force it if they really want to try
+                    return
 
         deal_dirs = [path for path in sorted(base_dir.iterdir()) if path.is_dir()]
         if deal_filter:
@@ -84,8 +164,7 @@ class Command(BaseCommand):
         skipped_assets = 0
 
         for deal_dir in deal_dirs:
-            deal_title = self._folder_to_deal_title(deal_dir.name)
-            deal = Deal.objects.filter(title=deal_title).first()
+            deal = self._resolve_deal_for_folder(deal_dir.name)
             if not deal:
                 self.stdout.write(self.style.WARNING(f"[SKIP] Missing Deal row for folder {deal_dir.name}"))
                 continue
@@ -110,6 +189,9 @@ class Command(BaseCommand):
                 inspected += 1
 
                 file_name = artifact_path.name.replace(".artifact.json", "")
+                self.stdout.write(f"  [PROCESSING] {file_name} ...", ending="")
+                self.stdout.flush()
+
                 suffix = Path(file_name).suffix.lower()
                 if suffix in self.SKIP_EXTENSIONS and not include_images:
                     self.stdout.write(f"[SKIP] Asset-like artifact filename: {artifact_path.name}")
@@ -167,6 +249,8 @@ class Command(BaseCommand):
                     )
                     if should_rechunk:
                         embed_service.vectorize_document(deal_document)
+
+                self.stdout.write(self.style.SUCCESS(" [DONE]"))
 
                 doc_creates += 1 if created else 0
                 doc_updates += 0 if created else 1

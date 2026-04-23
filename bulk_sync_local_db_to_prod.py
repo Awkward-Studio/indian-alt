@@ -322,6 +322,40 @@ def upsert_contact(local_contact: Contact | None, bank_map: dict[str, Bank], dry
     return Contact.objects.using(TARGET_DB).create(id=local_contact.id, **payload)
 
 
+def sync_reference_data(dry_run: bool = False) -> dict:
+    bank_map: dict[str, Bank] = {}
+    contact_map: dict[str, Contact] = {}
+
+    local_banks = list(Bank.objects.using(SOURCE_DB).all().order_by("name", "id"))
+    local_contacts = list(Contact.objects.using(SOURCE_DB).select_related("bank").all().order_by("name", "id"))
+
+    def perform_sync():
+        for local_bank in local_banks:
+            synced_bank = upsert_bank(local_bank, dry_run=dry_run)
+            if synced_bank:
+                bank_map[str(local_bank.id)] = synced_bank
+
+        for local_contact in local_contacts:
+            synced_contact = upsert_contact(local_contact, bank_map, dry_run=dry_run)
+            if synced_contact:
+                contact_map[str(local_contact.id)] = synced_contact
+
+    if dry_run:
+        perform_sync()
+    else:
+        with transaction.atomic(using=TARGET_DB):
+            perform_sync()
+
+    return {
+        "bank_map": bank_map,
+        "contact_map": contact_map,
+        "banks": len(bank_map),
+        "contacts": len(contact_map),
+        "local_banks": len(local_banks),
+        "local_contacts": len(local_contacts),
+    }
+
+
 from django.contrib.auth.models import User
 from accounts.models import Profile
 
@@ -719,33 +753,12 @@ def replace_retrieval_profile(local_deal: Deal, prod_deal: Deal, dry_run: bool =
     return 1
 
 
-def sync_single_deal(local_deal: Deal, dry_run: bool = False):
-    related_contacts = {}
-    bank_map = {}
-    contact_map = {}
-
-    if local_deal.bank_id:
-        related_bank = Bank.objects.using(SOURCE_DB).filter(id=local_deal.bank_id).first()
-        if related_bank:
-            bank_map[str(related_bank.id)] = upsert_bank(related_bank, dry_run=dry_run)
-
-    contact_ids = []
-    if local_deal.primary_contact_id:
-        contact_ids.append(str(local_deal.primary_contact_id))
-    contact_ids.extend(str(contact.id) for contact in local_deal.additional_contacts.using(SOURCE_DB).all())
-    for contact_id in dict.fromkeys(contact_ids):
-        local_contact = Contact.objects.using(SOURCE_DB).filter(id=contact_id).first()
-        if not local_contact:
-            continue
-        if local_contact.bank_id and str(local_contact.bank_id) not in bank_map:
-            related_bank = Bank.objects.using(SOURCE_DB).filter(id=local_contact.bank_id).first()
-            if related_bank:
-                bank_map[str(related_bank.id)] = upsert_bank(related_bank, dry_run=dry_run)
-        related_contacts[contact_id] = local_contact
-
-    for contact_id, local_contact in related_contacts.items():
-        contact_map[contact_id] = upsert_contact(local_contact, bank_map, dry_run=dry_run)
-
+def sync_single_deal(
+    local_deal: Deal,
+    bank_map: dict[str, Bank],
+    contact_map: dict[str, Contact],
+    dry_run: bool = False,
+):
     if dry_run:
         prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=True)
         analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=True)
@@ -853,11 +866,27 @@ def run():
         print("Mode: DRY RUN")
     print("-" * 72)
 
+    print("Syncing reference data: banks and bankers/contacts...")
+    t0 = time.time()
+    reference_data = sync_reference_data(dry_run=args.dry_run)
+    t1 = time.time()
+    print(
+        f"[REFERENCE] banks={reference_data['banks']}/{reference_data['local_banks']} "
+        f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
+        f"elapsed={round(t1 - t0, 2)}s"
+    )
+    print("-" * 72)
+
     processed = 0
     errors = 0
     for local_deal in deals:
         try:
-            result = sync_single_deal(local_deal, dry_run=args.dry_run)
+            result = sync_single_deal(
+                local_deal,
+                reference_data["bank_map"],
+                reference_data["contact_map"],
+                dry_run=args.dry_run,
+            )
             processed += 1
             print(
                 f"[OK] {result['deal']}: analyses={result['analyses']} "

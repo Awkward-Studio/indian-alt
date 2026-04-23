@@ -5,6 +5,8 @@ import logging
 from copy import deepcopy
 from typing import Any, Optional, TYPE_CHECKING
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
 
@@ -302,15 +304,28 @@ class DocumentArtifactService:
         chunks: list[dict[str, Any]] = []
         normalized_text = (artifact.get("normalized_text") or "").strip()
         if normalized_text:
-            chunks.append(
-                {
-                    "text": normalized_text[:text_excerpt_chars],
-                    "metadata": {
-                        **base_metadata,
-                        "chunk_kind": "normalized_text",
-                    },
-                }
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=text_excerpt_chars,
+                chunk_overlap=max(200, text_excerpt_chars // 10),
+                length_function=len,
+                separators=["\n\n", "\n", " ", ""],
             )
+            normalized_parts = splitter.split_text(normalized_text)
+            total_normalized_parts = len(normalized_parts)
+            for part_index, normalized_part in enumerate(normalized_parts):
+                if not normalized_part.strip():
+                    continue
+                chunks.append(
+                    {
+                        "text": normalized_part,
+                        "metadata": {
+                            **base_metadata,
+                            "chunk_kind": "normalized_text",
+                            "normalized_text_part_index": part_index,
+                            "normalized_text_part_count": total_normalized_parts,
+                        },
+                    }
+                )
 
         for metric in artifact.get("metrics") or []:
             serialized = cls._serialize_component(metric)
