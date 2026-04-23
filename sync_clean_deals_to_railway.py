@@ -26,7 +26,7 @@ def parse_args():
     )
     parser.add_argument(
         "--prod-database-url",
-        default=None,
+        default=os.environ.get("PROD_DATABASE_URL"),
         help="Optional production DATABASE_URL. If omitted, the script uses Railway CLI.",
     )
     parser.add_argument(

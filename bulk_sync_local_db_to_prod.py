@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 from copy import deepcopy
 from typing import Iterable
 
@@ -199,16 +200,37 @@ def iter_target_deals(identifiers: Iterable[str] | None):
 
 
 def filter_missing_deals(local_deals: list[Deal]) -> tuple[list[Deal], int]:
+    if not local_deals:
+        return [], 0
+
+    local_id_set = {str(local_deal.id) for local_deal in local_deals}
+    local_title_set = {
+        normalize_text(local_deal.title).lower()
+        for local_deal in local_deals
+        if normalize_text(local_deal.title)
+    }
+
+    prod_id_set = {
+        str(value)
+        for value in Deal.objects.using(TARGET_DB)
+        .filter(id__in=list(local_id_set))
+        .values_list("id", flat=True)
+    }
+    prod_title_set = {
+        normalize_text(value).lower()
+        for value in Deal.objects.using(TARGET_DB).values_list("title", flat=True)
+        if normalize_text(value)
+    }
+
     filtered: list[Deal] = []
     skipped_existing = 0
     for local_deal in local_deals:
-        exists = Deal.objects.using(TARGET_DB).filter(id=local_deal.id).exists()
-        if not exists and normalize_text(local_deal.title):
-            exists = Deal.objects.using(TARGET_DB).filter(title__iexact=local_deal.title).exists()
+        title_key = normalize_text(local_deal.title).lower()
+        exists = str(local_deal.id) in prod_id_set or (title_key and title_key in prod_title_set)
         if exists:
             skipped_existing += 1
-            continue
-        filtered.append(local_deal)
+        else:
+            filtered.append(local_deal)
     return filtered, skipped_existing
 
 
@@ -815,10 +837,14 @@ def run():
 
     skipped_existing = 0
     if args.only_missing_deals:
+        print("Resolving missing deals against production...")
+        t0 = time.time()
         deals, skipped_existing = filter_missing_deals(deals)
+        t1 = time.time()
         if not deals:
             print("No missing deals to sync. Production already has all selected deals.")
             return
+        print(f"Missing-deal resolution completed in {round(t1 - t0, 2)}s")
 
     print(f"Deals selected: {len(deals)}")
     if args.only_missing_deals:
