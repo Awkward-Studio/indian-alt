@@ -1,0 +1,352 @@
+# Incremental Stores
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **SSG** | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | |
+| **Existing Stores (Annual Qty Sold per Store)** | 42.93 | 71.24 | 140 | 240 | 268.8 | 301.06 | 337.18 | 377.64 | 422.96 |
+| **New Store - yr1 (Annual Qty Sold per Store)** | 150 | 168 | 188.16 | 210.74 | 236.03 | 264.35 | | | |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | 150 | 168 | 188.16 | 210.74 | 236.03 | | | |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | 150 | 168 | 188.16 | 210.74 | | | |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | 150 | 168 | 188.16 | | | |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | 150 | 168 | | | |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | 150 | | | |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | 3,134 | 11,184 | 21,666 | 37,680 | 42,201.6 | 47,265.79 | 52,937.69 | 59,290.21 | 66,405.03 |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | | | 5,250 | 5,880 | 6,585.6 | 7,375.87 | 8,260.98 |
+| **New Store - yr3 (Annual Qty Sold)** | | | | | | 5,250 | 5,880 | 6,585.6 | 7,375.87 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | | | 5,250 | 5,880 | 6,585.6 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | | | 2,625 | 2,940 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | | | 2,625 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | | |
+| **Total Quantity Sold (pcs)** | 3,134 | 11,184 | 21,666 | 37,680 | 47,451.6 | 58,395.79 | 70,653.29 | 81,756.68 | 94,192.48 |
+| **Qty Growth** | 0.94 | 0.74 | 0.26 | 0.23 | 0.21 | 0.16 | 0.15 | | |
+| **ASP (INR per pc)** | 2,531.31 | 1,554.35 | 1,793.49 | 1,524.46 | 1,524.46 | 1,524.46 | 1,524.46 | 1,524.46 | 1,524.46 |
+| **Total Sales (INR Mn)** | 7.93 | 17.38 | 38.86 | 57.44 | 72.34 | 89.02 | 107.71 | 124.64 | 143.59 |
+
+## Traditional Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | 30 | 60 | 90 | 120 | 150 | 180 | | |
+| **Incremental Stores** | 30 | 30 | 30 | 30 | 30 | 30 | | |
+| **SSG** | | | 0.1 | 0.1 | 0.1 | 0.1 | | |
+| **Existing Stores (Annual Qty Sold per Store)** | 26 | 26 | 26 | 26 | 28.6 | 31.46 | 34.61 | 38.07 |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | 26 | 26 | 26 | 28.6 | 31.46 | |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | 68 | 90 | 99 | 108.9 | 119.79 | 131.77 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | 68 | 90 | 99 | 108.9 | 119.79 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | 68 | 90 | 99 | 108.9 |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | 68 | 90 | 99 |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | 68 | 90 |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | 68 |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | 26 | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | 2,040 | 2,700 | 2,970 | 3,267 | 3,593.7 | 3,953.07 |
+| **New Store - yr3 (Annual Qty Sold)** | | | | 2,040 | 2,700 | 2,970 | 3,267 | 3,593.7 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | 2,040 | 2,700 | 2,970 | 3,267 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | 2,040 | 2,700 | 2,970 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | 2,040 | 2,700 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | 2,040 |
+| **Total Quantity Sold (pcs)** | 26 | | 2,040 | 4,740 | 7,710 | 10,977 | 14,570.7 | 18,523.77 |
+| **Qty Growth** | -1 | #DIV/0! | 1.32 | 0.63 | 0.42 | 0.33 | 0.27 | |
+| **ASP (INR per pc)** | 232.84 | | | | | | | |
+| **Total Sales (INR Mn)** | 0.006 | | | | | | | |
+
+## Online
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Annual Qty Sold (pcs)** | 110 | 194 | 302 | 1,208 | 4,832 | 14,496 | 28,992 | 57,984 | 115,968 |
+| **Qty Growth (%)** | 1 | 3 | 3 | 2 | 1 | 1 | 1 | | |
+| **ASP (INR)** | 1,930.66 | 2,045.95 | 1,872.19 | 1,872.19 | 1,872.19 | 1,872.19 | 1,872.19 | 1,872.19 | 1,872.19 |
+| **Growth (%)** | -0.1 | | | | | | | | |
+| **Total Giordano Sunglasses Sales (INR Mn)** | 0.21 | 0.40 | 0.57 | 2.26 | 9.05 | 27.14 | 54.28 | 108.56 | 217.11 |
+| **Growth (%)** | 0.42 | 3 | 3 | 2 | 1 | 1 | 1 | | |
+| **Total Giordano Sunglasses Sales (Qty)** | 3,244 | 11,404 | 21,968 | 40,928 | 57,023.6 | 80,601.79 | 110,622.29 | 154,311.38 | 228,684.25 |
+| **Qty Growth** | 2.52 | 0.93 | 0.86 | 0.39 | 0.41 | 0.37 | 0.39 | 0.48 | |
+| **Total Giordano Sunglasses Sales (INR Mn)** | 8.15 | 17.79 | 39.42 | 59.70 | 81.38 | 116.16 | 161.99 | 233.19 | 360.71 |
+| **Sales Growth** | 1.18 | 1.22 | 0.51 | 0.36 | 0.43 | 0.39 | 0.44 | 0.55 | |
+
+# Superdry
+
+## Modern Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | 53 | 115 | 115 | 90 | 100 | 110 | 120 | 130 | 140 |
+| **Incremental Stores** | | | -25 | 10 | 10 | 10 | 10 | 10 | |
+| **SSG** | | | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | |
+| **Existing Stores (Annual Qty Sold per Store)** | 14.89 | 37.69 | 48 | 54 | 59.4 | 65.34 | 71.87 | 79.06 | 86.97 |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | 48 | 54 | 59.4 | 65.34 | 71.87 | 79.06 | |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | 48 | 54 | 59.4 | 65.34 | 71.87 | |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | 48 | 54 | 59.4 | 65.34 | |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | 48 | 54 | 59.4 | |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | | 48 | 54 | |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | | 48 | |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | 789 | 4,334 | 4,067 | 4,860 | 5,346 | 5,880.6 | 6,468.66 | 7,115.53 | 7,827.08 |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | | | | | | | |
+| **New Store - yr3 (Annual Qty Sold)** | | | | | 480 | 540 | 594 | 653.4 | |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | | 480 | 540 | 594 | |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | | 240 | 270 | |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | | 240 | |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | | |
+| **Total Quantity Sold (pcs)** | 789 | 4,334 | 4,067 | 4,860 | 5,346 | 6,360.6 | 7,488.66 | 8,489.53 | 9,584.48 |
+| **Qty Growth** | | | 0.19 | 0.10 | 0.19 | 0.18 | 0.13 | 0.13 | |
+| **ASP (INR per pc)** | 3,228.99 | 2,185.27 | 3,010.67 | 3,462.27 | 3,462.27 | 3,462.27 | 3,462.27 | 3,462.27 | 3,462.27 |
+| **Total Sales (INR Mn)** | 2.55 | 9.47 | 12.24 | 16.83 | 18.51 | 22.02 | 25.93 | 29.39 | 33.18 |
+
+## Online
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Annual Qty Sold (pcs)** | 85 | 296 | 106 | 159 | 198.75 | 248.44 | 310.55 | 388.18 | 485.23 |
+| **Qty Growth (%)** | -0.64 | 0.5 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | | |
+| **ASP (INR)** | 3,218.77 | 2,287.54 | 2,386.97 | 2,386.97 | 2,386.97 | 2,386.97 | 2,386.97 | 2,386.97 | 2,386.97 |
+| **Growth (%)** | 0.04 | | | | | | | | |
+| **Superdry Online Sunglasses Sales (INR Mn)** | 0.27 | 0.68 | 0.25 | 0.38 | 0.47 | 0.59 | 0.74 | 0.93 | 1.16 |
+| **Growth (%)** | -0.63 | 0.5 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | | |
+| **Total Superdry Sunglasses Sales (Qty)** | 874 | 4,630 | 4,173 | 5,019 | 5,544.75 | 6,609.04 | 7,799.21 | 8,877.71 | 10,069.71 |
+| **Qty Growth** | 4.30 | -0.10 | 0.20 | 0.10 | 0.19 | 0.18 | 0.14 | 0.13 | |
+| **Total Superdry Sunglasses Sales (INR Mn)** | 2.82 | 10.15 | 12.50 | 17.21 | 18.98 | 22.62 | 26.67 | 30.32 | 34.34 |
+| **Sales Growth** | 2.60 | 0.23 | 0.38 | 0.10 | 0.19 | 0.18 | 0.14 | 0.13 | |
+
+# Others
+
+## Others
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Annual Qty Sold (pcs)** | 1 | 130 | 4,347 | 2,518 |
+| **Qty Growth (%)** | | | | |
+| **Total Other Sunglasses Sales (INR Mn)** | 0.000444 | 0.037467 | 11.47 | 5.60 |
+| **Growth (%)** | | | | |
+
+## Total Sunglasses Sales
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 | Year 10 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Sunglasses Sales (Qty)** | 687 | 12,217 | 79,880 | 99,664 | 133,338.04 | 204,647.42 | 295,955.13 | 412,049.15 | 556,319.33 | 759,236.90 |
+| **Qty Growth** | | 0.25 | 0.34 | 0.53 | 0.45 | 0.39 | 0.35 | 0.36 | | |
+| **Total Sunglasses Sales (INR Mn)** | 0.59 | 24.80 | 128.03 | 169.10 | 197.91 | 288.64 | 407.87 | 558.87 | 751.45 | 1,028.40 |
+| **Sales Growth** | 40.68 | 4.16 | 0.32 | 0.17 | 0.46 | 0.41 | 0.37 | 0.34 | 0.37 | |
+
+| Metric | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 | Year 9 | Year 10 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Sunglasses from Modern Retail (INR Mn)** | 23.21 | 126.13 | 166.57 | 185.02 | 233.90 | 290.06 | 352.21 | 416.12 | 474.85 |
+| **Growth** | 0.32 | 0.11 | 0.26 | 0.24 | 0.21 | 0.18 | 0.14 | | |
+| **Sunglasses from Traditional Retail (INR Mn)** | 0.006 | 0.16 | 4.20 | 8.03 | 12.16 | 16.63 | 21.46 | | |
+| **Growth** | 25.83 | -1 | #DIV/0! | 0.91 | 0.52 | 0.37 | 0.29 | | |
+| **Sunglasses from Online (INR Mn)** | 1.58 | 1.90 | 2.53 | 12.90 | 50.54 | 109.78 | 194.49 | 318.70 | 532.09 |
+| **Growth** | 0.33 | 4.10 | 2.92 | 1.17 | 0.77 | 0.64 | 0.67 | | |
+
+# Apparel
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | | | 20 | 55 | 90 | 125 | 160 | 195 |
+| **Incremental Stores** | | | 20 | 35 | 35 | 35 | 35 | 35 |
+| **SSG** | | | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | |
+| **Existing Stores (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | 1,000 | 1,200 | 1,320 | 1,452 | 1,597.2 | 1,756.92 |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | 1,000 | 1,200 | 1,320 | 1,452 | 1,597.2 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | 1,000 | 1,200 | 1,320 | 1,452 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | 1,000 | 1,200 | 1,320 |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | | 1,000 | 1,200 |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | | 1,000 |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | 10,000 | 24,000 | 26,400 | 29,040 | 31,944 | 35,138.4 |
+| **New Store - yr3 (Annual Qty Sold)** | | | | 17,500 | 42,000 | 46,200 | 50,820 | 55,902 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | 17,500 | 42,000 | 46,200 | 50,820 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | 17,500 | 21,000 | 23,100 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | 17,500 | 21,000 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | 17,500 |
+| **Total Quantity Sold (pcs)** | | | 10,000 | 41,500 | 85,900 | 134,740 | 167,464 | 203,460.4 |
+| **Qty Growth** | | | #DIV/0! | 3.15 | 1.07 | 0.57 | 0.24 | 0.21 |
+| **ASP (INR per pc)** | | | 2,000 | 2,000 | 2,000 | 2,000 | 2,000 | 2,000 |
+| **Total Sales (INR Mn)** | | | 20 | 83 | 171.8 | 269.48 | 334.93 | 406.92 |
+
+### Traditional Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | | | | | 20 | 40 | 60 | 80 |
+| **Incremental Stores** | | | | | 20 | 20 | 20 | 20 |
+| **SSG** | | | | | 0.05 | 0.05 | 0.05 | 0.05 |
+| **Existing Stores (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | | 200 | 300 | 315 | 330.75 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | | 200 | 300 | 315 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | | 200 | 300 |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | | | 200 |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr3 (Annual Qty Sold)** | | | | | 4,000 | 6,000 | 6,300 | 6,615 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | | 4,000 | 6,000 | 6,300 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | | 4,000 | 6,000 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | | 4,000 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | |
+| **Total Quantity Sold (pcs)** | | | | | 4,000 | 10,000 | 16,300 | 22,915 |
+| **Qty Growth** | | | #DIV/0! | #DIV/0! | #DIV/0! | 1.5 | 0.63 | 0.30 |
+| **ASP (INR per pc)** | | | 1,300 | 1,300 | 1,300 | 1,300 | 1,300 | 1,300 |
+| **Total Sales (INR Mn)** | | | 5.2 | 13 | 21.19 | 29.79 | 38.82 | |
+
+### Online
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Annual Qty Sold (pcs)** | | | 1,200 | 4,800 | 9,600 | 14,400 | 21,600 | 32,400 |
+| **Qty Growth (%)** | | | 3 | 1 | 0.5 | 0.5 | 0.5 | |
+| **ASP (INR)** | | | 1,200 | 1,200 | 1,200 | 1,200 | 1,200 | 1,200 |
+| **Growth (%)** | | | | | | | | |
+| **Giordano Online Apparel Sales (INR Mn)** | | | 1.44 | 5.76 | 11.52 | 17.28 | 25.92 | 38.88 |
+| **Growth (%)** | | | #DIV/0! | 3 | 1 | 0.5 | 0.5 | 0.5 |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Giordano Apparel Sales (Qty)** | | | 11,200 | 50,300 | 105,500 | 165,440 | 211,979 | 265,721.15 |
+| **Qty Growth** | | | #DIV/0! | #DIV/0! | 3.49 | 1.10 | 0.57 | 0.28 |
+| **Total Giordano Apparel Sales (INR Mn)** | | | 21.44 | 93.96 | 196.32 | 307.95 | 390.64 | 484.62 |
+| **Sales Growth** | | | #DIV/0! | #DIV/0! | 3.38 | 1.09 | 0.57 | 0.27 |
+
+## Kenneth Cole
+
+### Modern Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | | | 20 | 55 | 90 | 125 | 160 | 195 |
+| **Incremental Stores** | | | 20 | 35 | 35 | 35 | 35 | 35 |
+| **SSG** | | | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | |
+| **Existing Stores (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | 800 | 1,000 | 1,100 | 1,210 | 1,331 | 1,464.1 |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | 800 | 1,000 | 1,100 | 1,210 | 1,331 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | 800 | 1,000 | 1,100 | 1,210 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | 800 | 1,000 | 1,100 |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | | 800 | 1,000 |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | | 800 |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | 8,000 | 20,000 | 22,000 | 24,200 | 26,620 | 29,282 |
+| **New Store - yr3 (Annual Qty Sold)** | | | | 14,000 | 35,000 | 38,500 | 42,350 | 46,585 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | 14,000 | 35,000 | 38,500 | 42,350 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | 14,000 | 17,500 | 19,250 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | 14,000 | 17,500 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | 14,000 |
+| **Total Quantity Sold (pcs)** | | | 8,000 | 34,000 | 71,000 | 111,700 | 138,970 | 168,967 |
+| **Qty Growth** | | | #DIV/0! | 3.25 | 1.09 | 0.57 | 0.24 | 0.22 |
+| **ASP (INR per pc)** | | | 3,000 | 3,000 | 3,000 | 3,000 | 3,000 | 3,000 |
+| **Total Sales (INR Mn)** | | | 24 | 102 | 213 | 335.1 | 416.91 | 506.90 |
+
+### Traditional Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | | | | | 20 | 40 | 60 | 80 |
+| **Incremental Stores** | | | | | 20 | 20 | 20 | 20 |
+| **SSG** | | | | | 0.06 | 0.06 | 0.06 | 0.06 |
+| **Existing Stores (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | | 90 | 100 | 106 | 112.36 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | | 90 | 100 | 106 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | | 90 | 100 |
+| **New Store - yr5 (Annual Qty Sold per Store)** | | | | | | | | 90 |
+| **New Store - yr6 (Annual Qty Sold per Store)** | | | | | | | | |
+| **New Store - yr7 (Annual Qty Sold per Store)** | | | | | | | | |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Existing Stores (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr2 (Annual Qty Sold)** | | | | | | | | |
+| **New Store - yr3 (Annual Qty Sold)** | | | | | 1,800 | 2,000 | 2,120 | 2,247.2 |
+| **New Store - yr4 (Annual Qty Sold)** | | | | | | 1,800 | 2,000 | 2,120 |
+| **New Store - yr5 (Annual Qty Sold)** | | | | | | | 1,800 | 2,000 |
+| **New Store - yr6 (Annual Qty Sold)** | | | | | | | | 1,800 |
+| **New Store - yr7 (Annual Qty Sold)** | | | | | | | | |
+| **Total Quantity Sold (pcs)** | | | | | 1,800 | 3,800 | 5,920 | 8,167.2 |
+| **Qty Growth** | | | #DIV/0! | #DIV/0! | #DIV/0! | 1.11 | 0.56 | 0.38 |
+| **ASP (INR per pc)** | | | 1,700 | 1,700 | 1,700 | 1,700 | 1,700 | 1,700 |
+| **Total Sales (INR Mn)** | | | 3.06 | 6.46 | 10.06 | 13.88 | 17.93 | |
+
+### Online
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Annual Qty Sold (pcs)** | | | 1,000 | 2,500 | 5,000 | 7,500 | 11,250 | 16,875 |
+| **Qty Growth (%)** | | | 1.5 | 1 | 0.5 | 0.5 | 0.5 | |
+| **ASP (INR)** | | | 2,000 | 2,000 | 2,000 | 2,000 | 2,000 | 2,000 |
+| **Growth (%)** | | | | | | | | |
+| **KC Online Apparel Sales (INR Mn)** | | | 2 | 5 | 10 | 15 | 22.5 | 33.75 |
+| **Growth (%)** | | | #DIV/0! | 1.5 | 1 | 0.5 | 0.5 | 0.5 |
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total KC Apparel Sales (Qty)** | | | 9,000 | 38,300 | 79,800 | 125,120 | 158,387.2 | 196,391.23 |
+| **Qty Growth** | | | #DIV/0! | #DIV/0! | 3.26 | 1.08 | 0.57 | 0.24 |
+| **Total KC Apparel Sales (INR Mn)** | | | 26 | 110.06 | 229.46 | 360.16 | 453.29 | 558.58 |
+| **Sales Growth** | | | #DIV/0! | #DIV/0! | 3.23 | 1.08 | 0.57 | 0.23 |
+
+## Total Apparel Sales
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Apparel Sales (Qty)** | | | 20,200 | 88,600 | 185,300 | 290,560 | 370,366.2 | 462,112.38 |
+| **Qty Growth** | | | #DIV/0! | 3.39 | 1.09 | 0.57 | 0.27 | 0.25 |
+| **Total Apparel Sales (INR Mn)** | | | 47.44 | 204.02 | 425.78 | 668.11 | 843.93 | 1,043.20 |
+| **Sales Growth** | | | #DIV/0! | 3.30 | 1.09 | 0.57 | 0.26 | 0.24 |
+
+| Metric | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 | Year 8 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Apparel Sales from Modern Retail (INR Mn)** | 44 | 185 | 384.8 | 604.58 | 751.84 | 913.82 | |
+| **Growth** | #DIV/0! | #DIV/0! | 3.20 | 1.08 | 0.57 | 0.24 | 0.22 |
+| **Apparel Sales from Traditional Retail (INR Mn)** | 8.26 | 19.46 | 31.25 | 43.67 | 56.75 | | |
+| **Growth** | #DIV/0! | #DIV/0! | #DIV/0! | 1.36 | 0.61 | 0.40 | 0.30 |
+| **Apparel Sales from Online (INR Mn)** | 3.44 | 10.76 | 21.52 | 32.28 | 48.42 | 72.63 | |
+| **Growth** | #DIV/0! | 2.13 | 1 | 0.5 | 0.5 | 0.5 | |
+
+# Footwear
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Year 1 | Year 2 | Year 3 | Year 4 | Year 5 | Year 6 | Year 7 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Stores** | | | 25 | 65 | 105 | 145 | 185 |
+| **Incremental Stores** | | | 25 | 40 | 40 | 40 | 40 |
+| **SSG** | | | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| **Existing Stores (Annual Qty Sold per Store)** | | | | | | | |
+| **New Store - yr1 (Annual Qty Sold per Store)** | | | 470 | 500 | 525 | 551.25 | 578.81 |
+| **New Store - yr2 (Annual Qty Sold per Store)** | | | | 470 | 500 | 525 | 551.25 |
+| **New Store - yr3 (Annual Qty Sold per Store)** | | | | | 470 | 500 | 525 |
+| **New Store - yr4 (Annual Qty Sold per Store)** | | | | | | 470 | 500 |

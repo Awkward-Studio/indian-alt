@@ -1,0 +1,78 @@
+| I   | 25.4         | 31.8              | 35.6     | 5.2    | 2.0   | 100  |
+| II  | 9.0          | 28.6              | 45.4     | 13.7   | 3.3   | 100  |
+| III | 3.4          | 17.5              | 47.9     | 25.0   | 6.2   | 100  |
+| IV  | 2.1          | 10.7              | 40.8     | 31.7   | 14.9  | 100  |
+| V   | 2.1          | 7.9               | 33.2     | 35.1   | 21.8  | 100  |
+| VI  | 0.8          | 4.3               | 28.3     | 38.8   | 27.8  | 100  |
+| VII | 0.6          | 2.0               | 29.9     | 30.6   | 36.9  | 100  |
+| VIII| 0.2          | 2.3               | 20.8     | 28.6   | 48.1  | 100  |
+
+Each row shows the variation in children's arithmetic levels within a given grade. For example, among children in Std III, 3.4% cannot even recognize numbers 1-9, 17.5% can recognize numbers up to 9 but cannot recognize numbers up to 99 or higher, 47.9% can recognize numbers up to 99 but cannot do subtraction, 25% can do subtraction but cannot do division, and 6.2% can do division. For each grade, the total of these exclusive categories is 100%.
+
+### Arithmetic Tool
+
+<!-- Image of Arithmetic Tool -->
+Number recognition 1&9
+Number recognition 10&99
+Subtraction
+Division
+
+| 1 | 4 | 51 | 83 | 46 | 63 | 7)879( |
+|---|---|----|----|----|----|--------|
+| 7 | 3 | 37 | 65 | 47 | 45 | 6)824( |
+| 6 | 9 | 55 | 26 | 92 | 84 | 8)985( |
+| 5 | 2 | 91 | 43 | 52 | 66 | 4)517( |
+|   |   | 36 | 27 | 52 | 66 |        |
+
+## Reading and comprehension in English
+
+ASER assessments are conducted in the household. The type of school in which children are enrolled (government or private) is also recorded.
+
+### Table 8: % Children by grade and reading level in English
+All children 2016
+
+| Std | Not even capital letters | Capital letters | Small letters | Simple words | Easy sentences | Total |
+|-----|--------------------------|-----------------|---------------|--------------|----------------|-------|
+| I   | 29.9                     | 17.2            | 26.2          | 18.8         | 8.0            | 100   |
+| II  | 10.8                     | 14.6            | 29.8          | 33.4         | 11.4           | 100   |
+| III | 5.1                      | 9.4             | 21.2          | 40.3         | 24.0           | 100   |
+| IV  | 2.6                      | 6.2             | 16.1          | 41.7         | 33.5           | 100   |
+| V   | 1.8                      | 4.6             | 8.6           | 36.8         | 48.3           | 100   |
+| VI  | 0.4                      | 2.5             | 5.7           | 36.4         | 54.9           | 100   |
+| VII | 0.6                      | 2.1             | 5.9           | 24.3         | 67.2           | 100   |
+| VIII| 0.3                      | 0.8             | 3.7           | 20.4         | 74.7           | 100   |
+
+Each row shows the variation in children's reading levels in English within a given grade. For example, among children in Std III, 5.1% cannot even read capital letters, 9.4% can read capital letters but not small letters or higher, 21.2% can read small letters but not words or higher, 40.3% can read words but not sentences, and 24% can read sentences. For each grade, the total of these exclusive categories is 100%.
+
+### English Tool
+
+<!-- Image of English Tool -->
+Capital letters
+Small letters
+Word
+Sentence
+
+| A | J | Q | h | p | x |
+|---|---|---|---|---|---|
+| N | E |   | u | m |   |
+| Y | R | O | d | g | t |
+
+Word: cat, sun, new, bus, red, fan
+
+Sentence: What is the time? This is a large house. I like to read. She has many books.
+
+### Table 9: % Children by grade who can comprehend English
+All children 2016
+
+| Std | Of those who can read words, % children who can tell meanings of the words | Of those who can read sentences, % children who can tell meanings of the sentences |
+|-----|-----------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| I   | 41.3                                                                       |                                                                                   |
+| II  | 44.4                                                                       | 44.0                                                                                |
+| III | 43.1                                                                       | 51.4                                                                                |
+| IV  | 46.2                                                                       | 55.6                                                                                |
+| V   | 49.7                                                                       | 43.5                                                                                |
+| VI  | 55.3                                                                       | 56.2                                                                                |
+| VII | 61.3                                                                       | 59.0                                                                                |
+| VIII| 55.8                                                                       | 64.4                                                                                |
+
+<!-- Image of children and adult reading -->

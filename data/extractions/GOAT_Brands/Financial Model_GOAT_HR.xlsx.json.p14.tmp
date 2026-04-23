@@ -1,0 +1,116 @@
+| ID | Category | Metric | Channel | Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 | Col 7 | Col 8 | Col 9 | Col 10 | Col 11 | Col 12 | Col 13 | Col 14 | Col 15 | Col 16 | Col 17 | Col 18 | Col 19 | Col 20 | Col 21 | Col 22 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 46111428304 | Hipkoo | Other FUL % | Online | 0.10692989868995827 | 0.10249717440695712 | 0.09953270247669073 | 0.09837423797127237 | 0.09474988080510932 | 0.09474988080510931 | 0.09474988080510931 | 0.09474988080510933 | 0.09474988080510932 | 0.09480305088946338 | 0.09486709588999909 | 0.09383466549656272 | 0.09386480200220249 | 0.09405023732350652 | 0.09492539022384826 | 0.09501993913473855 | 0.09491041477443568 | 0.09491041477443568 | 0.08 | 0.08 | 0.08 | |
+| HipkooOther FUL %Online | Hipkoo | Other FUL % | Online | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | 0.17470130517314458 | | | | |
+| HipkooCommission % SalesTMP | Hipkoo | Commission % Sales | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooCommission % SalesB2B | Hipkoo | Commission % Sales | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooCommission % SalesOnline | Hipkoo | Commission % Sales | Online | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooORC % SalesTMP | Hipkoo | ORC % Sales | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooORC % SalesB2B | Hipkoo | ORC % Sales | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooORC % SalesOnline | Hipkoo | ORC % Sales | Online | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooCatalogue Cost % SalesTMP | Hipkoo | Catalogue Cost % Sales | TMP | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | | | | |
+| HipkooCatalogue Cost % SalesB2B | Hipkoo | Catalogue Cost % Sales | B2B | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | | | | |
+| HipkooCatalogue Cost % SalesOnline | Hipkoo | Catalogue Cost % Sales | Online | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.01 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | 0.005 | | | | |
+| HipkooPM Cost % SalesTMP | Hipkoo | PM Cost % Sales | TMP | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | | | | |
+| HipkooPM Cost % SalesB2B | Hipkoo | PM Cost % Sales | B2B | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | | | | |
+| HipkooPM Cost % SalesOnline | Hipkoo | PM Cost % Sales | Online | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | | | | |
+| HipkooMarketing and Advertisement | Hipkoo | Marketing and Advertisement | | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooRoyalty | Hipkoo | Royalty | | | | | | | | | | | | | | | | | | | | | | | | |
+| HipkooSalaries - Direct | Hipkoo | Salaries - Direct | | 0.02345361370317226 | 0.023701291402616613 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.002 | 0.027600000000000006 | 0.031740000000000004 | 0.036501 | 0.04197615 | | | | | |
+| HipkooOverheads - Direct | Hipkoo | Overheads - Direct | | | | 11.89837661882231 | 12.005035530856052 | 12.091414705952499 | 2.1836062922770823 | 2.2820478128173227 | 2.387213210383453 | 2.514118186129827 | 2.612407767567354 | 3.6454456282171894 | 3.5061850515447235 | 3.483274336893534 | 3.1605022712007234 | 3.288590028219029 | 3.515197432008141 | 3.7225002269342395 | 3.7225002269342395 | 3.722500226934239 | 3.7225002269342395 | |
+| | HIPKOO | | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSales Share %TMP | Brands upto 75 Crs | Sales Share % | TMP | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.37 | 0.37 | 0.37 | 0.30000000000000004 | 0.30000000000000004 | 0.30000000000000004 | 0.28 | 0.28 | 0.28 | 0.25 | 0.25 | 0.25 | | | | |
+| Brands upto 75 CrsSales Share %B2B | Brands upto 75 Crs | Sales Share % | B2B | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.08 | 0.08 | 0.08 | 0.1 | 0.1 | 0.1 | 0.12 | 0.12 | 0.12 | 0.15 | 0.15 | 0.15 | | | | |
+| Brands upto 75 CrsSales Share %Online | Brands upto 75 Crs | Sales Share % | Online | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.55 | 0.55 | 0.55 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | | | | |
+| Brands upto 75 CrsReturns%TMP | Brands upto 75 Crs | Returns% | TMP | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 75 CrsReturns%B2B | Brands upto 75 Crs | Returns% | B2B | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 75 CrsReturns%Online | Brands upto 75 Crs | Returns% | Online | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 75 CrsAvg MRPTMP | Brands upto 75 Crs | Avg MRP | TMP | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | | | | |
+| Brands upto 75 CrsAvg MRPB2B | Brands upto 75 Crs | Avg MRP | B2B | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | | | | |
+| Brands upto 75 CrsAvg MRPOnline | Brands upto 75 Crs | Avg MRP | Online | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | 3000 | | | | |
+| Brands upto 75 CrsDisc/Margin % MRPTMP | Brands upto 75 Crs | Disc/Margin % MRP | TMP | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 75 CrsDisc/Margin % MRPB2B | Brands upto 75 Crs | Disc/Margin % MRP | B2B | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | | | | |
+| Brands upto 75 CrsDisc/Margin % MRPOnline | Brands upto 75 Crs | Disc/Margin % MRP | Online | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 75 CrsB2B GMV FactorB2B | Brands upto 75 Crs | B2B GMV Factor | B2B | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | 2.4888888888888894 | | | | |
+| Brands upto 75 CrsGST %TMP | Brands upto 75 Crs | GST % | TMP | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | | |
+| Brands upto 75 CrsGST %B2B | Brands upto 75 Crs | GST % | B2B | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | | |
+| Brands upto 75 CrsGST %Online | Brands upto 75 Crs | GST % | Online | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | | |
+| Brands upto 75 CrsABSTMP | Brands upto 75 Crs | ABS | TMP | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | | | | |
+| Brands upto 75 CrsABSB2B | Brands upto 75 Crs | ABS | B2B | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | | | | |
+| Brands upto 75 CrsABSOnline | Brands upto 75 Crs | ABS | Online | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | | | | |
+| Brands upto 75 CrsSplit RatioTMP | Brands upto 75 Crs | Split Ratio | TMP | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 75 CrsSplit RatioB2B | Brands upto 75 Crs | Split Ratio | B2B | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 75 CrsSplit RatioOnline | Brands upto 75 Crs | Split Ratio | Online | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 75 CrsCOD OrdersTMP | Brands upto 75 Crs | COD Orders | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsCOD OrdersB2B | Brands upto 75 Crs | COD Orders | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsCOD OrdersOnline | Brands upto 75 Crs | COD Orders | Online | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | | | | |
+| Brands upto 75 CrsCOGS % MRPTMP | Brands upto 75 Crs | COGS % MRP | TMP | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.3 | 0.3 | 0.3 | 0.28 | 0.28 | 0.28 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.23 | 0.21 | 0.2 | |
+| Brands upto 75 CrsCOGS % MRPB2B | Brands upto 75 Crs | COGS % MRP | B2B | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.3 | 0.3 | 0.3 | 0.28 | 0.28 | 0.28 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.23 | 0.21 | 0.2 | |
+| Brands upto 75 CrsCOGS % MRPOnline | Brands upto 75 Crs | COGS % MRP | Online | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.3 | 0.3 | 0.3 | 0.28 | 0.28 | 0.28 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.26 | 0.23 | 0.21 | 0.2 | |
+| Brands upto 75 CrsSC - Prepaid per shipmentTMP | Brands upto 75 Crs | SC - Prepaid per shipment | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - Prepaid per shipmentB2B | Brands upto 75 Crs | SC - Prepaid per shipment | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - Prepaid per shipmentOnline | Brands upto 75 Crs | SC - Prepaid per shipment | Online | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | | | | |
+| Brands upto 75 CrsSC - COD per shipmentTMP | Brands upto 75 Crs | SC - COD per shipment | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - COD per shipmentB2B | Brands upto 75 Crs | SC - COD per shipment | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - COD per shipmentOnline | Brands upto 75 Crs | SC - COD per shipment | Online | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | 180 | | | | |
+| Brands upto 75 CrsSC - Return per shipmentTMP | Brands upto 75 Crs | SC - Return per shipment | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - Return per shipmentB2B | Brands upto 75 Crs | SC - Return per shipment | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSC - Return per shipmentOnline | Brands upto 75 Crs | SC - Return per shipment | Online | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | | | | |
+| Brands upto 75 CrsWH on OutwardsTMP | Brands upto 75 Crs | WH on Outwards | TMP | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | | | | |
+| Brands upto 75 CrsWH on OutwardsB2B | Brands upto 75 Crs | WH on Outwards | B2B | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | | | | |
+| Brands upto 75 CrsWH on OutwardsOnline | Brands upto 75 Crs | WH on Outwards | Online | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | 9.1 | | | | |
+| Brands upto 75 CrsWH on ReturnsTMP | Brands upto 75 Crs | WH on Returns | TMP | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | | | | |
+| Brands upto 75 CrsWH on ReturnsB2B | Brands upto 75 Crs | WH on Returns | B2B | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | | | | |
+| Brands upto 75 CrsWH on ReturnsOnline | Brands upto 75 Crs | WH on Returns | Online | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 | | | | |
+| Brands upto 75 CrsWH on StockingTMP | Brands upto 75 Crs | WH on Stocking | TMP | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | | | | |
+| Brands upto 75 CrsWH on StockingB2B | Brands upto 75 Crs | WH on Stocking | B2B | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | | | | |
+| Brands upto 75 CrsWH on StockingOnline | Brands upto 75 Crs | WH on Stocking | Online | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | 2.1 | | | | |
+| Brands upto 75 CrsPacking Cost per orderTMP | Brands upto 75 Crs | Packing Cost per order | TMP | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | | | | |
+| Brands upto 75 CrsPacking Cost per orderB2B | Brands upto 75 Crs | Packing Cost per order | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsPacking Cost per orderOnline | Brands upto 75 Crs | Packing Cost per order | Online | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | | | | |
+| Brands upto 75 CrsOther FUL %TMP | Brands upto 75 Crs | Other FUL % | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsOther FUL %B2B | Brands upto 75 Crs | Other FUL % | B2B | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.015 | 0.01 | 0.01 | | | | |
+| Brands upto 75 CrsOther FUL %Online | Brands upto 75 Crs | Other FUL % | Online | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.015 | 0.01 | 0.01 | | | | |
+| Brands upto 75 CrsCommission % SalesTMP | Brands upto 75 Crs | Commission % Sales | TMP | 0.35 | 0.35 | 0.35 | 0.35 | 0.35 | 0.35 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.28 | 0.25 | 0.23 | | | |
+| Brands upto 75 CrsCommission % SalesB2B | Brands upto 75 Crs | Commission % Sales | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsCommission % SalesOnline | Brands upto 75 Crs | Commission % Sales | Online | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsORC % SalesTMP | Brands upto 75 Crs | ORC % Sales | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsORC % SalesB2B | Brands upto 75 Crs | ORC % Sales | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsORC % SalesOnline | Brands upto 75 Crs | ORC % Sales | Online | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsCatalogue Cost % SalesTMP | Brands upto 75 Crs | Catalogue Cost % Sales | TMP | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | | | |
+| Brands upto 75 CrsCatalogue Cost % SalesB2B | Brands upto 75 Crs | Catalogue Cost % Sales | B2B | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | | | | |
+| Brands upto 75 CrsCatalogue Cost % SalesOnline | Brands upto 75 Crs | Catalogue Cost % Sales | Online | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | | | | |
+| Brands upto 75 CrsPM Cost % SalesTMP | Brands upto 75 Crs | PM Cost % Sales | TMP | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | | | | |
+| Brands upto 75 CrsPM Cost % SalesB2B | Brands upto 75 Crs | PM Cost % Sales | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsPM Cost % SalesOnline | Brands upto 75 Crs | PM Cost % Sales | Online | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.2 | 0.15 | 0.1 | | | |
+| Brands upto 75 CrsMarketing and Advertisement | Brands upto 75 Crs | Marketing and Advertisement | | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 | 0.13 | 0.11 | 0.1 | 0.1 | | | |
+| Brands upto 75 CrsRoyalty | Brands upto 75 Crs | Royalty | | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsSalaries - Direct | Brands upto 75 Crs | Salaries - Direct | | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 75 CrsOverheads - Direct | Brands upto 75 Crs | Overheads - Direct | | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | 0.4 | | | | |
+| | Brands upto 75 Crs | | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 30 CrsSales Share %TMP | Brands upto 30 Crs | Sales Share % | TMP | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.44999999999999996 | 0.37 | 0.37 | 0.37 | 0.30000000000000004 | 0.30000000000000004 | 0.30000000000000004 | 0.28 | 0.28 | 0.28 | 0.25 | 0.25 | 0.25 | | | | |
+| Brands upto 30 CrsSales Share %B2B | Brands upto 30 Crs | Sales Share % | B2B | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.08 | 0.08 | 0.08 | 0.1 | 0.1 | 0.1 | 0.12 | 0.12 | 0.12 | 0.15 | 0.15 | 0.15 | | | | |
+| Brands upto 30 CrsSales Share %Online | Brands upto 30 Crs | Sales Share % | Online | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.55 | 0.55 | 0.55 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | 0.6 | | | | |
+| Brands upto 30 CrsReturns%TMP | Brands upto 30 Crs | Returns% | TMP | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 30 CrsReturns%B2B | Brands upto 30 Crs | Returns% | B2B | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 30 CrsReturns%Online | Brands upto 30 Crs | Returns% | Online | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 30 CrsAvg MRPTMP | Brands upto 30 Crs | Avg MRP | TMP | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | | | | |
+| Brands upto 30 CrsAvg MRPB2B | Brands upto 30 Crs | Avg MRP | B2B | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | | | | |
+| Brands upto 30 CrsAvg MRPOnline | Brands upto 30 Crs | Avg MRP | Online | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | 2000 | | | | |
+| Brands upto 30 CrsDisc/Margin % MRPTMP | Brands upto 30 Crs | Disc/Margin % MRP | TMP | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 30 CrsDisc/Margin % MRPB2B | Brands upto 30 Crs | Disc/Margin % MRP | B2B | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | 0.55 | | | | |
+| Brands upto 30 CrsDisc/Margin % MRPOnline | Brands upto 30 Crs | Disc/Margin % MRP | Online | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | 0.3 | | | | |
+| Brands upto 30 CrsB2B GMV FactorB2B | Brands upto 30 Crs | B2B GMV Factor | B2B | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | 2.3333333333333335 | | | | |
+| Brands upto 30 CrsGST %TMP | Brands upto 30 Crs | GST % | TMP | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | | |
+| Brands upto 30 CrsGST %B2B | Brands upto 30 Crs | GST % | B2B | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | | | | |
+| Brands upto 30 CrsGST %Online | Brands upto 30 Crs | GST % | Online | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | | | | |
+| Brands upto 30 CrsABSTMP | Brands upto 30 Crs | ABS | TMP | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | 1.05 | | | | |
+| Brands upto 30 CrsABSB2B | Brands upto 30 Crs | ABS | B2B | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | | | | |
+| Brands upto 30 CrsABSOnline | Brands upto 30 Crs | ABS | Online | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | 1.6 | | | | |
+| Brands upto 30 CrsSplit RatioTMP | Brands upto 30 Crs | Split Ratio | TMP | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 30 CrsSplit RatioB2B | Brands upto 30 Crs | Split Ratio | B2B | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 30 CrsSplit RatioOnline | Brands upto 30 Crs | Split Ratio | Online | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | | | | |
+| Brands upto 30 CrsCOD OrdersTMP | Brands upto 30 Crs | COD Orders | TMP | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 30 CrsCOD OrdersB2B | Brands upto 30 Crs | COD Orders | B2B | | | | | | | | | | | | | | | | | | | | | | | |
+| Brands upto 30 CrsCOD OrdersOnline | Brands upto 30 Crs | COD Orders | Online | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 | | | | |
+| Brands upto 30 CrsCOGS % MRPTMP | Brands upto 30 Crs | COGS % MRP | TMP | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.32 | 0.3 | 0.3 | 0.3 | 0.28 | 0.28 | 0.28 | 0.26 | | | | | | | | | |

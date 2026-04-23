@@ -1,0 +1,688 @@
+# Incremental Stores
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Avg Annual Qty sold in new Stores (pcs) | 60 | 75 |
+| SSG | 0.15 | 0.15 |
+| ASP growth | 3300 | 3300 |
+
+## Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 2 |
+| Qty Growth (%) | 4 | 2 | 0.7 | 0.7 | 0.5 | 0.5 |
+| ASP | 3635.59 |
+| Qty Growth (%) | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 |
+
+# Sunglasses
+
+## Gio Collection
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | 71 | 163 | 175 |
+| Incremental Stores | 35 | 35 | 35 | 35 | 35 | 35 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 93.04225352112677 | 360.60122699386505 | 425.7177914110429 | 450 |
+| SSG | 0.12 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 1921.9415001513862 | 1493.886973038936 | 1583.3223922413963 | -0.1 |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 25 | 25 | 25 | 25 | 25 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 1 | 75 | 100 |
+| SSG | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | -23.220272727276264 | 1398.37 |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 686 | 1363 | 721 | 1612 |
+| Qty Growth (%) | 1.2357836338418862 | 5 | 3 | 1 | 0.7 | 0.5 | 0.5 |
+| ASP | 866.6752915451908 | 805.8198312545859 | 1140.8411095700503 | 1060.3267955490082 |
+| Qty Growth (%) | -0.0705745202777498 | | | | | | |
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | 73 | 157 | 175 |
+| Incremental Stores | 35 | 35 | 35 | 35 | 35 | 35 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 71.23566878980891 | 140 | 180 | 240 |
+| SSG | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 |
+| ASP growth | 2531.308994894707 | 1554.34801769712 | 1793.486291036436 | -0.15 |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 30 | 30 | 30 | 30 | 30 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 26 | | 68 | 90 |
+| SSG | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 232.8407692307673 | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 110 | 194 | 302 |
+| Qty Growth (%) | 1 | 3 | 3 | 2 | 1 | 1 | 1 |
+| ASP | 1930.6584545454532 | 2045.9524742268025 | 1872.1894039735116 |
+| Qty Growth (%) | -0.1 | | | | | | |
+
+## Superdry
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | 53 | 115 | 100 |
+| Incremental Stores | -25 | 10 | 10 | 10 | 10 | 10 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 37.68695652173913 | | 48 | 54 |
+| SSG | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 3228.9986058301643 | 2185.2667139086557 | 3010.672100829828 | 0.15 |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 85 | 296 | 106 |
+| Qty Growth (%) | -0.6418918918918919 | 0.5 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 |
+| ASP | 3218.765176470588 | 2287.535675675674 | 2386.9663207547164 |
+| Qty Growth (%) | 0.04346627077178722 | | | | | | |
+
+# Travelgear
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 30 | 30 | 30 | 30 | 30 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 150 |
+| SSG | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 2793.011288936064 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 30 | 30 | 30 | 30 | 30 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 150 |
+| SSG | 0.05 | 0.07 | 0.07 | 0.07 | 0.07 |
+| ASP growth | 1675.8067733616383 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 2519 | 7958 |
+| Qty Growth (%) | 0.3 | 0.3 | 0.25 | 0.25 | 0.25 | 0.25 |
+| ASP | 2307.0137197300514 | 1303.8543319206876 |
+| Qty Growth (%) | -0.15 | -0.15 | | | | | |
+
+## Swiss Eagle
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 30 | 30 | 30 | 30 | 30 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 90 |
+| SSG | 0.05 | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 3800 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 1977 | 2151 |
+| Qty Growth (%) | 0.2 | 0.35 | 0.35 | 0.35 | 0.3 | 0.3 | 0.3 |
+| ASP | 2721.9422610015013 | 820.6844844490869 |
+| Qty Growth (%) | | | | | | | |
+
+## Kenneth Cole
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 45 | 45 | 45 | 45 | 45 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 100 |
+| SSG | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 4000 | 4000 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 40 | 40 | 40 | 30 | 30 | 30 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 90 |
+| SSG | 0.07 | 0.07 | 0.07 | 0.07 | 0.07 | 0.07 |
+| ASP growth | 2800 | 2800 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 1200 |
+| Qty Growth (%) | 1.5 | 1 | 0.3 | 0.3 | 0.3 |
+| ASP | 3332.593250773994 |
+| Qty Growth (%) | | | | | |
+
+## Nautica
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 30 | 30 | 25 | 25 | 25 | 25 |
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 60 |
+| SSG | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 5500 | 5500 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 20 | 20 | 20 | 20 | 20 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 40 | |
+| SSG | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 |
+| ASP growth | 3500 | 3500 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 300 |
+| Qty Growth (%) | 1.5 | 1 | 0.7 | 0.7 | 0.7 |
+| ASP | 2959.7395833333335 |
+| Growth (%) | | | | | |
+
+# Apparel
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 35 | 35 | 35 | 35 | 35 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 1000 | 1200 |
+| SSG | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 2000 | 2000 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | 13 |
+| Incremental Stores | 20 | 20 | 20 | 20 | 20 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 200 | 300 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 1300 | 1300 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 1200 |
+| Qty Growth (%) | 3 | 1 | 0.5 | 0.5 | 0.5 |
+| ASP | 1200 |
+| Qty Growth (%) | | | | | |
+
+## Kenneth Cole
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 35 | 35 | 35 | 35 | 35 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 800 | 1000 |
+| SSG | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 3000 | 3000 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 20 | 20 | 20 | 20 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 90 | 100 |
+| SSG | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 |
+| ASP growth | 1700 | 1700 | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 3230 | 1000 |
+| Qty Growth (%) | 1.5 | 1 | 0.5 | 0.5 | 0.5 |
+| ASP | 2000 |
+| Qty Growth (%) | | | | | |
+
+# Footwear
+
+## Giordano
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 25 | 40 | 40 | 40 | 40 | 40 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 470 | 500 |
+| SSG | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| ASP growth | 2500 | 2500 | | | | |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 20 | 25 | 25 | 25 | 25 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 250 | 265 |
+| SSG | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 |
+| ASP growth | 1500 | | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 5000 |
+| Qty Growth (%) | 0.75 | 0.5 | 0.3 | 0.3 | 0.3 |
+| ASP | 1600 |
+| Qty Growth (%) | -0.03 | | | | |
+
+## Kenneth Cole
+
+### Modern Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 40 | 40 | 40 | 40 | 40 | 40 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 240 | 280 |
+| SSG | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 5000 | 5000 | -0.07 | -0.07 | -0.07 | -0.07 | -0.07 |
+
+### Traditional Retail
+
+| Metric | Value |
+| :--- | :--- |
+| Existing Stores | |
+| Incremental Stores | 20 | 20 | 20 | 20 | 20 | 20 |
+
+| Metric | Yr1 | Yr2 |
+| :--- | :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 90 | 100 |
+| SSG | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 |
+| ASP growth | 3000 | | | | | |
+
+### Online
+
+| Metric | Value |
+| :--- | :--- |
+| Annual Qty sold (pcs) | 4000 |
+| Qty Growth (%) | 0.75 | 0.7 | 0.6 | 0.5 | 0.5 |
+| ASP | 3500 |
+| Qty Growth (%) | -0.07 | -0.07 | | | |
+
+# Kiosk
+
+## Total Kiosks (Type A + Type B)
+
+| Metric | Value |
+| :--- | :--- |
+| New Kiosks | 3 | 2 | 5 | 5 | 5 | 5 | 5 | 5 |
+| Total | 5 | 10 | 15 | 20 | 25 | 30 | 35 |
+
+## Type A Kiosks (Watches + Sunglasses)
+
+| Metric | Value |
+| :--- | :--- |
+| New Kiosks | 2 | 1 | 4 | 4 | 4 | 4 | 4 | 4 |
+| Total | 3 | 7 | 11 | 15 | 19 | 23 | 27 |
+
+## Type B Kiosks (Watches + Sunglasses + Handbags)
+
+| Metric | Value |
+| :--- | :--- |
+| New Kiosks | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
+| Total | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+
+## Assumptions for Type A Kiosks
+
+### Watches
+
+#### Giordano
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 1200 | 3438 | 720 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 3248.952732778184 | 2765.01926992433 | | | | |
+
+#### Gio Collection
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 360 | | 240 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 3471.2660744985615 | 3411.0988649940246 | | | | |
+
+#### Swiss Eagle
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 60 | | 48 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 8436.55978494624 | 8080.158292682922 | | | | |
+
+#### Fjord
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 120 | | 96 |
+| SSG | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 |
+| ASP growth | 3512.2856521739127 | 3549.1259999999997 | | | | |
+
+### Sunglasses
+
+#### Giordano
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 360 | | 300 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 2352.9840888888903 | 2523.9504923599357 | | | | |
+
+#### Gio Collection
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 720 | | 780 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 1704 | 0.05 | | | | |
+
+#### Kenneth Cole
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 60 | | | | | |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 4700 | -0.07 | -0.07 | -0.07 | -0.07 | -0.07 | -0.07 |
+
+## Assumptions for Type B Kiosks (Watches + Sunglasses + Handbags)
+
+### Watches
+
+#### Giordano
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 1680 | | 960 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 2352.9840888888903 | 2523.9504923599357 | | | | |
+
+#### Gio Collection
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 360 | | 300 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 3471.2660744985615 | 3411.0988649940246 | | | | |
+
+#### Swiss Eagle
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 72 | | 60 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 8436.55978494624 | 8080.158292682922 | | | | |
+
+#### Fjord
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 168 | | 144 |
+| SSG | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 |
+| ASP growth | 3512.2856521739127 | 3549.1259999999997 | | | | |
+
+### Sunglasses
+
+#### Giordano
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 456 | | 420 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 2352.9840888888903 | 2523.9504923599357 | | | | |
+
+#### Gio Collection
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 960 | | 936 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 1567.4988834612702 | 1742.5061122112224 | | | | |
+
+#### Kenneth Cole
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 84 | | | | | |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 4700 | 2790.7825000000003 | -0.07 | -0.07 | -0.07 | -0.07 | -0.07 |
+
+### Handbags
+
+#### Giordano
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 432 | | 456 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 2166.1424439918574 | 1432.6621280276747 | | | | |
+
+#### Gio Collection
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 144 | | 168 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 1894.2501234567906 | 1204.918614232209 | | | | |
+
+#### Elle
+
+| Metric | Yr1 |
+| :--- | :--- |
+| Annual Qty sold in new Stores (pcs) | 960 | | 936 |
+| SSG | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 2331.9808771929825 | 1634.8017183288382 | | | | |
+
+# Stores
+
+## Total Stores (KC + Giordano + Lux - Acc + Lux - Handbags)
+
+| Metric | Value |
+| :--- | :--- |
+| New Stores | 3 | 3 | 12 | 13 | 13 | 12 | 12 |
+| Total | 3 | 6 | 18 | 31 | 44 | 56 | 68 |
+
+## Kenneth Cole EBO (Apparel + Footwear + Sunglasses)
+
+| Metric | Value |
+| :--- | :--- |
+| New Stores | 1 | 1 | 2 | 2 | 1 | 1 |
+| Total | 1 | 2 | 4 | 6 | 7 | 8 |
+
+| Metric | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Avg Sales per month (INR Mn) | 1 | 1.05 | 1.2075 | 1.3282500000000002 | 1.4610750000000003 | 1.6071825000000004 | 1.7679007500000006 |
+| Growth (%) | 0.05 | 0.15 | 0.1 | 0.1 | 0.1 | 0.1 | |
+
+### Category-wise Sales Spilt (%)
+
+| Category | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Footwear | 0.3 | 0.27 | 0.23 | 0.18 | 0.17 | 0.17 | 0.17 |
+| Apparel | 0.5 | 0.48 | 0.45 | 0.42 | 0.4 | 0.4 | 0.4 |
+| Luggage | 0.05 | 0.07 | 0.1 | 0.12 | 0.12 | 0.12 | 0.12 |
+| Handbags | 0.13 | 0.15 | 0.17 | 0.2 | 0.23 | 0.23 | 0.23 |
+| Sunglasses | 0.019999999999999907 | 0.029999999999999916 | 0.04999999999999993 | 0.08000000000000007 | 0.07999999999999996 | 0.07999999999999996 | 0.07999999999999996 |
+
+## Giordano EBO (Apparel + Footwear + Sunglasses + Watches)
+
+| Metric | Value |
+| :--- | :--- |
+| New Stores | 1 | 2 | 3 | 3 | 3 | 3 |
+| Total | 1 | 3 | 6 | 9 | 12 | 15 |
+
+| Metric | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Avg Sales per month (INR Mn) | 1 | 1.05 | 1.1550000000000002 | 1.3282500000000002 | 1.4610750000000003 | 1.6071825000000004 | 1.7679007500000006 |
+| Growth (%) | 0.05 | 0.1 | 0.15 | 0.1 | 0.1 | 0.1 | |
+
+### Category-wise Sales Spilt (%)
+
+| Category | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Watches | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| Apparel | 0.7 | 0.7 | 0.7 | 0.7 | 0.7 | 0.7 | 0.7 |
+| Footwear | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 |
+| Sunglasses | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 |
+| Luggage | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 | 0.03 |
+| Handbags | 0.040000000000000036 | 0.040000000000000036 | 0.040000000000000036 | 0.040000000000000036 | 0.040000000000000036 | 0.040000000000000036 | 0.040000000000000036 |
+
+## Luxuberance - Accessories (Watches + Sunglasses + Handbags)
+
+| Metric | Value |
+| :--- | :--- |
+| New Stores | 1 | 1 | 2 | 3 | 3 | 3 | 3 |
+| Total | 1 | 2 | 4 | 7 | 10 | 13 | 16 |
+
+| Metric | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Avg Sales per month (INR Mn) | 0.9 | 0.9450000000000001 | 1.0395 | 1.2474 | 1.43451 | 1.5779610000000002 | 1.7357571000000003 |
+| Growth (%) | 0.05 | 0.1 | 0.2 | 0.15 | 0.1 | 0.1 | |
+
+## Luxuberance - Multi brand handbags EBO
+
+| Metric | Value |
+| :--- | :--- |
+| New Stores | 2 | | 7 | 5 | 5 | 5 | 5 |
+| Total | 2 | 2 | 9 | 14 | 19 | 24 | 29 |
+
+| Metric | Yr1 | Yr2 | Yr3 | Yr4 | Yr4 | Yr4 | Yr4 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Avg Sales per month (INR Mn) | 0.9 | 0.9450000000000001 | 1.0395 | 1.2474 | 1.3721400000000001 | 1.5093540000000003 | 1.6602894000000006 |
+| Growth (%) | 0.05 | 0.1 | 0.2 | 0.1 | 0.1 | 0.1 | |
+
+--- Rev Working ---
+
+## Index
+
+| Metric | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Watches** | | | | | | | | | | |
+| **Giordano** | | | | | | | | | | |
+| **Modern Retail** | | | | | | | | | | |
+| Total Stores | 123 | 175 | 239 | 249 | 264 | 279 | 294 | 309 | 324 | 339 |
+| Incremental Stores | | 52 | 64 | 10 | 15 | 15 | 15 | 15 | 15 | 15 |
+| **Annual Qty Sold per Store from (pcs)** | | | | | | | | | | |
+| SSG | | 0.05 | 0.08 | 0.08 | 0.04 | 0.04 | 0.04 | | | |
+| Existing Stores | 371.2682926829268 | 352.06857142857143 | 309.6694560669456 | 244.91164658634537 | 257.15722891566264 | 277.72980722891566 | 299.9481918072289 | 311.9461194795181 | 324.4239642586988 | 337.40092282904675 |
+| New Store- yr1 | | | | 320 | 300 | 324 | 336.96000000000004 | 350.43840000000006 | 364.45593600000007 | |
+| New Store- yr2 | | | | | | 320 | 300 | 324 | 336.96000000000004 | 350.43840000000006 |
+| New Store- yr3 | | | | | | | | 320 | 300 | 324 | 336.96000000000004 |
+| New Store- yr4 | | | | | | | | | | 320 | 300 | 324 |
+| New Store- yr5 | | | | | | | | | | | | 320 | 300 |
+| New Store- yr6 | | | | | | | | | | | | | 320 |
+| New Store- yr7 | | | | | | | | | | | | | |
+| **Annual Qty Sold** | | | | | | | | | | |
+| Existing Stores | 45666 | 61612 | 74011 | 60983 | 61460.57771084337 | 66377.42392771084 | 71687.61784192771 | 74555.12255560482 | 77537.32745782901 | 80638.82055614218 |
+| New Store- yr1 | | | | 3200 | 3000 | 3240 | 3369.6000000000004 | 3504.3840000000005 | 3644.5593600000007 | |
+| New Store- yr2 | | | | | | 4800 | 4500 | 4860 | 5054.400000000001 | 5256.576000000001 |
+| New Store- yr3 | | | | | | | | 4800 | 4500 | 4860 | 5054.400000000001 |
+| New Store- yr4 | | | | | | | | | | 4800 | 4500 | 4860 |
+| New Store- yr5 | | | | | | | | | | | | 2400 | 2250 |
+| New Store- yr6 | | | | | | | | | | | | | 2400 |
+| New Store- yr7 | | | | | | | | | | | | | |
+| **Total Quantity Sold (pcs)** | | 45666 | 61612 | 74011 | 60983 | 64660.57771084337 | 74177.42392771084 | 84227.61784192771 | 92084.72255560482 | 97856.11145782901 | 104104.3559161 |

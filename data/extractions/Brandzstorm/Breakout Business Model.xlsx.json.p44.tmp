@@ -1,0 +1,215 @@
+| ID | Category | Brand | Channel | Metric | Col 1 | Col 2 | Col 3 | Col 4 | Col 5 | Col 6 | Col 7 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| SunglassesFossilKiosk | Sunglasses | Fossil | Kiosk | ASP growth | | | | | | |
+| SunglassesFossilKiosk | Sunglasses | Fossil | Kiosk | Sales Value (In Rs) | | | | | | 147498.92 | 639906.46 |
+| SunglassesFossilKiosk | Sunglasses | Fossil | Kiosk | Sales value growth | | | | | | |
+| SunglassesFossilKiosk | Sunglasses | Fossil | Kiosk | GP | | | | | | |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | Volume | | | | | | 3 | 2 |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | Volume growth | | | | | | -0.3333 |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | ASP (In Rs) | | | | | | 2046.81 | 3328.88 |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | ASP growth | | | | | | |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | Sales Value (In Rs) | | | | | | 6140.44 | 6657.75 |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | Sales value growth | | | | | | |
+| SunglassesFossilOther | Sunglasses | Fossil | Other | GP | | | | | | |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | Volume | | | | | 789 | 4334 | 4067 |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | Volume growth | | | | | | -0.0614 |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | ASP (In Rs) | | | | | 3228.99 | 2185.27 | 3010.67 |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | ASP growth | | | | | | |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | Sales Value (In Rs) | | | | | 2547679.90 | 9470945.94 | 12244403.43 |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | Sales value growth | | | | | | |
+| SunglassesSuperdryModern Retail | Sunglasses | Superdry | Modern Retail | GP | | | | | | |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | Volume | | | | | | 18 |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | Volume growth | | | | | | |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | ASP (In Rs) | | | | | | 1429.45 |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | ASP growth | | | | | | |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | Sales Value (In Rs) | | | | | | 25730.15 |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | Sales value growth | | | | | | |
+| SunglassesSuperdryTraditional Retail | Sunglasses | Superdry | Traditional Retail | GP | | | | | | |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | Volume | | | | | 85 | 296 | 106 |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | Volume growth | | | | | | -0.6419 |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | ASP (In Rs) | | | | | 3218.77 | 2287.54 | 2386.97 |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | ASP growth | | | | | | |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | Sales Value (In Rs) | | | | | 273595.04 | 677110.56 | 253018.43 |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | Sales value growth | | | | | | |
+| SunglassesSuperdryOnline | Sunglasses | Superdry | Online | GP | | | | | | |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | Volume | | | | | | 107 | 138 |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | Volume growth | | | | | | 0.2897 |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | ASP (In Rs) | | | | | | 2285.94 | 3119.49 |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | ASP growth | | | | | | |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | Sales Value (In Rs) | | | | | | 244595.65 | 430489.97 |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | Sales value growth | | | | | | |
+| SunglassesSuperdryKiosk | Sunglasses | Superdry | Kiosk | GP | | | | | | |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | Volume | | | | | 4 | 6 |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | Volume growth | | | | | | |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | ASP (In Rs) | | | | | 2700.32 | 1447.37 |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | ASP growth | | | | | | |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | Sales Value (In Rs) | | | | | 10801.27 | 8684.20 |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | Sales value growth | | | | | | |
+| SunglassesSuperdryOther | Sunglasses | Superdry | Other | GP | | | | | | |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | Volume | | | | | | 667 | 1400 |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | Volume growth | | | | | | 1.0990 |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | ASP (In Rs) | | | | | | 1316.96 | 1507.62 |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | ASP growth | | | | | | |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | Sales Value (In Rs) | | | | | | 878412.69 | 2110663.16 |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | Sales value growth | | | | | | |
+| SunglassesSteve MaddenModern Retail | Sunglasses | Steve Madden | Modern Retail | GP | | | | | | |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | Volume | | | | | | 32 | 82 |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | Volume growth | | | | | | 1.5625 |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | ASP (In Rs) | | | | | | 1196.47 | 1771.17 |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | ASP growth | | | | | | |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | Sales Value (In Rs) | | | | | | 38287.12 | 145235.90 |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | Sales value growth | | | | | | |
+| SunglassesSteve MaddenTraditional Retail | Sunglasses | Steve Madden | Traditional Retail | GP | | | | | | |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | Volume | | | | | | 243 |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | Volume growth | | | | | | |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | ASP (In Rs) | | | | | | 1357.56 |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | ASP growth | | | | | | |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | Sales Value (In Rs) | | | | | | 329885.93 |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | Sales value growth | | | | | | |
+| SunglassesSteve MaddenOnline | Sunglasses | Steve Madden | Online | GP | | | | | | |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | Volume | | | | | | 83 | 343 |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | Volume growth | | | | | | 3.2875 |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | ASP (In Rs) | | | | | | 2056.91 | 1473.11 |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | ASP growth | | | | | | |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | Sales Value (In Rs) | | | | | | 170723.40 | 505275.14 |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | Sales value growth | | | | | | |
+| SunglassesSteve MaddenKiosk | Sunglasses | Steve Madden | Kiosk | GP | | | | | | |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | Volume | | | | | | 3 | 59 |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | Volume growth | | | | | | 18.6667 |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | ASP (In Rs) | | | | | | 2046.61 | 4822.21 |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | ASP growth | | | | | | |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | Sales Value (In Rs) | | | | | | 6139.83 | 284510.65 |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | Sales value growth | | | | | | |
+| SunglassesSteve MaddenOther | Sunglasses | Steve Madden | Other | GP | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | Volume | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | Volume growth | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | ASP (In Rs) | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | ASP growth | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | Sales Value (In Rs) | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | Sales value growth | | | | | | |
+| SunglassesKCModern Retail | Sunglasses | KC | Modern Retail | GP | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | Volume | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | Volume growth | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | ASP (In Rs) | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | ASP growth | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | Sales Value (In Rs) | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | Sales value growth | | | | | | |
+| SunglassesKCTraditional Retail | Sunglasses | KC | Traditional Retail | GP | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | Volume | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | Volume growth | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | ASP (In Rs) | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | ASP growth | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | Sales Value (In Rs) | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | Sales value growth | | | | | | |
+| SunglassesKCOnline | Sunglasses | KC | Online | GP | | | | | | |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | Volume | | | | | | 8 |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | Volume growth | | | | | | |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | ASP (In Rs) | | | | | | 2790.78 |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | ASP growth | | | | | | |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | Sales Value (In Rs) | | | | | | 22326.26 |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | Sales value growth | | | | | | |
+| SunglassesKCKiosk | Sunglasses | KC | Kiosk | GP | | | | | | |
+| SunglassesKCOther | Sunglasses | KC | Other | Volume | | | | | | 1 |
+| SunglassesKCOther | Sunglasses | KC | Other | Volume growth | | | | | | |
+| SunglassesKCOther | Sunglasses | KC | Other | ASP (In Rs) | | | | | | 1095.07 |
+| SunglassesKCOther | Sunglasses | KC | Other | ASP growth | | | | | | |
+| SunglassesKCOther | Sunglasses | KC | Other | Sales Value (In Rs) | | | | | | 1095.07 |
+| SunglassesKCOther | Sunglasses | KC | Other | Sales value growth | | | | | | |
+| SunglassesKCOther | Sunglasses | KC | Other | GP | | | | | | |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | Volume | | | | | | 72 | -57 |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | Volume growth | | | | | | |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | ASP (In Rs) | | | | | | 6897.40 | 7583.65 |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | ASP growth | | | | | | |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | Sales Value (In Rs) | | | | | | 496612.94 | -432267.92 |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | Sales value growth | | | | | | |
+| SunglassesOthersModern Retail | Sunglasses | Others | Modern Retail | GP | | | | | | |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | Volume | | | | | | 13 | 3 |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | Volume growth | | | | | | |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | ASP (In Rs) | | | | | | 5913.68 | 5302.52 |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | ASP growth | | | | | | |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | Sales Value (In Rs) | | | | | | 76877.82 | 15907.56 |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | Sales value growth | | | | | | |
+| SunglassesOthersTraditional Retail | Sunglasses | Others | Traditional Retail | GP | | | | | | |
+| SunglassesOthersOnline | Sunglasses | Others | Online | Volume | | | | | | 7 | 7 |
+| SunglassesOthersOnline | Sunglasses | Others | Online | Volume growth | | | | | | |
+| SunglassesOthersOnline | Sunglasses | Others | Online | ASP (In Rs) | | | | | | 15202.29 | 9871.42 |
+| SunglassesOthersOnline | Sunglasses | Others | Online | ASP growth | | | | | | |
+| SunglassesOthersOnline | Sunglasses | Others | Online | Sales Value (In Rs) | | | | | | 106416.03 | 69099.97 |
+| SunglassesOthersOnline | Sunglasses | Others | Online | Sales value growth | | | | | | |
+| SunglassesOthersOnline | Sunglasses | Others | Online | GP | | | | | | |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | Volume | | | | | | 36 |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | Volume growth | | | | | | |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | ASP (In Rs) | | | | | | 7560.50 |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | ASP growth | | | | | | |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | Sales Value (In Rs) | | | | | | 272177.91 |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | Sales value growth | | | | | | |
+| SunglassesOthersKiosk | Sunglasses | Others | Kiosk | GP | | | | | | |
+| SunglassesOthersOther | Sunglasses | Others | Other | Volume | | | | | | 5 |
+| SunglassesOthersOther | Sunglasses | Others | Other | Volume growth | | | | | | |
+| SunglassesOthersOther | Sunglasses | Others | Other | ASP (In Rs) | | | | | | 7699.99 |
+| SunglassesOthersOther | Sunglasses | Others | Other | ASP growth | | | | | | |
+| SunglassesOthersOther | Sunglasses | Others | Other | Sales Value (In Rs) | | | | | | 38499.98 |
+| SunglassesOthersOther | Sunglasses | Others | Other | Sales value growth | | | | | | |
+| SunglassesOthersOther | Sunglasses | Others | Other | GP | | | | | | |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | Volume | -2 | | 251 | | 2035 | 29902 | 44375 |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | Volume growth | | -1 | -1 | | | 2.1794 |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | ASP (In Rs) | 1870.31 | | 1441.44 | | 3850.39 | 1779.04 | 1396.90 |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | ASP growth | | -1 | -1 | | | |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | Sales Value (In Rs) | -3740.62 | | 361801.29 | | 7835543.55 | 53196945.28 | 61987516.52 |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | Sales value growth | | -1 | -1 | | | |
+| HandbagsGiordanoModern Retail | Handbags | Giordano | Modern Retail | GP | | | | | | |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | Volume | 897 | | | | 54 | 106 | 16 |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | Volume growth | | -1 | | | | |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | ASP (In Rs) | 1692.27 | | | | 629.78 | 1163.19 | 2871.25 |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | ASP growth | | -1 | | | | |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | Sales Value (In Rs) | 1517963.46 | | | | 34007.85 | 123298.43 | 45940 |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | Sales value growth | | -1 | | | | |
+| HandbagsGiordanoTraditional Retail | Handbags | Giordano | Traditional Retail | GP | | | | | | |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | Volume | 2814 | 7664 | 4829 | 5898 | 13555 | 9900 | 8200 |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | Volume growth | | 1.7235 | -0.3699 | 0.2214 | 1.2982 | | 2.7805 |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | ASP (In Rs) | 779.39 | 1191.73 | 1419.31 | 1783.18 | 1351.79 | 1521.38 | 1213.20 |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | ASP growth | | 0.5290 | 0.1910 | 0.2564 | -0.2419 | |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | Sales Value (In Rs) | 2193217.38 | 9133406.80 | 6853853.80 | 10517168.39 | 18323568.23 | 15061643.10 | 9948275.58 |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | Sales value growth | | 3.1644 | -0.2496 | 0.5345 | 0.7423 | |
+| HandbagsGiordanoOnline | Handbags | Giordano | Online | GP | | | | | | |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | Volume | | | | | | 491 | 1734 |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | Volume growth | | | | | | 10.9586 |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | ASP (In Rs) | | | | | | 2166.14 | 1432.66 |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | ASP growth | | | | | | |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | Sales Value (In Rs) | | | | | | 1063575.94 | 2484236.13 |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | Sales value growth | | | | | | |
+| HandbagsGiordanoKiosk | Handbags | Giordano | Kiosk | GP | | | | | | |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | Volume | 1893 | 3396 | 330 | 646 | 319 | -11 | 93 |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | Volume growth | | 0.7940 | -0.9028 | 0.9576 | -0.5062 | | 14.5 |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | ASP (In Rs) | 1215.17 | 626.41 | 1434.17 | 1337.44 | 321.32 | -4762.66 | 752.60 |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | ASP growth | | -0.4845 | 1.2895 | -0.0674 | -0.7597 | |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | Sales Value (In Rs) | 2300309.06 | 2127294.64 | 473275.21 | 863984.64 | 102501.23 | 52389.27 | 69991.45 |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | Sales value growth | | -0.0752 | -0.7775 | 0.8255 | -0.8814 | |
+| HandbagsGiordanoOther | Handbags | Giordano | Other | GP | | | | | | |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | Volume | 88 | | 2 | | 963 | 1351 | 7951 |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | Volume growth | | -1 | -1 | | | 4.8809 |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | ASP (In Rs) | 2832.70 | | 6498.75 | | 0.48 | 1786.82 | 1366.40 |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | ASP growth | | -1 | -1 | | | |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | Sales Value (In Rs) | 249277.19 | | 12997.50 | | 459.33 | 2413994.34 | 10864247.16 |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | Sales value growth | | -1 | -1 | | | |
+| HandbagsElleModern Retail | Handbags | Elle | Modern Retail | GP | | | | | | |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | Volume | 30 | | | | | 46 |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | Volume growth | | -1 | | | | |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | ASP (In Rs) | 1090.95 | | | | | 2304.84 |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | ASP growth | | -1 | | | | |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | Sales Value (In Rs) | 32728.65 | | | | | 106022.73 |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | Sales value growth | | -1 | | | | |
+| HandbagsElleTraditional Retail | Handbags | Elle | Traditional Retail | GP | | | | | | |
+| HandbagsElleOnline | Handbags | Elle | Online | Volume | | | | | | 2892 | 5748 |
+| HandbagsElleOnline | Handbags | Elle | Online | Volume growth | | | | | | 0.9876 |
+| HandbagsElleOnline | Handbags | Elle | Online | ASP (In Rs) | | | | | | 2447.00 | 868.96 |
+| HandbagsElleOnline | Handbags | Elle | Online | ASP growth | | | | | | |
+| HandbagsElleOnline | Handbags | Elle | Online | Sales Value (In Rs) | | | | | | 7076725.46 | 4994788.77 |
+| HandbagsElleOnline | Handbags | Elle | Online | Sales value growth | | | | | | |
+| HandbagsElleOnline | Handbags | Elle | Online | GP | | | | | | |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | Volume | | | | | | 57 | 1484 |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | Volume growth | | | | | | 25.0351 |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | ASP (In Rs) | | | | | | 2331.98 | 1634.80 |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | ASP growth | | | | | | |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | Sales Value (In Rs) | | | | | | 132922.91 | 2426045.75 |
+| HandbagsElleKiosk | Handbags | Elle | Kiosk | Sales value growth | | | | | | |

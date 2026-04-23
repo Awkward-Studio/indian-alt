@@ -1,0 +1,103 @@
+# Divisional estimates of learning outcomes and schooling status: precision of ASER estimates
+
+Wilima Wadhwa, Director, ASER Centre
+
+Every year since 2005, ASER has presented estimates of learning and status of schooling at the state and district level. The survey design of ASER is based on the premise of generating estimates at the district level. Having estimates of learning levels at the district level is desirable since education plans are made at this level. As a result, ASER is one of the largest sample based surveys conducted in India, with a sample size of approximately 650,000 children in the age group of 3-16 years.
+
+ASER is a household survey, undertaken in almost all rural districts of India. Within each district, 30 villages are randomly chosen¹ and, in each village 20 households are randomly selected for a total of 600 households per district. All children in the age group of 3-16 years who regularly live in the sampled households are recorded in the survey. This translates into around 900-1,200 children per district.²
+
+The statistical precision of district level estimates is an issue because of the ASER sample design - namely clustering and absence of stratification at the village level. In a design without clustering, children in the relevant age group would be directly sampled. Not only is this expensive (in terms of survey time), it is also difficult to have a reliable population frame that could be used for sampling. Instead ASER employs a two-stage clustering design. The first stage clustering happens when villages are randomly picked. The second stage clustering is when households within a village are randomly selected and the children belonging to that household are tested.
+
+While this is an inexpensive and practical way of sampling children, it is well known that clustering increases the variability of estimates. One way of increasing precision at the district level would have been to stratify the village sample according to age of children or school type. However, this would require a prior household listing, which is expensive in terms of both time and resources.
+
+The ASER sample is stratified, however, at the district level. Insofar as outcomes within a district are more homogenous than across districts, stratification within the district leads to more precise estimates at the state level.
+
+Ramaswami and Wadhwa (2009)³ studied the precision of ASER state and district level estimates for a selection of states and variables for the year 2008. They found that state level averages are estimated precisely - with a margin of error of 5% or less. However, district level estimates are less precisely estimated. The precision varies across states and districts and according to the learning outcome. In both cases, learning outcomes of children in grade III-V are relatively less precisely estimated.
+
+Two commonly used measures of precision are the margin of error and the 95% confidence interval.
+
+The margin of error is the % interval around the point estimate that almost certainly contains the population estimate (i.e., with 95% probability). For instance, if x is the margin of error then the population proportion lies within ±x% of the sample proportion with 95% probability.
+
+Suppose $\hat{p}$ is the estimated sample proportion and $\sigma$ is the associated standard error. From statistical theory, it is known that the interval $[\hat{p} \pm 2\sigma]$ contains the population proportion with 95% probability - 95% confidence interval. The margin of error expresses the confidence interval in terms of the sample estimate. It is thus defined as
+
+$$
+me = \frac{2\sigma}{\hat{p}}
+$$
+
+A margin of error of 10% is regarded as an acceptable degree of precision in many studies (United Nations, 2005)⁴. Estimates with a margin of error in excess of 20% are regarded as estimates with low precision.
+
+Note that the margin of error depends on the standard error and the estimated proportion and the standard error itself depends on the estimated proportion. For a given sample size, therefore, a lower precision will be associated with a variable which has a lower incidence in the population and/or a higher standard error. Further, in the case of proportions, for a given sample size, the standard error is the largest for a population proportion close to 0.5. On the other hand, for a given incidence, one way to reduce the standard error and therefore, increase precision is to increase the sample size.
+
+In the case of ASER, as shown by Ramaswami and Wadhwa (2009), precision is not an issue at the state level. At the district level, however, since sample sizes in sub-populations of interest are much smaller than the total sample size, precision can be an issue. Increasing the sample size at the district level, for a national survey, however, is extremely costly. In the past, ASER has clubbed classes while presenting district level estimates, in an attempt to increase the sample size. However, precision gains from this strategy were limited, especially for variables whose estimated proportions were in the vicinity of 0.5.
+
+---
+
+¹ Villages are chosen from the Census Directory using PPS (Probability Proportional to Size) sampling.
+
+² Over time the rural household size, in India, has been steadily falling. Since ASER samples households and not children, the sample size in terms of children has also been falling. For instance, in 2006, a sample of 322,425 households in 15,841 villages yielded 762,252 children in the age group 3-16 years. In comparison, ASER 2016 surveyed 350,232 households in 17,473 villages and the total sample of 3-16 year olds was 562,305.
+
+³ Ramaswami, Bharat and Wadhwa, Wilima (2009), "Survey Design and Precision of ASER Estimates", mimeo.
+
+⁴ United Nations (2005), Designing Household Survey Samples: Practical Guidelines, Studies in Methods, Series F No. 98, Department of Economic and Social Affairs, Statistics Division.
+
+ASER 2016
+233
+
+---
+
+One way to provide sub-state estimates with acceptable levels of precision is to club districts within a state.⁵ Many states have administrative divisions, comprised of two or more districts that can be used as units of analysis. These divisions are at a level of aggregation between the state and district level. Since 2011, ASER has provided estimates for selected indicators at the divisional level.⁶ In the ASER 2014 report, these estimates were provided for the period 2010 to 2014 for the states that have administrative divisions.
+
+As discussed in the sampling note in this report, ASER 2016 uses the new sampling frame of Census 2011. Between Census 2001 and 2011, 31 new rural districts were created. Since divisions are constituted from districts, some of the divisional boundaries have changed as a result of these new districts. In addition, in some states like Punjab, administrative divisions have been formed, which have replaced the geographical divisions used in ASER 2011-14. ASER 2016, therefore, starts a new series of divisional estimates; in subsequent years divisional trends will be added.
+
+ASER 2016 presents divisional estimates for Andhra Pradesh, Assam, Bihar, Chhattisgarh, Haryana, Himachal Pradesh, Jharkhand, Karnataka, Kerala, Madhya Pradesh, Maharashtra, Odisha, Punjab, Rajasthan, Uttar Pradesh, Uttarakhand, and West Bengal.⁷ In addition, in Gujarat, divisions were formed using geographical regions commonly used in the state.⁸
+
+Divisional estimates are provided for the following 6 variables:⁹
+
+- % children in the age group 6-14 years who are not enrolled in school
+- % children in the age group 6-14 years who are enrolled in private school
+- % children in Std III-V who can read at least Std I level text
+- % children in Std III-V who can do at least subtraction
+- % children in Std VI-VIII who can read Std II level text
+- % children in Std VI-VIII who can do division
+
+In addition to point estimates, the 95% confidence interval [ $\hat{p} \pm 2\hat{\sigma}$ ] is also presented. The last row of each state table presents both these statistics for the state as a whole as well.
+
+Figure 1: State learning levels, Margin of error (%), 2016
+
+<!-- Image (528, 142, 904, 388) -->
+
+Figure 1 presents the margin of error for the four learning outcomes in selected states in 2016. As is clear from the figure, most of these are below 5%. Also, note that learning outcomes in arithmetic are less precisely estimated as compared to those in reading – that is, the margin of error for arithmetic learning outcomes is consistently higher as compared to that for reading learning outcomes. This is true for both Std III-V and Std VI-VIII. On average the margin of error is the highest for Std VI-VIII arithmetic levels. In reading there does not seem to be a clear trend across grades.
+
+At the division level, margin of error is, understandably, higher because sample sizes are smaller. For instance, the average margin of error for reading in Std VI-VIII is 3.5% at the state level and 7.6% at the divisional level. Among the four learning outcomes, while average standard errors are similar, these translate into quite different margins of error. Arithmetic learning outcomes have higher margins of error as compared to reading. In reading, Std III-V learning outcomes have a higher margin of error as compared to Std VI-VIII. The highest average margin of error is for arithmetic in Std VI-VIII at 14.1%. In discussing the division level estimates we concentrate on Std VI-VIII learning outcomes since they represent the bestcase (reading) and the worstcase (arithmetic) scenarios.
+
+---
+
+⁵ For instance, NSS surveys are not representative at the district level. However, they are representative for NSS regions, which are formed using agro-climatic criteria.
+
+⁶ We decided to go with the state administrative divisions, rather than the NSS regions, since these are more commonly used within the state.
+
+⁷ The district composition was obtained from the relevant state websites. See the section on Divisional Estimates in this report for the exact composition.
+
+⁸ See the section on Divisional Estimates in this report for the exact composition.
+
+⁹ As compared to ASER 2011-14, we have replaced learning levels in Std. 1-2 with those in Std. 6-8.
+
+---
+
+Figure 2.1: Division learning levels
+Reading Std VI-VIII, Margin of error (%), 2016
+
+Figure 2.2: Division learning levels
+Arithmetic Std VI-VIII, Margin of error (%), 2016
+
+Figures 2.1 and 2.2 present the 2016 margins of error for reading and arithmetic in Std VI-VIII, across divisions of selected states. Reading learning outcomes in most states are estimated with margins of under or close to 10%. The exception is Madhya Pradesh. Across the board precision levels are lower for arithmetic learning outcomes. Most states now have margins of error within 10–15% and those for Chhattisgarh, Madhya Pradesh and Maharashtra are close to 20–25%.
+
+Why are margins of error consistently higher for arithmetic in Std VI-VIII? Similarly, in reading, why are learning outcomes in Std III-V less precisely estimated as compared to Std VI-VIII? First, given a sample size, the margin of error is inversely proportional to the incidence of the variable concerned. What that implies is that any variable that has a low incidence in the population will be estimated with a high margin of error. Intuitively this makes sense because if something is not observed very frequently, one would need a much larger sample size to measure it accurately. However, this is not that much of a problem if the standard error is small. To see why, consider the case of out of school children– say the point estimate is 0.04
+
+(i.e.,4%) with a standard error of 0.01. The margin of error would be 50% (=((2 * 0.01)/0.04)*100), which is very high. However, note that this translates into confidence bounds of ±2 percentage points, i.e., with 95% probability the true proportion of out of school children lie between 2% and 6%. In other words, given a low incidence, a high margin of error may still translate into tight confidence bands. Another way of looking at this is by focusing on children enrolled in school instead of children not enrolled in school. If out of school children are 4% then in-school children will be 96% with the same standard error of 1% giving a margin of error of only 2.1% and confidence bounds of ±2 percentage points around the point estimate of 96%.
+
+Second, the margin of error is directly proportional to the standard error. For a given sample size, a large standard error, implying imprecise estimation, not surprisingly will result in a high margin of error. In the case of proportions, the standard error itself depends on the value of the proportion, and is larger when the value is closer to 0.5. Intuitively, the reason behind this is that the greatest uncertainty is associated with a proportion of 0.5, requiring larger sample sizes to measure it accurately.
+
+By and large, learning levels in reading are higher as compared to arithmetic, resulting in lower margins of error for arithmetic. Often, arithmetic learning levels are closer to 0.5, again resulting in high margins of error.
+
+Overall, the divisional estimates are more precisely estimated as compared to district level estimates. Clubbing districts increases the sample size and lowers the standard errors

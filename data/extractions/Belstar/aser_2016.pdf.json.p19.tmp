@@ -1,0 +1,59 @@
+# Gujarat RURAL
+
+Data is not presented where sample size is insufficient.
+
+## Reading
+
+ASER assessments are conducted in the household. The type of school in which children are enrolled (government or private) is also recorded.
+
+### Table 4: % Children by grade and reading level
+All children 2016
+
+| Std | Not even letter | Letter | Word | Std I level text | Std II level text | Total |
+|-----|-----------------|--------|------|------------------|-------------------|-------|
+| I   | 46.3            | 42.2   | 7.9  | 2.7              | 0.9               | 100   |
+| II  | 17.5            | 30.9   | 25.0 | 16.5             | 10.2              | 100   |
+| III | 11.1            | 22.1   | 19.8 | 24.0             | 23.0              | 100   |
+| IV  | 5.2             | 12.2   | 18.1 | 25.5             | 39.1              | 100   |
+| V   | 4.0             | 9.0    | 14.8 | 19.3             | 53.0              | 100   |
+| VI  | 3.5             | 6.8    | 11.2 | 23.5             | 55.0              | 100   |
+| VII | 3.0             | 4.0    | 7.2  | 16.8             | 69.0              | 100   |
+| VIII| 0.8             | 2.5    | 6.8  | 13.3             | 76.6              | 100   |
+
+Each row shows the variation in children's reading levels within a given grade. For example, among children in Std III, 11.1% cannot even read letters, 22.1% can read letters but not words or higher, 19.8% can read words but not Std I level text or higher, 24% can read Std I level text but not Std II level text, and 23% can read Std II level text. For each grade, the total of these exclusive categories is 100%.
+
+### Table 5: Trends over time
+Reading in Std III by school type
+2010, 2012, 2014 and 2016
+
+| Year | % Children in Std III who can read Std II level text | | |
+|------|------------------------------------------------------|---|---|
+|      | Govt. | Pvt. | Govt. & Pvt.* |
+| 2010 | 12.6 | 30.3 | 14.1 |
+| 2012 | 19.5 | 34.2 | 20.9 |
+| 2014 | 17.6 | 41.8 | 20.3 |
+| 2016 | 21.6 | 36.7 | 23.0 |
+
+* This is the weighted average for children in government and private schools only.
+
+The highest level in the ASER reading assessment is a Std II level text. Table 5 shows the proportion of children in Std III who can read Std II level text. This figure is a proxy for "grade level" reading for Std III. Data for children enrolled in government schools and private schools is shown separately.
+
+### Chart 3: Trends over time
+% Children who can read Std II level text
+Cohorts of children in Std IV in 2008, 2010 and 2012
+
+100
+ 90
+ 80
+ 70
+ 60
+ 50
+ 40
+ 30
+ 20
+ 10
+  0
+    Cohort in Std IV in 2008   Cohort in Std IV in 2010   Cohort in Std IV in 2012
+    Std IV                     Std VI                      Std VIII
+
+This graph shows the progress of three cohorts from Std IV to Std VIII. For example, the first cohort was in Std IV in 2008, in Std VI in 2010, and in Std VIII in 2012. For this cohort: % children who could read Std II level text in Std IV (in 2008) was 31.

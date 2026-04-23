@@ -1,0 +1,251 @@
+s in the sample. Since PPS sampling in the first stage and simple random sampling in the second stage, ensures that all
+
+households have an equal chance of being selected at the district level, the weights associated with households within a district are the same.¹³ Therefore, weighted estimates are exactly the same as the un-weighted estimates at the district level. However, to get estimates at the state and national levels, weighted estimates are needed since states have a different number of districts and districts vary by population.
+
+Even though the purpose of the survey is to estimate learning levels among children, the household was chosen as the second stage sampling unit. This has a number of advantages. First, children are tested at home rather than in school, allowing all children to be tested rather than just those in school. Further, testing children in school might create a bias since many children don’t attend school regularly and/or teachers may encourage testing the brighter children in class. Second, a household sample will generate an age distribution of children that can be cross checked with other data sources, like the census and the NSS. Third, a household sample makes calculation of the inflation factors easier since the population of children is no longer needed.
+
+Often household surveys are stratified on various parameters of interest. The reason for stratification is to get enough observations on entities that have the characteristic that is being studied. The ASER survey stratifies the sample by population in the first stage. No stratification is possible at the second stage. In order to stratify on households with children in the 3–16 age group, in the second stage, we would need the population of such households in the village, which is not possible without a complete houselist of the village.
+
+---
+
+¹² The 10 new villages are drawn as an independent sample from the same sampling frame.
+
+¹³ The probability that household $j$ gets selected in village $i$ ($p_{ji}$) is the product of the probability that village $i$ gets selected ($p_i$) and the probability that household $j$ gets selected ($p_{ji}$). This is given by:
+
+$$
+p_{ji} = p_i \cdot p_{ji} = \frac{30 \cdot vpop_i}{dpop} \cdot \frac{20}{vpop_i} = \frac{600}{dpop}
+$$
+
+where $vpop_i$ is the household population of village $i$ and $dpop$ is the number of households in the district. Therefore, the weight associated with each sampled household within a district is the same and is the inverse of the probability of selection.
+
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 10) ---
+# ASER 2016 – Training
+
+The ASER survey is conducted in almost every rural district in India with the help of local organisations and institutions including universities and colleges, non governmental organisations, self help groups, youth clubs, government departments, District Institutes of Education and Training (DIET), etc. On average ASER reaches over 560 districts each year, surveying an average of 650,000 children in more than 16,000 villages across the country. For ASER surveyors to succeed in this endeavour, they need to be trained rigorously. The ASER training process gives surveyors the skills needed to survey a village, assess children's learning levels reliably and record the information accurately.
+
+ASER survey trainings follow a rigorous three-tier model that consists of:
+
+**National training:**
+ASER state team members are trained by the ASER central team
+
+**State level training:**
+Master Trainers* are trained by the ASER state teams
+
+**District level training:**
+Surveyors are trained by Master Trainers
+
+Standardisation in training and survey is extremely important in order to ensure that the data collected is reliable and valid across districts and states. For this purpose, ASER Centre ensures that the guidelines and instructions for the trainings delivered at all three tiers are kept clear and consistent so that each participant is able to conduct the survey accurately. The three-tiered structure is as follows:
+
+## Tier I: National training:
+Each year the ASER survey begins with a 6-day national training. The main objective of the national training is to thoroughly train teams on all survey tools and processes. This year the national training brought together over 140 people – the core team, ASER state teams from across the country, participants from other countries, external guests, independent researchers, and others. The training was held in Lucknow, Uttar Pradesh from 30th August to 4th September, 2016. It comprised 4 days of classroom sessions and 2 days of field visits to nearby villages.
+
+### Key features of the national training include:
+
+- **Classroom sessions:** These are designed to provide a theoretical understanding of the survey process, quality control processes, financial planning for the survey, etc. Instruction manuals, role plays, group work, energizers, and Power Point Presentations are used to make the classroom sessions effective and engaging.
+
+- **Energizers** are used to enhance audience engagement during or in between classroom sessions. They make good ice-breakers for people attending the national workshop for the first time, creating a more participative and positive learning environment.
+
+- **Field visits:** One day of the national training is devoted to practicing the actual survey. An additional field day is devoted to rechecking** the villages surveyed on the first field visit day. The two field visit days are extremely useful for the participants to get hands-on experience of doing the survey and recheck.
+
+- **Quizzes:** Quizzes are administered in order to ensure that every participant understands the survey content and other processes thoroughly. Post training, additional sessions are organised to fill learning gaps identified through the quiz results.
+
+- **Mock training:** An entire day in the national training is devoted to mock trainings. Participants prepare on given topics after which each of them conducts a training session. Mock training sessions are organised to gauge participants' training ability and assist them in improving the same. Participants are assessed by experienced ASER trainers and personalized feedback is given to each participant. This session prepares the participants to lead and deliver trainings in the next tier more efficiently and confidently.
+
+- **Clarification and feedback:** Short feedback and clarification rounds are conducted to provide additional support, close any gaps and ensure participants' complete understanding of the survey processes.
+
+- **State planning:** The national workshop is also a time to finalize the roll-out plans for each state, including identification of partners, plans for state level trainings and calendars for execution of the survey. Experience of the previous years' ASER survey is reviewed, manpower requirements are identified, partner lists are drawn up, tentative timelines are made, and detailed budgeting is done.
+
+## Tier II: State level training:
+These trainings are conducted in every state just before the district trainings. The national training process is replicated in the state level trainings. State level trainings are scheduled for 5 to 6 weeks with 3 to 4 days of classroom sessions and 2 days of field visits. The main objective
+
+---
+
+*ASER Centre recruits Master Trainers in each district for the entire survey period. Two Master Trainers are responsible for the successful execution of the complete survey in each district, including quality control processes.
+
+**Rechecks are conducted in the surveyed villages to ensure that the survey was conducted properly.
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 11) ---
+is to prepare the Master Trainers as lead trainers so that they can successfully train the surveyors in their own districts. Approximately 830 Master Trainers participated in ASER 2016.
+
+The structure of state level trainings is kept as close as possible to that of the national training. State level trainings too have five major components: classroom sessions, field visits, quizzes, mock trainings and district level planning.
+
+Performance in mock trainings, field visits and quiz results are analysed to identify under-confident or under-prepared Master Trainers, who are either replaced, re-trained or provided with additional support during district trainings. It is mandatory for all participants to be present on all days of the training. Any participant who is not present for all sessions of the training cannot qualify as a Master Trainer for ASER.
+
+**Tier III: District level training:** The district level training is the last tier of the training for the ASER survey. Master Trainers who were trained in the state level training, now train surveyors who carry out the survey in the villages. District level training are usually for 3 days. Like state level trainings, key elements of district trainings include classroom sessions, field practice sessions and a quiz. In most districts, surveyors who score low on the quiz are either replaced or are paired with stronger surveyors to carry out the survey. After the district level training,
+
+the survey is conducted by a team of two surveyors in each village.
+
+**Monitoring of trainings:** Specific steps are taken to ensure that key aspects of training are implemented across all state level and district level trainings:
+
+- State level trainings are usually attended and monitored by the head of the Pratham program in the state as well as members of the central ASER team.
+
+- To support district level activities of ASER including district level training, in most states, a call centre is set up to monitor and support ASER teams. The call centre leader also attends the state level training to get a clear understanding of the ASER process. A trained call centre person interacts with Master Trainers on a daily basis to ensure that they complete all basic processes during training, survey and recheck. In states without a call centre, district activities are monitored by the ASER state teams.
+
+- In all district level trainings, records are maintained for each ASER surveyor. These records contain attendance for each day of training and quiz marks of all surveyors. The data in this sheet is used for surveyor selection for the ASER survey.
+
+For a more detailed report on ASER 2016 training, please visit www.asercentre.org
+
+ASER 2016
+255
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 12) ---
+# ASER village process
+
+The following process explanations are excerpts from the ASER 2016 instruction manual, used by our volunteers during trainings. The sections covered are: how to collect village information, how to make a map and make sections, what to do in each hamlet/section, what to do in each household, what to do with children, and what to do in a school. In between these sections, sample English versions of the survey formats have been provided. These formats, along with the instruction manual, are translated into regional languages for the survey.
+
+## How to collect village information?
+
+**Purpose:** To understand the basic characteristics of the village you are going to survey.
+
+You will be given the name of a village. Two surveyors will go to each village. You must go only to the assigned village.
+
+Meet the Sarpanch, give him/her the 'Letter for Sarpanch' and explain what ASER is and its importance. If the Sarpanch is not present, meet a village representative, eg. Panchayat Secretary. After informing him/her and asking for his/her cooperation in doing the survey, start walking around the village to collect village information.
+
+As you are walking around the village, look out for village infrastructural indicators. If you see them, tick the appropriate box on the Village Information Sheet (provided on page 260). If initially you are unable to observe, ask the people in the village but verify the information yourself.
+
+Write the name of the state, district, block/taluk, village, surveyors and date and day of the survey on the Village Information Sheet.
+
+## How to make a map and make sections?
+
+**Purpose:** To enable you to divide the village into different sections and randomly select households. The map is also used later for the recheck process.
+
+Information from 20 households randomly selected from the entire village will be collected.
+
+### How to start making a map: Talk to the villagers while walking around the village.
+
+To get to know the village, walk around the whole village first before you start mapping.
+
+### Talk to people:
+
+Ask how many different hamlets/sections are there in the village? Where are they located? Ask the children to take you around the village. Tell people about ASER. This initial process of walking and talking may take more than an hour.
+
+### MAP
+
+#### Rough map:
+
+The purpose of a rough map is to understand the pattern of habitations in the village. Use the help of local people to show the main landmarks – temples, mosques, river, school, bus stop, panchayat bhavan, shop etc. Mark the main roads/streets/paths through the village prominently on the map.
+
+#### Final map:
+
+Once everyone agrees that the rough map is a good representation, and it matches with your experience of walking around the village, copy it on to the map sheet that has been given to you in the survey booklet (see page 259 for an example).
+
+## Once the map is made, make sections on the map as follows:
+
+### Continuous village
+
+If it is a village with continuous habitations:
+
+- Divide the entire village into 4 sections geographically.
+- Assign each section a number. Write the number on the map (see the example given below).
+- Select 5 households from each section (the procedure for household selection is explained in the next section).
+
+<!-- Image of a continuous village map divided into 4 sections labeled 1, 2, 3, and 4 -->
+
+### Village with hamlets/sections
+
+If the village has discontiguous hamlets/sections:
+
+Assign each hamlet/section a number. Write the number on the map.
+
+If the village has:
+
+- **2 hamlets/sections:** Divide each hamlet/section in 2 parts and take 5 households from each part.
+- **3 hamlets/sections:** Take 7, 7 and 6 households from the 3 hamlets respectively.
+- **4 hamlets/sections:** Select 5 households from each hamlet/section.
+- **More than 4 hamlets/sections:** Randomly pick 4 hamlets/sections and then select 5 households from each hamlet/section. On the map, tick the hamlets/sections chosen for the survey (see the example given below).
+
+<!-- Image of a village with multiple hamlets/sections, some of which are ticked for selection -->
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 13) ---
+# What to do in each hamlet/section?
+
+**Purpose:** To randomly select 20 households from the village. You need to pick 5 households from each of the 4 hamlets/sections that you have selected, using the following procedure:
+
+- Go to each selected hamlet/section. Try to find the central point in that hamlet/section and start household selection from the left.
+- Begin from the first household on your left. You must select every 5th household. After you have surveyed this household, skip the next 4 households and select the 5th one. While selecting households, count only those dwellings that are residential. 'Household' refers to every 'door or entrance to a house from the street'.
+- If you have reached the end of the hamlet/section before 5 households are sampled, go around the same hamlet/section again using the 'every 5th household rule'. If a surveyed household gets selected again then go to the next/adjacent household. Continue till you have 5 households from the hamlet/section.
+- If the hamlet/section has less than 5 households, then survey all the households and survey the remaining households from other hamlets/sections.
+- Now move to the next selected hamlet/section.
+- Follow the same process of selecting the households for the survey using the 'every 5th household rule'.
+- If the village has less than 20 households, then survey all the households in the village.
+
+Ensure that you go to households only when children are likely to be at home.
+
+This means that you will go to households after school hours and/or on a holiday/Sunday.
+
+---
+
+## SOME SPECIAL CASES
+
+- **Household with multiple kitchens:** In each house ask how many kitchens or chulhas are there. If there is more than one kitchen in a household, then select the kitchen from which the respondent's¹ family eats. You will survey only those individuals who regularly eat from the selected kitchen. After completing the survey in this house proceed to the next 5th house counting from the next house on the street, not from the next kitchen/chulha.
+
+- **Household with no children:** If there are no children in the age group 3–16 in the selected household but there are inhabitants, include that household. Take the information about the name of the head of the household, total number of members of the household, household assets, name of the respondent and mobile number of the household. Also, write the number of the hamlet/section from the map from which the house has been selected. In addition, ask if anyone in the household has passed Std. 12 and if anyone knows how to use a computer (see the sample household survey sheet on page 264). Such a household will be counted as one of the 5 surveyed households in each hamlet/section but no information about mothers or fathers will be collected.
+
+- **Household locked:** If the selected house is closed or if there is nobody at home, note that down. This household does not count as a surveyed household. Do not include this household in the survey sheet. Move to the next/adjacent house. After the survey is over, note down total number of such cases on the cover page of the survey booklet under 'locked households'.
+
+- **No response:** If a household refuses to participate, note that down. This household also does not count as a surveyed household. Do not include this household in the survey sheet. Move to the next/adjacent house. After the survey is over, note down total number of such cases on the cover page of the survey booklet under 'no response households'.
+
+---
+
+1. Respondent = An adult who is present in the household during the survey and is providing the information.
+
+ASER 2016
+257
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 14) ---
+# How to sample households in a hamlet?
+
+258
+
+ASER 2016
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 15) ---
+# Sample village map
+
+## MAP OF THE VILLAGE
+
+### INSTRUCTIONS TO DRAW THE MAP
+- Show the main hamlets/sections of the surveyed village.
+- Number each hamlet/section on the map.
+- Mark the main roads/streets/paths through the village prominently on the map.
+- Show the main landmarks – schools, health centres, anganwadis, temples, mosques, river, road, bus stop, panchayat bhavan, shop etc.
+- Verify all the information on the map with people in the village as you walk around.
+
+### INDEX
+- Tower (CASN)
+- Field
+- Post office
+- Temple
+- Public Distribution System
+- G.P.S.
+- Police
+- Post office
+- Temple
+- Public Distribution System
+
+ASER 2016
+259
+
+--- aser_2016 [Pages 251-300].pdf (PAGE 16) ---
+# Sample village information sheet
+
+## VILLAGE INFORMATION SHEET
+
+| Name of state: | CHHATTISGARH | Name of block: | MOHLA |
+|----------------|--------------|----------------|-------|
+| Name of district: | RAJNANDGAON | Name of village: | BANJARI |
+| Surveyors' names: | | | |
+| 1. AJIT SAHOO | | | |
+| 2. PRIYANKA CHELAK | | | |
+| Date of survey: | 24/09/16 | Day of survey: | SATURDAY |
+
+### Please tick (√) the relevant box
+
+#### BASIC SERVICES
+
+| Did you see the following facilities/services in the village yourself? (Tick Yes/No based on your own observation) |
+|---|
+| Pucca road leading to the village? | YES | NO |
+| Electricity connection in the village? | YES | NO |
+| Post office in the village? | YES |

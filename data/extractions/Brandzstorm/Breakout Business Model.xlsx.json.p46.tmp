@@ -1,0 +1,260 @@
+| Category | Segment | Brand | Channel | Metric | Value 1 | Value 2 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Handbags | BEBE | Modern Retail | GP | | | |
+| Handbags | BEBE | Traditional Retail | Volume | | | |
+| Handbags | BEBE | Traditional Retail | Volume growth | | | |
+| Handbags | BEBE | Traditional Retail | ASP (In Rs) | | | |
+| Handbags | BEBE | Traditional Retail | ASP growth | | | |
+| Handbags | BEBE | Traditional Retail | Sales Value (In Rs) | | | |
+| Handbags | BEBE | Traditional Retail | Sales value growth | | | |
+| Handbags | BEBE | Traditional Retail | GP | | | |
+| Handbags | BEBE | Online | Volume | | 2 | |
+| Handbags | BEBE | Online | Volume growth | | | |
+| Handbags | BEBE | Online | ASP (In Rs) | | 3635.59 | |
+| Handbags | BEBE | Online | ASP growth | | | |
+| Handbags | BEBE | Online | Sales Value (In Rs) | | 7271.18 | |
+| Handbags | BEBE | Online | Sales value growth | | | |
+| Handbags | BEBE | Online | GP | | | |
+| Handbags | BEBE | Kiosk | Volume | | 365 | |
+| Handbags | BEBE | Kiosk | Volume growth | | | |
+| Handbags | BEBE | Kiosk | ASP (In Rs) | | 2919.1605753424687 | |
+| Handbags | BEBE | Kiosk | ASP growth | | | |
+| Handbags | BEBE | Kiosk | Sales Value (In Rs) | | 1065493.610000001 | |
+| Handbags | BEBE | Kiosk | Sales value growth | | | |
+| Handbags | BEBE | Kiosk | GP | | | |
+| Handbags | BEBE | Other | Volume | | | |
+| Handbags | BEBE | Other | Volume growth | | | |
+| Handbags | BEBE | Other | ASP (In Rs) | | | |
+| Handbags | BEBE | Other | ASP growth | | | |
+| Handbags | BEBE | Other | Sales Value (In Rs) | | | |
+| Handbags | BEBE | Other | Sales value growth | | | |
+| Handbags | BEBE | Other | GP | | | |
+| Handbags | Others | Modern Retail | Volume | | | |
+| Handbags | Others | Modern Retail | Volume growth | | | |
+| Handbags | Others | Modern Retail | ASP (In Rs) | | | |
+| Handbags | Others | Modern Retail | ASP growth | | | |
+| Handbags | Others | Modern Retail | Sales Value (In Rs) | | | |
+| Handbags | Others | Modern Retail | Sales value growth | | | |
+| Handbags | Others | Modern Retail | GP | | | |
+| Handbags | Others | Traditional Retail | Volume | | | |
+| Handbags | Others | Traditional Retail | Volume growth | | | |
+| Handbags | Others | Traditional Retail | ASP (In Rs) | | | |
+| Handbags | Others | Traditional Retail | ASP growth | | | |
+| Handbags | Others | Traditional Retail | Sales Value (In Rs) | | | |
+| Handbags | Others | Traditional Retail | Sales value growth | | | |
+| Handbags | Others | Traditional Retail | GP | | | |
+| Handbags | Others | Online | Volume | 216 | | |
+| Handbags | Others | Online | Volume growth | | -1 | |
+| Handbags | Others | Online | ASP (In Rs) | 737.6688888888891 | | |
+| Handbags | Others | Online | ASP growth | | -1 | |
+| Handbags | Others | Online | Sales Value (In Rs) | 159336.48000000004 | | |
+| Handbags | Others | Online | Sales value growth | | -1 | |
+| Handbags | Others | Online | GP | | | |
+| Handbags | Others | Kiosk | Volume | | | |
+| Handbags | Others | Kiosk | Volume growth | | | |
+| Handbags | Others | Kiosk | ASP (In Rs) | | | |
+| Handbags | Others | Kiosk | ASP growth | | | |
+| Handbags | Others | Kiosk | Sales Value (In Rs) | | | |
+| Handbags | Others | Kiosk | Sales value growth | | | |
+| Handbags | Others | Kiosk | GP | | | |
+| Handbags | Others | Other | Volume | 26 | | |
+| Handbags | Others | Other | Volume growth | | -1 | |
+| Handbags | Others | Other | ASP (In Rs) | 1194.2749999999999 | | |
+| Handbags | Others | Other | ASP growth | | -1 | |
+| Handbags | Others | Other | Sales Value (In Rs) | 31051.149999999998 | | |
+| Handbags | Others | Other | Sales value growth | | -1 | |
+| Handbags | Others | Other | GP | | | |
+| Luggage | Swiss Eagle | Modern Retail | Volume | | 31 | |
+| Luggage | Swiss Eagle | Modern Retail | Volume growth | | | |
+| Luggage | Swiss Eagle | Modern Retail | ASP (In Rs) | | 0.995161290322581 | |
+| Luggage | Swiss Eagle | Modern Retail | ASP growth | | | |
+| Luggage | Swiss Eagle | Modern Retail | Sales Value (In Rs) | | 30.850000000000012 | |
+| Luggage | Swiss Eagle | Modern Retail | Sales value growth | | | |
+| Luggage | Swiss Eagle | Modern Retail | GP | | | |
+| Luggage | Swiss Eagle | Traditional Retail | Volume | | 473 | |
+| Luggage | Swiss Eagle | Traditional Retail | Volume growth | | | |
+| Luggage | Swiss Eagle | Traditional Retail | ASP (In Rs) | | 391.51723044397465 | |
+| Luggage | Swiss Eagle | Traditional Retail | ASP growth | | | |
+| Luggage | Swiss Eagle | Traditional Retail | Sales Value (In Rs) | | 185187.65000000002 | |
+| Luggage | Swiss Eagle | Traditional Retail | Sales value growth | | | |
+| Luggage | Swiss Eagle | Traditional Retail | GP | | | |
+| Luggage | Swiss Eagle | Online | Volume | | 1977 | 2151 |
+| Luggage | Swiss Eagle | Online | Volume growth | | 0.08801213960546272 | |
+| Luggage | Swiss Eagle | Online | ASP (In Rs) | | 2721.9422610015013 | 820.6844844490869 |
+| Luggage | Swiss Eagle | Online | ASP growth | | | |
+| Luggage | Swiss Eagle | Online | Sales Value (In Rs) | | 5381279.849999968 | 1765292.3260499858 |
+| Luggage | Swiss Eagle | Online | Sales value growth | | | |
+| Luggage | Swiss Eagle | Online | GP | | | |
+| Luggage | Swiss Eagle | Kiosk | Volume | | 2 | 5 |
+| Luggage | Swiss Eagle | Kiosk | Volume growth | | 1.5 | |
+| Luggage | Swiss Eagle | Kiosk | ASP (In Rs) | | 2221.395 | 3555.0860000000002 |
+| Luggage | Swiss Eagle | Kiosk | ASP growth | | | |
+| Luggage | Swiss Eagle | Kiosk | Sales Value (In Rs) | | 4442.79 | 17775.43 |
+| Luggage | Swiss Eagle | Kiosk | Sales value growth | | | |
+| Luggage | Swiss Eagle | Kiosk | GP | | | |
+| Luggage | Swiss Eagle | Other | Volume | | 27 | 10 |
+| Luggage | Swiss Eagle | Other | Volume growth | | -0.6296296296296297 | |
+| Luggage | Swiss Eagle | Other | ASP (In Rs) | | 2871.026666666667 | 1800.7199999999998 |
+| Luggage | Swiss Eagle | Other | ASP growth | | | |
+| Luggage | Swiss Eagle | Other | Sales Value (In Rs) | | 77517.72000000002 | 18007.199999999997 |
+| Luggage | Swiss Eagle | Other | Sales value growth | | | |
+| Luggage | Swiss Eagle | Other | GP | | | |
+| Luggage | Giordano | Modern Retail | Volume | | -1236 | |
+| Luggage | Giordano | Modern Retail | Volume growth | | -1.0778484600365308 | |
+| Luggage | Giordano | Modern Retail | ASP (In Rs) | | 2793.011288936064 | |
+| Luggage | Giordano | Modern Retail | ASP growth | | | |
+| Luggage | Giordano | Modern Retail | Sales Value (In Rs) | | -3452161.953124975 | |
+| Luggage | Giordano | Modern Retail | Sales value growth | | | |
+| Luggage | Giordano | Modern Retail | GP | | | |
+| Luggage | Giordano | Traditional Retail | Volume | | 13 | |
+| Luggage | Giordano | Traditional Retail | Volume growth | | -0.8773584905660378 | |
+| Luggage | Giordano | Traditional Retail | ASP (In Rs) | | 1 | |
+| Luggage | Giordano | Traditional Retail | ASP growth | | | |
+| Luggage | Giordano | Traditional Retail | Sales Value (In Rs) | | -4946 | 13 |
+| Luggage | Giordano | Traditional Retail | Sales value growth | | | |
+| Luggage | Giordano | Traditional Retail | GP | | | |
+| Luggage | Giordano | Online | Volume | | 2519 | 7958 |
+| Luggage | Giordano | Online | Volume growth | | -0.22360975609756095 | |
+| Luggage | Giordano | Online | ASP (In Rs) | | 2307.0137197300514 | 1303.8543319206876 |
+| Luggage | Giordano | Online | ASP growth | | | |
+| Luggage | Giordano | Online | Sales Value (In Rs) | | 5811367.56 | 10376072.773424832 |
+| Luggage | Giordano | Online | Sales value growth | | | |
+| Luggage | Giordano | Online | GP | | | |
+| Luggage | Giordano | Kiosk | Volume | | 218 | |
+| Luggage | Giordano | Kiosk | Volume growth | | -0.36994219653179194 | |
+| Luggage | Giordano | Kiosk | ASP (In Rs) | | 1197.2507798165161 | |
+| Luggage | Giordano | Kiosk | ASP growth | | | |
+| Luggage | Giordano | Kiosk | Sales Value (In Rs) | | 261000.6700000005 | |
+| Luggage | Giordano | Kiosk | Sales value growth | | | |
+| Luggage | Giordano | Kiosk | GP | | | |
+| Luggage | Giordano | Other | Volume | | 189 | 238 |
+| Luggage | Giordano | Other | Volume growth | | 0.40828402366863914 | |
+| Luggage | Giordano | Other | ASP (In Rs) | | 1173.6470370370373 | 848.1718067226892 |
+| Luggage | Giordano | Other | ASP growth | | | |
+| Luggage | Giordano | Other | Sales Value (In Rs) | | 221819.29000000004 | 201864.89000000004 |
+| Luggage | Giordano | Other | Sales value growth | | | |
+| Luggage | Giordano | Other | GP | | | |
+| Luggage | KC | Modern Retail | Volume | | | |
+| Luggage | KC | Modern Retail | Volume growth | | | |
+| Luggage | KC | Modern Retail | ASP (In Rs) | | | |
+| Luggage | KC | Modern Retail | ASP growth | | | |
+| Luggage | KC | Modern Retail | Sales Value (In Rs) | | | |
+| Luggage | KC | Modern Retail | Sales value growth | | | |
+| Luggage | KC | Modern Retail | GP | | | |
+| Luggage | KC | Traditional Retail | Volume | | | |
+| Luggage | KC | Traditional Retail | Volume growth | | | |
+| Luggage | KC | Traditional Retail | ASP (In Rs) | | | |
+| Luggage | KC | Traditional Retail | ASP growth | | | |
+| Luggage | KC | Traditional Retail | Sales Value (In Rs) | | | |
+| Luggage | KC | Traditional Retail | Sales value growth | | | |
+| Luggage | KC | Traditional Retail | GP | | | |
+| Luggage | KC | Online | Volume | | 3230 | |
+| Luggage | KC | Online | Volume growth | | | |
+| Luggage | KC | Online | ASP (In Rs) | | 3332.593250773994 | |
+| Luggage | KC | Online | ASP growth | | | |
+| Luggage | KC | Online | Sales Value (In Rs) | | 10764276.200000001 | |
+| Luggage | KC | Online | Sales value growth | | | |
+| Luggage | KC | Online | GP | | | |
+| Luggage | KC | Kiosk | Volume | | | |
+| Luggage | KC | Kiosk | Volume growth | | | |
+| Luggage | KC | Kiosk | ASP (In Rs) | | | |
+| Luggage | KC | Kiosk | ASP growth | | | |
+| Luggage | KC | Kiosk | Sales Value (In Rs) | | | |
+| Luggage | KC | Kiosk | Sales value growth | | | |
+| Luggage | KC | Kiosk | GP | | | |
+| Luggage | KC | Other | Volume | | | |
+| Luggage | KC | Other | Volume growth | | | |
+| Luggage | KC | Other | ASP (In Rs) | | | |
+| Luggage | KC | Other | ASP growth | | | |
+| Luggage | KC | Other | Sales Value (In Rs) | | | |
+| Luggage | KC | Other | Sales value growth | | | |
+| Luggage | KC | Other | GP | | | |
+| Luggage | Others | Modern Retail | Volume | | | |
+| Luggage | Others | Modern Retail | Volume growth | | | |
+| Luggage | Others | Modern Retail | ASP (In Rs) | | | |
+| Luggage | Others | Modern Retail | ASP growth | | | |
+| Luggage | Others | Modern Retail | Sales Value (In Rs) | | | |
+| Luggage | Others | Modern Retail | Sales value growth | | | |
+| Luggage | Others | Modern Retail | GP | | | |
+| Luggage | Others | Traditional Retail | Volume | | | |
+| Luggage | Others | Traditional Retail | Volume growth | | | |
+| Luggage | Others | Traditional Retail | ASP (In Rs) | | | |
+| Luggage | Others | Traditional Retail | ASP growth | | | |
+| Luggage | Others | Traditional Retail | Sales Value (In Rs) | | | |
+| Luggage | Others | Traditional Retail | Sales value growth | | | |
+| Luggage | Others | Traditional Retail | GP | | | |
+| Luggage | Others | Online | Volume | | | |
+| Luggage | Others | Online | Volume growth | | | |
+| Luggage | Others | Online | ASP (In Rs) | | | |
+| Luggage | Others | Online | ASP growth | | | |
+| Luggage | Others | Online | Sales Value (In Rs) | | | |
+| Luggage | Others | Online | Sales value growth | | | |
+| Luggage | Others | Online | GP | | | |
+| Luggage | Others | Kiosk | Volume | | | |
+| Luggage | Others | Kiosk | Volume growth | | | |
+| Luggage | Others | Kiosk | ASP (In Rs) | | | |
+| Luggage | Others | Kiosk | ASP growth | | | |
+| Luggage | Others | Kiosk | Sales Value (In Rs) | | | |
+| Luggage | Others | Kiosk | Sales value growth | | | |
+| Luggage | Others | Kiosk | GP | | | |
+| Luggage | Others | Other | Volume | | | |
+| Luggage | Others | Other | Volume growth | | | |
+| Luggage | Others | Other | ASP (In Rs) | | | |
+| Luggage | Others | Other | ASP growth | | | |
+| Luggage | Others | Other | Sales Value (In Rs) | | | |
+| Luggage | Others | Other | Sales value growth | | | |
+| Luggage | Others | Other | GP | | | |
+| Apparel | Giordano | Modern Retail | Volume | | | |
+| Apparel | Giordano | Modern Retail | Volume growth | | | |
+| Apparel | Giordano | Modern Retail | ASP (In Rs) | | | |
+| Apparel | Giordano | Modern Retail | ASP growth | | | |
+| Apparel | Giordano | Modern Retail | Sales Value (In Rs) | | | |
+| Apparel | Giordano | Modern Retail | Sales value growth | | | |
+| Apparel | Giordano | Modern Retail | GP | | | |
+| Apparel | Giordano | Traditional Retail | Volume | | | |
+| Apparel | Giordano | Traditional Retail | Volume growth | | | |
+| Apparel | Giordano | Traditional Retail | ASP (In Rs) | | | |
+| Apparel | Giordano | Traditional Retail | ASP growth | | | |
+| Apparel | Giordano | Traditional Retail | Sales Value (In Rs) | | | |
+| Apparel | Giordano | Traditional Retail | Sales value growth | | | |
+| Apparel | Giordano | Traditional Retail | GP | | | |
+| Apparel | Giordano | Online | Volume | | | |
+| Apparel | Giordano | Online | Volume growth | | | |
+| Apparel | Giordano | Online | ASP (In Rs) | | | |
+| Apparel | Giordano | Online | ASP growth | | | |
+| Apparel | Giordano | Online | Sales Value (In Rs) | | | |
+| Apparel | Giordano | Online | Sales value growth | | | |
+| Apparel | Giordano | Online | GP | | | |
+| Apparel | Giordano | Kiosk | Volume | | | |
+| Apparel | Giordano | Kiosk | Volume growth | | | |
+| Apparel | Giordano | Kiosk | ASP (In Rs) | | | |
+| Apparel | Giordano | Kiosk | ASP growth | | | |
+| Apparel | Giordano | Kiosk | Sales Value (In Rs) | | | |
+| Apparel | Giordano | Kiosk | Sales value growth | | | |
+| Apparel | Giordano | Kiosk | GP | | | |
+| Apparel | Giordano | Other | Volume | | | |
+| Apparel | Giordano | Other | Volume growth | | | |
+| Apparel | Giordano | Other | ASP (In Rs) | | | |
+| Apparel | Giordano | Other | ASP growth | | | |
+| Apparel | Giordano | Other | Sales Value (In Rs) | | | |
+| Apparel | Giordano | Other | Sales value growth | | | |
+| Apparel | Giordano | Other | GP | | | |
+| Apparel | KC | Modern Retail | Volume | | | |
+| Apparel | KC | Modern Retail | Volume growth | | | |
+| Apparel | KC | Modern Retail | ASP (In Rs) | | | |
+| Apparel | KC | Modern Retail | ASP growth | | | |
+| Apparel | KC | Modern Retail | Sales Value (In Rs) | | | |
+| Apparel | KC | Modern Retail | Sales value growth | | | |
+| Apparel | KC | Modern Retail | GP | | | |
+| Apparel | KC | Traditional Retail | Volume | | | |
+| Apparel | KC | Traditional Retail | Volume growth | | | |
+| Apparel | KC | Traditional Retail | ASP (In Rs) | | | |
+| Apparel | KC | Traditional Retail | ASP growth | | | |
+| Apparel | KC | Traditional Retail | Sales Value (In Rs) | | | |
+| Apparel | KC | Traditional Retail | Sales value growth | | | |
+| Apparel | KC | Traditional Retail | GP | | | |
+| Apparel | KC | Online | Volume | | | |
+| Apparel | KC | Online | Volume growth | | | |
+| Apparel | KC | Online | ASP (In Rs) | | | |
+| Apparel | KC | Online | ASP growth | | | |
+| Apparel | KC | Online | Sales Value (In Rs) | | | |

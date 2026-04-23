@@ -1,0 +1,452 @@
+### Balance Sheet Extract
+
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Total Current Assets** | 186.65 | 301.23 | 431.86 | 526.66 | 705.10 | 888.12 | 2400.20 | 2693.61 | 3061.00 | 3780.55 |
+| **TOTAL - ASSETS** | 378.53 | 483.65 | 558.81 | 633.33 | 823.61 | 974.19 | 2521.25 | 2870.65 | 3258.29 | 3991.13 |
+| | | | | | | | | | | 4642.62 | 5804.76 | 6076.80 |
+
+---
+
+### Cash Flow Statement
+**Currency:** INR Mn
+
+| Item | FY17 | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Cashflow from Operating Activities** | | | | | | | | | |
+| PBT | 32.88 | 76.86 | 124.04 | 155.30 | 269.95 | 532.77 | 809.53 | 1093.82 | 1443.69 |
+| *Adjusted for:* | | | | | | | | | |
+| Employee benefits expenses | -1.77 | 1.82 | | | | | | | |
+| Depreciation, Amortization and Impairment | 7.04 | 8.46 | 16.23 | 26.10 | 43.41 | 61.46 | 78.79 | 101.03 | 130.11 |
+| Finance Costs | 10.16 | 18.12 | 28.24 | 33.40 | 12.50 | | | | |
+| Other Income | -6.76 | -2.93 | | | | | | | |
+| Taxes Paid (Net) | -8.63 | -26.88 | -35.77 | -45.22 | -94.33 | -186.17 | -282.88 | -382.22 | -504.48 |
+| Operating Profit before WC Changes | 32.92 | 75.44 | 132.74 | 169.58 | 231.53 | 408.06 | 605.43 | 812.62 | 1069.32 |
+| *Adjusted for:* | | | | | | | | | |
+| Decrease/(increase) in inventory | -53.22 | 17.33 | -89.29 | -115.55 | -325.05 | -416.62 | -472.87 | -451.75 | -545.78 |
+| Decrease/(increase) in trade receivables | -46.44 | -194.03 | 29.75 | -65.45 | -181.16 | -225.45 | -260.49 | -249.27 | -305.83 |
+| Decrease/(increase) in other financial and non-financial assets | 2.05 | 2.27 | 13.39 | -17.01 | -53.58 | -57.85 | -58.16 | -54.19 | -54.19 |
+| Increase/(decrease) in trade payable | 33.57 | 19.50 | 31.80 | 40.56 | 173.84 | 191.05 | 206.19 | 180.33 | 253.30 |
+| Increase/(decrease) in other financial and non-financial liabilites | 7.00 | 5.43 | -9.11 | | | | | | |
+| **Net Cash flow from Operating Activities** | **-24.12** | **-74.05** | **109.28** | **12.14** | **-154.42** | **-100.81** | **20.11** | **237.73** | **416.82** |
+| **Cashflow from Investing Activities** | | | | | | | | | |
+| Capex of Tangible Assets + WIP | -9.67 | -17.57 | -15.82 | -27.16 | -59.46 | -80.22 | -90.58 | -129.38 | -158.97 |
+| Capex of Intangible assets | -1.68 | -1.45 | -1.00 | -60.00 | -40.00 | -1.50 | -1.50 | -1.50 | -1.50 |
+| Other Income | 6.76 | 2.93 | | | | | | | |
+| Loans & Advances | -1.31 | -0.51 | | | | | | | |
+| Other non-current assets | 26.65 | -1.14 | 32.65 | 26.09 | | | | | |
+| **Net Cash flow from Investing Activities** | **20.75** | **-17.73** | **15.83** | **-61.07** | **-99.46** | **-81.72** | **-92.08** | **-130.88** | **-160.47** |
+| **Cashflow from Financing Activities** | | | | | | | | | |
+| Proceeds from Issuance of shares | | | | 1500.00 | | | | | |
+| Proceeds from Borrowings | 11.06 | 113.91 | 40.00 | -103.88 | | -150.00 | | | |
+| Interest Paid | -10.16 | -18.12 | -28.24 | -33.40 | -12.50 | | | | |
+| **Net Cash flow from Financing Activities** | **0.90** | **95.79** | **11.76** | **1362.72** | **-12.50** | **-150.00** | | | |
+| **Net (Decrease) in Cash and Cash Equivalents** | **-2.77** | **4.01** | **136.87** | **1313.78** | **-266.38** | **-332.53** | **-71.97** | **106.85** | **256.35** |
+| Opening Balance of Cash and Cash Equivalents | 2.97 | 0.16 | 4.17 | 141.34 | 1455.13 | 1188.74 | 856.22 | 784.25 | 891.10 |
+| **Closing Balance of Cash and Cash Equivalents** | **0.19** | **4.17** | **141.04** | **1455.13** | **1188.74** | **856.22** | **784.25** | **891.10** | **1147.44** |
+
+---
+
+### Revenue Assumptions
+**Currency:** INR Mn
+
+#### Watches
+
+##### Giordano
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | 123 | 175 | 239 | 249 | | | | | | |
+| Incremental Stores | | | | | 15 | 15 | 15 | 15 | 15 | 15 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | 371.27 | 352.07 | 309.67 | 244.91 | 320 | 300 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.05 | 0.04 | 0.04 | 0.04 | 0.04 | 0.04 |
+| ASP (In Rs) | 5948 | 5131.54 | 3524.11 | 3846.47 | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 162 | 191 | 231 | | | | | | |
+| Incremental Stores | | | | | 40 | 40 | 40 | 40 | 40 | 40 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 173.53 | 145.66 | 152.26 | 160 | 150 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | 3468.66 | 2788.60 | 2394.31 | 2374.75 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 70655 | 35778 | 71241 | 105408 | | | | | | |
+| Qty Growth (%) | | 0.99 | 0.48 | 0.50 | 0.40 | 0.40 | 0.40 | 0.40 | 0.40 | 0.40 |
+| ASP | 1810.14 | 2703.45 | 2330.78 | 1961.50 | | | | | | |
+| Qty Growth (%) | | | | -0.16 | | | | | | |
+
+##### Gio Collection
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | 150 | 175 | 193 | 250 | | | | | | |
+| Incremental Stores | | | | | 10 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | 92.77 | 134.01 | 199.64 | 164.06 | 200 | 180 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.05 | 0.05 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | 5113 | 5365.24 | 3800.34 | 3474.61 | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 25 | 56 | 76 | | | | | | |
+| Incremental Stores | | | | | 20 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 134.48 | 135.32 | 173.79 | 135 | 120 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.08 | 0.07 | 0.07 | 0.07 | 0.07 | 0.07 |
+| ASP growth | 2913.44 | 3756.71 | 2606.04 | 2996.48 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 37649 | 36300 | 17032 | 13850 | | | | | | |
+| Qty Growth (%) | | | | -0.19 | 0.45 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 |
+| ASP | 985.02 | 1871.47 | 2439.69 | 1902.66 | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Swiss Eagle
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | 56 | 78 | 101 | 110 | | | | | | |
+| Incremental Stores | | | | | 10 | 10 | 10 | 10 | 10 | 10 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | 22.07 | 21.82 | 69.46 | 80 | 80 | 50 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.08 | 0.05 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | 15629 | 15076.17 | 7396.31 | 7441.72 | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 43 | 65 | 80 | | | | | | |
+| Incremental Stores | | | | | 20 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 31 | 49.49 | 47.12 | 51 | 51 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.08 | 0.07 | 0.07 | 0.07 | 0.07 | 0.07 |
+| ASP growth | 16840.56 | 8932.91 | 4364.32 | 4138.20 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 190 | 1296 | 1907 | 1995 | | | | | | |
+| Qty Growth (%) | | | | 0.05 | 0.35 | 0.30 | 0.30 | 0.30 | 0.30 | 0.30 |
+| ASP | 9836.87 | 10298.45 | 8011.50 | 6220.13 | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Fjord
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 28 | 34 | 40 | | | | | | |
+| Incremental Stores | | | | | 25 | 15 | 15 | 15 | 15 | 15 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 32.75 | 47.12 | 41.38 | 55 | 55 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | | 4985.94 | 3214.94 | 3789.59 | 0.25 | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 7 | 29 | 44 | | | | | | |
+| Incremental Stores | | | | | 20 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 33 | 61.93 | 67.72 | 54 | 60 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 |
+| ASP growth | | 2907.46 | 2125.68 | 2220.45 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | 180 | 213 | 267 | | | | | | |
+| Qty Growth (%) | | | | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 |
+| ASP | | 3937.46 | 3147.25 | 2730.50 | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Steve Madden
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | 10 | 10 | | | | | | |
+| Incremental Stores | | | | | 45 | 25 | 25 | 25 | 25 | 25 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 17.5 | 130.5 | 100 | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | 1303.09 | 2203.65 | | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | 10 | | | | | | |
+| Incremental Stores | | | | | 20 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 54 | 40 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 | 0.06 |
+| ASP growth | | 2627.12 | 1822.62 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | 5027 | 9068 | | | | | | | |
+| Qty Growth (%) | | | 0.80 | 0.70 | 0.70 | 0.50 | 0.50 | 0.50 | 0.50 | 0.50 |
+| ASP | | 2182.83 | 2029.29 | | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Superdry
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | 26 | 35 | 36 | 36 | | | | | | |
+| Incremental Stores | | | | | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | 4.38 | 83.20 | 61.36 | 97.53 | 30 | 30 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | -1.00 | | | | | |
+| ASP growth | 6201.80 | 3422.31 | 3009.77 | 1614.43 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 226 | 1563 | 1757 | 2413 | | | | | | |
+| Qty Growth (%) | | | 0.37 | -1.00 | | | | | | |
+| ASP | 4000.04 | 3248.26 | 2601.04 | 2074.87 | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Giani Bernard
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | 3328 | 6163 | | | | | | | |
+| Qty Growth (%) | | | 0.85 | -1.00 | | | | | | |
+| ASP | | 635.30 | 362.95 | | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+#### Handbags
+
+##### Giordano
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 15 | 81 | 103 | | | | | | |
+| Incremental Stores | | | | | 35 | 35 | 30 | 30 | 30 | 30 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 135.67 | 369.16 | 547.84 | 480 | 550 | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | 3850.39 | 1779.04 | 1396.90 | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 15 | 20 | 20 | 20 | 20 | 20 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 50 | 60 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | 1163.19 | 2871.25 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 5898 | 13555 | 9900 | 8200 | | | | | | |
+| Qty Growth (%) | | | -0.17 | 0.40 | 0.30 | 0.25 | 0.25 | 0.25 | 0.25 | 0.25 |
+| ASP | 1783.18 | 1351.79 | 1521.38 | 1213.20 | | | | | | |
+| Qty Growth (%) | | | | -0.20 | | | | | | |
+
+##### Elle
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | 6 | 21 | | | | | | |
+| Incremental Stores | | | | | 30 | 30 | 25 | 25 | 25 | 25 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | 225.17 | | 650 | 700 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | 0.48 | 1786.82 | 1366.40 | 0.05 | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 5 | 5 | 5 | 5 | 5 | 5 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 36 | 50 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.09 | 0.09 | 0.09 | 0.09 | 0.09 |
+| ASP growth | | 2304.84 | | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | 2892 | 5748 | | | | | | | |
+| Qty Growth (%) | | | 0.99 | 0.75 | 0.50 | 0.40 | 0.35 | 0.35 | 0.35 | 0.35 |
+| ASP | | 2447.00 | 868.96 | | | | | | | |
+| Qty Growth (%) | | | | -0.64 | | | | | | |
+
+##### Gio Collection
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | 16 | 36 | | | | | | |
+| Incremental Stores | | | | 20 | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 100 | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| ASP growth | | 590.05 | 432.34 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | 639 | 1662 | | | | | | | |
+| Qty Growth (%) | | | -1.00 | | | | | | | |
+| ASP | | 1902.87 | 855.36 | | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Kenneth Cole
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 20 | 20 | 15 | 15 | 15 | 15 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 320 | 400 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 |
+| ASP growth | | | | 1761.33 | | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | | 5 | 5 | 5 | 5 | 5 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 35 | 50 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | | | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | | 368 | 2000 | | | | | | |
+| Qty Growth (%) | | | | 1.00 | 0.50 | 0.35 | 0.35 | 0.35 | 0.35 | 0.35 |
+| ASP | | | 2045.62 | 2500.00 | | | | | | |
+| ASP growth | | | | | | | | | | |
+
+##### Pierre Cardin
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 30 | 30 | 30 | 30 | 30 | 30 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 480 | 550 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 |
+| ASP growth | | 2300 | 2300 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | | 59 | 8000 | | | | | | |
+| Qty Growth (%) | | | | 2.00 | 0.50 | 0.30 | 0.30 | 0.30 | 0.30 | 0.30 |
+| ASP | | | 731.21 | 1300.00 | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### BCBG
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 15 | 15 | 15 | 15 | 15 | 15 |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 180 | 250 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | | | 2341.48 | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | | 654 | | | | | | | |
+| Qty Growth (%) | | | | 0.50 | 0.50 | 0.30 | 0.30 | 0.30 | 0.30 | 0.30 |
+| ASP | | | 2737.90 | | | | | | | |
+| Qty Growth (%) | | | | | | | | | | |
+
+##### Juicy Couture
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 40 | 60 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 |
+| ASP growth | | 5000 | 5000 | -0.05 | -0.05 | -0.05 | -0.05 | -0.05 | -0.05 | -0.05 |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | | | | | | | | | |
+| Qty Growth (%) | | | | 3.00 | 2.00 | 0.50 | 0.50 | 0.50 | 0.50 | 0.50 |
+| ASP | | | 2700.00 | | | | | | | |
+| Qty Growth (%) | | | | -0.10 | | | | | | |
+
+##### Bebe
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr1) | | | | 60 | 75 | | | | | |
+| Avg Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.15 | 0.15 | 0.15 | 0.15 | 0.15 |
+| ASP growth | | 3300 | 3300 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | | | 2 | | | | | | | |
+| Qty Growth (%) | | | | 4.00 | 2.00 | 0.70 | 0.70 | 0.50 | 0.50 | 0.50 |
+| ASP | | | 3635.59 | | | | | | | |
+| Qty Growth (%) | | | | | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 | 0.02 |
+
+#### Sunglasses
+
+##### Gio Collection
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 71 | 163 | 175 | | | | | | |
+| Incremental Stores | | | | | 35 | 35 | 35 | 35 | 35 | 35 |
+| Annual Qty sold in new Stores (pcs) (Yr1) | | 93.04 | 360.60 | 425.72 | 450 | | | | | |
+| Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.12 | 0.10 | 0.10 | 0.10 | 0.10 | 0.10 |
+| ASP growth | | 1921.94 | 1493.89 | 1583.32 | -0.10 | | | | | |
+
+**Traditional Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | | | | | | | | | |
+| Incremental Stores | | | | | 30 | 25 | 25 | 25 | 25 | 25 |
+| Annual Qty sold in new Stores (pcs) (Yr1) | | | | 1 | 75 | 100 | | | | |
+| Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | | 0.08 | 0.08 | 0.08 | 0.08 | 0.08 |
+| ASP growth | | -23.22 | 1398.37 | | | | | | | |
+
+**Online**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Annual Qty sold (pcs) | 686 | 1363 | 721 | 1612 | | | | | | |
+| Qty Growth (%) | | | 1.24 | 5.00 | 3.00 | 1.00 | 0.70 | 0.50 | 0.50 | 0.50 |
+| ASP | 866.68 | 805.82 | 1140.84 | 1060.33 | | | | | | |
+| Qty Growth (%) | | | | -0.07 | | | | | | |
+
+##### Giordano
+**Modern Retail**
+| Item | FY16A | FY17A | FY18A | FY19P | FY20E | FY21E | FY22E | FY23E | FY24E | FY25E |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Existing Stores | | 73 | 157 | 175 | | | | | | |
+| Incremental Stores | | | | | 35 | 35 | 35 | 35 | 35 | 35 |
+| Annual Qty sold in new Stores (pcs) (Yr1) | | | 71.24 | 140 | 180 | 240 | | | | |
+| Annual Qty sold in new Stores (pcs) (Yr2) | | | | | | | | | | |
+| SSG | | | | | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 | 0.12 |
+| ASP growth | | | | | | | | | | |
