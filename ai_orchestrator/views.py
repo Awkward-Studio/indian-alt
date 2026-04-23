@@ -3,6 +3,7 @@ import json
 import uuid
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
+from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -166,24 +167,29 @@ class DealChatView(APIView):
                 defaults={'id': uuid.uuid4()} # Using deal ID as a reference? No, use new UUID.
             )
 
-            task = generate_chat_response_async.apply_async(
-                kwargs={
-                    'conversation_id': str(conversation.id),
-                    'user_message': user_message,
-                    'skill_name': 'deal_chat',
-                    'metadata': {
-                        'deal_id': str(deal.id),
-                    },
-                    'audit_log_id': str(audit_log.id)
-                }
-            )
+            task_info: Dict[str, Any] = {}
 
-            audit_log.celery_task_id = task.id
-            audit_log.save(update_fields=['celery_task_id'])
+            def _enqueue_task():
+                task = generate_chat_response_async.apply_async(
+                    kwargs={
+                        'conversation_id': str(conversation.id),
+                        'user_message': user_message,
+                        'skill_name': 'deal_chat',
+                        'metadata': {
+                            'deal_id': str(deal.id),
+                        },
+                        'audit_log_id': str(audit_log.id)
+                    }
+                )
+                task_info["id"] = task.id
+                audit_log.celery_task_id = task.id
+                audit_log.save(update_fields=['celery_task_id'])
+
+            transaction.on_commit(_enqueue_task)
 
             return Response({
                 "status": "queued",
-                "task_id": task.id,
+                "task_id": task_info.get("id"),
                 "audit_log_id": str(audit_log.id),
                 "conversation_id": str(conversation.id)
             })
@@ -228,22 +234,27 @@ class UniversalChatView(APIView):
             )
 
             from .tasks import generate_chat_response_async
-            task = generate_chat_response_async.apply_async(
-                kwargs={
-                    'conversation_id': str(conversation.id),
-                    'user_message': user_message,
-                    'skill_name': 'universal_chat',
-                    'metadata': {}, # We will build the context entirely inside the Celery task
-                    'audit_log_id': str(audit_log.id)
-                }
-            )
+            task_info: Dict[str, Any] = {}
 
-            audit_log.celery_task_id = task.id
-            audit_log.save(update_fields=['celery_task_id'])
+            def _enqueue_task():
+                task = generate_chat_response_async.apply_async(
+                    kwargs={
+                        'conversation_id': str(conversation.id),
+                        'user_message': user_message,
+                        'skill_name': 'universal_chat',
+                        'metadata': {}, # We will build the context entirely inside the Celery task
+                        'audit_log_id': str(audit_log.id)
+                    }
+                )
+                task_info["id"] = task.id
+                audit_log.celery_task_id = task.id
+                audit_log.save(update_fields=['celery_task_id'])
+
+            transaction.on_commit(_enqueue_task)
 
             return Response({
                 "status": "queued",
-                "task_id": task.id,
+                "task_id": task_info.get("id"),
                 "audit_log_id": str(audit_log.id),
                 "conversation_id": str(conversation.id)
             })

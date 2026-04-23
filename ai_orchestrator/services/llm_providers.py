@@ -340,8 +340,8 @@ class RerankerProviderService:
             return []
         effective_timeout = timeout or self.timeout
         request_variants = [
-            self._request_payload(model=model, query=query, documents=documents, include_model=True, include_documents_alias=True),
             self._request_payload(model=model, query=query, documents=documents, include_model=True, include_documents_alias=False),
+            self._request_payload(model=model, query=query, documents=documents, include_model=True, include_documents_alias=True),
             self._request_payload(model=model, query=query, documents=documents, include_model=False, include_documents_alias=False),
         ]
 

@@ -43,6 +43,16 @@ class Command(BaseCommand):
             action="store_true",
             help="Print the rendered analysis prompt when --run-analysis is enabled.",
         )
+        parser.add_argument(
+            "--skip-rerank",
+            action="store_true",
+            help="Disable reranker calls for this inspection run (useful when debugging OOM or endpoint limits).",
+        )
+        parser.add_argument(
+            "--light",
+            action="store_true",
+            help="Run with reduced retrieval/context budgets to avoid heavy memory usage.",
+        )
 
     def handle(self, *args, **options):
         query = (options.get("query") or "").strip()
@@ -54,8 +64,56 @@ class Command(BaseCommand):
         show_context = bool(options.get("show_context"))
         run_analysis = bool(options.get("run_analysis"))
         show_analysis_prompt = bool(options.get("show_analysis_prompt"))
+        skip_rerank = bool(options.get("skip_rerank"))
+        light_mode = bool(options.get("light"))
 
         service = UniversalChatService(AIProcessorService())
+        if skip_rerank:
+            service.embed_service.reranker_model = ""
+
+        if light_mode:
+            stage_by_id = {stage.get("id"): stage for stage in service.flow_config.get("stages", [])}
+
+            planner = (stage_by_id.get("query_planner") or {}).get("settings", {})
+            planner.update(
+                {
+                    "default_deal_limit": 8,
+                    "max_deal_limit": 12,
+                    "default_chunks_per_deal": 4,
+                    "max_chunks_per_deal": 8,
+                }
+            )
+
+            filtering = (stage_by_id.get("deal_filtering") or {}).get("settings", {})
+            filtering.update(
+                {
+                    "candidate_pool_limit": 80,
+                    "result_limit": 8,
+                }
+            )
+
+            chunk_retrieval = (stage_by_id.get("chunk_retrieval") or {}).get("settings", {})
+            chunk_retrieval.update(
+                {
+                    "vector_limit": 120,
+                    "fallback_candidate_limit": 160,
+                    "synthesis_document_candidate_limit": 80,
+                }
+            )
+
+            context_assembly = (stage_by_id.get("context_assembly") or {}).get("settings", {})
+            context_assembly.update(
+                {
+                    "max_total_chunks": 24,
+                    "soft_max_total_chunks": 18,
+                    "fallback_max_total_chunks": 24,
+                    "max_context_chars": 70000,
+                    "chunk_excerpt_chars": 1200,
+                    "min_chunks_per_selected_deal": 2,
+                    "max_chunks_per_selected_deal": 8,
+                }
+            )
+
         simulation = service.simulate_query(
             query,
             conversation_id=conversation_id,
