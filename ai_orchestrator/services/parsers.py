@@ -65,54 +65,68 @@ class ResponseParserService:
     @staticmethod
     def extract_json(text: str) -> str:
         """Robustly find and extract JSON string from a larger text block."""
+        if not text:
+            return ""
+            
         try:
-            # 1. Try to find content between tags (non-greedy to avoid capturing multiple blocks if tags are repeated)
+            # 1. Clean response by removing known thinking tags first to avoid confusing the extractor
+            clean_text = re.sub(r'<(thinking|think)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+            
+            # 2. Try to find all content between tags or code blocks in the cleaned text
             patterns = [
                 r'<json>(.*?)</json>',
                 r'```json(.*?)\s*```',
                 r'```(.*?)\s*```'
             ]
             
-            candidate = None
+            candidates = []
             for pattern in patterns:
-                match = re.search(pattern, text, re.DOTALL)
-                if match:
-                    candidate = match.group(1).strip()
-                    break
+                matches = re.findall(pattern, clean_text, re.DOTALL)
+                for m in matches:
+                    if m.strip(): candidates.append(m.strip())
             
-            if not candidate:
-                # Fallback to finding from first {
+            # Also try to find anything that looks like a JSON object { ... }
+            brace_matches = re.finditer(r'\{.*\}', clean_text, re.DOTALL)
+            for m in brace_matches:
+                candidates.append(m.group(0).strip())
+
+            # If no candidates in cleaned text, search the whole text as fallback
+            if not candidates:
+                for pattern in patterns:
+                    matches = re.findall(pattern, text, re.DOTALL)
+                    for m in matches:
+                        if m.strip(): candidates.append(m.strip())
+                brace_matches = re.finditer(r'\{.*\}', text, re.DOTALL)
+                for m in brace_matches:
+                    candidates.append(m.group(0).strip())
+
+            if not candidates:
+                # Last resort fallback to finding first brace in the raw text
                 first_brace = text.find('{')
                 if first_brace != -1:
-                    candidate = text[first_brace:].strip()
-            
-            if not candidate:
+                    return text[first_brace:].strip()
                 return text
 
-            # 2. Use raw_decode to get the FIRST valid JSON object from the candidate
-            # This handles cases where the AI appends extra text or repeats the JSON structure.
-            start_idx = candidate.find('{')
-            if start_idx == -1:
-                return candidate
+            # 3. Iterate backwards through candidates (preferring the final output)
+            decoder = json.JSONDecoder()
+            for candidate in reversed(candidates):
+                start_idx = candidate.find('{')
+                if start_idx == -1: continue
                 
-            # Attempt to repair common issues before raw_decode to increase success rate
-            # (e.g., trailing commas or unescaped characters that raw_decode might stumble on)
-            # but we only repair the first object part if possible.
-            
-            try:
-                decoder = json.JSONDecoder()
-                # raw_decode returns (object, end_index)
-                obj, _ = decoder.raw_decode(candidate[start_idx:])
-                return json.dumps(obj)
-            except json.JSONDecodeError:
-                # If raw_decode fails on the raw string, try repairing it and decoding again
-                repaired_candidate = ResponseParserService.repair_json(candidate[start_idx:])
+                json_part = candidate[start_idx:]
                 try:
-                    obj, _ = decoder.raw_decode(repaired_candidate)
+                    obj, _ = decoder.raw_decode(json_part)
                     return json.dumps(obj)
-                except:
-                    # Final fallback: return the original candidate if all decoding/repair fails
-                    return candidate
+                except json.JSONDecodeError:
+                    try:
+                        repaired = ResponseParserService.repair_json(json_part)
+                        obj, _ = decoder.raw_decode(repaired)
+                        return json.dumps(obj)
+                    except:
+                        continue
+
+            return candidates[-1]
+            
         except Exception as e:
             logger.error(f"JSON extraction failed: {str(e)}")
         return text
