@@ -17,14 +17,15 @@ from urllib3.util.retry import Retry
 # MASTER TUNING DASHBOARD (INTELLIGENCE-FUSION v46)
 # ==============================================================================
 # 1. WORKER POOLS
-# Synthesis is heavy on VRAM. 32 workers is the optimal limit for 250k prompts.
-GPU_FIREHOSE_WORKERS = 32       
-CONNECTION_POOL_SIZE = 300      
+# Synthesis is heavy on VRAM. Keep defaults conservative for a 32k-token vLLM server.
+GPU_FIREHOSE_WORKERS = int(os.getenv("PHASE3_SYNTHESIS_WORKERS", "8"))
+CONNECTION_POOL_SIZE = int(os.getenv("PHASE3_CONNECTION_POOL_SIZE", "64"))
 
 # 2. HIERARCHICAL SETTINGS
-# Since we only use structured intel, 250k chars covers even 1,000-file deals.
-CONTEXT_SAFE_LIMIT = 250000     
-BUCKET_SIZE_CHARS = 100000      # Fallback bucket size for astronomical deals
+# These are character limits, not token limits. 60k chars leaves room for the
+# system prompt, JSON structure, and model output under --max-model-len=32768.
+CONTEXT_SAFE_LIMIT = int(os.getenv("PHASE3_CONTEXT_SAFE_CHARS", "60000"))
+BUCKET_SIZE_CHARS = int(os.getenv("PHASE3_BUCKET_CHARS", "45000"))
 # 3. NETWORK SETTINGS
 # 20 minutes allowed for deep-reasoning synthesis passes.
 NORM_TIMEOUT = (15, 1200)       
