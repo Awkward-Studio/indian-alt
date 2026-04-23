@@ -1220,6 +1220,8 @@ class UniversalChatService:
                 deal_ids=deal_ids or None,
             )
             candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
+        synthesis_document_candidates = self._augment_with_synthesis_document_candidates(candidate_chunks, scoped_deals, plan)
+        candidate_chunks = self._merge_chunk_pool(candidate_chunks, synthesis_document_candidates)
         candidate_chunks = self._augment_with_deal_summary_candidates(candidate_chunks, scoped_deals)
         if not candidate_chunks:
             queryset = DocumentChunk.objects.all().select_related("deal")
@@ -1260,6 +1262,11 @@ class UniversalChatService:
                 score += 24.0 if single_deal_depth_first else 8.0
 
             score += self._chunk_evidence_prior(chunk_kind, source_type=source_type, evidence_preference=plan.get("evidence_preference"))
+            synthesis_rank = getattr(chunk, "_synthesis_document_rank", None)
+            if synthesis_rank is not None:
+                # The deal synthesis artifact already analyzed this source document.
+                # Use that as a prior, while still letting rerank decide exact chunks.
+                score += max(4.0, 18.0 - min(float(synthesis_rank), 14.0))
 
             if score <= 0:
                 dropped_by_zero_score += 1
@@ -1304,6 +1311,7 @@ class UniversalChatService:
             "dropped_by_total_cap": dropped_by_total_cap,
             "dropped_as_duplicates": dropped_as_duplicates,
             "dropped_by_zero_score": dropped_by_zero_score,
+            "synthesis_document_candidate_count": len(synthesis_document_candidates),
             "chunk_scope_deal_ids": [str(deal.id) for deal in scoped_deals],
             "chunk_scope_deal_titles": [str(deal.title or "") for deal in scoped_deals],
             "selected_chunk_details": [
@@ -1463,6 +1471,153 @@ class UniversalChatService:
                 continue
             seen_ids.add(chunk_id)
             augmented.append(chunk)
+        return augmented
+
+    def _normalize_document_name(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return ""
+        normalized = normalized.replace("\\", "/").split("/")[-1]
+        if normalized.endswith(".json"):
+            normalized = normalized[:-5]
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
+
+    def _deal_synthesis_document_entries(self, deal: Deal) -> List[Dict[str, Any]]:
+        current_analysis = deal.current_analysis if isinstance(deal.current_analysis, dict) else {}
+        canonical_snapshot = current_analysis.get("canonical_snapshot") if isinstance(current_analysis.get("canonical_snapshot"), dict) else {}
+
+        raw_entries: List[Any] = []
+        for source in (
+            canonical_snapshot.get("document_evidence"),
+            current_analysis.get("document_evidence"),
+            (current_analysis.get("metadata") or {}).get("analysis_input_files") if isinstance(current_analysis.get("metadata"), dict) else None,
+        ):
+            if isinstance(source, list):
+                raw_entries.extend(source)
+
+        entries: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for rank, item in enumerate(raw_entries):
+            if isinstance(item, str):
+                entry = {"document_name": item}
+            elif isinstance(item, dict):
+                entry = dict(item)
+            else:
+                continue
+
+            names = [
+                entry.get("document_name"),
+                entry.get("source_file"),
+                entry.get("filename"),
+                entry.get("file_name"),
+                entry.get("title"),
+                entry.get("citation_label"),
+            ]
+            normalized_names = [self._normalize_document_name(name) for name in names if name]
+            normalized_names = [name for name in normalized_names if name]
+            if not normalized_names:
+                continue
+            identity = normalized_names[0]
+            if identity in seen:
+                continue
+            seen.add(identity)
+            entry["_normalized_names"] = normalized_names
+            entry["_rank"] = rank
+            entries.append(entry)
+        return entries
+
+    def _chunk_matches_synthesis_document(self, chunk: DocumentChunk, document_entries: List[Dict[str, Any]]) -> int | None:
+        metadata = chunk.metadata or {}
+        try:
+            document_metadata = self._document_metadata_for_chunk(chunk)
+        except Exception:
+            document_metadata = {}
+
+        chunk_names = [
+            metadata.get("title"),
+            metadata.get("filename"),
+            metadata.get("document_name"),
+            metadata.get("citation_label"),
+            document_metadata.get("document_name"),
+            document_metadata.get("citation_label"),
+            chunk.source_id,
+        ]
+        normalized_chunk_names = [
+            self._normalize_document_name(name)
+            for name in chunk_names
+            if name
+        ]
+        normalized_chunk_names = [name for name in normalized_chunk_names if name]
+        if not normalized_chunk_names:
+            return None
+
+        for entry in document_entries:
+            entry_names = entry.get("_normalized_names") or []
+            for chunk_name in normalized_chunk_names:
+                for entry_name in entry_names:
+                    if chunk_name == entry_name or chunk_name.startswith(entry_name) or entry_name.startswith(chunk_name):
+                        return int(entry.get("_rank") or 0)
+        return None
+
+    def _augment_with_synthesis_document_candidates(
+        self,
+        candidate_chunks: List[DocumentChunk],
+        deals: List[Deal],
+        plan: Dict[str, Any],
+    ) -> List[DocumentChunk]:
+        if not deals:
+            return []
+
+        retrieval_settings = self._stage_settings("chunk_retrieval")
+        per_deal_limit = max(int(retrieval_settings.get("synthesis_document_candidate_limit") or 240), 24)
+        existing_ids = {str(chunk.id) for chunk in candidate_chunks if getattr(chunk, "id", None)}
+        augmented: List[DocumentChunk] = []
+        evidence_preference = str(plan.get("evidence_preference") or "mixed")
+
+        for deal in deals:
+            document_entries = self._deal_synthesis_document_entries(deal)
+            if not document_entries:
+                continue
+
+            queryset = (
+                DocumentChunk.objects.filter(
+                    deal=deal,
+                    source_type__in=["document", "extracted_source", "analysis_document"],
+                )
+                .select_related("deal")
+                .order_by("-created_at")
+            )
+            matched: List[DocumentChunk] = []
+            for chunk in queryset[: max(per_deal_limit * 6, 300)]:
+                chunk_id = str(chunk.id)
+                if chunk_id in existing_ids:
+                    continue
+                rank = self._chunk_matches_synthesis_document(chunk, document_entries)
+                if rank is None:
+                    continue
+                setattr(chunk, "_synthesis_document_rank", rank)
+                matched.append(chunk)
+
+            def sort_key(chunk: DocumentChunk):
+                metadata = chunk.metadata or {}
+                kind = str(metadata.get("chunk_kind") or "").lower()
+                evidence_bonus = -self._chunk_evidence_prior(
+                    kind,
+                    source_type=str(chunk.source_type or ""),
+                    evidence_preference=evidence_preference,
+                )
+                return (
+                    int(getattr(chunk, "_synthesis_document_rank", 9999) or 0),
+                    evidence_bonus,
+                    int(metadata.get("chunk_index", 0) or 0),
+                )
+
+            matched.sort(key=sort_key)
+            for chunk in matched[:per_deal_limit]:
+                existing_ids.add(str(chunk.id))
+                augmented.append(chunk)
+
         return augmented
 
     def _chunk_evidence_prior(self, chunk_kind: str, *, source_type: str, evidence_preference: str | None) -> float:

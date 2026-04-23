@@ -19,7 +19,7 @@ from deals.services.document_artifacts import DocumentArtifactService
 from deals.services.deal_flow import DealFlowService
 from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
-from deals.services.bulk_sync_resolution import folder_aliases, synthesis_canonical_title
+from deals.services.bulk_sync_resolution import folder_aliases, resolve_existing_deal, synthesis_canonical_title
 from deals.tasks import analyze_additional_documents_async, analyze_selection_async, process_single_document_async
 
 
@@ -801,6 +801,30 @@ class BulkSyncResolutionAliasTests(TestCase):
 
         self.assertEqual(aliases[0], "Folder Backed Canonical Name")
         self.assertIn("Investment Report: Renamed By Synthesis", aliases)
+
+    def test_resolve_existing_deal_falls_back_to_distinctive_title_token(self):
+        deal = Deal.objects.create(title="Example Target Holdings Private Limited")
+        artifact = {
+            "deal_name": "Example",
+            "portable_deal_data": {"deal_model_data": {"title": "Example Target Holdings"}},
+        }
+
+        resolution = resolve_existing_deal("Example", artifact)
+
+        self.assertEqual(resolution.deal, deal)
+        self.assertEqual(resolution.matched_by, "fuzzy:Example")
+
+    def test_resolve_existing_deal_avoids_ambiguous_fuzzy_matches(self):
+        Deal.objects.create(title="Example Alpha Private Limited")
+        Deal.objects.create(title="Example Beta Private Limited")
+        artifact = {
+            "deal_name": "Example",
+            "portable_deal_data": {"deal_model_data": {"title": None}},
+        }
+
+        resolution = resolve_existing_deal("Example", artifact)
+
+        self.assertIsNone(resolution.deal)
 
 
 class RebuildDerivedDealStateCommandTests(TestCase):
