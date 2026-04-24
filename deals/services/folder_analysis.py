@@ -81,6 +81,41 @@ class FolderAnalysisService:
         return AIAuditLog.objects.filter(id=audit_log_id).first()
 
     @staticmethod
+    def persist_folder_tree(deal, folder_id: str, drive_id: str, user_email: str) -> int:
+        """
+        Synchronously traverses a OneDrive folder and persists the tree in an AIAuditLog.
+        This enables immediate file browser access without needing a background worker.
+        """
+        from microsoft.services.graph_service import GraphAPIService
+        from ai_orchestrator.models import AIAuditLog, AIPersonality
+        
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        graph = GraphAPIService()
+        
+        # 1. Perform Traversal
+        file_tree = graph.get_folder_tree(drive_id, folder_id, user_email=user_email)
+        
+        # 2. Persist in Audit Log so serializers can find it
+        AIAuditLog.objects.create(
+            source_type='onedrive_folder',
+            source_id=folder_id,
+            personality=personality,
+            status='COMPLETED',
+            is_success=True,
+            system_prompt="Immediate folder traversal for linking.",
+            user_prompt=f"Linking folder {folder_id} to deal {deal.id}",
+            source_metadata={
+                "drive_id": drive_id,
+                "folder_id": folder_id,
+                "deal_id": str(deal.id),
+                "file_tree": file_tree,
+                "total_files": len(file_tree),
+                "workflow_stage": "traversal_complete"
+            }
+        )
+        return len(file_tree)
+
+    @staticmethod
     def queue_folder_analysis(folder_id: str, folder_name: str, drive_id: str) -> dict:
         """
         Kicks off an asynchronous folder analysis. Returns tracking info.

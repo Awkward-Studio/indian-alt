@@ -283,6 +283,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """
         Manually link a OneDrive folder to an existing deal.
         """
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+
         deal = self.get_object()
         folder_id = request.data.get('source_onedrive_id')
         drive_id = request.data.get('source_drive_id')
@@ -294,15 +296,27 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal.source_drive_id = drive_id
         deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
 
-        # Pickup existing analyzed files
+        # 1. Pickup existing analyzed files
         from deals.services.vdr_sync import VDRSyncService
-        # Attempt to use current user's email if they have an account, otherwise service default
-        user_email = getattr(request.user, 'email', None)
+        user_email = getattr(request.user, 'email', None) or DMS_USER_EMAIL
         linked_count = VDRSyncService.sync_existing_analyses_to_folder(deal, user_email=user_email)
         
+        # 2. Synchronously traverse the folder tree to make it "instant" for the VDR dialog
+        try:
+            tree_count = FolderAnalysisService.persist_folder_tree(
+                deal=deal, 
+                folder_id=folder_id, 
+                drive_id=drive_id, 
+                user_email=DMS_USER_EMAIL
+            )
+            message = f"OneDrive folder linked. {tree_count} items discovered."
+        except Exception as e:
+            logger.error(f"Synchronous traversal failed: {e}")
+            message = "OneDrive folder linked, but traversal failed. Folder view may be empty."
+
         return Response({
             "status": "success",
-            "message": f"OneDrive folder linked successfully. Picked up {linked_count} existing analyses.",
+            "message": f"{message} Picked up {linked_count} existing analyses.",
             "source_onedrive_id": deal.source_onedrive_id,
             "source_drive_id": deal.source_drive_id,
             "linked_count": linked_count
