@@ -11,8 +11,110 @@ from drf_spectacular.types import OpenApiTypes
 from core.mixins import ErrorHandlingMixin
 from .models import Version
 from .serializers import VersionSerializer
+from banks.models import Bank
+from contacts.models import Contact
+from deals.models import Deal
 
 logger = logging.getLogger(__name__)
+
+
+class NetworkGraphView(APIView):
+    """
+    Returns data for the network graph visualization.
+    Structure: Banks -> Bankers (Contacts) -> Deals
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        nodes = []
+        links = []
+        node_ids = set()
+
+        # Colors from the frontend component
+        BANK_COLOR = "#FFD700"
+        CONTACT_COLOR = "#4ADE80"
+        DEAL_COLOR = "#3B82F6"
+
+        try:
+            # Prefetch for performance
+            banks = Bank.objects.prefetch_related(
+                'contacts', 
+                'contacts__primary_deals', 
+                'contacts__additional_deals'
+            ).all()
+            
+            for bank in banks:
+                bank_id = str(bank.id)
+                if bank_id not in node_ids:
+                    nodes.append({
+                        "id": bank_id,
+                        "label": bank.name or "Unknown Bank",
+                        "type": "bank",
+                        "color": BANK_COLOR,
+                        "val": 40
+                    })
+                    node_ids.add(bank_id)
+
+                for contact in bank.contacts.all():
+                    contact_id = str(contact.id)
+                    if contact_id not in node_ids:
+                        nodes.append({
+                            "id": contact_id,
+                            "label": contact.name or "Unknown Contact",
+                            "type": "contact",
+                            "color": CONTACT_COLOR,
+                            "val": 20
+                        })
+                        node_ids.add(contact_id)
+                    
+                    links.append({
+                        "source": bank_id,
+                        "target": contact_id
+                    })
+
+                    # Connect deals via primary_contact
+                    for deal in contact.primary_deals.all():
+                        deal_id = str(deal.id)
+                        if deal_id not in node_ids:
+                            nodes.append({
+                                "id": deal_id,
+                                "label": deal.title or "Untitled Deal",
+                                "type": "deal",
+                                "color": DEAL_COLOR,
+                                "val": 10
+                            })
+                            node_ids.add(deal_id)
+                        
+                        links.append({
+                            "source": contact_id,
+                            "target": deal_id
+                        })
+
+                    # Connect deals via additional_contacts
+                    for deal in contact.additional_deals.all():
+                        deal_id = str(deal.id)
+                        if deal_id not in node_ids:
+                            nodes.append({
+                                "id": deal_id,
+                                "label": deal.title or "Untitled Deal",
+                                "type": "deal",
+                                "color": DEAL_COLOR,
+                                "val": 10
+                            })
+                            node_ids.add(deal_id)
+                        
+                        links.append({
+                            "source": contact_id,
+                            "target": deal_id
+                        })
+
+            return Response({"nodes": nodes, "links": links})
+        except Exception as e:
+            logger.error(f"Error generating graph data: {str(e)}")
+            return Response(
+                {"error": "Failed to generate graph data", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class HealthCheckView(APIView):
