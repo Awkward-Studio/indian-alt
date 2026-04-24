@@ -48,6 +48,13 @@ List all sources used at the end of the narrative.""",
             name="deal_extraction",
             defaults={
                 "description": "Forensic deal extraction from folders and emails.",
+                "system_template": """### DEAL EXTRACTION OUTPUT CONTRACT:
+- Return exactly one JSON object and nothing else.
+- Do not wrap the JSON in markdown fences or <json> tags.
+- Do not repeat keys or restart the JSON object.
+- Keep `analyst_report` concise and bounded; prefer summary quality over length.
+- `funding_ask` must be a string in INR Cr, not a number.
+- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.""",
                 "output_schema": {
                     "deal_model_data": {
                         "title": "string",
@@ -194,6 +201,11 @@ USER INQUIRY: "{{ content }}"
             name="document_evidence_extraction",
             defaults={
                 "description": "Extracts structured evidence from a single document before final deal synthesis.",
+                "system_template": """### DOCUMENT EVIDENCE OUTPUT CONTRACT:
+- Return exactly one JSON object and nothing else.
+- `document_summary`, `normalized_text`, and `reasoning` must be strings.
+- `claims`, `risks`, `open_questions`, `citations`, and `quality_flags` must be arrays of strings.
+- `metrics`, `tables_summary`, `contacts_found`, and `source_map` must be valid JSON values.""",
                 "output_schema": {
                     "document_name": "string",
                     "document_type": "string",
@@ -279,6 +291,12 @@ Rules:
             name="deal_synthesis",
             defaults={
                 "description": "Synthesizes a final deal analysis from document evidence objects and supporting raw chunks.",
+                "system_template": """### DEAL SYNTHESIS OUTPUT CONTRACT:
+- Return exactly one JSON object and nothing else.
+- `analyst_report` must be a string with citations.
+- `document_evidence`, `cross_document_conflicts`, and `missing_information_requests` must be arrays.
+- `metadata` must include `ambiguous_points`, `sources_cited`, `documents_analyzed`, `analysis_input_files`, and `failed_files`.
+- Preserve supporting citations from the supplied evidence where possible.""",
                 "output_schema": {
                     "deal_model_data": "object",
                     "metadata": "object",
@@ -343,6 +361,11 @@ Rules:
             name="vdr_incremental_analysis",
             defaults={
                 "description": "Generates a supplementary analysis version from newly selected VDR documents.",
+                "system_template": """### INCREMENTAL ANALYSIS OUTPUT CONTRACT:
+- Return exactly one JSON object and nothing else.
+- The JSON must contain `analyst_report` as a string.
+- `document_evidence`, `cross_document_conflicts`, and `missing_information_requests` must be arrays.
+- Focus only on newly supplied documents; do not rewrite the full prior report.""",
                 "output_schema": {
                     "analyst_report": "string",
                     "deal_model_data": "object",
@@ -389,5 +412,68 @@ Rules:
 - Keep citations or file references tied to the new documents when possible.""",
             }
         )
+
+        # NEW SKILLS FOR EMAIL THREAD PIPELINE
+        AISkill.objects.update_or_create(
+            name="deal_routing",
+            defaults={
+                "description": "Extracts routing metadata from email threads to link to Deals, Banks, and Bankers.",
+                "system_template": "Return exactly one JSON object with company_name, bank_name, banker_name, and banker_email.",
+                "prompt_template": """Analyze this email thread and extract the Deal metadata.
+THREAD:
+{{ content }}
+
+Return JSON:
+{
+  "company_name": "Name of the target company",
+  "bank_name": "Name of the investment bank",
+  "banker_name": "Name of the primary banker",
+  "banker_email": "Email of the primary banker"
+}"""
+            }
+        )
+
+        AISkill.objects.update_or_create(
+            name="document_normalization",
+            defaults={
+                "description": "Normalizes raw document text into high-fidelity structured JSON.",
+                "system_template": "Return exactly one JSON object following the strict schema.",
+                "prompt_template": """[SYSTEM: DOCUMENT-NORMALIZER]
+Strictly extract deal intelligence in JSON format.
+
+INPUT:
+{{ content }}
+
+Return JSON:
+{
+  "document_name": "...",
+  "document_type": "...",
+  "document_summary": "...",
+  "metrics": {
+    "Key Metric Name": "Value"
+  },
+  "risks": ["..."],
+  "tables_summary": "...",
+  "quality_flags": ["cleaned_markdown"],
+  "source_file": "..."
+}"""
+            }
+        )
+
+        AISkill.objects.update_or_create(
+            name="email_thread_synthesis",
+            defaults={
+                "description": "Synthesizes updated deal state from an email thread and its attachments.",
+                "system_template": "Return exactly one JSON object compatible with Deal model updates.",
+                "prompt_template": """Update the deal state based on the following new intelligence.
+CURRENT DEAL: {{ deal_title }} | {{ deal_summary }}
+NEW INTEL:
+{{ content }}
+
+Return updated deal metadata in the standard synthesis format."""
+            }
+        )
+
+        self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts.'))
 
         self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts.'))

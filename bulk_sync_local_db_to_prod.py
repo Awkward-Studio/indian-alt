@@ -3,7 +3,9 @@ import json
 import os
 import subprocess
 import time
+import sys
 from copy import deepcopy
+from itertools import islice
 from typing import Iterable
 
 import dj_database_url
@@ -17,6 +19,7 @@ from django.db import connections, transaction
 from django.db.models import Count, Q
 
 from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
+from api_requests.models import Request
 from banks.models import Bank
 from contacts.models import Contact
 from deals.models import Deal, DealAnalysis, DealDocument, DealPhaseLog, FolderAnalysisDocument
@@ -56,9 +59,11 @@ def parse_args():
         help="Directory where Railway CLI should run. Defaults to current directory.",
     )
     parser.add_argument(
+        "--prune-production-data",
         "--prune-production-deals",
+        dest="prune_production_data",
         action="store_true",
-        help="Delete production deals that are not present in the selected local deal set. Dry-run unless --dry-run is omitted.",
+        help="Delete production rows not present in the selected local sync set. For full deal syncs this prunes deals; for reference-data-only mode this prunes contacts and banks.",
     )
     parser.add_argument(
         "--only-missing-deals",
@@ -70,6 +75,55 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether the production DB connection should require SSL.",
+    )
+    parser.add_argument(
+        "--verbose-sync",
+        action="store_true",
+        help="Print every bank, contact, document, and chunk as it is prepared for sync.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=250,
+        help="Print progress every N rows during large sync phases. Defaults to 250.",
+    )
+    parser.add_argument(
+        "--reference-data-only",
+        action="store_true",
+        help="Sync only banks and bankers/contacts. If pruning is enabled, prune production contacts/banks not present locally.",
+    )
+    parser.add_argument(
+        "--skip-reference-data",
+        action="store_true",
+        help="Skip the initial bank/contact sync phase and go straight to deal data.",
+    )
+    parser.add_argument(
+        "--prune-batch-size",
+        type=int,
+        default=250,
+        help="Delete production prune candidates in batches of this size.",
+    )
+    parser.add_argument(
+        "--prompt-child-overwrite",
+        action="store_true",
+        help="Prompt per deal whether to rebuild analyses/documents/chunks/profile from local or keep production.",
+    )
+    parser.add_argument(
+        "--interactive-prune",
+        action="store_true",
+        help="Prompt before deleting each production prune candidate; choose individual deals or prune all.",
+    )
+    parser.add_argument(
+        "--deal-batch-size",
+        type=int,
+        default=50,
+        help="Process local deals in batches of this size with prefetched relations. Defaults to 50.",
+    )
+    parser.add_argument(
+        "--reference-batch-size",
+        type=int,
+        default=250,
+        help="Process reference banks/contacts in batches of this size. Defaults to 250.",
     )
     return parser.parse_args()
 
@@ -181,6 +235,195 @@ def normalize_text(value):
     return str(value).strip()
 
 
+def request_payload_for(request_obj: Request | None) -> dict | None:
+    if not request_obj:
+        return None
+    return {
+        "metadata": deepcopy(request_obj.metadata or {}),
+        "body": deepcopy(request_obj.body or {}),
+        "attachments": deepcopy(request_obj.attachments or {}),
+        "status": request_obj.status,
+        "logs": request_obj.logs,
+        "created_at": request_obj.created_at,
+    }
+
+
+def related_id_set(objs) -> set[str]:
+    return {str(obj.id) for obj in objs if getattr(obj, "id", None)}
+
+
+def format_profile_debug(profile) -> str:
+    if not profile:
+        return "N/A"
+    pieces = [
+        str(getattr(profile, "id", "N/A")),
+        normalize_text(getattr(profile, "name", "")) or "N/A",
+        normalize_text(getattr(profile, "email", "")) or "N/A",
+    ]
+    return " | ".join(pieces)
+
+
+def format_profile_list_debug(profiles) -> str:
+    items = [format_profile_debug(profile) for profile in profiles if profile]
+    return "; ".join(items) if items else "None"
+
+
+def deal_state_differences(
+    local_deal: Deal,
+    prod_deal: Deal | None,
+    bank_map: dict[str, Bank],
+    contact_map: dict[str, Contact],
+) -> list[str]:
+    if not prod_deal:
+        return ["missing production deal"]
+
+    local_request_payload = request_payload_for(local_deal.request)
+    prod_request_payload = request_payload_for(prod_deal.request)
+
+    local_additional_contacts = [
+        contact_map[str(contact.id)]
+        for contact in local_deal.additional_contacts.using(SOURCE_DB).all()
+        if str(contact.id) in contact_map
+    ]
+    local_responsibility = list(local_deal.responsibility.using(SOURCE_DB).all())
+    local_responsibility_mapped = [
+        upsert_user_and_profile(profile, dry_run=True) for profile in local_responsibility
+    ]
+    local_responsibility_ids = related_id_set(local_responsibility_mapped)
+    prod_responsibility_ids = related_id_set(prod_deal.responsibility.using(TARGET_DB).all())
+
+    payload = {
+        "title": local_deal.title,
+        "bank": bank_map.get(str(local_deal.bank_id)) if local_deal.bank_id else None,
+        "priority": local_deal.priority,
+        "deal_status": local_deal.deal_status,
+        "current_phase": local_deal.current_phase,
+        "deal_flow_decisions": dict(local_deal.deal_flow_decisions or {}),
+        "rejection_stage_id": local_deal.rejection_stage_id,
+        "rejection_reason": local_deal.rejection_reason,
+        "deal_summary": local_deal.deal_summary,
+        "funding_ask": local_deal.funding_ask,
+        "industry": local_deal.industry,
+        "sector": local_deal.sector,
+        "comments": local_deal.comments,
+        "deal_details": local_deal.deal_details,
+        "is_female_led": local_deal.is_female_led,
+        "management_meeting": local_deal.management_meeting,
+        "funding_ask_for": local_deal.funding_ask_for,
+        "company_details": local_deal.company_details,
+        "business_proposal_stage": local_deal.business_proposal_stage,
+        "ic_stage": local_deal.ic_stage,
+        "reasons_for_passing": local_deal.reasons_for_passing,
+        "city": local_deal.city,
+        "state": local_deal.state,
+        "country": local_deal.country,
+        "other_contacts": [str(contact.id) for contact in local_additional_contacts],
+        "primary_contact": contact_map.get(str(local_deal.primary_contact_id)) if local_deal.primary_contact_id else None,
+        "fund": local_deal.fund,
+        "legacy_investment_bank": local_deal.legacy_investment_bank,
+        "priority_rationale": local_deal.priority_rationale,
+        "themes": list(local_deal.themes or []),
+        "is_indexed": local_deal.is_indexed,
+        "extracted_text": local_deal.extracted_text,
+        "source_onedrive_id": local_deal.source_onedrive_id,
+        "source_drive_id": local_deal.source_drive_id,
+        "source_email_id": local_deal.source_email_id,
+        "processing_status": local_deal.processing_status,
+        "processing_error": local_deal.processing_error,
+    }
+
+    differences: list[str] = []
+    for field, value in payload.items():
+        current = getattr(prod_deal, field)
+        if current != value:
+            differences.append(field)
+
+    if local_request_payload != prod_request_payload:
+        differences.append("request")
+
+    prod_additional_ids = related_id_set(prod_deal.additional_contacts.using(TARGET_DB).all())
+    if related_id_set(local_additional_contacts) != prod_additional_ids:
+        differences.append("additional_contacts")
+
+    if local_responsibility_ids != prod_responsibility_ids:
+        differences.append("responsibility")
+
+    return differences
+
+
+def deal_matches_prod(local_deal: Deal, prod_deal: Deal | None, bank_map: dict[str, Bank], contact_map: dict[str, Contact]) -> bool:
+    return not deal_state_differences(local_deal, prod_deal, bank_map, contact_map)
+
+
+def prompt_child_overwrite(local_deal: Deal, prod_deal: Deal) -> bool:
+    if not sys.stdin or not sys.stdin.isatty():
+        return True
+
+    prompt = (
+        f"\n[CHILD-OVERWRITE] {local_deal.title or local_deal.id}\n"
+        f"  production_deal_id={prod_deal.id}\n"
+        "  Rewrite analyses/documents/chunks/profile from local?\n"
+        "  [y] yes  [n] keep production  [s] skip deal\n"
+        "  Choice: "
+    )
+    while True:
+        answer = input(prompt).strip().lower()
+        if answer in {"y", "yes", ""}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        if answer in {"s", "skip"}:
+            raise RuntimeError(f"Skipped by operator: {local_deal.title or local_deal.id}")
+        print("Please respond with y, n, or s.", flush=True)
+
+
+def prompt_prune_selection(candidates: list[dict], interactive: bool) -> list[dict]:
+    if not candidates:
+        return []
+    if not interactive:
+        return candidates
+    if not sys.stdin or not sys.stdin.isatty():
+        return candidates
+
+    print("\n[PRUNE-INTERACTIVE] Production deals eligible for deletion:", flush=True)
+    for index, candidate in enumerate(candidates, start=1):
+        print(
+            f"  {index}. {candidate['title'] or candidate['id']} "
+            f"id={candidate['id']} documents={candidate['documents_count']} "
+            f"chunks={candidate['chunks_count']} analyses={candidate['analyses_count']}",
+            flush=True,
+        )
+    print("Choose: comma-separated numbers, 'all', or 'skip'.", flush=True)
+
+    while True:
+        answer = input("Deletion selection: ").strip().lower()
+        if answer in {"all", "a"}:
+            return candidates
+        if answer in {"skip", "s", ""}:
+            return []
+        indices = []
+        try:
+            for part in answer.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                indices.append(int(part))
+        except ValueError:
+            print("Please enter comma-separated numbers, 'all', or 'skip'.", flush=True)
+            continue
+        selected = []
+        invalid = False
+        for index in indices:
+            if index < 1 or index > len(candidates):
+                invalid = True
+                break
+            selected.append(candidates[index - 1])
+        if invalid:
+            print("One or more numbers were out of range.", flush=True)
+            continue
+        return selected
+
+
 def iter_target_deals(identifiers: Iterable[str] | None):
     queryset = Deal.objects.using(SOURCE_DB).all().order_by("title", "created_at")
     identifiers = [normalize_text(value) for value in identifiers or [] if normalize_text(value)]
@@ -197,6 +440,75 @@ def iter_target_deals(identifiers: Iterable[str] | None):
             seen_ids.add(str(deal.id))
             matched.append(deal)
     return matched
+
+
+def deal_batches(deals: list[Deal], batch_size: int):
+    batch_size = max(1, int(batch_size))
+    iterator = iter(deals)
+    while True:
+        batch = list(islice(iterator, batch_size))
+        if not batch:
+            break
+        yield batch
+
+
+def hydrate_local_deal_batch(batch: list[Deal]) -> list[Deal]:
+    if not batch:
+        return []
+    deal_ids = [deal.id for deal in batch]
+    queryset = (
+        Deal.objects.using(SOURCE_DB)
+        .filter(id__in=deal_ids)
+        .select_related("request", "bank", "primary_contact")
+        .prefetch_related("analyses", "phase_logs", "documents", "chunks", "additional_contacts", "responsibility")
+    )
+    hydrated_by_id = {deal.id: deal for deal in queryset}
+    return [hydrated_by_id[deal_id] for deal_id in deal_ids if deal_id in hydrated_by_id]
+
+
+def iter_batches(items, batch_size: int):
+    batch_size = max(1, int(batch_size))
+    iterator = iter(items)
+    while True:
+        batch = list(islice(iterator, batch_size))
+        if not batch:
+            break
+        yield batch
+
+
+def upsert_request(local_request: Request | None, dry_run: bool = False, verbose: bool = False) -> Request | None:
+    if not local_request:
+        return None
+
+    prod_request = Request.objects.using(TARGET_DB).filter(id=local_request.id).first()
+    payload = request_payload_for(local_request)
+
+    if dry_run:
+        return prod_request or local_request
+
+    if prod_request:
+        if request_payload_for(prod_request) == payload:
+            if verbose:
+                print(f"[SKIP-UNCHANGED] REQUEST {local_request.id}", flush=True)
+            return prod_request
+        changed = []
+        for field, value in payload.items():
+            current = getattr(prod_request, field)
+            if current != value:
+                setattr(prod_request, field, value)
+                changed.append(field)
+        if changed:
+            prod_request.save(using=TARGET_DB, update_fields=changed)
+            if verbose:
+                print(f"[UPDATE] REQUEST {local_request.id} fields={','.join(changed)}", flush=True)
+        return prod_request
+
+    prod_request = Request.objects.using(TARGET_DB).create(id=local_request.id, **payload)
+    if prod_request.created_at != local_request.created_at:
+        Request.objects.using(TARGET_DB).filter(pk=prod_request.pk).update(created_at=local_request.created_at)
+    if verbose:
+        print(f"[CREATE] REQUEST {local_request.id}", flush=True)
+    return prod_request
 
 
 def filter_missing_deals(local_deals: list[Deal]) -> tuple[list[Deal], int]:
@@ -234,7 +546,50 @@ def filter_missing_deals(local_deals: list[Deal]) -> tuple[list[Deal], int]:
     return filtered, skipped_existing
 
 
-def upsert_bank(local_bank: Bank | None, dry_run: bool = False) -> Bank | None:
+def _deal_rank_key_for_sync(deal: Deal):
+    document_count = deal.documents.using(SOURCE_DB).count()
+    chunk_count = deal.chunks.using(SOURCE_DB).count()
+    analysis_count = deal.analyses.using(SOURCE_DB).count()
+    created_at = deal.created_at.isoformat() if deal.created_at else ""
+    return (-document_count, -chunk_count, -analysis_count, created_at, str(deal.id))
+
+
+def dedupe_local_deals_by_title(local_deals: list[Deal]) -> tuple[list[Deal], list[dict]]:
+    grouped: dict[str, list[Deal]] = {}
+    passthrough: list[Deal] = []
+
+    for deal in local_deals:
+        normalized_title = " ".join(normalize_text(deal.title).lower().split())
+        if not normalized_title:
+            passthrough.append(deal)
+            continue
+        grouped.setdefault(normalized_title, []).append(deal)
+
+    deduped: list[Deal] = list(passthrough)
+    collisions: list[dict] = []
+
+    for normalized_title, deals in grouped.items():
+        if len(deals) == 1:
+            deduped.append(deals[0])
+            continue
+
+        ranked = sorted(deals, key=_deal_rank_key_for_sync)
+        winner = ranked[0]
+        dropped = ranked[1:]
+        deduped.append(winner)
+        collisions.append(
+            {
+                "normalized_title": normalized_title,
+                "winner": winner,
+                "dropped": dropped,
+            }
+        )
+
+    deduped.sort(key=lambda deal: ((deal.title or "").lower(), deal.created_at or ""))
+    return deduped, collisions
+
+
+def upsert_bank(local_bank: Bank | None, dry_run: bool = False, verbose: bool = False) -> Bank | None:
     if not local_bank:
         return None
 
@@ -256,6 +611,14 @@ def upsert_bank(local_bank: Bank | None, dry_run: bool = False) -> Bank | None:
         return prod_bank or local_bank
 
     if prod_bank:
+        if (
+            prod_bank.name == payload["name"]
+            and prod_bank.website_domain == payload["website_domain"]
+            and prod_bank.description == payload["description"]
+        ):
+            if verbose:
+                print(f"[SKIP-UNCHANGED] BANK {local_bank.name or local_bank.id}", flush=True)
+            return prod_bank
         changed = []
         for field, value in payload.items():
             if getattr(prod_bank, field) != value:
@@ -263,12 +626,24 @@ def upsert_bank(local_bank: Bank | None, dry_run: bool = False) -> Bank | None:
                 changed.append(field)
         if changed:
             prod_bank.save(using=TARGET_DB, update_fields=changed)
+            if verbose:
+                print(
+                    f"[UPDATE] BANK {local_bank.name or local_bank.id} fields={','.join(changed)}",
+                    flush=True,
+                )
         return prod_bank
 
+    if verbose:
+        print(f"[CREATE] BANK {local_bank.name or local_bank.id}", flush=True)
     return Bank.objects.using(TARGET_DB).create(id=local_bank.id, **payload)
 
 
-def upsert_contact(local_contact: Contact | None, bank_map: dict[str, Bank], dry_run: bool = False) -> Contact | None:
+def upsert_contact(
+    local_contact: Contact | None,
+    bank_map: dict[str, Bank],
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> Contact | None:
     if not local_contact:
         return None
 
@@ -309,6 +684,10 @@ def upsert_contact(local_contact: Contact | None, bank_map: dict[str, Bank], dry
         return prod_contact or local_contact
 
     if prod_contact:
+        if all(getattr(prod_contact, field) == value for field, value in payload.items()):
+            if verbose:
+                print(f"[SKIP-UNCHANGED] CONTACT {local_contact.name or local_contact.id}", flush=True)
+            return prod_contact
         changed = []
         for field, value in payload.items():
             current = getattr(prod_contact, field)
@@ -317,12 +696,24 @@ def upsert_contact(local_contact: Contact | None, bank_map: dict[str, Bank], dry
                 changed.append(field)
         if changed:
             prod_contact.save(using=TARGET_DB, update_fields=changed)
+            if verbose:
+                print(
+                    f"[UPDATE] CONTACT {local_contact.name or local_contact.id} fields={','.join(changed)}",
+                    flush=True,
+                )
         return prod_contact
 
+    if verbose:
+        print(f"[CREATE] CONTACT {local_contact.name or local_contact.id}", flush=True)
     return Contact.objects.using(TARGET_DB).create(id=local_contact.id, **payload)
 
 
-def sync_reference_data(dry_run: bool = False) -> dict:
+def sync_reference_data(
+    dry_run: bool = False,
+    verbose: bool = False,
+    progress_interval: int = 250,
+    batch_size: int = 250,
+) -> dict:
     bank_map: dict[str, Bank] = {}
     contact_map: dict[str, Contact] = {}
 
@@ -330,15 +721,47 @@ def sync_reference_data(dry_run: bool = False) -> dict:
     local_contacts = list(Contact.objects.using(SOURCE_DB).select_related("bank").all().order_by("name", "id"))
 
     def perform_sync():
-        for local_bank in local_banks:
-            synced_bank = upsert_bank(local_bank, dry_run=dry_run)
-            if synced_bank:
-                bank_map[str(local_bank.id)] = synced_bank
+        print(f"[REFERENCE] Starting banks: total={len(local_banks)} batch_size={batch_size}", flush=True)
+        bank_index = 0
+        for batch_number, bank_batch in enumerate(iter_batches(local_banks, batch_size), start=1):
+            print(
+                f"[REFERENCE-BATCH] banks batch={batch_number} size={len(bank_batch)}",
+                flush=True,
+            )
+            for local_bank in bank_batch:
+                bank_index += 1
+                if verbose:
+                    print(
+                        f"[BANK {bank_index}/{len(local_banks)}] {local_bank.name or local_bank.id} "
+                        f"domain={local_bank.website_domain or 'N/A'}",
+                        flush=True,
+                    )
+                synced_bank = upsert_bank(local_bank, dry_run=dry_run, verbose=verbose)
+                if synced_bank:
+                    bank_map[str(local_bank.id)] = synced_bank
+                if progress_interval > 0 and bank_index % progress_interval == 0:
+                    print(f"[REFERENCE] banks synced={bank_index}/{len(local_banks)}", flush=True)
 
-        for local_contact in local_contacts:
-            synced_contact = upsert_contact(local_contact, bank_map, dry_run=dry_run)
-            if synced_contact:
-                contact_map[str(local_contact.id)] = synced_contact
+        print(f"[REFERENCE] Starting bankers/contacts: total={len(local_contacts)} batch_size={batch_size}", flush=True)
+        contact_index = 0
+        for batch_number, contact_batch in enumerate(iter_batches(local_contacts, batch_size), start=1):
+            print(
+                f"[REFERENCE-BATCH] contacts batch={batch_number} size={len(contact_batch)}",
+                flush=True,
+            )
+            for local_contact in contact_batch:
+                contact_index += 1
+                if verbose:
+                    print(
+                        f"[CONTACT {contact_index}/{len(local_contacts)}] {local_contact.name or local_contact.id} "
+                        f"email={local_contact.email or 'N/A'} bank_id={local_contact.bank_id or 'N/A'}",
+                        flush=True,
+                    )
+                synced_contact = upsert_contact(local_contact, bank_map, dry_run=dry_run, verbose=verbose)
+                if synced_contact:
+                    contact_map[str(local_contact.id)] = synced_contact
+                if progress_interval > 0 and contact_index % progress_interval == 0:
+                    print(f"[REFERENCE] contacts synced={contact_index}/{len(local_contacts)}", flush=True)
 
     if dry_run:
         perform_sync()
@@ -354,6 +777,101 @@ def sync_reference_data(dry_run: bool = False) -> dict:
         "local_banks": len(local_banks),
         "local_contacts": len(local_contacts),
     }
+
+
+def load_existing_reference_maps(verbose: bool = False, progress_interval: int = 250, batch_size: int = 250) -> dict:
+    bank_map: dict[str, Bank] = {}
+    contact_map: dict[str, Contact] = {}
+
+    local_banks = list(Bank.objects.using(SOURCE_DB).all().order_by("name", "id"))
+    local_contacts = list(Contact.objects.using(SOURCE_DB).select_related("bank").all().order_by("name", "id"))
+
+    print(
+        f"[REFERENCE-MAP] Loading existing production banks: total={len(local_banks)} batch_size={batch_size}",
+        flush=True,
+    )
+    bank_index = 0
+    for batch_number, bank_batch in enumerate(iter_batches(local_banks, batch_size), start=1):
+        print(f"[REFERENCE-MAP-BATCH] banks batch={batch_number} size={len(bank_batch)}", flush=True)
+        for local_bank in bank_batch:
+            bank_index += 1
+            prod_bank = Bank.objects.using(TARGET_DB).filter(id=local_bank.id).first()
+            if not prod_bank and normalize_text(local_bank.website_domain):
+                prod_bank = Bank.objects.using(TARGET_DB).filter(
+                    website_domain__iexact=local_bank.website_domain
+                ).first()
+            if not prod_bank and normalize_text(local_bank.name):
+                prod_bank = Bank.objects.using(TARGET_DB).filter(name__iexact=local_bank.name).first()
+            if prod_bank:
+                bank_map[str(local_bank.id)] = prod_bank
+            if verbose:
+                print(
+                    f"[BANK-MAP {bank_index}/{len(local_banks)}] {local_bank.name or local_bank.id} "
+                    f"mapped={'yes' if prod_bank else 'no'}",
+                    flush=True,
+                )
+            elif progress_interval > 0 and bank_index % progress_interval == 0:
+                print(f"[REFERENCE-MAP] banks checked={bank_index}/{len(local_banks)} mapped={len(bank_map)}", flush=True)
+
+    print(
+        f"[REFERENCE-MAP] Loading existing production contacts: total={len(local_contacts)} batch_size={batch_size}",
+        flush=True,
+    )
+    contact_index = 0
+    for batch_number, contact_batch in enumerate(iter_batches(local_contacts, batch_size), start=1):
+        print(f"[REFERENCE-MAP-BATCH] contacts batch={batch_number} size={len(contact_batch)}", flush=True)
+        for local_contact in contact_batch:
+            contact_index += 1
+            prod_contact = Contact.objects.using(TARGET_DB).filter(id=local_contact.id).first()
+            if not prod_contact and normalize_text(local_contact.email):
+                prod_contact = Contact.objects.using(TARGET_DB).filter(email__iexact=local_contact.email).first()
+            if not prod_contact and normalize_text(local_contact.name):
+                query = Contact.objects.using(TARGET_DB).filter(name__iexact=local_contact.name)
+                mapped_bank = bank_map.get(str(local_contact.bank_id)) if local_contact.bank_id else None
+                if mapped_bank:
+                    query = query.filter(bank=mapped_bank)
+                prod_contact = query.first()
+            if prod_contact:
+                contact_map[str(local_contact.id)] = prod_contact
+            if verbose:
+                print(
+                    f"[CONTACT-MAP {contact_index}/{len(local_contacts)}] {local_contact.name or local_contact.id} "
+                    f"mapped={'yes' if prod_contact else 'no'}",
+                    flush=True,
+                )
+            elif progress_interval > 0 and contact_index % progress_interval == 0:
+                print(f"[REFERENCE-MAP] contacts checked={contact_index}/{len(local_contacts)} mapped={len(contact_map)}", flush=True)
+
+    return {
+        "bank_map": bank_map,
+        "contact_map": contact_map,
+        "banks": len(bank_map),
+        "contacts": len(contact_map),
+        "local_banks": len(local_banks),
+        "local_contacts": len(local_contacts),
+    }
+
+
+def prune_production_contacts(contact_map: dict[str, Contact], dry_run: bool = False):
+    keep_ids = [contact.id for contact in contact_map.values() if getattr(contact, "id", None)]
+    queryset = Contact.objects.using(TARGET_DB).exclude(id__in=keep_ids).order_by("name", "id")
+    candidates = list(
+        queryset.values("id", "name", "email", "bank_id")
+    )
+    if not dry_run and candidates:
+        queryset.delete()
+    return candidates
+
+
+def prune_production_banks(bank_map: dict[str, Bank], dry_run: bool = False):
+    keep_ids = [bank.id for bank in bank_map.values() if getattr(bank, "id", None)]
+    queryset = Bank.objects.using(TARGET_DB).exclude(id__in=keep_ids).order_by("name", "id")
+    candidates = list(
+        queryset.values("id", "name", "website_domain")
+    )
+    if not dry_run and candidates:
+        queryset.delete()
+    return candidates
 
 
 from django.contrib.auth.models import User
@@ -418,14 +936,44 @@ def upsert_user_and_profile(local_profile: Profile, dry_run: bool = False) -> Pr
     
     return prod_profile
 
-def upsert_deal(local_deal: Deal, bank_map: dict[str, Bank], contact_map: dict[str, Contact], dry_run: bool = False) -> Deal:
+def upsert_deal(
+    local_deal: Deal,
+    bank_map: dict[str, Bank],
+    contact_map: dict[str, Contact],
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> Deal:
     prod_deal = Deal.objects.using(TARGET_DB).filter(id=local_deal.id).first()
     if not prod_deal and normalize_text(local_deal.title):
         prod_deal = Deal.objects.using(TARGET_DB).filter(title__iexact=local_deal.title).first()
+    local_request = local_deal.request
+    local_request_payload = request_payload_for(local_request)
+
+    local_additional_contacts = [
+        contact
+        for contact in local_deal.additional_contacts.using(SOURCE_DB).all()
+    ]
+    additional_contacts = [
+        contact_map[str(contact.id)]
+        for contact in local_additional_contacts
+        if str(contact.id) in contact_map
+    ]
+    local_additional_contact_ids = related_id_set(local_additional_contacts)
+    additional_contact_ids = related_id_set(additional_contacts)
+
+    local_responsibility = list(local_deal.responsibility.using(SOURCE_DB).all())
+    local_responsibility_ids = related_id_set(
+        [upsert_user_and_profile(profile, dry_run=True) for profile in local_responsibility]
+    )
+    prod_responsibility_ids = related_id_set(prod_deal.responsibility.using(TARGET_DB).all()) if prod_deal else set()
+
+    mapped_bank = bank_map.get(str(local_deal.bank_id)) if local_deal.bank_id else None
+    mapped_primary_contact = contact_map.get(str(local_deal.primary_contact_id)) if local_deal.primary_contact_id else None
+    prod_request_payload = request_payload_for(prod_deal.request) if prod_deal else None
 
     payload = {
         "title": local_deal.title,
-        "bank": bank_map.get(str(local_deal.bank_id)) if local_deal.bank_id else None,
+        "bank": mapped_bank,
         "priority": local_deal.priority,
         "deal_status": local_deal.deal_status,
         "current_phase": local_deal.current_phase,
@@ -448,8 +996,8 @@ def upsert_deal(local_deal: Deal, bank_map: dict[str, Bank], contact_map: dict[s
         "city": local_deal.city,
         "state": local_deal.state,
         "country": local_deal.country,
-        "other_contacts": [],
-        "primary_contact": contact_map.get(str(local_deal.primary_contact_id)) if local_deal.primary_contact_id else None,
+        "other_contacts": [str(contact.id) for contact in additional_contacts],
+        "primary_contact": mapped_primary_contact,
         "fund": local_deal.fund,
         "legacy_investment_bank": local_deal.legacy_investment_bank,
         "priority_rationale": local_deal.priority_rationale,
@@ -461,19 +1009,25 @@ def upsert_deal(local_deal: Deal, bank_map: dict[str, Bank], contact_map: dict[s
         "source_email_id": local_deal.source_email_id,
         "processing_status": local_deal.processing_status,
         "processing_error": local_deal.processing_error,
-        "request": None,
+        "request": prod_deal.request if prod_deal else None,
     }
 
-    additional_contacts = [
-        contact_map[str(contact.id)]
-        for contact in local_deal.additional_contacts.using(SOURCE_DB).all()
-        if str(contact.id) in contact_map
-    ]
-    payload["other_contacts"] = [str(contact.id) for contact in additional_contacts]
+    if prod_deal:
+        scalar_matches = all(getattr(prod_deal, field) == value for field, value in payload.items() if field != "request")
+        request_matches = local_request_payload == prod_request_payload
+        additional_matches = local_additional_contact_ids == related_id_set(prod_deal.additional_contacts.using(TARGET_DB).all())
+        responsibility_matches = local_responsibility_ids == prod_responsibility_ids
+        if scalar_matches and request_matches and additional_matches and responsibility_matches:
+            if verbose:
+                print(f"[SKIP-UNCHANGED] DEAL {local_deal.title or local_deal.id}", flush=True)
+            return prod_deal if not dry_run else local_deal
+
+    prod_request = upsert_request(local_request, dry_run=dry_run, verbose=verbose)
+    payload["request"] = prod_request
 
     # Resolve responsibility (Team Members)
     prod_responsibility = []
-    for local_profile in local_deal.responsibility.using(SOURCE_DB).all():
+    for local_profile in local_responsibility:
         prod_responsibility.append(upsert_user_and_profile(local_profile, dry_run=dry_run))
 
     if dry_run:
@@ -499,6 +1053,8 @@ def upsert_deal(local_deal: Deal, bank_map: dict[str, Bank], contact_map: dict[s
 
     prod_deal.additional_contacts.set(additional_contacts)
     prod_deal.responsibility.set(prod_responsibility)
+    if verbose:
+        print(f"[UPDATE] DEAL {local_deal.title or local_deal.id}", flush=True)
     return prod_deal
 
 
@@ -557,14 +1113,33 @@ def replace_phase_logs(local_deal: Deal, prod_deal: Deal, dry_run: bool = False)
     return len(phase_logs)
 
 
-def replace_deal_documents(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
+def replace_deal_documents(
+    local_deal: Deal,
+    prod_deal: Deal,
+    dry_run: bool = False,
+    verbose: bool = False,
+    progress_interval: int = 250,
+):
     documents = list(local_deal.documents.using(SOURCE_DB).all().order_by("created_at"))
     if dry_run:
+        if verbose:
+            for index, document in enumerate(documents, start=1):
+                print(f"[DOCUMENT-DRY-RUN {index}/{len(documents)}] {local_deal.title}: {document.title or document.id}", flush=True)
         return len(documents)
 
+    print(f"[DOCUMENTS] {local_deal.title}: replacing {len(documents)} documents", flush=True)
     DealDocument.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not documents:
         return 0
+    if verbose:
+        for index, document in enumerate(documents, start=1):
+            print(
+                f"[DOCUMENT {index}/{len(documents)}] {local_deal.title}: "
+                f"{document.title or document.id} type={document.document_type or 'N/A'}",
+                flush=True,
+            )
+    elif progress_interval > 0 and len(documents) >= progress_interval:
+        print(f"[DOCUMENTS] {local_deal.title}: preparing bulk insert for {len(documents)} documents", flush=True)
 
     DealDocument.objects.using(TARGET_DB).bulk_create(
         [
@@ -601,14 +1176,38 @@ def replace_deal_documents(local_deal: Deal, prod_deal: Deal, dry_run: bool = Fa
     return len(documents)
 
 
-def replace_deal_chunks(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
+def replace_deal_chunks(
+    local_deal: Deal,
+    prod_deal: Deal,
+    dry_run: bool = False,
+    verbose: bool = False,
+    progress_interval: int = 250,
+):
     chunks = list(local_deal.chunks.using(SOURCE_DB).all().order_by("created_at"))
     if dry_run:
+        if verbose:
+            for index, chunk in enumerate(chunks, start=1):
+                print(
+                    f"[CHUNK-DRY-RUN {index}/{len(chunks)}] {local_deal.title}: "
+                    f"source={chunk.source_type}:{chunk.source_id or 'N/A'}",
+                    flush=True,
+                )
         return len(chunks)
 
+    print(f"[CHUNKS] {local_deal.title}: replacing {len(chunks)} chunks", flush=True)
     DocumentChunk.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not chunks:
         return 0
+    if verbose:
+        for index, chunk in enumerate(chunks, start=1):
+            print(
+                f"[CHUNK {index}/{len(chunks)}] {local_deal.title}: "
+                f"source={chunk.source_type}:{chunk.source_id or 'N/A'} "
+                f"embedding_dims={chunk.embedding_dimensions or 'N/A'}",
+                flush=True,
+            )
+    elif progress_interval > 0 and len(chunks) >= progress_interval:
+        print(f"[CHUNKS] {local_deal.title}: preparing bulk insert for {len(chunks)} chunks", flush=True)
 
     DocumentChunk.objects.using(TARGET_DB).bulk_create(
         [
@@ -758,29 +1357,119 @@ def sync_single_deal(
     bank_map: dict[str, Bank],
     contact_map: dict[str, Contact],
     dry_run: bool = False,
+    verbose: bool = False,
+    progress_interval: int = 250,
+    prompt_child_overwrite_enabled: bool = False,
 ):
+    print(f"[DEAL] {local_deal.title or local_deal.id}: starting", flush=True)
+    print(
+        f"[DEAL-SUMMARY] id={local_deal.id} bank_id={local_deal.bank_id or 'N/A'} "
+        f"primary_contact_id={local_deal.primary_contact_id or 'N/A'} "
+        f"additional_contacts={local_deal.additional_contacts.count()} request_id={local_deal.request_id or 'N/A'} "
+        f"analyses={local_deal.analyses.count()} documents={local_deal.documents.count()} "
+        f"chunks={local_deal.chunks.count()} phase_logs={local_deal.phase_logs.count()}",
+        flush=True,
+    )
     if dry_run:
-        prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=True)
+        prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=True, verbose=verbose)
         analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=True)
         return {
             "deal": prod_deal.title if hasattr(prod_deal, "title") else local_deal.title,
             "analyses": replace_deal_analyses(local_deal, local_deal, dry_run=True),
             "phase_logs": replace_phase_logs(local_deal, local_deal, dry_run=True),
-            "documents": replace_deal_documents(local_deal, local_deal, dry_run=True),
-            "chunks": replace_deal_chunks(local_deal, local_deal, dry_run=True),
+            "documents": replace_deal_documents(
+                local_deal,
+                local_deal,
+                dry_run=True,
+                verbose=verbose,
+                progress_interval=progress_interval,
+            ),
+            "chunks": replace_deal_chunks(
+                local_deal,
+                local_deal,
+                dry_run=True,
+                verbose=verbose,
+                progress_interval=progress_interval,
+            ),
             "profile": replace_retrieval_profile(local_deal, local_deal, dry_run=True),
             "audit_logs": analysis_docs["audit_logs"],
             "analysis_documents": analysis_docs["analysis_documents"],
         }
 
+    existing_prod_deal = Deal.objects.using(TARGET_DB).filter(id=local_deal.id).first()
+    if not existing_prod_deal and normalize_text(local_deal.title):
+        existing_prod_deal = Deal.objects.using(TARGET_DB).filter(title__iexact=local_deal.title).first()
+
     with transaction.atomic(using=TARGET_DB):
-        prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=False)
-        analyses = replace_deal_analyses(local_deal, prod_deal, dry_run=False)
-        phase_logs = replace_phase_logs(local_deal, prod_deal, dry_run=False)
-        documents = replace_deal_documents(local_deal, prod_deal, dry_run=False)
-        analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=False)
-        chunks = replace_deal_chunks(local_deal, prod_deal, dry_run=False)
-        profile = replace_retrieval_profile(local_deal, prod_deal, dry_run=False)
+        print(f"[DEAL] {local_deal.title or local_deal.id}: upserting deal row", flush=True)
+        prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=False, verbose=verbose)
+        rewrite_children = True
+        differences = deal_state_differences(local_deal, existing_prod_deal, bank_map, contact_map)
+        link_only_changes = bool(differences) and set(differences).issubset(
+            {"bank", "primary_contact", "additional_contacts"}
+        )
+        if prompt_child_overwrite_enabled and not differences:
+            rewrite_children = False
+        elif prompt_child_overwrite_enabled and link_only_changes:
+            print(
+                f"[DEAL] {local_deal.title or local_deal.id}: link-only changes detected; "
+                f"auto-accepting local child tables",
+                flush=True,
+            )
+            rewrite_children = True
+        elif prompt_child_overwrite_enabled:
+            print(
+                f"[DEAL] {local_deal.title or local_deal.id}: changed_fields={', '.join(differences) if differences else 'unknown'}",
+                flush=True,
+            )
+            if "responsibility" in differences:
+                local_responsibility_debug = format_profile_list_debug(
+                    local_deal.responsibility.using(SOURCE_DB).all()
+                )
+                prod_responsibility_debug = format_profile_list_debug(
+                    prod_deal.responsibility.using(TARGET_DB).all()
+                )
+                print(
+                    f"[DEAL] {local_deal.title or local_deal.id}: responsibility local=[{local_responsibility_debug}] "
+                    f"prod=[{prod_responsibility_debug}]",
+                    flush=True,
+                )
+            rewrite_children = prompt_child_overwrite(local_deal, prod_deal)
+
+        if rewrite_children:
+            print(f"[DEAL] {local_deal.title or local_deal.id}: rebuilding child tables from local", flush=True)
+            analyses = replace_deal_analyses(local_deal, prod_deal, dry_run=False)
+            print(f"[DEAL] {local_deal.title or local_deal.id}: replacing phase logs", flush=True)
+            phase_logs = replace_phase_logs(local_deal, prod_deal, dry_run=False)
+            documents = replace_deal_documents(
+                local_deal,
+                prod_deal,
+                dry_run=False,
+                verbose=verbose,
+                progress_interval=progress_interval,
+            )
+            print(f"[DEAL] {local_deal.title or local_deal.id}: syncing referenced analysis documents", flush=True)
+            analysis_docs = sync_referenced_analysis_documents(local_deal, dry_run=False)
+            chunks = replace_deal_chunks(
+                local_deal,
+                prod_deal,
+                dry_run=False,
+                verbose=verbose,
+                progress_interval=progress_interval,
+            )
+            print(f"[DEAL] {local_deal.title or local_deal.id}: replacing retrieval profile", flush=True)
+            profile = replace_retrieval_profile(local_deal, prod_deal, dry_run=False)
+        else:
+            print(
+                f"[DEAL] {local_deal.title or local_deal.id}: keeping production analyses/documents/chunks/profile",
+                flush=True,
+            )
+            analyses = prod_deal.analyses.using(TARGET_DB).count()
+            phase_logs = prod_deal.phase_logs.using(TARGET_DB).count()
+            documents = prod_deal.documents.using(TARGET_DB).count()
+            chunks = prod_deal.chunks.using(TARGET_DB).count()
+            profile = int(DealRetrievalProfile.objects.using(TARGET_DB).filter(deal=prod_deal).exists())
+            analysis_docs = {"audit_logs": 0, "analysis_documents": 0}
 
     return {
         "deal": prod_deal.title,
@@ -794,7 +1483,12 @@ def sync_single_deal(
     }
 
 
-def prune_production_deals(local_deals: list[Deal], dry_run: bool = False):
+def prune_production_deals(
+    local_deals: list[Deal],
+    dry_run: bool = False,
+    batch_size: int = 250,
+    interactive: bool = False,
+):
     keep_ids = [deal.id for deal in local_deals]
     queryset = Deal.objects.using(TARGET_DB).exclude(id__in=keep_ids).order_by("title", "id")
     candidates = list(
@@ -805,22 +1499,58 @@ def prune_production_deals(local_deals: list[Deal], dry_run: bool = False):
             analyses_count=Count("analyses", distinct=True),
         )
     )
-    if not dry_run and candidates:
-        queryset.delete()
+    if dry_run or not candidates:
+        return candidates
+
+    candidates = prompt_prune_selection(candidates, interactive=interactive)
+    if not candidates:
+        print("[PRUNE] No production deals selected for deletion.", flush=True)
+        return []
+
+    effective_batch_size = max(1, int(batch_size))
+    for start in range(0, len(candidates), effective_batch_size):
+        batch = candidates[start : start + effective_batch_size]
+        batch_ids = [candidate["id"] for candidate in batch]
+        batch_titles = ", ".join((candidate["title"] or str(candidate["id"])) for candidate in batch[:3])
+        if len(batch) > 3:
+            batch_titles += f", ... (+{len(batch) - 3} more)"
+        print(
+            f"[PRUNE-BATCH] deleting {len(batch)} production deals "
+            f"({start + 1}-{start + len(batch)} of {len(candidates)}): {batch_titles}",
+            flush=True,
+        )
+        with transaction.atomic(using=TARGET_DB):
+            deleted_count, deleted_by_model = Deal.objects.using(TARGET_DB).filter(id__in=batch_ids).delete()
+        print(
+            f"[PRUNE-BATCH] deleted_count={deleted_count} model_breakdown={deleted_by_model}",
+            flush=True,
+        )
     return candidates
 
 
 def run():
     args = parse_args()
-    if args.prune_production_deals and args.deals:
+    if args.prune_production_data and args.deals:
         raise RuntimeError(
-            "--prune-production-deals cannot be combined with --deals because it would delete "
+            "--prune-production-data cannot be combined with --deals because it would delete "
             "production deals outside the selected subset. Run a full sync or omit pruning."
         )
-    if args.prune_production_deals and args.only_missing_deals:
+    if args.prune_production_data and args.only_missing_deals:
         raise RuntimeError(
-            "--prune-production-deals cannot be combined with --only-missing-deals. "
+            "--prune-production-data cannot be combined with --only-missing-deals. "
             "Disable pruning while resuming partial runs."
+        )
+    if args.reference_data_only and args.deals:
+        raise RuntimeError(
+            "--reference-data-only cannot be combined with --deals. It always syncs the full local bank/contact set."
+        )
+    if args.reference_data_only and args.only_missing_deals:
+        raise RuntimeError(
+            "--reference-data-only cannot be combined with --only-missing-deals."
+        )
+    if args.reference_data_only and args.skip_reference_data:
+        raise RuntimeError(
+            "--reference-data-only cannot be combined with --skip-reference-data."
         )
 
     prod_database_url = args.prod_database_url
@@ -848,6 +1578,18 @@ def run():
         print("No matching deals found in local DB.")
         return
 
+    deals, title_collisions = dedupe_local_deals_by_title(deals)
+    if title_collisions:
+        print(f"Collapsed duplicate local deal titles: {len(title_collisions)}")
+        for collision in title_collisions:
+            winner = collision["winner"]
+            dropped = collision["dropped"]
+            dropped_labels = ", ".join(str(item.id) for item in dropped)
+            print(
+                f"[TITLE-DUPE] kept={winner.title or winner.id} winner_id={winner.id} "
+                f"dropped_ids=[{dropped_labels}]"
+            )
+
     skipped_existing = 0
     if args.only_missing_deals:
         print("Resolving missing deals against production...")
@@ -866,40 +1608,118 @@ def run():
         print("Mode: DRY RUN")
     print("-" * 72)
 
-    print("Syncing reference data: banks and bankers/contacts...")
-    t0 = time.time()
-    reference_data = sync_reference_data(dry_run=args.dry_run)
-    t1 = time.time()
-    print(
-        f"[REFERENCE] banks={reference_data['banks']}/{reference_data['local_banks']} "
-        f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
-        f"elapsed={round(t1 - t0, 2)}s"
-    )
-    print("-" * 72)
+    reference_data = {"bank_map": {}, "contact_map": {}, "banks": 0, "contacts": 0, "local_banks": 0, "local_contacts": 0}
+    if args.skip_reference_data:
+        print("Skipping reference data writes: loading existing production bank/contact maps.", flush=True)
+        t0 = time.time()
+        reference_data = load_existing_reference_maps(
+            verbose=args.verbose_sync,
+            progress_interval=args.progress_interval,
+            batch_size=args.reference_batch_size,
+        )
+        t1 = time.time()
+        print(
+            f"[REFERENCE-MAP] banks={reference_data['banks']}/{reference_data['local_banks']} "
+            f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
+            f"elapsed={round(t1 - t0, 2)}s",
+            flush=True,
+        )
+        print("-" * 72)
+    else:
+        print("Syncing reference data: banks and bankers/contacts...")
+        t0 = time.time()
+        reference_data = sync_reference_data(
+            dry_run=args.dry_run,
+            verbose=args.verbose_sync,
+            progress_interval=args.progress_interval,
+            batch_size=args.reference_batch_size,
+        )
+        t1 = time.time()
+        print(
+            f"[REFERENCE] banks={reference_data['banks']}/{reference_data['local_banks']} "
+            f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
+            f"elapsed={round(t1 - t0, 2)}s"
+        )
+        print("-" * 72)
 
-    processed = 0
-    errors = 0
-    for local_deal in deals:
-        try:
-            result = sync_single_deal(
-                local_deal,
-                reference_data["bank_map"],
+    if args.reference_data_only:
+        if args.prune_production_data:
+            print("Pruning production contacts not present in local reference data...", flush=True)
+            contact_prune_candidates = prune_production_contacts(
                 reference_data["contact_map"],
                 dry_run=args.dry_run,
             )
-            processed += 1
             print(
-                f"[OK] {result['deal']}: analyses={result['analyses']} "
-                f"phase_logs={result['phase_logs']} documents={result['documents']} "
-                f"analysis_documents={result['analysis_documents']} chunks={result['chunks']} "
-                f"profile={result['profile']}"
+                f"Production contact prune candidates not present in local reference set: {len(contact_prune_candidates)}",
+                flush=True,
             )
-        except Exception as exc:
-            errors += 1
-            print(f"[ERROR] {local_deal.title or local_deal.id}: {exc}")
+            if args.verbose_sync:
+                for candidate in contact_prune_candidates:
+                    print(
+                        f"[CONTACT-PRUNE{'-DRY-RUN' if args.dry_run else ''}] "
+                        f"{candidate['name'] or candidate['id']} "
+                        f"email={candidate['email'] or 'N/A'} bank_id={candidate['bank_id'] or 'N/A'}",
+                        flush=True,
+                    )
+            print("Pruning production banks not present in local reference data...", flush=True)
+            bank_prune_candidates = prune_production_banks(
+                reference_data["bank_map"],
+                dry_run=args.dry_run,
+            )
+            print(
+                f"Production bank prune candidates not present in local reference set: {len(bank_prune_candidates)}",
+                flush=True,
+            )
+            if args.verbose_sync:
+                for candidate in bank_prune_candidates:
+                    print(
+                        f"[BANK-PRUNE{'-DRY-RUN' if args.dry_run else ''}] "
+                        f"{candidate['name'] or candidate['id']} "
+                        f"domain={candidate['website_domain'] or 'N/A'}",
+                        flush=True,
+                    )
+        print("Reference-data-only sync completed.", flush=True)
+        return
 
-    if args.prune_production_deals:
-        prune_candidates = prune_production_deals(deals, dry_run=args.dry_run)
+    processed = 0
+    errors = 0
+    deal_batch_size = max(1, int(args.deal_batch_size))
+    for batch_index, local_deal_batch in enumerate(deal_batches(deals, deal_batch_size), start=1):
+        hydrated_batch = hydrate_local_deal_batch(local_deal_batch)
+        print(
+            f"[DEAL-BATCH] {batch_index}: size={len(hydrated_batch)} "
+            f"batch_size={deal_batch_size} first={hydrated_batch[0].title if hydrated_batch else 'N/A'}",
+            flush=True,
+        )
+        for local_deal in hydrated_batch:
+            try:
+                result = sync_single_deal(
+                    local_deal,
+                    reference_data["bank_map"],
+                    reference_data["contact_map"],
+                    dry_run=args.dry_run,
+                    verbose=args.verbose_sync,
+                    progress_interval=args.progress_interval,
+                    prompt_child_overwrite_enabled=args.prompt_child_overwrite,
+                )
+                processed += 1
+                print(
+                    f"[OK] {result['deal']}: analyses={result['analyses']} "
+                    f"phase_logs={result['phase_logs']} documents={result['documents']} "
+                    f"analysis_documents={result['analysis_documents']} chunks={result['chunks']} "
+                    f"profile={result['profile']}"
+                )
+            except Exception as exc:
+                errors += 1
+                print(f"[ERROR] {local_deal.title or local_deal.id}: {exc}")
+
+    if args.prune_production_data:
+        prune_candidates = prune_production_deals(
+            deals,
+            dry_run=args.dry_run,
+            batch_size=args.prune_batch_size,
+            interactive=args.interactive_prune,
+        )
         print("-" * 72)
         print(
             f"Production prune candidates not present in selected local deal set: {len(prune_candidates)}"

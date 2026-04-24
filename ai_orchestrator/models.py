@@ -49,6 +49,7 @@ class AISkill(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True, help_text="Unique name for this skill (e.g., deal_extraction)")
     description = models.TextField(blank=True)
+    system_template = models.TextField(blank=True, help_text="Optional system-level instructions for this skill")
     prompt_template = models.TextField(help_text="The task-specific prompt template")
     input_schema = models.JSONField(default=dict, blank=True, help_text="Expected JSON structure for input (optional)")
     output_schema = models.JSONField(default=dict, blank=True, help_text="Expected JSON structure for output (optional)")

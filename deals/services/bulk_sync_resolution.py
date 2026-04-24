@@ -195,7 +195,24 @@ def _deal_rank_key(deal: Deal):
     chunk_count = getattr(deal, "chunk_count", 0) or 0
     analysis_count = getattr(deal, "analysis_count", 0) or 0
     created_at = deal.created_at.isoformat() if deal.created_at else ""
-    return (-document_count, -chunk_count, -analysis_count, created_at, str(deal.id))
+    csv_score = _csv_import_signal_score(deal)
+    connected_score = 1 if csv_score and (document_count or chunk_count or analysis_count) else 0
+    return (-connected_score, -csv_score, -document_count, -chunk_count, -analysis_count, created_at, str(deal.id))
+
+
+def _csv_import_signal_score(deal: Deal) -> int:
+    score = 0
+    deal_details = str(getattr(deal, "deal_details", "") or "")
+    if "Source:" in deal_details:
+        score += 6
+    if "Funding Type:" in deal_details:
+        score += 3
+    if "Next Steps:" in deal_details:
+        score += 2
+    for field in ("company_details", "reasons_for_passing", "comments"):
+        if normalize_placeholder(getattr(deal, field, None)):
+            score += 1
+    return score
 
 
 def resolve_existing_deal(folder_name: str, artifact_data: dict[str, Any] | None) -> DealResolution:

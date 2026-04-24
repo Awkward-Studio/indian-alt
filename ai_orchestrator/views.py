@@ -413,5 +413,5 @@ class AISkillsView(APIView):
     def get(self, request):
         try:
             skills = AISkill.objects.all().order_by('name')
-            return Response([{"id": str(s.id), "name": s.name, "description": s.description, "prompt_template": s.prompt_template} for s in skills])
+            return Response([{"id": str(s.id), "name": s.name, "description": s.description, "prompt_template": s.prompt_template, "system_template": s.system_template} for s in skills])
         except Exception as e: return Response({"error": str(e)}, status=500)

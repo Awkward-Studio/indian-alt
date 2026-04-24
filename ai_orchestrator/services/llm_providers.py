@@ -74,6 +74,7 @@ class VLLMProviderService:
 
     def __init__(self):
         self.base_url = getattr(settings, "VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+        self.vision_url = getattr(settings, "VLLM_VISION_URL", self.base_url).rstrip("/")
         self.embedding_url = getattr(settings, "VLLM_EMBEDDING_URL", self.base_url).rstrip("/")
         self.api_key = getattr(settings, "VLLM_API_KEY", "")
 
@@ -83,21 +84,31 @@ class VLLMProviderService:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _get_completions_url(self) -> str:
+    def _get_completions_url(self, payload: dict | None = None) -> str:
         url = self.base_url
+        if payload and payload.get("images"):
+            url = self.vision_url
+        
         if not url.endswith("/v1"):
             url = f"{url}/v1"
         return f"{url}/chat/completions"
 
     def get_available_models(self) -> list[str]:
         try:
-            url = self.base_url
-            if not url.endswith("/v1"):
-                url = f"{url}/v1"
-            response = requests.get(f"{url}/models", headers=self._headers(), timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return [model.get("id") for model in data.get("data", []) if model.get("id")]
+            # Check both for complete telemetry
+            models = set()
+            for base in [self.base_url, self.vision_url]:
+                url = base
+                if not url.endswith("/v1"):
+                    url = f"{url}/v1"
+                try:
+                    response = requests.get(f"{url}/models", headers=self._headers(), timeout=5)
+                    response.raise_for_status()
+                    data = response.json()
+                    for m in data.get("data", []):
+                        if m.get("id"): models.add(m.get("id"))
+                except: continue
+            return list(models)
         except Exception as exc:
             logger.error("Error fetching vLLM models: %s", exc)
             return []
@@ -117,7 +128,7 @@ class VLLMProviderService:
     def execute_stream(self, payload: dict) -> Iterator[str]:
         body = self._build_chat_body(payload, stream=True)
         response = requests.post(
-            self._get_completions_url(),
+            self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
             stream=True,
@@ -149,7 +160,7 @@ class VLLMProviderService:
     def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
         body = self._build_chat_body(payload, stream=False)
         response = requests.post(
-            self._get_completions_url(),
+            self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
             timeout=timeout,

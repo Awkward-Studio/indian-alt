@@ -1382,3 +1382,141 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             audit_log.error_message = str(e)
             audit_log.save()
         raise e
+
+
+@shared_task(bind=True)
+def process_single_thread_document_async(self, file_info: dict, deal_id: str, user_email: str, audit_log_id: str):
+    """
+    Atomized task for email thread analysis.
+    Downloads, transcribes, normalizes into strict JSON, and returns a file record.
+    """
+    from ai_orchestrator.models import AIAuditLog
+    from microsoft.models import Email
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+    from ai_orchestrator.services.document_processor import DocumentProcessorService
+    from ai_orchestrator.services.embedding_processor import EmbeddingService
+
+    file_name = file_info.get("name") or "unknown_file"
+    file_id = file_info.get("id")
+    email_id = file_info.get("email_id")
+    
+    graph = GraphAPIService()
+    doc_processor = DocumentProcessorService()
+    ai_service = AIProcessorService()
+    embed_service = EmbeddingService()
+    
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+
+    try:
+        if audit_log:
+            log_worker_event(audit_log, f"Processing document: {file_name}", status='PROCESSING')
+
+        content = None
+        if file_id == "body":
+            email = Email.objects.get(id=email_id)
+            content = (email.body_html or email.body_text or email.body_preview or "").encode('utf-8')
+        else:
+            email = Email.objects.get(id=email_id)
+            att_content = graph.get_attachment_content(user_email, email.graph_id, file_id)
+            if 'contentBytes' in att_content:
+                import base64
+                content = base64.b64decode(att_content['contentBytes'])
+
+        if not content:
+            raise ValueError(f"Could not retrieve content for {file_name}")
+
+        # 1. Extraction (GLM-4V)
+        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
+        raw_markdown = extraction.get("normalized_text") or extraction.get("text") or ""
+
+        # 2. Normalization (vLLM Qwen)
+        norm_result = ai_service.process_content(
+            content=raw_markdown,
+            skill_name="document_normalization",
+            source_type="normalization"
+        )
+        
+        normalized_json = norm_result.get('parsed_json', {}) if isinstance(norm_result, dict) else {}
+        
+        # 3. Persist as DealDocument & DocumentChunk
+        # We repurpose _persist_folder_analysis_document but pass normalized data
+        analysis_doc = _persist_folder_analysis_document(
+            audit_log_id=audit_log_id,
+            file_info={**file_info, "deal_id": deal_id},
+            extraction={**extraction, "normalized_json": normalized_json},
+            ai_service=ai_service,
+            embed_service=embed_service,
+        )
+        
+        return {
+            **_analysis_document_to_result(analysis_doc),
+            "normalized_json": normalized_json
+        }
+    except Exception as e:
+        logger.error(f"Thread document processing failed for {file_name}: {e}")
+        return {"status": "failed", "file_name": file_name, "error": str(e)}
+
+
+@shared_task(bind=True)
+def finalize_thread_analysis_async(self, results, deal_id: str, audit_log_id: str):
+    """
+    Chord callback for autonomous email thread analysis.
+    Synthesizes the finalized deal state from all parallel document extractions.
+    """
+    from ai_orchestrator.models import AIAuditLog
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+    from deals.models import Deal
+    from deals.services.deal_creation import DealCreationService
+
+    audit_log = AIAuditLog.objects.get(id=audit_log_id)
+    deal = Deal.objects.get(id=deal_id)
+    
+    passed_results = [r for r in results if r.get("status") == "passed"]
+    
+    if not passed_results:
+        log_worker_event(audit_log, "No documents successfully processed in thread.", status='FAILED', done=True)
+        return {"error": "No documents processed"}
+
+    log_worker_event(audit_log, f"Synthesizing thread intelligence from {len(passed_results)} documents...", status='PROCESSING')
+    
+    # Gather all normalized data for the final prompt
+    intelligence_context = []
+    for r in passed_results:
+        intelligence_context.append({
+            "name": r.get("file_name"),
+            "intel": r.get("normalized_json")
+        })
+
+    ai_service = AIProcessorService()
+    
+    result = ai_service.process_content(
+        content=json.dumps(intelligence_context, default=str),
+        skill_name="email_thread_synthesis",
+        source_type="email_thread_synthesis",
+        metadata={
+            "deal_title": deal.title,
+            "deal_summary": deal.deal_summary
+        }
+    )
+
+    analysis = result.get('parsed_json', {}) if isinstance(result, dict) else {}
+    
+    if analysis and "error" not in analysis:
+        # Apply the synthesis to the actual Deal object
+        normalized_analysis = _normalize_synthesis_result(
+            analysis,
+            analysis_kind=AnalysisKind.INITIAL,
+            document_evidence=[], 
+            analysis_input_files=[{"file_name": r["file_name"]} for r in passed_results],
+            failed_files=[r for r in results if r.get("status") != "passed"],
+        )
+        
+        DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+        
+        log_worker_event(audit_log, "Deal intelligence updated successfully.", status='COMPLETED', done=True)
+        audit_log.is_success = True
+        audit_log.save(update_fields=['is_success'])
+        return {"status": "success", "deal_id": str(deal.id)}
+    else:
+        log_worker_event(audit_log, "Failed to synthesize thread intelligence.", status='FAILED', done=True)
+        return {"error": "Synthesis failed"}

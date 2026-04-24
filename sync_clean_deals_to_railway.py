@@ -51,6 +51,50 @@ def parse_args():
         action="store_true",
         help="Sync only deals that are not already present in production.",
     )
+    parser.add_argument(
+        "--verbose-sync",
+        action="store_true",
+        help="Print every bank, banker/contact, document, and chunk prepared by the underlying sync.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=250,
+        help="Print progress every N rows during large sync phases. Defaults to 250.",
+    )
+    parser.add_argument(
+        "--prune-batch-size",
+        type=int,
+        default=250,
+        help="Delete production prune candidates in batches of this size.",
+    )
+    parser.add_argument(
+        "--skip-reference-data",
+        action="store_true",
+        help="Skip the initial bank/contact sync phase and go straight to deal data.",
+    )
+    parser.add_argument(
+        "--prompt-child-overwrite",
+        action="store_true",
+        help="Prompt once per deal whether to rewrite analyses/documents/chunks/profile from local or keep production.",
+    )
+    parser.add_argument(
+        "--interactive-prune",
+        action="store_true",
+        help="Prompt before deleting each production prune candidate; choose individual deals or prune all.",
+    )
+    parser.add_argument(
+        "--deal-batch-size",
+        type=int,
+        default=50,
+        help="Process local deals in batches of this size with prefetched relations.",
+    )
+    parser.add_argument(
+        "--reference-batch-size",
+        type=int,
+        default=250,
+        help="Process banks/contacts in batches of this size.",
+    )
     return parser.parse_args()
 
 
@@ -88,13 +132,25 @@ def main() -> int:
         command.append("--dry-run")
 
     if not args.no_prune_production:
-        command.append("--prune-production-deals")
+        command.append("--prune-production-data")
 
     if args.deals:
         command.append("--deals")
         command.extend(args.deals)
     if args.only_missing_deals:
         command.append("--only-missing-deals")
+    if args.verbose_sync:
+        command.append("--verbose-sync")
+    command.extend(["--progress-interval", str(args.progress_interval)])
+    command.extend(["--prune-batch-size", str(args.prune_batch_size)])
+    if args.skip_reference_data:
+        command.append("--skip-reference-data")
+    if args.prompt_child_overwrite:
+        command.append("--prompt-child-overwrite")
+    if args.interactive_prune:
+        command.append("--interactive-prune")
+    command.extend(["--deal-batch-size", str(args.deal_batch_size)])
+    command.extend(["--reference-batch-size", str(args.reference_batch_size)])
 
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f">>> CLEAN DEAL DB RAILWAY SYNC ({mode})", flush=True)
@@ -103,7 +159,7 @@ def main() -> int:
         if args.deals:
             print("ERROR: production pruning is only allowed for full-dataset syncs. Use --no-prune-production with --deal.", flush=True)
             return 2
-        print("Production deals not present in the selected local set will be pruned in apply mode.", flush=True)
+        print("Production data not present in the selected local set will be pruned in apply mode.", flush=True)
     print("-" * 72, flush=True)
 
     return run_command(command)

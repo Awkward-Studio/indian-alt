@@ -65,16 +65,16 @@ class DocumentArtifactService:
         ai_service: Optional["AIProcessorService"] = None,
         source_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_text = (extracted_text or "").strip()
+        raw_text = (extracted_text or "").strip()
         source_metadata = source_metadata or {}
         fallback = cls._fallback_artifact(
             file_name=file_name,
-            extracted_text=normalized_text,
+            extracted_text=raw_text,
             document_type=document_type,
             extraction_mode=extraction_mode,
         )
 
-        if not normalized_text:
+        if not raw_text:
             return fallback
 
         if ai_service is None:
@@ -82,6 +82,47 @@ class DocumentArtifactService:
             service = AIProcessorService()
         else:
             service = ai_service
+
+        # --- OPTIMIZATION: SLICING & CLEANING (Industrial Flow) ---
+        SAFE_CHAR_LIMIT = 20000
+        CHUNK_OVERLAP = 2000
+        
+        cleaned_parts = []
+        txt_len = len(raw_text)
+        
+        # If document is short, skip complex slicing
+        if txt_len <= SAFE_CHAR_LIMIT:
+            try:
+                norm_res = service.process_content(
+                    content=raw_text,
+                    skill_name="document_normalization",
+                    source_type="cleaning",
+                )
+                cleaned_text = norm_res.get('parsed_json', {}).get('normalized_text') or norm_res.get('response') or raw_text
+            except:
+                cleaned_text = raw_text
+        else:
+            # Slicing loop for industrial normalization
+            start = 0
+            while start < txt_len:
+                segment = raw_text[start:start+SAFE_CHAR_LIMIT]
+                try:
+                    # Clean each part
+                    clean_res = service.process_content(
+                        content=segment,
+                        skill_name="document_normalization",
+                        source_type="cleaning_segment",
+                    )
+                    part_text = clean_res.get('parsed_json', {}).get('normalized_text') or clean_res.get('response') or segment
+                    cleaned_parts.append(part_text)
+                except:
+                    cleaned_parts.append(segment)
+                
+                start += (SAFE_CHAR_LIMIT - CHUNK_OVERLAP)
+            
+            cleaned_text = "\n\n".join(cleaned_parts)
+
+        # --- FINAL INTEL EXTRACTION ---
         metadata = {
             "document_name": file_name,
             "document_type": document_type,
@@ -90,8 +131,9 @@ class DocumentArtifactService:
         }
 
         try:
+            # We use the cleaned text (capped for performance) for the final structured artifact
             result = service.process_content(
-                content=normalized_text,
+                content=cleaned_text[:50000], 
                 skill_name="document_evidence_extraction",
                 source_type="document_evidence",
                 source_id=str(source_metadata.get("source_id") or file_name),
@@ -100,11 +142,11 @@ class DocumentArtifactService:
             parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
             artifact = cls._normalize_artifact(parsed, fallback=fallback)
             artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or ""
-            artifact["normalized_text"] = artifact.get("normalized_text") or normalized_text
-            artifact["source_map"] = artifact.get("source_map") or cls._default_source_map(file_name, extraction_mode, normalized_text)
+            artifact["normalized_text"] = cleaned_text # Preserve the full cleaned text
+            artifact["source_map"] = artifact.get("source_map") or cls._default_source_map(file_name, extraction_mode, cleaned_text)
             return artifact
         except Exception as e:
-            logger.warning("Document evidence extraction failed for %s: %s", file_name, e)
+            logger.warning("Document intelligence extraction failed for %s: %s", file_name, e)
             return fallback
 
     @classmethod

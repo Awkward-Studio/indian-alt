@@ -293,12 +293,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal.source_onedrive_id = folder_id
         deal.source_drive_id = drive_id
         deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
+
+        # Pickup existing analyzed files
+        from deals.services.vdr_sync import VDRSyncService
+        # Attempt to use current user's email if they have an account, otherwise service default
+        user_email = getattr(request.user, 'email', None)
+        linked_count = VDRSyncService.sync_existing_analyses_to_folder(deal, user_email=user_email)
         
         return Response({
             "status": "success",
-            "message": "OneDrive folder linked successfully",
+            "message": f"OneDrive folder linked successfully. Picked up {linked_count} existing analyses.",
             "source_onedrive_id": deal.source_onedrive_id,
-            "source_drive_id": deal.source_drive_id
+            "source_drive_id": deal.source_drive_id,
+            "linked_count": linked_count
         })
 
     @extend_schema(
