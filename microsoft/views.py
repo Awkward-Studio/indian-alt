@@ -132,10 +132,16 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
             from .tasks import analyze_email_async
             from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
 
+            from django.utils import timezone
+            from datetime import timedelta
+
+            # Only block if there's a recent active run (within 30 mins)
+            stale_threshold = timezone.now() - timedelta(minutes=30)
             existing_run = AIAuditLog.objects.filter(
                 source_type='email',
                 source_id=str(email.id),
                 status__in=['PENDING', 'PROCESSING'],
+                created_at__gt=stale_threshold
             ).order_by('-created_at').first()
             if existing_run:
                 return Response({

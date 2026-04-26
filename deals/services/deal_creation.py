@@ -162,6 +162,34 @@ class DealCreationService:
         analyst_report = analysis_json.get('analyst_report')
         changed_fields = []
 
+    @staticmethod
+    def _get_analysis_model_data(analysis_json: dict) -> dict:
+        """
+        Helper to extract deal_model_data from various possible JSON structures.
+        """
+        if not isinstance(analysis_json, dict):
+            return {}
+
+        # 1. Check portable_deal_data (Phase 3 Synthesis format)
+        portable = analysis_json.get("portable_deal_data")
+        if isinstance(portable, dict) and "deal_model_data" in portable:
+            return portable["deal_model_data"]
+
+        # 2. Check direct deal_model_data (Standard extraction format)
+        if "deal_model_data" in analysis_json:
+            return analysis_json["deal_model_data"]
+
+        return analysis_json
+
+    @staticmethod
+    def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):
+        if not isinstance(analysis_json, dict):
+            return
+
+        model_data = DealCreationService._get_analysis_model_data(analysis_json)
+        analyst_report = analysis_json.get('analyst_report')
+        changed_fields = []
+
         field_mapping = {
             'industry': 'industry',
             'sector': 'sector',
@@ -171,14 +199,21 @@ class DealCreationService:
             'city': 'city',
             'state': 'state',
             'country': 'country',
+            'comments': 'comments',
+            'deal_details': 'deal_details',
+            'company_details': 'company_details',
+            'reasons_for_passing': 'reasons_for_passing',
+            'bank_name': 'bank_name',
+            'primary_contact_name': 'primary_contact_name',
+            'priority_rationale': 'priority_rationale',
         }
 
         for analysis_key, deal_field in field_mapping.items():
             value = model_data.get(analysis_key)
-            if not isinstance(value, str):
+            if value is None:
                 continue
-
-            normalized_value = value.strip()
+            
+            normalized_value = str(value).strip()
             if not normalized_value:
                 continue
 
@@ -188,12 +223,73 @@ class DealCreationService:
                     setattr(deal, deal_field, normalized_value)
                     changed_fields.append(deal_field)
 
+        # Handle Boolean Flags
+        bool_fields = {
+            'is_female_led': 'is_female_led',
+            'management_meeting': 'management_meeting',
+            'business_proposal_stage': 'business_proposal_stage',
+            'ic_stage': 'ic_stage'
+        }
+        for analysis_key, deal_field in bool_fields.items():
+            value = model_data.get(analysis_key)
+            if value is not None:
+                normalized_bool = str(value).lower() in ('true', 'yes', '1', 'on')
+                current_bool = getattr(deal, deal_field)
+                if overwrite or not current_bool:
+                    if current_bool != normalized_bool:
+                        setattr(deal, deal_field, normalized_bool)
+                        changed_fields.append(deal_field)
+
         if isinstance(analyst_report, str):
             normalized_report = analyst_report.strip()
             if normalized_report and (overwrite or not deal.deal_summary):
                 if deal.deal_summary != normalized_report:
                     deal.deal_summary = normalized_report
                     changed_fields.append('deal_summary')
+        
+        # Handle source_relationships (Bank/Contact)
+        source_relationships = analysis_json.get("source_relationships") or (analysis_json.get("portable_deal_data") or {}).get("source_relationships")
+        if source_relationships:
+            # Resolve Bank
+            bank_data = source_relationships.get("bank")
+            if isinstance(bank_data, dict) and bank_data.get("name") and (overwrite or not deal.bank):
+                from banks.models import Bank
+                bank_name = bank_data["name"]
+                bank, _ = Bank.objects.get_or_create(
+                    name__iexact=bank_name,
+                    defaults={
+                        'name': bank_name,
+                        'website_domain': bank_data.get("website_domain"),
+                        'description': bank_data.get("description")
+                    }
+                )
+                if deal.bank != bank:
+                    deal.bank = bank
+                    changed_fields.append('bank')
+
+            # Resolve Contact
+            contact_data = source_relationships.get("primary_contact")
+            if isinstance(contact_data, dict) and (contact_data.get("name") or contact_data.get("email")) and (overwrite or not deal.primary_contact):
+                from contacts.models import Contact
+                email = contact_data.get("email")
+                name = contact_data.get("name")
+                contact = None
+                if email:
+                    contact = Contact.objects.filter(email__iexact=email).first()
+                if not contact and name:
+                    contact = Contact.objects.filter(name__iexact=name, bank=deal.bank).first()
+                
+                if not contact:
+                    contact = Contact.objects.create(
+                        name=name or email,
+                        email=email,
+                        bank=deal.bank,
+                        designation=contact_data.get("designation"),
+                        linkedin_url=contact_data.get("linkedin_url")
+                    )
+                if deal.primary_contact != contact:
+                    deal.primary_contact = contact
+                    changed_fields.append('primary_contact')
 
         themes = DealCreationService._normalize_string_list(model_data.get('themes'))
         if themes and (overwrite_themes or not deal.themes):

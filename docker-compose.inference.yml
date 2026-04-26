@@ -14,7 +14,7 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - --model
-      - ${VLLM_TEXT_MODEL:-Qwen/Qwen3.6-35B-A3B}
+      - ${VLLM_TEXT_MODEL:-Qwen/Qwen3.6-27B-FP8}
       - --host
       - 0.0.0.0
       - --port
@@ -45,7 +45,7 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - --model
-      - ${VLLM_VISION_MODEL:-Qwen/Qwen2-VL-7B-Instruct}
+      - ${VLLM_VISION_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
       - --host
       - 0.0.0.0
       - --port
@@ -53,10 +53,11 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --gpu-memory-utilization
-      - "0.20" # Allocates ~16GB (20% of 80GB)
+      - "0.30" # Increased from 0.20 to allow for KV cache blocks
       - --max-model-len
       - "8192" # Vision models are token-heavy; keep this reasonable
       - --trust-remote-code
+
 
   # 3. TEI Embedding
   tei-embedding:

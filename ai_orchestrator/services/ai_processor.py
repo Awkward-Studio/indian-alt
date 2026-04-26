@@ -86,9 +86,18 @@ class AIProcessorService:
             "stream": stream,
             "options": {
                 "max_tokens": 8192,
-                "temperature": 0.1,
+                "temperature": metadata.get("temperature", 0.1) if metadata else 0.1,
             }
         }
+
+        # Support for Phase 3 style strict JSON and thinking control
+        if metadata:
+            if "response_format" in metadata:
+                payload["response_format"] = metadata["response_format"]
+            if "chat_template_kwargs" in metadata:
+                payload["chat_template_kwargs"] = metadata["chat_template_kwargs"]
+            if "max_tokens" in metadata:
+                payload["options"]["max_tokens"] = metadata["max_tokens"]
 
         # PHASE 3: EXECUTION (Delegated to Provider + Parser)
         if stream:
@@ -257,12 +266,25 @@ class AIProcessorService:
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
             
-            extraction_skills = {"deal_extraction", "document_evidence_extraction", "deal_synthesis", "vdr_incremental_analysis"}
+            extraction_skills = {
+                "deal_extraction", 
+                "document_evidence_extraction", 
+                "deal_synthesis", 
+                "vdr_incremental_analysis", 
+                "email_thread_synthesis",
+                "deal_routing"
+            }
             is_extraction = audit_log.skill and audit_log.skill.name in extraction_skills
             
             parsed_json, success, clean_resp, clean_think = ResponseParserService.parse_standard_response(
-                raw_response, thinking, is_extraction
+                raw_response, thinking, is_extraction_skill=is_extraction
             )
+
+            # Ensure the result object contains the clean response text 
+            # so callers can access it via .get('response')
+            if isinstance(parsed_json, dict):
+                parsed_json["response"] = clean_resp
+                parsed_json["thinking"] = clean_think
 
             audit_log.raw_response = clean_resp
             audit_log.raw_thinking = clean_think

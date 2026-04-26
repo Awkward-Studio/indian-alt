@@ -29,6 +29,7 @@ TITLE_MATCH_STOPWORDS = {
     "company",
     "deal",
     "equity",
+    "financial",
     "for",
     "fund",
     "growth",
@@ -43,6 +44,7 @@ TITLE_MATCH_STOPWORDS = {
     "pvt",
     "report",
     "series",
+    "services",
     "the",
 }
 
@@ -188,6 +190,7 @@ class DealResolution:
     deal: Deal | None
     duplicates: list[Deal]
     matched_by: str | None
+    fuzzy_candidates: list[tuple[float, Deal, str]] = None  # (score, deal, matched_alias)
 
 
 def _deal_rank_key(deal: Deal):
@@ -242,46 +245,47 @@ def resolve_existing_deal(folder_name: str, artifact_data: dict[str, Any] | None
             matches.append(deal)
             seen_ids.add(deal_id)
 
-    if not matches:
-        fuzzy_query = _candidate_query_for_aliases(aliases)
-        fuzzy_candidates = []
-        if fuzzy_query:
-            fuzzy_candidates = list(
-                Deal.objects.filter(fuzzy_query)
-                .prefetch_related("documents", "chunks", "analyses")
-                .order_by("created_at", "id")
-            )
+    scored_candidates: list[tuple[float, Deal, str]] = []
+    fuzzy_query = _candidate_query_for_aliases(aliases)
+    fuzzy_candidates = []
+    if fuzzy_query:
+        fuzzy_candidates = list(
+            Deal.objects.filter(fuzzy_query)
+            .prefetch_related("documents", "chunks", "analyses")
+            .order_by("created_at", "id")
+        )
 
-        scored_candidates: list[tuple[float, Deal, str]] = []
-        seen_fuzzy_ids: set[str] = set()
-        for deal in fuzzy_candidates:
-            title = deal.title or ""
-            best_score = 0.0
-            best_alias = None
-            for alias in aliases:
-                score = _title_match_score(alias, title)
-                if score > best_score:
-                    best_score = score
-                    best_alias = alias
-            if best_score < 0.72 or best_alias is None:
-                continue
-            deal_id = str(deal.id)
-            if deal_id in seen_fuzzy_ids:
-                continue
-            deal.document_count = deal.documents.count()
-            deal.chunk_count = deal.chunks.count()
-            deal.analysis_count = deal.analyses.count()
-            scored_candidates.append((best_score, deal, best_alias))
-            seen_fuzzy_ids.add(deal_id)
+    seen_fuzzy_ids: set[str] = set()
+    for deal in fuzzy_candidates:
+        title = deal.title or ""
+        best_score = 0.0
+        best_alias = None
+        for alias in aliases:
+            score = _title_match_score(alias, title)
+            if score > best_score:
+                best_score = score
+                best_alias = alias
+        if best_score < 0.35 or best_alias is None:  # Lowered threshold further for candidate list
+            continue
+        deal_id = str(deal.id)
+        if deal_id in seen_fuzzy_ids:
+            continue
+        deal.document_count = deal.documents.count()
+        deal.chunk_count = deal.chunks.count()
+        deal.analysis_count = deal.analyses.count()
+        scored_candidates.append((best_score, deal, best_alias))
+        seen_fuzzy_ids.add(deal_id)
 
-        if scored_candidates:
-            scored_candidates.sort(key=lambda item: (-item[0], _deal_rank_key(item[1])))
-            top_score, top_deal, top_alias = scored_candidates[0]
-            second_score = scored_candidates[1][0] if len(scored_candidates) > 1 else 0.0
-            if len(scored_candidates) == 1 or top_score - second_score >= 0.18:
-                matches.append(top_deal)
-                seen_ids.add(str(top_deal.id))
-                matched_by = f"fuzzy:{top_alias}"
+    if scored_candidates:
+        scored_candidates.sort(key=lambda item: (-item[0], _deal_rank_key(item[1])))
+
+    if not matches and scored_candidates:
+        top_score, top_deal, top_alias = scored_candidates[0]
+        second_score = scored_candidates[1][0] if len(scored_candidates) > 1 else 0.0
+        if top_score >= 0.72 and (len(scored_candidates) == 1 or top_score - second_score >= 0.18):
+            matches.append(top_deal)
+            seen_ids.add(str(top_deal.id))
+            matched_by = f"fuzzy:{top_alias}"
 
     if not matches:
         return DealResolution(
@@ -290,6 +294,7 @@ def resolve_existing_deal(folder_name: str, artifact_data: dict[str, Any] | None
             deal=None,
             duplicates=[],
             matched_by=None,
+            fuzzy_candidates=scored_candidates,
         )
 
     matches.sort(key=_deal_rank_key)
@@ -301,4 +306,5 @@ def resolve_existing_deal(folder_name: str, artifact_data: dict[str, Any] | None
         deal=canonical,
         duplicates=duplicates,
         matched_by=matched_by,
+        fuzzy_candidates=scored_candidates,
     )

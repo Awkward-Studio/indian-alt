@@ -445,18 +445,27 @@ def _persist_folder_analysis_document(
     )
 
     if normalized_text:
-        artifact = DocumentArtifactService.build_document_artifact(
-            file_name=analysis_doc.file_name,
-            extracted_text=raw_extracted_text or normalized_text,
-            document_type=analysis_doc.document_type,
-            extraction_mode=analysis_doc.extraction_mode,
-            ai_service=ai_service,
-            source_metadata={
-                "audit_log_id": audit_log_id,
-                "source_id": analysis_doc.source_file_id,
-                "file_name": analysis_doc.file_name,
-            },
-        )
+        # Check if we already have normalized JSON (from the email pipeline)
+        pre_normalized = extraction.get("normalized_json")
+        
+        if pre_normalized and isinstance(pre_normalized, dict) and "metrics" in pre_normalized:
+            # OPTIMIZED: Use the high-fidelity data we already have
+            artifact = pre_normalized
+        else:
+            # LEGACY: Trigger a new analysis pass (standard folder behavior)
+            artifact = DocumentArtifactService.build_document_artifact(
+                file_name=analysis_doc.file_name,
+                extracted_text=raw_extracted_text or normalized_text,
+                document_type=analysis_doc.document_type,
+                extraction_mode=analysis_doc.extraction_mode,
+                ai_service=ai_service,
+                source_metadata={
+                    "audit_log_id": audit_log_id,
+                    "source_id": analysis_doc.source_file_id,
+                    "file_name": analysis_doc.file_name,
+                },
+            )
+        
         DocumentArtifactService.persist_analysis_artifact(analysis_doc, artifact)
         embed_service.vectorize_analysis_document(analysis_doc)
         analysis_doc.refresh_from_db()
@@ -1411,32 +1420,89 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
         if audit_log:
             log_worker_event(audit_log, f"Processing document: {file_name}", status='PROCESSING')
 
-        content = None
-        if file_id == "body":
+        extraction = {}
+        raw_markdown = ""
+
+        is_body = file_info.get("is_body", False)
+
+        if is_body:
+            # OPTIMIZED PATH: Extract text directly from DB/HTML (Zero Loss)
             email = Email.objects.get(id=email_id)
-            content = (email.body_html or email.body_text or email.body_preview or "").encode('utf-8')
+            raw_body = email.body_html or email.body_text or email.body_preview or ""
+            
+            # Pre-clean HTML to save tokens and prevent model confusion
+            import re
+            def fast_strip_html(text):
+                if not text: return ""
+                t = re.sub(r'<(style|script)[^>]*>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                t = re.sub(r'<[^>]+>', ' ', t)
+                return re.sub(r'\s+', ' ', t).strip()
+            
+            clean_body = fast_strip_html(raw_body)
+            
+            # CHUNKING LOGIC: If body is massive (> 40k chars), chunk it
+            MAX_BODY_CHARS = 40000
+            if len(clean_body) > MAX_BODY_CHARS:
+                log_worker_event(audit_log, f"Email body is massive ({len(clean_body)} chars). Chunking...", status='PROCESSING')
+                chunks = [clean_body[i:i + 35000] for i in range(0, len(clean_body), 30000)]
+                unrolled_parts = []
+                for idx, chunk in enumerate(chunks):
+                    log_worker_event(audit_log, f"Unrolling chunk {idx+1}/{len(chunks)}...", status='PROCESSING')
+                    chunk_res = ai_service.process_content(
+                        content=chunk, 
+                        skill_name="email_unroll", 
+                        source_type="email",
+                        metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                    )
+                    unrolled_parts.append(chunk_res.get('response') or chunk_res.get('text') or "")
+                raw_markdown = "\n\n--- THREAD CONTINUATION ---\n\n".join(unrolled_parts)
+            else:
+                log_worker_event(audit_log, f"Unrolling email thread history: {file_name}", status='PROCESSING')
+                unroll_result = ai_service.process_content(
+                    content=clean_body, 
+                    skill_name="email_unroll", 
+                    source_type="email",
+                    metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                )
+                raw_markdown = unroll_result.get('response') or unroll_result.get('text') or ""
+            
+            # DEBUG LOG
+            if raw_markdown:
+                log_worker_event(audit_log, f"Successfully unrolled thread history.", status='PROCESSING')
+            
+            extraction = {
+                "normalized_text": raw_markdown,
+                "text": raw_markdown,
+                "mode": "text_direct",
+                "transcription_status": "complete" if raw_markdown else "failed"
+            }
         else:
+            # LEGACY PATH: Binary files (PDF, Excel, etc.) go to docproc
             email = Email.objects.get(id=email_id)
-            att_content = graph.get_attachment_content(user_email, email.graph_id, file_id)
+            real_file_id = file_id # For attachments, the id is already correct
+            att_content = graph.get_attachment_content(user_email, email.graph_id, real_file_id)
+            content = None
             if 'contentBytes' in att_content:
                 import base64
                 content = base64.b64decode(att_content['contentBytes'])
 
-        if not content:
-            raise ValueError(f"Could not retrieve content for {file_name}")
+            if not content:
+                raise ValueError(f"Could not retrieve content for {file_name}")
 
-        # 1. Extraction (GLM-4V)
-        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
-        raw_markdown = extraction.get("normalized_text") or extraction.get("text") or ""
-
+            extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
+            raw_markdown = extraction.get("normalized_text") or extraction.get("text") or ""
+        
         # 2. Normalization (vLLM Qwen)
+        log_worker_event(audit_log, f"Normalizing extracted evidence: {file_name}", status='PROCESSING')
         norm_result = ai_service.process_content(
             content=raw_markdown,
             skill_name="document_normalization",
-            source_type="normalization"
+            source_type="normalization",
+            metadata={"chat_template_kwargs": {"enable_thinking": False}}
         )
         
-        normalized_json = norm_result.get('parsed_json', {}) if isinstance(norm_result, dict) else {}
+        # FIX: result is already the parsed JSON dict
+        normalized_json = norm_result if isinstance(norm_result, dict) else {}
         
         # 3. Persist as DealDocument & DocumentChunk
         # We repurpose _persist_folder_analysis_document but pass normalized data
@@ -1458,7 +1524,7 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
 
 
 @shared_task(bind=True)
-def finalize_thread_analysis_async(self, results, deal_id: str, audit_log_id: str):
+def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log_id: str):
     """
     Chord callback for autonomous email thread analysis.
     Synthesizes the finalized deal state from all parallel document extractions.
@@ -1469,7 +1535,8 @@ def finalize_thread_analysis_async(self, results, deal_id: str, audit_log_id: st
     from deals.services.deal_creation import DealCreationService
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
-    deal = Deal.objects.get(id=deal_id)
+    deal = Deal.objects.filter(id=deal_id).first() if deal_id else None
+    ai_service = AIProcessorService()
     
     passed_results = [r for r in results if r.get("status") == "passed"]
     
@@ -1484,25 +1551,183 @@ def finalize_thread_analysis_async(self, results, deal_id: str, audit_log_id: st
     for r in passed_results:
         intelligence_context.append({
             "name": r.get("file_name"),
-            "intel": r.get("normalized_json")
+            "full_text": r.get("normalized_text"), # The unrolled chronological history
+            "intel": r.get("normalized_json")      # The structured metrics/facts
         })
 
-    ai_service = AIProcessorService()
+    # Add proposed intelligence if available
+    proposed_intel = (audit_log.source_metadata or {}).get("proposed_intel", {})
+    if proposed_intel:
+        intelligence_context.insert(0, {
+            "name": "ROUTING_PROPOSAL",
+            "intel": proposed_intel
+        })
+
+    # HIERARCHICAL BUCKETING (Institutional Fusion v46 logic)
+    # Chars limit approx 60k for safe 32k token window
+    CONTEXT_SAFE_CHARS = 60000 
+    full_context_json = json.dumps(intelligence_context, default=str)
     
+    if len(full_context_json) > CONTEXT_SAFE_CHARS:
+        log_worker_event(audit_log, f"Context is too large ({len(full_context_json)} chars). Performing hierarchical synthesis...", status='PROCESSING')
+        
+        # Split into buckets (approx 45k chars each)
+        buckets = []
+        current_bucket = []
+        current_len = 0
+        for item in intelligence_context:
+            item_str = json.dumps(item, default=str)
+            if current_len + len(item_str) > 45000 and current_bucket:
+                buckets.append(current_bucket)
+                current_bucket = []
+                current_len = 0
+            current_bucket.append(item)
+            current_len += len(item_str)
+        if current_bucket:
+            buckets.append(current_bucket)
+            
+        bucket_summaries = []
+        for idx, bucket in enumerate(buckets):
+            log_worker_event(audit_log, f"Fusing intermediate bucket {idx+1}/{len(buckets)}...", status='PROCESSING')
+            bucket_res = ai_service.process_content(
+                content=json.dumps(bucket, default=str),
+                skill_name="email_intermediate_fusion", # Use dedicated fusion skill
+                source_type="email",
+                metadata={
+                    "audit_log_id": audit_log_id, 
+                    "temperature": 0.0,
+                    "chat_template_kwargs": {"enable_thinking": False}
+                }
+            )
+            # We want the text response of the summary
+            summary = bucket_res.get('response') or bucket_res.get('text') or ""
+            bucket_summaries.append(f"[BUCKET {idx+1} SUMMARY]\n{summary}")
+            
+        final_content = "\n\n".join(bucket_summaries)
+    else:
+        final_content = full_context_json
+
+    # DEBUG: Log the exact JSON payload being sent for final synthesis
+    log_worker_event(audit_log, f"Starting final synthesis pass. Context Payload (First 3000 chars):\n{final_content[:3000]}", status='PROCESSING')
+
+    # 3. FINAL FUSION
+    # We now fetch the dynamic schema from the skill if possible, or use a default
+    DEAL_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "deal_model_data": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "industry": {"type": "string"},
+                    "sector": {"type": "string"},
+                    "funding_ask": {"type": "string"},
+                    "funding_ask_for": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["High", "Medium", "Low"]},
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                    "country": {"type": "string"},
+                    "themes": {"type": "array", "items": {"type": "string"}},
+                    "is_female_led": {"type": "boolean"},
+                    "deal_summary": {"type": "string"},
+                    "deal_details": {"type": "string"},
+                    "company_details": {"type": "string"},
+                    "priority_rationale": {"type": "string"}
+                },
+                "required": [
+                    "title", "industry", "sector", "funding_ask", "funding_ask_for", 
+                    "priority", "city", "state", "country", "themes", 
+                    "is_female_led", "deal_summary", "deal_details", "company_details", "priority_rationale"
+                ],
+                "additionalProperties": False
+            },
+            "source_relationships": {
+                "type": "object",
+                "properties": {
+                    "bank": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": ["string", "null"]},
+                            "website_domain": {"type": ["string", "null"]},
+                            "description": {"type": ["string", "null"]}
+                        },
+                        "required": ["name", "website_domain", "description"],
+                        "additionalProperties": False
+                    },
+                    "primary_contact": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "name": {"type": ["string", "null"]},
+                            "email": {"type": ["string", "null"]},
+                            "designation": {"type": ["string", "null"]},
+                            "linkedin_url": {"type": ["string", "null"]}
+                        },
+                        "required": ["name", "email", "designation", "linkedin_url"],
+                        "additionalProperties": False
+                    },
+                    "additional_contacts": {"type": "array", "items": {"type": "object"}},
+                    "relationship_metadata": {
+                        "type": "object",
+                        "properties": {
+                            "source_type": {"type": ["string", "null"]},
+                            "source_documents": {"type": "array", "items": {"type": "string"}},
+                            "confidence": {"type": ["string", "null"], "enum": ["High", "Medium", "Low", None]},
+                            "ambiguities": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["source_type", "source_documents", "confidence", "ambiguities"],
+                        "additionalProperties": False
+                    }
+                },
+                "required": ["bank", "primary_contact", "additional_contacts", "relationship_metadata"],
+                "additionalProperties": False
+            },
+            "analyst_report": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "properties": {
+                    "ambiguous_points": {"type": "array", "items": {"type": "string"}},
+                    "documents_analyzed": {"type": "array", "items": {"type": "string"}},
+                    "cross_document_conflicts": {"type": "array", "items": {"type": "object"}},
+                    "missing_information_requests": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["ambiguous_points", "documents_analyzed", "cross_document_conflicts", "missing_information_requests"],
+                "additionalProperties": False
+            }
+        },
+        "required": ["deal_model_data", "source_relationships", "analyst_report", "metadata"],
+        "additionalProperties": False
+    }
+
     result = ai_service.process_content(
-        content=json.dumps(intelligence_context, default=str),
+        content=final_content,
         skill_name="email_thread_synthesis",
-        source_type="email_thread_synthesis",
+        source_type="email",
         metadata={
-            "deal_title": deal.title,
-            "deal_summary": deal.deal_summary
+            "deal_title": deal.title if deal else proposed_intel.get("company_name"),
+            "deal_summary": deal.deal_summary if deal else "",
+            "audit_log_id": audit_log_id,
+            "temperature": 0.0,
+            "max_tokens": 8192,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {
+                "type": "json_schema", 
+                "json_schema": {
+                    "name": "email_deal_synth", 
+                    "schema": DEAL_SCHEMA, 
+                    "strict": True
+                }
+            }
         }
     )
 
-    analysis = result.get('parsed_json', {}) if isinstance(result, dict) else {}
+    analysis = result
     
     if analysis and "error" not in analysis:
-        # Apply the synthesis to the actual Deal object
+        # Ensure deal_model_data has title if deal is missing
+        if not analysis.get("deal_model_data", {}).get("title"):
+            analysis.setdefault("deal_model_data", {})["title"] = proposed_intel.get("company_name")
+
+        # Apply the synthesis to the actual Deal object if it exists
         normalized_analysis = _normalize_synthesis_result(
             analysis,
             analysis_kind=AnalysisKind.INITIAL,
@@ -1511,12 +1736,26 @@ def finalize_thread_analysis_async(self, results, deal_id: str, audit_log_id: st
             failed_files=[r for r in results if r.get("status") != "passed"],
         )
         
-        DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+        if deal:
+            DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
         
-        log_worker_event(audit_log, "Deal intelligence updated successfully.", status='COMPLETED', done=True)
+        audit_log.parsed_json = normalized_analysis
+        audit_log.status = 'COMPLETED'
         audit_log.is_success = True
-        audit_log.save(update_fields=['is_success'])
-        return {"status": "success", "deal_id": str(deal.id)}
+        
+        # Prepare file tree for later VDR confirm
+        source_meta = audit_log.source_metadata or {}
+        source_meta["passed_files"] = passed_results
+        source_meta["failed_files"] = [r for r in results if r.get("status") != "passed"]
+        source_meta["interaction_status"] = "pending"
+        source_meta["interaction_mode"] = "editable"
+        audit_log.source_metadata = source_meta
+        
+        audit_log.save(update_fields=['parsed_json', 'status', 'is_success', 'source_metadata'])
+        log_worker_event(audit_log, "Deal intelligence synthesized successfully.", status='COMPLETED', done=True)
+        
+        return {"status": "success", "deal_id": str(deal.id) if deal else None}
     else:
-        log_worker_event(audit_log, "Failed to synthesize thread intelligence.", status='FAILED', done=True)
-        return {"error": "Synthesis failed"}
+        error_msg = analysis.get("error", "AI model returned an empty or unparseable response.")
+        log_worker_event(audit_log, f"Synthesis failed: {error_msg}", status='FAILED', done=True)
+        return {"error": f"Synthesis failed: {error_msg}"}

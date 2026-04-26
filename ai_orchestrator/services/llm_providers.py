@@ -226,6 +226,9 @@ class VLLMProviderService:
             "temperature": ((payload.get("options") or {}).get("temperature", 0.1)),
         }
 
+        if payload.get("chat_template_kwargs"):
+            body["chat_template_kwargs"] = payload["chat_template_kwargs"]
+
         response_format = payload.get("response_format")
         if response_format:
             body["response_format"] = response_format

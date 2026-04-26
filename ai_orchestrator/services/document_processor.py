@@ -40,9 +40,10 @@ class DocumentProcessorService:
         filename: str,
         page_limit: int = None,
         allow_local_fallback: bool = True,
+        hint: str | None = None,
     ) -> dict:
         if self.docproc_url:
-            remote_result = self._remote_extract(file_content, filename, page_limit=page_limit)
+            remote_result = self._remote_extract(file_content, filename, page_limit=page_limit, hint=hint)
             if remote_result:
                 return remote_result
             if not allow_local_fallback:
@@ -56,21 +57,22 @@ class DocumentProcessorService:
                     "error": f"Remote docproc unavailable for {filename}",
                 }
             logger.warning("[DOC-PROC] Remote docproc unavailable for %s. Falling back locally.", filename)
-        return self._local_extract(file_content, filename, page_limit=page_limit)
+        return self._local_extract(file_content, filename, page_limit=page_limit, hint=hint)
 
-    def transcribe_document(self, file_content: bytes, filename: str, page_limit: int = None) -> str:
-        result = self.get_extraction_result(file_content, filename, page_limit=page_limit)
+    def transcribe_document(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> str:
+        result = self.get_extraction_result(file_content, filename, page_limit=page_limit, hint=hint)
         text = result.get("normalized_text") or result.get("text")
         if text:
             return text
         return f"[No readable content extracted for: {filename}]"
 
-    def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None) -> dict | None:
+    def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> dict | None:
         try:
             payload = {
                 "filename": filename,
                 "page_limit": page_limit,
                 "content_base64": base64.b64encode(file_content).decode("utf-8"),
+                "hint": hint,
             }
             headers = {"Content-Type": "application/json"}
             if self.docproc_api_key:

@@ -25,14 +25,19 @@ class PromptBuilderService:
 
     @staticmethod
     def build_system_instructions(personality: Optional[AIPersonality], skill: Optional[AISkill], stream: bool = False) -> str:
-        system_instructions = personality.system_instructions if personality else "You are a PE analyst."
+        # IF a skill exists, it provides the PRIMARY identity for the task.
+        # This prevents conflicting instruction errors (e.g. Analyst vs Recovery Specialist).
+        if skill and skill.system_template:
+            system_instructions = skill.system_template
+        elif personality:
+            system_instructions = personality.system_instructions
+        else:
+            system_instructions = "You are a professional PE analyst."
         
-        if skill:
+        if skill and not skill.system_template:
+            # Fallback: Merge only if the skill DOES NOT define its own identity
             skill_identity = f"# CURRENT TASK: {skill.name.upper().replace('_', ' ')}\n{skill.description}\n\n"
             system_instructions = skill_identity + system_instructions
-            
-            if skill.system_template:
-                system_instructions += f"\n\n{skill.system_template}"
         
         # Inject Dynamic Protocols
         protocol = AnalysisProtocol.objects.filter(is_active=True).first()

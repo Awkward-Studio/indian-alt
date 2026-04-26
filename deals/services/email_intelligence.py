@@ -16,11 +16,10 @@ class EmailIntelligenceService:
     """
 
     @staticmethod
-    def resolve_thread_to_deal(email_id: str) -> Tuple[Deal, bool]:
+    def propose_thread_routing(email_id: str) -> dict:
         """
-        Takes an email, finds its thread, and resolves it to a Deal.
-        Creates a new Deal/Bank/Contact if necessary.
-        Returns (Deal, created)
+        Analyzes an email thread and returns proposed deal metadata (routing).
+        Bypasses Audit Logging to prevent frontend dialog race conditions.
         """
         try:
             root_email = Email.objects.get(id=email_id)
@@ -30,38 +29,83 @@ class EmailIntelligenceService:
         # 1. Get entire thread
         thread = Email.objects.filter(conversation_id=root_email.conversation_id).order_by('created_at')
         
-        # 2. Check for existing link
-        existing_deal = thread.filter(deal__isnull=False).values_list('deal', flat=True).first()
-        if existing_deal:
-            deal = Deal.objects.get(id=existing_deal)
-            # Ensure all emails in thread are linked
-            thread.filter(deal__isnull=True).update(deal=deal)
-            return deal, False
+        # 2. Extract Context
+        import re
+        def clean_html(raw_html):
+            if not raw_html: return ""
+            # Remove style and script tags
+            clean = re.sub(r'<(style|script)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
+            # Remove all other tags
+            clean = re.sub(r'<[^>]+>', ' ', clean)
+            # Remove extra whitespace
+            clean = re.sub(r'\s+', ' ', clean).strip()
+            return clean
 
-        # 3. Autonomous Extraction via vLLM
-        ai_service = AIProcessorService()
         thread_context = "\n\n".join([
-            f"FROM: {e.from_email}\nSUBJECT: {e.subject}\nBODY: {e.body_preview}"
+            f"### MESSAGE FROM: {e.from_email} | SUBJECT: {e.subject}\n{clean_html(e.body_preview or e.body_text or '')}"
             for e in thread
-        ])
+        ]).strip()
 
-        routing_prompt = f"Analyze this thread:\n{thread_context[:10000]}"
+        if not thread_context:
+            logger.warning(f"No thread context found for email {email_id}")
+            return {"company_name": root_email.subject or "Unknown Deal"}
 
-        result = ai_service.process_content(
-            content=routing_prompt,
-            skill_name="deal_routing",
-            source_type="email_thread"
-        )
+        routing_prompt = f"Analyze this thread and propose deal routing metadata:\n{thread_context[:10000]}"
 
-        extraction = result.get('parsed_json', {}) if isinstance(result, dict) else {}
-        company_name = extraction.get('company_name')
-        bank_name = extraction.get('bank_name')
-        banker_name = extraction.get('banker_name')
-        banker_email = extraction.get('banker_email')
+        # 3. Direct Provider Call (No Audit Log)
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        from ai_orchestrator.services.parsers import ResponseParserService
+        from ai_orchestrator.models import AISkill, AIPersonality
+        from ai_orchestrator.services.runtime import AIRuntimeService
+        
+        provider = VLLMProviderService()
+        skill = AISkill.objects.filter(name="deal_routing").first()
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        active_model = AIRuntimeService.get_text_model(personality)
+        
+        payload = {
+            "model": active_model,
+            "messages": [
+                {"role": "system", "content": skill.system_template if skill else "Return exactly one valid JSON object."},
+                {"role": "user", "content": routing_prompt}
+            ],
+            "temperature": 0.0,
+            "chat_template_kwargs": {"enable_thinking": False}, # Disable thinking for speed
+            "response_format": {"type": "json_object"}
+        }
 
-        if not company_name:
-            # Fallback to subject if extraction fails
-            company_name = root_email.subject or f"New Deal from {root_email.from_email}"
+        try:
+            data = provider.execute_standard(payload)
+            raw_response = data.get("response") or ""
+            
+            # Robust extraction of JSON from response (handling thinking blocks)
+            parsed_json, success, _, _ = ResponseParserService.parse_standard_response(
+                raw_response, "", is_extraction_skill=True
+            )
+            extraction = parsed_json if success else {}
+        except Exception as e:
+            logger.error(f"Routing extraction failed: {e}")
+            extraction = {}
+        
+        # Ensure we have a company name fallback
+        if not extraction.get('company_name'):
+            extraction['company_name'] = root_email.subject or f"New Deal from {root_email.from_email}"
+            
+        return extraction
+
+    @staticmethod
+    def create_deal_from_intelligence(email_id: str, intelligence: dict) -> Tuple[Deal, bool]:
+        """
+        Actually creates/resolves the Deal, Bank, and Contact records.
+        Used after user confirmation.
+        """
+        root_email = Email.objects.get(id=email_id)
+        thread = Email.objects.filter(conversation_id=root_email.conversation_id)
+        
+        company_name = intelligence.get('company_name')
+        bank_name = intelligence.get('bank_name')
+        banker_name = intelligence.get('banker_name')
+        banker_email = intelligence.get('banker_email')
 
         with transaction.atomic():
             # Resolve Bank
@@ -90,9 +134,9 @@ class EmailIntelligenceService:
             if not deal:
                 deal = Deal.objects.create(
                     title=company_name,
-                    bank_name=bank.name if bank else bank_name,
-                    primary_contact_name=contact.name if contact else banker_name,
-                    primary_contact=contact
+                    bank=bank,
+                    primary_contact=contact,
+                    source_email_id=str(root_email.id)
                 )
                 created = True
             
@@ -105,3 +149,11 @@ class EmailIntelligenceService:
                 deal.save(update_fields=['primary_contact'])
 
             return deal, created
+
+    @staticmethod
+    def resolve_thread_to_deal(email_id: str) -> Tuple[Deal, bool]:
+        """
+        LEGACY/AUTONOMOUS: Immediately resolves and creates.
+        """
+        intelligence = EmailIntelligenceService.propose_thread_routing(email_id)
+        return EmailIntelligenceService.create_deal_from_intelligence(email_id, intelligence)

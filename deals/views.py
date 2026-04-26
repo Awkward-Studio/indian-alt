@@ -274,6 +274,55 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
         return Response(data)
     
+    def create(self, request, *args, **kwargs):
+        """
+        Custom create to support session-based deal initialization (from OneDrive or Email).
+        """
+        session_id = request.data.get('sessionId')
+        if not session_id:
+            return super().create(request, *args, **kwargs)
+
+        try:
+            from ai_orchestrator.models import AIAuditLog
+            from .services.folder_analysis import FolderAnalysisService
+            from .services.email_intelligence import EmailIntelligenceService
+
+            # 1. Resolve Session/Audit Log
+            audit_log = AIAuditLog.objects.filter(id=session_id).first()
+            if not audit_log:
+                return Response({"error": "Invalid session or audit log ID"}, status=400)
+
+            # 2. Create the Deal record first (with user-edited form data)
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            deal = serializer.save()
+
+            # 3. Handle source-specific initialization
+            source_type = audit_log.source_type
+            
+            if source_type == 'email':
+                # Link intelligence specifically from email thread
+                proposed_intel = (audit_log.source_metadata or {}).get("proposed_intel", {})
+                EmailIntelligenceService.create_deal_from_intelligence(audit_log.source_id, proposed_intel)
+                # Ensure the deal we just saved is the one linked.
+                deal.source_email_id = audit_log.source_id
+                deal.save(update_fields=['source_email_id'])
+
+            # 4. Finalize deal with analysis session data (common for folder/email)
+            # This handles doc linking, embedding, and synthesis persistence
+            result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
+            
+            if result.get("error"):
+                return Response(result, status=400)
+
+            # 5. Return the finalized deal
+            return Response(self.get_serializer(deal).data, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to confirm deal from session {session_id}: {traceback.format_exc()}")
+            return Response({"error": str(e)}, status=500)
+
     def perform_create(self, serializer):
         deal = serializer.save()
         DealCreationService.process_deal_creation(deal, serializer.validated_data, self.request.user)

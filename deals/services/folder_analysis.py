@@ -658,42 +658,70 @@ class FolderAnalysisService:
                 overwrite_themes=True,
             )
 
+        # 4. Finalize deal with analysis session data (common for folder/email)
         embed_service = EmbeddingService()
         created_docs = []
+
+        # Process each analyzed document from the session
         for file in approved_files:
             file_name = file.get('file_name') or 'unknown_file'
-            extracted_text = (file.get('extracted_text') or '').strip()
+            normalized_json = file.get('normalized_json') or file.get('document_artifact') or {}
             
-            doc_kwargs = {
-                "deal": deal,
-                "title": file_name,
-                "document_type": DocumentType.OTHER,
-                "extracted_text": extracted_text,
-                "normalized_text": file.get('normalized_text') or extracted_text,
-                "evidence_json": file.get('document_artifact') or {},
-                "source_map_json": (file.get('document_artifact') or {}).get('source_map', {}),
-                "table_json": (file.get('document_artifact') or {}).get('tables_summary', []),
-                "key_metrics_json": (file.get('document_artifact') or {}).get('metrics', []),
-                "reasoning": file.get('document_reasoning') or (file.get('document_artifact') or {}).get('reasoning', ''),
-                "is_indexed": False,
-                "is_ai_analyzed": True,
-                "initial_analysis_status": InitialAnalysisStatus.SELECTED_AND_ANALYZED,
-                "extraction_mode": file.get('extraction_mode') or ExtractionMode.FALLBACK_TEXT,
-                "transcription_status": file.get('transcription_status') or TranscriptionStatus.COMPLETE,
-                "chunking_status": ChunkingStatus.NOT_CHUNKED,
-                "last_transcribed_at": deal.created_at,
-            }
+            # Extract structured intel (Same as bulk_sync_artifacts.py)
+            clean_text = file.get('normalized_text') or file.get('extracted_text') or ""
+            doc_summary = normalized_json.get("document_summary", "No summary extracted.")
+            metrics = normalized_json.get("metrics", [])
+            risks = normalized_json.get("risks", [])
+            doc_type = normalized_json.get("document_type") or DocumentType.OTHER
+
+            # Create the permanent DealDocument record
+            doc = DealDocument.objects.create(
+                deal=deal,
+                title=file_name,
+                document_type=doc_type,
+                extracted_text=clean_text,
+                normalized_text=clean_text,
+                evidence_json=normalized_json,
+                source_map_json=normalized_json.get('source_map', {}),
+                table_json=normalized_json.get('tables_summary', []),
+                key_metrics_json=metrics,
+                reasoning=file.get('document_reasoning') or normalized_json.get('reasoning', ''),
+                is_ai_analyzed=True,
+                initial_analysis_status=InitialAnalysisStatus.SELECTED_AND_ANALYZED,
+                extraction_mode=file.get('extraction_mode') or ExtractionMode.TEXT_DIRECT,
+                transcription_status=TranscriptionStatus.COMPLETE,
+                chunking_status=ChunkingStatus.NOT_CHUNKED,
+            )
 
             if source_type == 'onedrive_folder':
-                doc_kwargs["onedrive_id"] = file.get('file_id')
+                doc.onedrive_id = file.get('file_id')
+                doc.save(update_fields=['onedrive_id'])
+
+            # 5. PERFORM DEEP CHUNKING & EMBEDDING (Matches bulk_sync_artifacts sync_worker)
+            if clean_text:
+                chunk_count = embed_service.chunk_and_embed(
+                    text=clean_text,
+                    deal=deal,
+                    source_type='extracted_source', # Matches bulk loader for chat consistency
+                    source_id=f"{file_name}.json",
+                    metadata={
+                        'filename': file_name,
+                        'is_artifact': True,
+                        'metrics': metrics,
+                        'summary': doc_summary,
+                        'doc_type': doc_type,
+                        'risks': risks,
+                        'chunk_kind': 'normalized_text',
+                    },
+                    replace_existing=True,
+                )
+                if chunk_count > 0:
+                    doc.is_indexed = True
+                    doc.chunk_count = chunk_count
+                    doc.chunking_status = ChunkingStatus.CHUNKED
+                    doc.save(update_fields=['is_indexed', 'chunk_count', 'chunking_status'])
             
-            doc = DealDocument.objects.create(**doc_kwargs)
-            DocumentArtifactService.persist_artifact(doc, DocumentArtifactService.artifact_from_file_record(file))
-            
-            if extracted_text:
-                if embed_service.vectorize_document(doc):
-                    doc.refresh_from_db(fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
-                created_docs.append(doc)
+            created_docs.append(doc)
 
         for file in session_data.get('failed_files', []):
             doc_kwargs = {

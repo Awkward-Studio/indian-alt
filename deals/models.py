@@ -139,6 +139,8 @@ class Deal(models.Model):
     city = models.TextField(blank=True, null=True)
     state = models.TextField(blank=True, null=True)
     country = models.TextField(blank=True, null=True)
+    bank_name = models.TextField(blank=True, null=True, help_text="Raw bank name extracted from analysis")
+    primary_contact_name = models.TextField(blank=True, null=True, help_text="Raw contact name extracted from analysis")
     # Originally: ArrayField(models.UUIDField(), ...) for Postgres.
     # Used for additional contacts beyond the primary_contact.
     # Now stored as JSON list for SQLite/Postgres compatibility.

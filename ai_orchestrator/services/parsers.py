@@ -69,8 +69,23 @@ class ResponseParserService:
             return ""
             
         try:
-            # 1. Clean response by removing known thinking tags first to avoid confusing the extractor
-            clean_text = re.sub(r'<(thinking|think)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+            # 1. CLEANING (Institutional Fusion v46 fast_scrub logic)
+            # Remove thinking blocks
+            clean_text = text
+            if "</think>" in clean_text:
+                clean_text = clean_text.split("</think>")[-1]
+            elif "</thinking>" in clean_text:
+                clean_text = clean_text.split("</thinking>")[-1]
+            
+            # Remove thinking tags specifically if only opening tags exist or other variations
+            clean_text = re.sub(r'<(thinking|think)>.*?</\1>', '', clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            
+            # Remove preamble text common in MoE models
+            preamble_patterns = re.compile(r"^(Here is|Here's|Sure|Okay|Attached|I have|Cleaned).*?\n", re.MULTILINE | re.IGNORECASE)
+            clean_text = preamble_patterns.sub("", clean_text)
+            
+            # Remove code fence wrappers
+            clean_text = re.sub(r'^```json\n|^```markdown\n|^```\w*\n|```\n?$', '', clean_text, flags=re.IGNORECASE | re.MULTILINE).strip()
             
             # 2. Try to find all content between tags or code blocks in the cleaned text
             patterns = [
@@ -310,14 +325,16 @@ class ResponseParserService:
         # Also strip the <json> block from the display text if it's there
         clean_response = re.sub(r'<json>.*?</json>', '', clean_response, flags=re.DOTALL).strip()
 
-        # 3. PARSE JSON
+        # 3. PARSE JSON (Only if expected)
+        if not is_extraction_skill:
+            return {}, True, clean_response, thinking
+
         try:
             parsed_json = json.loads(clean_json_str)
             
-            if is_extraction_skill:
-                if "deal_model_data" not in parsed_json: parsed_json["deal_model_data"] = {}
-                if "metadata" not in parsed_json: parsed_json["metadata"] = {"ambiguous_points": [], "missing_fields": []}
-                if "analyst_report" not in parsed_json: parsed_json["analyst_report"] = raw_response
+            if "deal_model_data" not in parsed_json: parsed_json["deal_model_data"] = {}
+            if "metadata" not in parsed_json: parsed_json["metadata"] = {"ambiguous_points": [], "missing_fields": []}
+            if "analyst_report" not in parsed_json: parsed_json["analyst_report"] = raw_response
             
             parsed_json["thinking"] = thinking
             parsed_json["response"] = clean_response
@@ -325,10 +342,10 @@ class ResponseParserService:
             return parsed_json, True, clean_response, thinking
         except Exception as e:
             logger.error(f"JSON parsing/repair failed: {str(e)}")
-            if is_extraction_skill:
-                salvaged = ResponseParserService.salvage_extraction_payload(raw_response, clean_response, thinking)
-                if salvaged:
-                    return salvaged, False, clean_response, thinking
+            salvaged = ResponseParserService.salvage_extraction_payload(raw_response, clean_response, thinking)
+            if salvaged:
+                return salvaged, False, clean_response, thinking
+            
             # FALLBACK: If JSON fails, still try to extract basic metadata from the text report
             fallback_data = {
                 "deal_model_data": {"title": "Direct Inference (Parsing Error)"},
