@@ -150,6 +150,7 @@ class DealSerializer(serializers.ModelSerializer):
         source='primary_contact.name',
         read_only=True
     )
+    primary_contact_details = serializers.SerializerMethodField()
     additional_contacts = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Contact.objects.all(),
@@ -182,6 +183,18 @@ class DealSerializer(serializers.ModelSerializer):
             }
             for contact in contacts
         ]
+
+    def get_primary_contact_details(self, obj):
+        if not obj.primary_contact:
+            return None
+        contact = obj.primary_contact
+        return {
+            "id": str(contact.id),
+            "name": contact.name,
+            "email": contact.email,
+            "bank": str(contact.bank_id) if contact.bank_id else None,
+            "bank_name": contact.bank.name if contact.bank else None,
+        }
     
     def create(self, validated_data):
         # Pop fields that are not on the Deal model anymore
@@ -253,7 +266,7 @@ class DealDetailSerializer(DealSerializer):
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'primary_contact',
-            'primary_contact_name', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
+            'primary_contact_name', 'primary_contact_details', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'current_phase', 'industry',
             'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
             'ic_stage', 'city', 'country', 'created_at', 'deal_summary',

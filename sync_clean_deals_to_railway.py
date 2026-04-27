@@ -69,6 +69,10 @@ def parse_args():
         help="Delete production prune candidates in batches of this size.",
     )
     parser.add_argument(
+        "--output-prune-file",
+        help="Path to save pruning candidates to a JSON file instead of deleting them.",
+    )
+    parser.add_argument(
         "--skip-reference-data",
         action="store_true",
         help="Skip the initial bank/contact sync phase and go straight to deal data.",
@@ -143,6 +147,8 @@ def main() -> int:
         command.append("--verbose-sync")
     command.extend(["--progress-interval", str(args.progress_interval)])
     command.extend(["--prune-batch-size", str(args.prune_batch_size)])
+    if args.output_prune_file:
+        command.extend(["--output-prune-file", args.output_prune_file])
     if args.skip_reference_data:
         command.append("--skip-reference-data")
     if args.prompt_child_overwrite:

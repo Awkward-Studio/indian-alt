@@ -125,6 +125,10 @@ def parse_args():
         default=250,
         help="Process reference banks/contacts in batches of this size. Defaults to 250.",
     )
+    parser.add_argument(
+        "--output-prune-file",
+        help="Save production prune candidates to a JSON file instead of deleting them directly.",
+    )
     return parser.parse_args()
 
 
@@ -1488,6 +1492,7 @@ def prune_production_deals(
     dry_run: bool = False,
     batch_size: int = 250,
     interactive: bool = False,
+    output_file: str = None,
 ):
     keep_ids = [deal.id for deal in local_deals]
     queryset = Deal.objects.using(TARGET_DB).exclude(id__in=keep_ids).order_by("title", "id")
@@ -1499,6 +1504,19 @@ def prune_production_deals(
             analyses_count=Count("analyses", distinct=True),
         )
     )
+
+    if output_file and candidates:
+        output_data = {
+            "timestamp": time.time(),
+            "target_db": TARGET_DB,
+            "to_delete_ids": [str(c["id"]) for c in candidates],
+            "summary": {"deals": len(candidates)}
+        }
+        with open(output_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"[PRUNE] Saved {len(candidates)} pruning candidates to {output_file}", flush=True)
+        return candidates
+
     if dry_run or not candidates:
         return candidates
 
@@ -1719,6 +1737,7 @@ def run():
             dry_run=args.dry_run,
             batch_size=args.prune_batch_size,
             interactive=args.interactive_prune,
+            output_file=args.output_prune_file,
         )
         print("-" * 72)
         print(
