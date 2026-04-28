@@ -25,6 +25,10 @@ echo ""
 echo "=== RUNNING MIGRATIONS ==="
 python manage.py migrate --noinput
 
+echo ""
+echo "=== SEEDING AI SKILLS & PERSONALITIES ==="
+python manage.py seed_ai_prompts
+
 if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
@@ -79,10 +83,6 @@ else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="
     python manage.py create_default_superuser
-
-    echo ""
-    echo "=== SEEDING AI SKILLS ==="
-    python manage.py seed_ai_prompts
 
     echo ""
     echo "=== CHECKING TABLES ==="
