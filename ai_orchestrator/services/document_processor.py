@@ -109,7 +109,7 @@ class DocumentProcessorService:
             result["error"] = data["error"]
         return result
 
-    def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None) -> dict:
+    def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> dict:
         ext = os.path.splitext(filename)[1].lower()
         images_b64 = self._convert_to_images(file_content, filename, page_limit)
 
@@ -162,9 +162,12 @@ class DocumentProcessorService:
 
         for i, img in enumerate(images_b64):
             try:
+                base_prompt = "Extract all text and tabular data from this document exactly. Output Markdown."
+                final_prompt = f"{hint}\n\n{base_prompt}" if hint else base_prompt
+
                 payload = {
                     "model": vision_model,
-                    "prompt": "Extract all text and tabular data from this document exactly. Output Markdown.",
+                    "prompt": final_prompt,
                     "images": [img],
                     "stream": False,
                 }

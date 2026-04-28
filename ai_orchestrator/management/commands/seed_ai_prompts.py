@@ -7,13 +7,14 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # 1. Seed Personalities
+        # STRENGTHENED: Model names set to "default" to respect .env
         senior_pe_personality, _ = AIPersonality.objects.update_or_create(
             name="Senior PE Investment Analyst",
             defaults={
                 "description": "Senior Analyst with 10+ years experience. Rigorous, skeptical, and forensic.",
                 "model_provider": "vllm",
-                "text_model_name": getattr(settings, "VLLM_TEXT_MODEL", "") or "default",
-                "vision_model_name": getattr(settings, "VLLM_VISION_MODEL", "") or "default",
+                "text_model_name": "default",
+                "vision_model_name": "default",
                 "system_instructions": """# Role Definition
 You are a Senior Private Equity (PE) Investment Analyst with over 10 years of experience in M&A due diligence, financial modeling, and risk assessment. Your goal is to conduct comprehensive due diligence on target companies for potential acquisition or fundraise rounds.
 
@@ -123,12 +124,13 @@ Return exactly one valid JSON object and nothing else. Do not use markdown fence
 }
 
 RULES:
-- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes:
-  a. Women Oriented Consumption
-  b. Health & Wellness
-  c. Financial Services + Tech
-  d. Gen Z + Millennials
-  e. Climate & Sustainability
+- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes. If a deal does not fit, use the most relevant one from this list:
+  1. Women Oriented Consumption
+  2. Health & Wellness
+  3. Financial Services + Tech
+  4. Gen Z + Millennials
+  5. Climate & Sustainability
+- STRICT THEME ADHERENCE: Do not invent new themes. Do not use generic industry names as themes. Only use the 5 themes listed above.
 - BANKERS: Investment Banker and advisory team details are typically located on the final pages of the pitch deck or teaser. Extract them carefully into the 'contact_discovery' object. If none are found, output null for contact_discovery.
 - Do not repeat the JSON object or any keys.
 - Keep 'analyst_report' concise enough to fit in a single response.
@@ -326,7 +328,7 @@ Return exactly one valid JSON object and nothing else:
     "funding_ask_for": "Use of funds",
     "priority": "High/Medium/Low",
     "city": "HQ City",
-    "themes": ["India Alternative themes only"]
+    "themes": ["Choose ONLY from: Women Oriented Consumption, Health & Wellness, Financial Services + Tech, Gen Z + Millennials, Climate & Sustainability"]
   },
   "metadata": {
     "ambiguous_points": ["Unresolved points requiring verification"],
@@ -348,6 +350,13 @@ Return exactly one valid JSON object and nothing else:
 }
 
 Rules:
+- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes:
+  1. Women Oriented Consumption
+  2. Health & Wellness
+  3. Financial Services + Tech
+  4. Gen Z + Millennials
+  5. Climate & Sustainability
+- STRICT THEME ADHERENCE: Only use themes from the list above. Do not invent others.
 - Treat document_evidence_json as the primary source of truth.
 - Use supporting_raw_chunks_json only to refine detail and citations.
 - Preserve citations in every material section of analyst_report.
@@ -474,6 +483,4 @@ Return updated deal metadata in the standard synthesis format."""
             }
         )
 
-        self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts.'))
-
-        self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts.'))
+        self.stdout.write(self.style.SUCCESS('Successfully updated to high-fidelity Forensic PE Analyst prompts with strict theme adherence.'))
