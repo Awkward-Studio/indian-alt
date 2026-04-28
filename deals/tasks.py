@@ -1693,7 +1693,7 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
             "deal_summary": deal.deal_summary if deal else "",
             "audit_log_id": audit_log_id,
             "temperature": 0.0,
-            "max_tokens": 8192,
+            "max_tokens": 4096,
             "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {
                 "type": "json_schema", 
