@@ -170,6 +170,9 @@ class DocumentProcessorService:
                     "prompt": final_prompt,
                     "images": [img],
                     "stream": False,
+                    "options": {
+                        "max_tokens": 4096,
+                    }
                 }
                 resp = self.provider.execute_standard(payload, timeout=120)
                 page_text = resp.get("response", "")
