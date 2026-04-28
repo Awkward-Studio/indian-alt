@@ -1550,20 +1550,20 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         })
 
     # HIERARCHICAL BUCKETING (Institutional Fusion v46 logic)
-    # Chars limit approx 60k for safe 32k token window
-    CONTEXT_SAFE_CHARS = 60000 
+    # Chars limit approx 35k for safe context window
+    CONTEXT_SAFE_CHARS = 35000 
     full_context_json = json.dumps(intelligence_context, default=str)
     
     if len(full_context_json) > CONTEXT_SAFE_CHARS:
         log_worker_event(audit_log, f"Context is too large ({len(full_context_json)} chars). Performing hierarchical synthesis...", status='PROCESSING')
         
-        # Split into buckets (approx 45k chars each)
+        # Split into buckets (approx 30k chars each)
         buckets = []
         current_bucket = []
         current_len = 0
         for item in intelligence_context:
             item_str = json.dumps(item, default=str)
-            if current_len + len(item_str) > 45000 and current_bucket:
+            if current_len + len(item_str) > 30000 and current_bucket:
                 buckets.append(current_bucket)
                 current_bucket = []
                 current_len = 0
