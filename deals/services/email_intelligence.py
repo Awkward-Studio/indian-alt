@@ -70,7 +70,6 @@ class EmailIntelligenceService:
                 {"role": "user", "content": routing_prompt}
             ],
             "temperature": 0.0,
-            "max_tokens": 1024,
             "chat_template_kwargs": {"enable_thinking": False}, # Disable thinking for speed
             "response_format": {"type": "json_object"}
         }

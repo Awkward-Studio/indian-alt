@@ -85,7 +85,7 @@ class AIProcessorService:
             "system": system_instructions,
             "stream": stream,
             "options": {
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "temperature": metadata.get("temperature", 0.1) if metadata else 0.1,
             }
         }
