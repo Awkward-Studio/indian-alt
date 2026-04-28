@@ -114,6 +114,7 @@ class DocumentArtifactService:
             # PARALLEL EXECUTION: Blasting chunks to vLLM server
             logger.info(f"[DOC-ARTIFACT] Blasting {len(segments)} segments in parallel for {file_name}")
             cleaned_parts = [None] * len(segments)
+            completed_count = 0
             
             with ThreadPoolExecutor(max_workers=8) as executor:
                 future_to_idx = {
@@ -128,10 +129,13 @@ class DocumentArtifactService:
                 
                 for future in as_completed(future_to_idx):
                     idx = future_to_idx[future]
+                    completed_count += 1
                     try:
                         clean_res = future.result()
                         part_text = clean_res.get('parsed_json', {}).get('normalized_text') or clean_res.get('response') or segments[idx]
                         cleaned_parts[idx] = part_text
+                        if completed_count % 5 == 0 or completed_count == len(segments):
+                            logger.info(f"  [{file_name}] Normalization Progress: {completed_count}/{len(segments)} chunks complete.")
                     except Exception as e:
                         logger.warning(f"Parallel chunk cleaning failed for {file_name} index {idx}: {e}")
                         cleaned_parts[idx] = segments[idx]

@@ -549,6 +549,7 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             log_worker_event(audit_log, "No files found in specified folder.", status='FAILED', done=True)
             return {"error": "No files found"}
 
+        # 2. Manual Selection Path (Restored)
         selected_files = _select_folder_analysis_files(file_tree)
         selected_file_ids = [file.get("id") for file in selected_files if file.get("id")]
         log_worker_event(
@@ -885,82 +886,72 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
 @shared_task(bind=True)
 def preflight_selection_async(self, drive_id: str | None, folder_id: str | None, user_email: str, audit_log_id: str, selected_file_ids: list, session_id: str):
     """
-    Performs a read/extraction preflight on selected files before the user confirms the Qwen analysis.
-    Supports both OneDrive and Email sources.
+    Parallelized autonomous extraction and synthesis after user selection.
     """
     from ai_orchestrator.models import AIAuditLog
+    from celery import chord
 
     try:
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
-        log_worker_event(audit_log, f"Worker starting preflight for {len(selected_file_ids)} files", status='PROCESSING')
+        log_worker_event(audit_log, f"Worker starting parallel analysis for {len(selected_file_ids)} files", status='PROCESSING')
     except AIAuditLog.DoesNotExist:
         return {"error": "Audit log not found"}
 
     try:
         cache_key = f"folder_sync_{session_id}"
         session_data = cache.get(cache_key) or {}
+        file_tree = session_data.get("file_tree", [])
         
-        email_id = session_data.get("email_id")
-        source_type = audit_log.source_type
+        # 1. Map selected IDs back to full file metadata for the parallel workers
+        id_to_file = {f.get("id"): f for f in file_tree if f.get("id")}
+        selected_files_meta = [id_to_file[fid] for fid in selected_file_ids if fid in id_to_file]
+        
+        if not selected_files_meta:
+            log_worker_event(audit_log, "No valid files found in selection metadata.", status='FAILED', done=True)
+            return {"error": "No valid files found"}
 
-        log_worker_event(audit_log, f"Downloading and extracting selected {source_type} content...")
-        extraction_result = _extract_selected_files(drive_id, user_email, selected_file_ids, email_id=email_id)
-        passed_files = extraction_result["passed_files"]
-        failed_files = extraction_result["failed_files"]
+        log_worker_event(audit_log, f"Launching parallel extraction for {len(selected_files_meta)} files...", status='PROCESSING')
 
-        log_worker_event(audit_log, f"Preflight results: {len(passed_files)} PASSED, {len(failed_files)} FAILED", status='COMPLETED', done=True)
-        audit_log.is_success = True
+        # 2. Launch Autonomous Parallel Chord
+        header = [
+            process_single_folder_analysis_document_async.s(
+                file_info=file, 
+                drive_id=drive_id, 
+                user_email=user_email, 
+                audit_log_id=str(audit_log.id)
+            ).set(queue='high_priority') 
+            for file in selected_files_meta
+        ]
+        
+        callback = finalize_folder_analysis_async.s(
+            drive_id=drive_id,
+            folder_id=folder_id,
+            user_email=user_email,
+            audit_log_id=str(audit_log.id)
+        ).set(queue='high_priority')
+
+        chord(header)(callback)
+
+        # Update metadata to reflect we've moved to parallel phase
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
             "selected_files_count": len(selected_file_ids),
-            "passed_files_count": len(passed_files),
-            "failed_files_count": len(failed_files),
-            "selected_file_ids": selected_file_ids,
-            "passed_files": passed_files,
-            "failed_files": failed_files,
-            "workflow_stage": "preflight_complete",
-            "interaction_status": "pending",
-            "interaction_mode": "editable",
-            "source_type": source_type
+            "workflow_stage": "parallel_analysis_queued",
+            "interaction_status": "completed",
+            "interaction_mode": "read_only",
         }
-        audit_log.raw_response = (
-            f"Preflight completed for {len(selected_file_ids)} selected files.\n"
-            f"Passed: {len(passed_files)}\nFailed: {len(failed_files)}"
-        )
-        audit_log.save()
-        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
-
-        session_data.update({
-            "folder_id": folder_id,
-            "drive_id": drive_id,
-            "email_id": email_id,
-            "source_type": source_type,
-            "user_email": user_email,
-            "selected_file_ids": selected_file_ids,
-            "passed_files": passed_files,
-            "failed_files": failed_files,
-            "preflight_audit_log_id": str(audit_log.id),
-        })
-        cache.set(cache_key, session_data, timeout=3600)
-        logger.info("Session %s updated in cache with %s passed files. Source: %s", session_id, len(passed_files), source_type)
+        audit_log.save(update_fields=["source_metadata"])
 
         return {
-            "phase": "preflight",
+            "phase": "parallel_analysis_queued",
             "status": "success",
             "audit_log_id": str(audit_log.id),
             "session_id": session_id,
-            "source_type": source_type,
-            "selected_files_count": len(selected_file_ids),
-            "passed_files_count": len(passed_files),
-            "failed_files_count": len(failed_files),
-            "passed_files": passed_files,
-            "failed_files": failed_files,
-            "drive_id": drive_id,
-            "folder_id": folder_id,
-            "email_id": email_id,
-            "user_email": user_email,
+            "selected_count": len(selected_files_meta)
         }
+
     except Exception as e:
+        log_worker_event(audit_log, f"Parallel queue error: {str(e)}", status='FAILED', done=True)
         audit_log.status = 'FAILED'
         audit_log.error_message = str(e)
         audit_log.save()

@@ -33,7 +33,8 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
     if not channel_layer or not log:
         return
 
-    data = {
+    # 1. Full payload for the specific log stream (e.g., detail view)
+    detail_data = {
         "type": "ai_message",
         "event_type": event_type,
         "audit_log_id": str(log.id),
@@ -42,16 +43,25 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
         "audit_log": serialize_audit_log(log),
     }
 
-    # Per-log stream (e.g., for detailed reasoning view)
     async_to_sync(channel_layer.group_send)(
         f"ai_stream_{str(log.id)}",
-        data,
+        detail_data,
     )
 
-    # Global ledger stream (for list view updates)
+    # 2. Lightweight payload for the general ledger (reduces "over capacity" errors)
+    ledger_data = {
+        "type": "ai_message",
+        "event_type": "ledger_update",
+        "audit_log_id": str(log.id),
+        "status": (log.status or "").lower(),
+        "done": done,
+        "context_label": log.context_label,
+        "last_log_entry": log.worker_logs[-1] if log.worker_logs else None,
+    }
+
     async_to_sync(channel_layer.group_send)(
         "audit_logs_general",
-        data,
+        ledger_data,
     )
 
 
