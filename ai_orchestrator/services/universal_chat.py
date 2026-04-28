@@ -1529,13 +1529,13 @@ class UniversalChatService:
                 and (plan.get("selection_mode") or "balanced") == "depth_first"
             )
             if source_type == "deal_summary":
-                score += 10.0 if single_deal_depth_first else 35.0
+                score += 10.0 if single_deal_depth_first else 25.0
             elif source_type == "document":
-                score += 28.0 if single_deal_depth_first else 10.0
+                score += 28.0 if single_deal_depth_first else 18.0
             elif source_type == "extracted_source":
-                score += 24.0 if single_deal_depth_first else 5.0
+                score += 24.0 if single_deal_depth_first else 20.0
             elif source_type == "analysis_document":
-                score += 24.0 if single_deal_depth_first else 8.0
+                score += 24.0 if single_deal_depth_first else 15.0
 
             score += self._chunk_evidence_prior(chunk_kind, source_type=source_type, evidence_preference=plan.get("evidence_preference"))
             synthesis_rank = getattr(chunk, "_synthesis_document_rank", None)

@@ -297,7 +297,7 @@ class FolderAnalysisService:
                     "preview_text": preview_text,
                     "raw_thinking": log.raw_thinking,
                     "originating_audit_log_id": str(log.id),
-                    "analysis_input_files": meta.get('analysis_input_files', []),
+                    "analysis_input_files": meta.get('analysis_input_files', meta.get('passed_files', [])),
                     "failed_files": meta.get('failed_files', []),
                     "document_evidence": (log.parsed_json or {}).get('document_evidence', []),
                 }, timeout=3600)
@@ -619,7 +619,7 @@ class FolderAnalysisService:
             deal.source_email_id = session_data.get('source_id') or origin_meta.get('email_id') or getattr(origin_log, 'source_id', None)
 
         approved_ids = set(session_data.get('approved_file_ids', []))
-        input_files = session_data.get('analysis_input_files', session_data.get('passed_files', []))
+        input_files = session_data.get('analysis_input_files') or session_data.get('passed_files') or []
         approved_files = [
             file for file in input_files
             if not approved_ids or file.get('file_id') in approved_ids

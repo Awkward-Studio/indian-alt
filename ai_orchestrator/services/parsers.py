@@ -70,18 +70,26 @@ class ResponseParserService:
             
         try:
             # 1. CLEANING (Institutional Fusion v46 fast_scrub logic)
-            # Remove thinking blocks
+            # Remove thinking blocks aggressively
             clean_text = text
+            
+            # Handle standard tags (including missing closing tags)
             if "</think>" in clean_text:
                 clean_text = clean_text.split("</think>")[-1]
-            elif "</thinking>" in clean_text:
+            if "</thinking>" in clean_text:
                 clean_text = clean_text.split("</thinking>")[-1]
             
             # Remove thinking tags specifically if only opening tags exist or other variations
-            clean_text = re.sub(r'<(thinking|think)>.*?</\1>', '', clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
+            clean_text = re.sub(r'<(thinking|think)>.*?(?:</\1>|$)', '', clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
             
+            # Remove common thinking block prefixes if tags were missed
+            # We strip everything from the prefix until a standard double-newline delimiter or header
+            clean_text = re.sub(r'^(Here\'s a thinking process:|Thinking Process:).*?(?=\n\n(?:#|```|---|\*\*|Dear|Hi|Hello|\[|[A-Z]))', '', clean_text, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            # Fallback for short ones
+            clean_text = re.sub(r'^(Here\'s a thinking process:|Thinking Process:).*?\n', '', clean_text, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+
             # Remove preamble text common in MoE models
-            preamble_patterns = re.compile(r"^(Here is|Here's|Sure|Okay|Attached|I have|Cleaned).*?\n", re.MULTILINE | re.IGNORECASE)
+            preamble_patterns = re.compile(r"^(Here is|Here's|Sure|Okay|Attached|I have|Cleaned|Below is).*?\n", re.MULTILINE | re.IGNORECASE)
             clean_text = preamble_patterns.sub("", clean_text)
             
             # Remove code fence wrappers
@@ -314,16 +322,34 @@ class ResponseParserService:
                 
         # 2. CLEAN RESPONSE FOR DISPLAY
         clean_response = raw_response
+        
+        # Priority 1: If there's an explicit <response> tag, take only that
         if "<response>" in clean_response:
             r_match = re.search(r'<response>(.*?)</response>', clean_response, re.DOTALL)
             if r_match:
                 clean_response = r_match.group(1).strip()
+            else:
+                # Handle unclosed tag
+                clean_response = clean_response.split("<response>")[-1].strip()
+
+        # Priority 2: Strip thinking tags and content
+        if "</think>" in clean_response:
+            clean_response = clean_response.split("</think>")[-1].strip()
+        if "</thinking>" in clean_response:
+            clean_response = clean_response.split("</thinking>")[-1].strip()
                 
-        clean_response = re.sub(r'<thinking>.*?</thinking>', '', clean_response, flags=re.DOTALL).strip()
-        clean_response = re.sub(r'<think>.*?</think>', '', clean_response, flags=re.DOTALL).strip()
+        clean_response = re.sub(r'<(thinking|think)>.*?(?:</\1>|$)', '', clean_response, flags=re.DOTALL | re.IGNORECASE).strip()
+        
+        # Priority 3: Strip common thinking prefixes if they leaked into the body
+        clean_response = re.sub(r'^(Here\'s a thinking process:|Thinking Process:).*?(?=\n\n(?:#|```|---|\*\*|Dear|Hi|Hello|\[|[A-Z]))', '', clean_response, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+        clean_response = re.sub(r'^(Here\'s a thinking process:|Thinking Process:).*?\n', '', clean_response, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+
+        # Cleanup leftover tags
         clean_response = clean_response.replace("<response>", "").replace("</response>", "").strip()
         # Also strip the <json> block from the display text if it's there
-        clean_response = re.sub(r'<json>.*?</json>', '', clean_response, flags=re.DOTALL).strip()
+        clean_response = re.sub(r'<(json|metadata|deal_model_data)>.*?(?:</\1>|$)', '', clean_response, flags=re.DOTALL).strip()
+        # Remove trailing markdown code fences if they were wrapping the whole thing
+        clean_response = re.sub(r'^```json\n|^```markdown\n|^```\w*\n|```\n?$', '', clean_response, flags=re.IGNORECASE | re.MULTILINE).strip()
 
         # 3. PARSE JSON (Only if expected)
         if not is_extraction_skill:

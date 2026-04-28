@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery import shared_task, chord
 from django.core.cache import cache
 from django.db import transaction
@@ -219,30 +220,51 @@ def _build_document_evidence_for_files(
     ai_service,
     audit_log_id: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    artifacts: list[dict] = []
-    enriched_files: list[dict] = []
+    artifacts: list[dict] = [None] * len(files)
+    enriched_files: list[dict] = [None] * len(files)
 
-    for file in files:
-        artifact = DocumentArtifactService.build_document_artifact(
-            file_name=file.get("file_name") or "unknown_file",
-            extracted_text=file.get("extracted_text") or "",
-            document_type=file.get("document_type") or DocumentType.OTHER,
-            extraction_mode=file.get("extraction_mode"),
-            ai_service=ai_service,
-            source_metadata={
-                "audit_log_id": audit_log_id,
-                "source_id": file.get("file_id"),
-                "file_name": file.get("file_name"),
-            },
-        )
-        artifacts.append(artifact)
-        enriched_file = dict(file)
-        enriched_file["document_artifact"] = artifact
-        enriched_file["normalized_text"] = artifact.get("normalized_text") or file.get("extracted_text") or ""
-        enriched_file["document_reasoning"] = artifact.get("reasoning") or ""
-        enriched_files.append(enriched_file)
+    logger.info(f"[EVIDENCE-FLOW] Processing {len(files)} documents in parallel...")
+    
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_idx = {
+            executor.submit(
+                DocumentArtifactService.build_document_artifact,
+                file_name=file.get("file_name") or "unknown_file",
+                extracted_text=file.get("extracted_text") or "",
+                document_type=file.get("document_type") or DocumentType.OTHER,
+                extraction_mode=file.get("extraction_mode"),
+                ai_service=ai_service,
+                source_metadata={
+                    "audit_log_id": audit_log_id,
+                    "source_id": file.get("file_id"),
+                    "file_name": file.get("file_name"),
+                },
+            ): i for i, file in enumerate(files)
+        }
+        
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                artifact = future.result()
+                artifacts[idx] = artifact
+                
+                file = files[idx]
+                enriched_file = dict(file)
+                enriched_file["document_artifact"] = artifact
+                enriched_file["normalized_text"] = artifact.get("normalized_text") or file.get("extracted_text") or ""
+                enriched_file["document_reasoning"] = artifact.get("reasoning") or ""
+                enriched_files[idx] = enriched_file
+            except Exception as e:
+                logger.error(f"Parallel document evidence extraction failed for index {idx}: {e}")
+                # Fallback handled inside build_document_artifact if needed, but we ensure we don't crash the list reassembly
+                if artifacts[idx] is None:
+                    # Minimum fallback
+                    artifacts[idx] = {"document_name": files[idx].get("file_name", "error_file"), "metrics": [], "claims": []}
+                if enriched_files[idx] is None:
+                    enriched_files[idx] = dict(files[idx])
 
-    return artifacts, enriched_files
+    # Filter out any possible None entries just in case
+    return [a for a in artifacts if a is not None], [f for f in enriched_files if f is not None]
 
 
 def _build_synthesis_metadata(
@@ -531,9 +553,11 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
         selected_file_ids = [file.get("id") for file in selected_files if file.get("id")]
         log_worker_event(
             audit_log,
-            f"Traversal complete. Discovered {len(file_tree)} files. Auto-selecting {len(selected_files)} files for direct analysis.",
-            status='PROCESSING',
+            f"Traversal complete. Discovered {len(file_tree)} files. Interaction required for document selection.",
+            status='COMPLETED',
+            done=True
         )
+        audit_log.is_success = True
         audit_log.source_metadata = {
             "file_tree": file_tree,
             "drive_id": drive_id,
@@ -541,50 +565,19 @@ def analyze_folder_async(self, drive_id: str, folder_id: str, user_email: str, a
             "total_files": len(file_tree),
             "selected_files_count": len(selected_files),
             "selected_file_ids": selected_file_ids,
-            "analysis_input_files": [
-                {
-                    "file_id": file.get("id"),
-                    "file_name": file.get("name"),
-                    "path": file.get("path"),
-                    "drive_id": file.get("driveId"),
-                }
-                for file in selected_files
-            ],
-            "workflow_stage": "analysis_pending",
-            "interaction_status": "completed",
-            "interaction_mode": "read_only",
+            "workflow_stage": "traversal_complete",
+            "interaction_status": "pending",
+            "interaction_mode": "editable",
         }
-        audit_log.save(update_fields=["source_metadata"])
-
-        if not selected_file_ids:
-            log_worker_event(audit_log, "Traversal found no supported files for analysis.", status='FAILED', done=True)
-            return {"error": "No supported files found for analysis"}
-
-        log_worker_event(audit_log, f"Queueing {len(selected_files)} documents for parallel extraction...")
-        tasks = [
-            process_single_folder_analysis_document_async.s(file, drive_id, user_email, str(audit_log.id))
-            for file in selected_files
-        ]
-        callback = finalize_folder_analysis_async.s(drive_id, folder_id, user_email, str(audit_log.id))
-        _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
-        audit_log.celery_task_id = self.request.id
-        audit_log.source_metadata = {
-            **(audit_log.source_metadata or {}),
-            "child_task_ids": child_task_ids,
-            "callback_task_id": callback_task_id,
-            "workflow_stage": "analysis_pending",
-        }
-        audit_log.save(update_fields=["celery_task_id", "source_metadata"])
-        chord(tasks)(callback)
+        audit_log.save(update_fields=["source_metadata", "is_success", "status"])
 
         return {
-            "status": "queued",
-            "phase": "analysis",
+            "status": "success",
+            "phase": "traversal",
             "audit_log_id": str(audit_log.id),
             "folder_id": folder_id,
-            "total_files": len(selected_files),
+            "total_files": len(file_tree),
             "file_tree": file_tree,
-            "selected_file_ids": selected_file_ids,
             "drive_id": drive_id,
             "user_email": user_email,
         }
@@ -704,6 +697,7 @@ def finalize_folder_analysis_async(self, results, drive_id: str, folder_id: str,
             'audit_log_id': str(audit_log.id),
             'celery_task_id': self.request.id,
             'context_label': audit_log.context_label,
+            'chat_template_kwargs': {'enable_thinking': False},
         },
     )
 
@@ -823,6 +817,7 @@ def analyze_selection_async(self, session_id: str, audit_log_id: str, selected_f
                 'audit_log_id': str(audit_log.id),
                 'celery_task_id': self.request.id,
                 'context_label': audit_log.context_label,
+                'chat_template_kwargs': {'enable_thinking': False},
             }
             meta = _build_synthesis_metadata(
                 document_evidence=document_evidence,

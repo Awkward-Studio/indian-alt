@@ -31,9 +31,9 @@ if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,low_priority,default}"
     CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
 
-    if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 2 ] 2>/dev/null; then
-        echo "Capping thread-pool concurrency from ${CELERY_CONCURRENCY_VALUE} to 2 for memory safety."
-        CELERY_CONCURRENCY_VALUE="2"
+    if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 32 ] 2>/dev/null; then
+        echo "Capping thread-pool concurrency from ${CELERY_CONCURRENCY_VALUE} to 32 for memory safety."
+        CELERY_CONCURRENCY_VALUE="32"
     fi
 
     echo ""

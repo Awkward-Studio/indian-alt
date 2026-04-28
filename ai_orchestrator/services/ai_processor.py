@@ -269,9 +269,11 @@ class AIProcessorService:
             extraction_skills = {
                 "deal_extraction", 
                 "document_evidence_extraction", 
+                "document_normalization",
                 "deal_synthesis", 
                 "vdr_incremental_analysis", 
                 "email_thread_synthesis",
+                "email_intermediate_fusion",
                 "deal_routing"
             }
             is_extraction = audit_log.skill and audit_log.skill.name in extraction_skills

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -97,30 +98,45 @@ class DocumentArtifactService:
                     content=raw_text,
                     skill_name="document_normalization",
                     source_type="cleaning",
+                    metadata={"chat_template_kwargs": {"enable_thinking": False}}
                 )
                 cleaned_text = norm_res.get('parsed_json', {}).get('normalized_text') or norm_res.get('response') or raw_text
             except:
                 cleaned_text = raw_text
         else:
             # Slicing loop for industrial normalization
+            segments = []
             start = 0
             while start < txt_len:
-                segment = raw_text[start:start+SAFE_CHAR_LIMIT]
-                try:
-                    # Clean each part
-                    clean_res = service.process_content(
+                segments.append(raw_text[start:start+SAFE_CHAR_LIMIT])
+                start += (SAFE_CHAR_LIMIT - CHUNK_OVERLAP)
+            
+            # PARALLEL EXECUTION: Blasting chunks to vLLM server
+            logger.info(f"[DOC-ARTIFACT] Blasting {len(segments)} segments in parallel for {file_name}")
+            cleaned_parts = [None] * len(segments)
+            
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        service.process_content,
                         content=segment,
                         skill_name="document_normalization",
                         source_type="cleaning_segment",
-                    )
-                    part_text = clean_res.get('parsed_json', {}).get('normalized_text') or clean_res.get('response') or segment
-                    cleaned_parts.append(part_text)
-                except:
-                    cleaned_parts.append(segment)
+                        metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                    ): i for i, segment in enumerate(segments)
+                }
                 
-                start += (SAFE_CHAR_LIMIT - CHUNK_OVERLAP)
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        clean_res = future.result()
+                        part_text = clean_res.get('parsed_json', {}).get('normalized_text') or clean_res.get('response') or segments[idx]
+                        cleaned_parts[idx] = part_text
+                    except Exception as e:
+                        logger.warning(f"Parallel chunk cleaning failed for {file_name} index {idx}: {e}")
+                        cleaned_parts[idx] = segments[idx]
             
-            cleaned_text = "\n\n".join(cleaned_parts)
+            cleaned_text = "\n\n".join([p for p in cleaned_parts if p is not None])
 
         # --- FINAL INTEL EXTRACTION ---
         metadata = {
@@ -128,6 +144,7 @@ class DocumentArtifactService:
             "document_type": document_type,
             "source_metadata_json": json.dumps(source_metadata, default=str),
             "context_label": f"Document Evidence: {file_name}",
+            "chat_template_kwargs": {"enable_thinking": False}
         }
 
         try:
