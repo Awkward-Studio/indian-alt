@@ -2273,7 +2273,7 @@ class UniversalChatService:
             "system": system_instructions,
             "stream": False,
             "options": {
-                "max_tokens": 8192,
+                "max_tokens": 4096,
                 "temperature": 0.1,
             },
         }
