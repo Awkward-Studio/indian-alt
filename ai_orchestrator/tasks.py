@@ -133,13 +133,30 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 )
         elif skill_name == 'deal_chat':
             chat_service = UniversalChatService(ai_service)
-            task_metadata = chat_service.process_single_deal_build_metadata(
-                user_message,
-                conversation_id,
-                history_context,
-                audit_log_id,
-                metadata.get("deal_id"),
-            )
+            if (metadata or {}).get("interactive_context_data"):
+                task_metadata = {
+                    "history_context": history_context,
+                    "context_data": metadata.get("interactive_context_data"),
+                    "deal_context": metadata.get("interactive_context_data"),
+                    "audit_log_id": audit_log_id,
+                    "query_plan": metadata.get("query_plan") or {},
+                    "answer_generation_prompt": chat_service._stage_settings("answer_generation").get("prompt_template"),
+                    "used_query_builder": True,
+                    "gate_mode": "interactive_selection",
+                    "gate_reason": "Analyst selected deals/documents/chunks before answer generation.",
+                    "deals_considered": 0,
+                    "retrieved_chunk_count": 0,
+                    "selected_chunk_count": len(metadata.get("selected_sources") or []),
+                    "selected_sources": metadata.get("selected_sources") or [],
+                }
+            else:
+                task_metadata = chat_service.process_single_deal_build_metadata(
+                    user_message,
+                    conversation_id,
+                    history_context,
+                    audit_log_id,
+                    metadata.get("deal_id"),
+                )
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "used_query_builder": True,
@@ -239,4 +256,118 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             audit_log.status = 'FAILED'
             audit_log.error_message = str(e)
             audit_log.save()
+        raise e
+
+
+@shared_task(bind=True)
+def generate_deal_helper_analysis_async(
+    self,
+    deal_id: str,
+    directive: str,
+    mode: str,
+    audit_log_id: str,
+    document_title: str = "",
+    generated_document_id: str | None = None,
+    selected_context: str = "",
+    selected_deal_ids: list | None = None,
+    selected_document_ids: list | None = None,
+    selected_chunk_ids: list | None = None,
+):
+    try:
+        from deals.models import Deal, DealAnalysis, AnalysisKind, DealGeneratedDocument
+
+        deal = Deal.objects.get(id=deal_id)
+        audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if audit_log:
+            audit_log.status = "PROCESSING"
+            audit_log.celery_task_id = self.request.id
+            audit_log.save(update_fields=["status", "celery_task_id"])
+
+        ai_service = AIProcessorService()
+        chat_service = UniversalChatService(ai_service)
+        saved_context = chat_service._saved_relationship_context_for_deal(deal)
+        deal_specific_prompt = (deal.analysis_prompt or "").strip()
+        documents = list(deal.documents.all().order_by("-created_at")[:80])
+        document_context = "\n\n".join(
+            f"[{doc.title} | {doc.document_type}]\n{(doc.normalized_text or doc.extracted_text or '')[:6000]}"
+            for doc in documents
+            if (doc.normalized_text or doc.extracted_text)
+        )
+        current_analysis = deal.current_analysis if isinstance(deal.current_analysis, dict) else {}
+        current_report = current_analysis.get("report") or deal.deal_summary or ""
+        task_label = "full rewrite" if mode == "full_rewrite" else "user-directed addendum"
+        prompt = (
+            f"You are creating a saved {task_label} for deal: {deal.title}.\n\n"
+            f"Deal-specific analysis prompt:\n{deal_specific_prompt or 'None'}\n\n"
+            f"User directive:\n{directive}\n\n"
+            "The directive controls the output format completely. If the user asks for an IC note, financial model, memo, table, risk register, or any other structure, produce that structure.\n\n"
+            f"Current analysis:\n{current_report or 'No current analysis available.'}\n\n"
+            f"Saved related-deal context:\n{saved_context or 'None'}\n\n"
+            f"Deal metadata:\nIndustry: {deal.industry or 'N/A'}\nSector: {deal.sector or 'N/A'}\nFunding ask: {deal.funding_ask or 'N/A'}\n\n"
+            f"Selected evidence context:\n{selected_context or 'No manually selected evidence context supplied.'}\n\n"
+            f"Documents:\n{document_context or 'No extracted document text available.'}"
+        )
+        result = ai_service.process_content(
+            content=prompt,
+            skill_name="deal_chat",
+            source_type="deal_helper_analysis",
+            source_id=str(deal.id),
+            metadata={
+                "audit_log_id": audit_log_id,
+                "context_label": f"Deal Helper Analysis: {deal.title}",
+                "_source_metadata": {"mode": mode, "document_count": len(documents)},
+                "max_tokens": 8192,
+            },
+            stream=False,
+        )
+        report = (result.get("response") or result.get("thinking") or "").strip()
+        next_version = None
+        if mode == "full_rewrite":
+            next_version = (deal.analyses.order_by("-version").values_list("version", flat=True).first() or 0) + 1
+            DealAnalysis.objects.create(
+                deal=deal,
+                version=next_version,
+                analysis_kind=AnalysisKind.SUPPLEMENTAL,
+                thinking=result.get("thinking") or "",
+                ambiguities=[],
+                analysis_json={
+                    "analyst_report": report,
+                    "metadata": {
+                        "mode": mode,
+                        "directive": directive,
+                        "deal_specific_prompt": deal_specific_prompt,
+                        "documents_analyzed": [doc.title for doc in documents],
+                        "analysis_input_files": [{"file_id": str(doc.id), "file_name": doc.title} for doc in documents],
+                    },
+                },
+            )
+        else:
+            generated_document = DealGeneratedDocument.objects.filter(id=generated_document_id).first() if generated_document_id else None
+            if generated_document:
+                generated_document.title = (document_title or generated_document.title or directive[:80] or "Directive Document")[:255]
+                generated_document.directive = directive
+                generated_document.content = report
+                generated_document.selected_deal_ids = selected_deal_ids or []
+                generated_document.selected_document_ids = selected_document_ids or []
+                generated_document.selected_chunk_ids = selected_chunk_ids or []
+                generated_document.audit_log_id = audit_log_id
+                generated_document.save(update_fields=[
+                    "title", "directive", "content", "selected_deal_ids",
+                    "selected_document_ids", "selected_chunk_ids", "audit_log_id",
+                ])
+        if audit_log:
+            audit_log.raw_response = report
+            audit_log.raw_thinking = result.get("thinking") or ""
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.save(update_fields=["raw_response", "raw_thinking", "status", "is_success"])
+        return {"status": "success", "version": next_version, "generated_document_id": generated_document_id}
+    except Exception as e:
+        audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.error_message = str(e)
+            audit_log.is_success = False
+            audit_log.save(update_fields=["status", "error_message", "is_success"])
+        logger.error("Deal helper analysis failed: %s", e, exc_info=True)
         raise e

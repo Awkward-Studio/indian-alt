@@ -6,6 +6,7 @@ from django.db.models import Q, Count
 from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -22,7 +23,7 @@ from .services.realtime import broadcast_audit_log_update
 from .services.runtime import AIRuntimeService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
-from deals.models import Deal
+from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,331 @@ class UniversalChatView(APIView):
         except Exception as e:
             logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
+
+
+class DealHelperView(APIView):
+    permission_classes = [IsAuthenticated]
+    cache_prefix = "deal_helper_session"
+    session_ttl = 60 * 60 * 4
+
+    def _cache_key(self, session_id: str) -> str:
+        return f"{self.cache_prefix}:{session_id}"
+
+    def _get_session(self, session_id: str) -> Dict[str, Any] | None:
+        return cache.get(self._cache_key(session_id))
+
+    def _save_session(self, session_id: str, payload: Dict[str, Any]) -> None:
+        cache.set(self._cache_key(session_id), payload, timeout=self.session_ttl)
+
+    def _profile(self, request):
+        return getattr(request.user, "profile", None)
+
+    def post(self, request, action: str):
+        handlers = {
+            "start": self.start,
+            "select-deals": self.select_deals,
+            "select-documents": self.select_documents,
+            "answer": self.answer,
+            "analysis": self.analysis,
+        }
+        handler = handlers.get(action)
+        if not handler:
+            return Response({"error": "Unsupported deal helper action."}, status=404)
+        try:
+            return handler(request)
+        except Deal.DoesNotExist:
+            return Response({"error": "Deal not found."}, status=404)
+        except Exception as e:
+            logger.error("Deal helper %s failed: %s", action, e, exc_info=True)
+            return Response({"error": str(e)}, status=500)
+
+    def _conversation_for_deal(self, request, deal: Deal, conversation_id: str | None = None, user_message: str | None = None):
+        if conversation_id:
+            conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
+            if conversation:
+                return conversation
+        title_seed = (user_message or "").strip()
+        if title_seed:
+            title = f"{deal.title}: {title_seed[:64]}"
+        else:
+            title = f"{deal.title}: New Chat"
+        return AIConversation.objects.create(
+            user=request.user,
+            title=title[:255],
+            metadata={
+                "kind": "deal_chat",
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+            },
+        )
+
+    def start(self, request):
+        deal_id = request.data.get("deal_id")
+        message = str(request.data.get("message") or "").strip()
+        if not deal_id or not message:
+            return Response({"error": "deal_id and message are required."}, status=400)
+        deal = Deal.objects.get(id=deal_id)
+        conversation = self._conversation_for_deal(request, deal, request.data.get("conversation_id"), message)
+        history_context = ""
+        service = UniversalChatService(AIProcessorService())
+        helper = service.start_deal_helper_session(
+            deal_id=str(deal.id),
+            user_message=message,
+            conversation_id=str(conversation.id),
+            history_context=history_context,
+        )
+        session_id = str(uuid.uuid4())
+        payload = {
+            "session_id": session_id,
+            "deal_id": str(deal.id),
+            "message": message,
+            "conversation_id": str(conversation.id),
+            "route": helper["route"],
+            "query_plan": helper["query_plan"],
+            "selected_deal_ids": [],
+            "selected_document_ids": [],
+            "selected_chunks": [],
+            "relationship_type": None,
+            "relationship_notes": "",
+            "saved_context": helper.get("saved_context") or "",
+        }
+        self._save_session(session_id, payload)
+        return Response({
+            **helper,
+            "session_id": session_id,
+            "conversation_id": str(conversation.id),
+            "deal": {"id": str(deal.id), "title": deal.title},
+        })
+
+    def select_deals(self, request):
+        session_id = request.data.get("session_id")
+        session = self._get_session(session_id)
+        if not session:
+            return Response({"error": "Session expired or not found."}, status=404)
+        selected_deal_ids = [str(item) for item in request.data.get("selected_deal_ids", []) if item]
+        if not selected_deal_ids:
+            return Response({"error": "Select at least one deal."}, status=400)
+        relationship_type = request.data.get("relationship_type") or DealRelationshipContext.RelationshipType.COMPARABLE
+        notes = str(request.data.get("notes") or "").strip()
+        service = UniversalChatService(AIProcessorService())
+        chunks, diagnostics = service.chunks_for_selected_deals(
+            plan=session["query_plan"],
+            deal_ids=selected_deal_ids,
+        )
+        deal = Deal.objects.get(id=session["deal_id"])
+        related_deals = list(Deal.objects.filter(id__in=selected_deal_ids))
+        for related_deal in related_deals:
+            DealRelationshipContext.objects.create(
+                deal=deal,
+                related_deal=related_deal,
+                relationship_type=relationship_type,
+                notes=notes,
+                selected_deal_ids=selected_deal_ids,
+                created_by=self._profile(request),
+            )
+        session.update({
+            "selected_deal_ids": selected_deal_ids,
+            "relationship_type": relationship_type,
+            "relationship_notes": notes,
+            "candidate_chunks": chunks,
+        })
+        self._save_session(session_id, session)
+        return Response({"chunks": chunks, "retrieval_diagnostics": diagnostics})
+
+    def select_documents(self, request):
+        session_id = request.data.get("session_id")
+        session = self._get_session(session_id)
+        if not session:
+            return Response({"error": "Session expired or not found."}, status=404)
+        deal = Deal.objects.get(id=session["deal_id"])
+        if request.data.get("select_all_indexed"):
+            document_ids = [str(doc.id) for doc in deal.documents.filter(is_indexed=True)]
+        else:
+            document_ids = [str(item) for item in request.data.get("document_ids", []) if item]
+        if not document_ids:
+            return Response({"error": "Select at least one indexed document."}, status=400)
+        service = UniversalChatService(AIProcessorService())
+        chunks, diagnostics = service.chunks_for_selected_documents(
+            plan=session["query_plan"],
+            deal_id=str(deal.id),
+            document_ids=document_ids,
+        )
+        session.update({
+            "selected_deal_ids": [str(deal.id)],
+            "selected_document_ids": document_ids,
+            "candidate_chunks": chunks,
+        })
+        self._save_session(session_id, session)
+        return Response({"chunks": chunks, "retrieval_diagnostics": diagnostics})
+
+    def answer(self, request):
+        session_id = request.data.get("session_id")
+        session = self._get_session(session_id)
+        if not session:
+            return Response({"error": "Session expired or not found."}, status=404)
+        selected_chunk_ids = {str(item) for item in request.data.get("selected_chunk_ids", []) if item}
+        candidate_chunks = session.get("candidate_chunks") or []
+        chunks = [chunk for chunk in candidate_chunks if str(chunk.get("chunk_id")) in selected_chunk_ids]
+        if not chunks:
+            return Response({"error": "Select at least one chunk."}, status=400)
+        deal = Deal.objects.get(id=session["deal_id"])
+        conversation = self._conversation_for_deal(request, deal, session.get("conversation_id"), session.get("message"))
+        AIMessage.objects.create(conversation=conversation, role="user", content=session["message"])
+        if session.get("selected_deal_ids") and session.get("route") == "related_deals":
+            DealRelationshipContext.objects.create(
+                deal=deal,
+                related_deal=None,
+                relationship_type=session.get("relationship_type") or DealRelationshipContext.RelationshipType.COMPARABLE,
+                notes=session.get("relationship_notes") or "",
+                selected_deal_ids=session.get("selected_deal_ids") or [],
+                selected_document_ids=session.get("selected_document_ids") or [],
+                selected_chunk_ids=list(selected_chunk_ids),
+                created_by=self._profile(request),
+            )
+        service = UniversalChatService(AIProcessorService())
+        selected_deal_ids = session.get("selected_deal_ids") or [str(deal.id)]
+        extra_context = "\n".join(
+            item for item in [
+                session.get("saved_context") or "",
+                f"Relationship type: {session.get('relationship_type')}" if session.get("relationship_type") else "",
+                f"Analyst notes: {session.get('relationship_notes')}" if session.get("relationship_notes") else "",
+                str(request.data.get("notes") or "").strip(),
+            ] if item
+        )
+        context_data = service.build_context_from_selection(
+            plan=session["query_plan"],
+            deal_ids=selected_deal_ids,
+            chunks=chunks,
+            extra_context=extra_context,
+        )
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='deal_chat').first()
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type='deal_chat',
+            source_id=str(deal.id),
+            context_label=f"Deal Helper: {deal.title}",
+            personality=personality,
+            skill=skill,
+            status='PENDING',
+            is_success=False,
+            system_prompt="Queued interactive deal helper answer...",
+            user_prompt=session["message"],
+            source_metadata={
+                "deal_helper_session_id": session_id,
+                "route": session.get("route"),
+                "selected_deal_ids": selected_deal_ids,
+                "selected_document_ids": session.get("selected_document_ids") or [],
+                "selected_chunk_ids": list(selected_chunk_ids),
+            },
+        )
+        from .tasks import generate_chat_response_async
+        task = generate_chat_response_async.apply_async(kwargs={
+            "conversation_id": str(conversation.id),
+            "user_message": session["message"],
+            "skill_name": "deal_chat",
+            "metadata": {
+                "deal_id": str(deal.id),
+                "interactive_context_data": context_data,
+                "query_plan": session["query_plan"],
+                "selected_sources": [
+                    f"{chunk.get('deal')}|{chunk.get('source_title') or chunk.get('source_type')}"
+                    for chunk in chunks
+                ],
+            },
+            "audit_log_id": str(audit_log.id),
+        })
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=["celery_task_id"])
+        session["selected_chunks"] = chunks
+        self._save_session(session_id, session)
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "conversation_id": str(conversation.id),
+        })
+
+    def analysis(self, request):
+        deal_id = request.data.get("deal_id")
+        directive = str(request.data.get("directive") or "").strip()
+        mode = request.data.get("mode") or "user_directive_addendum"
+        document_title = str(request.data.get("document_title") or "").strip()
+        session_id = request.data.get("session_id")
+        selected_chunk_ids = [str(item) for item in request.data.get("selected_chunk_ids", []) if item]
+        if not deal_id or not directive:
+            return Response({"error": "deal_id and directive are required."}, status=400)
+        deal = Deal.objects.get(id=deal_id)
+        if mode == "full_rewrite":
+            deal.analysis_prompt = directive
+            deal.save(update_fields=["analysis_prompt"])
+        selected_context = ""
+        selected_deal_ids = []
+        selected_document_ids = []
+        if session_id:
+            helper_session = self._get_session(session_id) or {}
+            selected_deal_ids = helper_session.get("selected_deal_ids") or []
+            selected_document_ids = helper_session.get("selected_document_ids") or []
+            candidate_chunks = helper_session.get("candidate_chunks") or []
+            selected_context = "\n\n".join(
+                f"[{chunk.get('deal')} | {chunk.get('source_title') or chunk.get('source_type')}]\n{chunk.get('text') or ''}"
+                for chunk in candidate_chunks
+                if not selected_chunk_ids or str(chunk.get("chunk_id")) in selected_chunk_ids
+            )
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        skill = AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
+        generated_document = None
+        if mode != "full_rewrite":
+            generated_document = DealGeneratedDocument.objects.create(
+                deal=deal,
+                title=document_title or directive[:80] or "Directive Document",
+                kind=DealGeneratedDocument.DocumentKind.DIRECTIVE,
+                directive=directive,
+                content="Queued...",
+                selected_deal_ids=selected_deal_ids,
+                selected_document_ids=selected_document_ids,
+                selected_chunk_ids=selected_chunk_ids,
+                created_by=self._profile(request),
+            )
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type='deal_helper_analysis',
+            source_id=str(deal.id),
+            context_label=f"Deal Helper Analysis: {deal.title}",
+            personality=personality,
+            skill=skill,
+            status='PENDING',
+            is_success=False,
+            system_prompt="Queued user-directed deal analysis...",
+            user_prompt=directive,
+            source_metadata={
+                "mode": mode,
+                "generated_document_id": str(generated_document.id) if generated_document else None,
+                "selected_chunk_ids": selected_chunk_ids,
+            },
+        )
+        from .tasks import generate_deal_helper_analysis_async
+        task = generate_deal_helper_analysis_async.apply_async(kwargs={
+            "deal_id": str(deal.id),
+            "directive": directive,
+            "mode": mode,
+            "audit_log_id": str(audit_log.id),
+            "document_title": document_title,
+            "generated_document_id": str(generated_document.id) if generated_document else None,
+            "selected_context": selected_context,
+            "selected_deal_ids": selected_deal_ids,
+            "selected_document_ids": selected_document_ids,
+            "selected_chunk_ids": selected_chunk_ids,
+        }, queue="high_priority")
+        if generated_document:
+            generated_document.audit_log_id = str(audit_log.id)
+            generated_document.save(update_fields=["audit_log_id"])
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=["celery_task_id"])
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "message": "Analysis queued.",
+        })
 
 class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]

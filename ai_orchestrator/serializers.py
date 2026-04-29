@@ -59,5 +59,5 @@ class AIConversationSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = AIConversation
-        fields = ['id', 'title', 'created_at', 'updated_at', 'messages']
+        fields = ['id', 'title', 'metadata', 'created_at', 'updated_at', 'messages']
         read_only_fields = ['id', 'created_at', 'updated_at']

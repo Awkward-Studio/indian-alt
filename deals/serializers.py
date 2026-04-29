@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Deal, DealDocument, DealPhaseLog, InitialAnalysisStatus
+from .models import Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus
 from accounts.models import Profile
 from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
@@ -144,6 +144,19 @@ class DealDocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at')
 
 
+class DealGeneratedDocumentSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+
+    class Meta:
+        model = DealGeneratedDocument
+        fields = (
+            'id', 'deal', 'title', 'kind', 'directive', 'content',
+            'selected_deal_ids', 'selected_document_ids', 'selected_chunk_ids',
+            'audit_log_id', 'created_by', 'created_by_name', 'created_at',
+        )
+        read_only_fields = ('id', 'created_at')
+
+
 class DealSerializer(serializers.ModelSerializer):
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
@@ -254,6 +267,7 @@ class DealSerializer(serializers.ModelSerializer):
 
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
+    generated_documents = DealGeneratedDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     file_tree = serializers.SerializerMethodField()
 
@@ -272,6 +286,7 @@ class DealDetailSerializer(DealSerializer):
             'ic_stage', 'city', 'country', 'created_at', 'deal_summary',
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
             'legacy_investment_bank', 'other_contacts', 'other_contact_details', 'additional_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
+            'generated_documents', 'analysis_prompt',
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree',

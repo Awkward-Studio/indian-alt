@@ -382,6 +382,9 @@ class UniversalChatService:
             chunks=serialized_chunks,
             diagnostics=chunk_diagnostics,
         )
+        saved_context = self._saved_relationship_context_for_deal(deal)
+        if saved_context:
+            context_data = f"{context_data}\n\n[SAVED RELATED-DEAL CONTEXT]\n{saved_context}"
 
         return {
             "history_context": history_context,
@@ -422,6 +425,188 @@ class UniversalChatService:
                 for chunk in serialized_chunks
             ],
         }
+
+    def _saved_relationship_context_for_deal(self, deal: Deal) -> str:
+        try:
+            contexts = deal.relationship_contexts.select_related("related_deal", "created_by").all()[:20]
+        except Exception:
+            return ""
+        lines = []
+        for item in contexts:
+            related_title = item.related_deal.title if item.related_deal else "Multiple selected deals"
+            notes = (item.notes or "").strip()
+            lines.append(
+                f"- {related_title} | Relation: {item.relationship_type}"
+                + (f" | Analyst notes: {notes}" if notes else "")
+            )
+        return "\n".join(lines)
+
+    def classify_deal_helper_route(self, user_message: str) -> str:
+        lowered = (user_message or "").lower()
+        if any(term in lowered for term in ["full rewrite", "rewrite analysis", "rewrite the analysis", "regenerate analysis"]):
+            return "analysis_full_rewrite"
+        if any(term in lowered for term in ["addendum", "ic note", "financial model", "memo", "risk register", "new analysis", "v2", "v3"]):
+            return "analysis_user_directive_addendum"
+        if any(term in lowered for term in ["competitor", "competitors", "similar deal", "similar deals", "comparable", "other deals", "pipeline", "sister", "parent", "subsidiary"]):
+            return "related_deals"
+        return "current_deal"
+
+    def start_deal_helper_session(self, *, deal_id: str, user_message: str, conversation_id: str, history_context: str = "") -> Dict[str, Any]:
+        deal = Deal.objects.get(id=deal_id)
+        route = self.classify_deal_helper_route(user_message)
+        plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
+        saved_context = self._saved_relationship_context_for_deal(deal)
+        documents = list(deal.documents.all().order_by("-created_at"))
+
+        if route == "related_deals":
+            plan["deal_limit"] = max(int(plan.get("deal_limit") or 8), 8)
+            deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
+            serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
+            for index, item in enumerate(serialized_deals):
+                item["suggested"] = index < 3
+                item["rank_reason"] = "Top reranked pipeline match" if index < 3 else "Additional reranked candidate"
+            return {
+                "route": route,
+                "query_plan": plan,
+                "saved_context": saved_context,
+                "candidate_deals": serialized_deals,
+                "documents": [],
+            }
+
+        return {
+            "route": route,
+            "query_plan": plan,
+            "saved_context": saved_context,
+            "candidate_deals": [],
+            "documents": self._rank_deal_documents_for_helper(deal, plan, documents),
+        }
+
+    def _rank_deal_documents_for_helper(self, deal: Deal, plan: Dict[str, Any], documents: List[DealDocument]) -> List[Dict[str, Any]]:
+        chunks, _diagnostics = self._search_ranked_chunks(plan, [deal])
+        score_by_document_key: Dict[str, float] = {}
+        for item in chunks:
+            chunk = item["chunk"]
+            score = float(item.get("score") or 0)
+            metadata = chunk.metadata or {}
+            document_metadata = self._document_metadata_for_chunk(chunk)
+            keys = [
+                str(chunk.source_id or ""),
+                str(metadata.get("document_id") or ""),
+                str(metadata.get("title") or ""),
+                str(metadata.get("filename") or ""),
+                str(document_metadata.get("document_name") or ""),
+            ]
+            for key in keys:
+                normalized = self._normalize_document_match_key(key)
+                if normalized:
+                    score_by_document_key[normalized] = max(score_by_document_key.get(normalized, 0), score)
+
+        payload = []
+        for document in documents:
+            keys = [
+                str(document.id),
+                str(document.onedrive_id or ""),
+                str(document.title or ""),
+            ]
+            score = max(score_by_document_key.get(self._normalize_document_match_key(key), 0) for key in keys)
+            payload.append({
+                "id": str(document.id),
+                "title": document.title,
+                "document_type": document.document_type,
+                "is_indexed": document.is_indexed,
+                "is_ai_analyzed": document.is_ai_analyzed,
+                "transcription_status": document.transcription_status,
+                "chunking_status": document.chunking_status,
+                "file_url": document.file_url,
+                "suggested": score > 0,
+                "suggested_score": round(score, 3) if score else None,
+                "rank_reason": "Reranker found relevant chunks in this document" if score else "Available deal document",
+            })
+
+        payload.sort(key=lambda item: (bool(item.get("suggested")), float(item.get("suggested_score") or 0), bool(item.get("is_indexed"))), reverse=True)
+        for index, item in enumerate(payload):
+            if index < 3 and item.get("is_indexed"):
+                item["suggested"] = True
+                item["rank_reason"] = item.get("rank_reason") or "Top indexed document candidate"
+        return payload
+
+    def _normalize_document_match_key(self, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized.endswith(".json"):
+            normalized = normalized[:-5]
+        return normalized
+
+    def chunks_for_selected_deals(self, *, plan: Dict[str, Any], deal_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        deals = list(Deal.objects.filter(id__in=deal_ids).prefetch_related("phase_logs"))
+        chunks, diagnostics = self._search_ranked_chunks(plan, deals)
+        serialized = [self._serialize_chunk(item) for item in chunks]
+        for index, item in enumerate(serialized):
+            item["suggested"] = index < 6
+            item["rank_reason"] = "Top reranked evidence chunk" if index < 6 else "Additional evidence chunk"
+        return serialized, diagnostics
+
+    def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        deal = Deal.objects.get(id=deal_id)
+        selected_documents = list(deal.documents.filter(id__in=document_ids))
+        chunks, diagnostics = self._search_ranked_chunks(plan, [deal])
+        selected = []
+        allowed_keys = set()
+        for document in selected_documents:
+            allowed_keys.update(
+                self._normalize_document_match_key(value)
+                for value in [str(document.id), str(document.onedrive_id or ""), str(document.title or "")]
+            )
+        allowed_keys = {key for key in allowed_keys if key}
+        for item in chunks:
+            chunk = item["chunk"]
+            metadata = chunk.metadata or {}
+            document_metadata = self._document_metadata_for_chunk(chunk)
+            chunk_keys = {
+                self._normalize_document_match_key(value)
+                for value in [
+                    str(chunk.source_id or ""),
+                    str(metadata.get("document_id") or ""),
+                    str(metadata.get("title") or ""),
+                    str(metadata.get("filename") or ""),
+                    str(document_metadata.get("document_name") or ""),
+                ]
+            }
+            if allowed_keys.intersection(key for key in chunk_keys if key):
+                selected.append(item)
+        if not selected and allowed_keys:
+            fallback = []
+            for chunk in DocumentChunk.objects.filter(deal=deal).select_related("deal").order_by("-created_at").iterator(chunk_size=100):
+                metadata = chunk.metadata or {}
+                document_metadata = self._document_metadata_for_chunk(chunk)
+                chunk_keys = {
+                    self._normalize_document_match_key(value)
+                    for value in [
+                        str(chunk.source_id or ""),
+                        str(metadata.get("document_id") or ""),
+                        str(metadata.get("title") or ""),
+                        str(metadata.get("filename") or ""),
+                        str(document_metadata.get("document_name") or ""),
+                    ]
+                }
+                if allowed_keys.intersection(key for key in chunk_keys if key):
+                    fallback.append({"chunk": chunk, "score": 1.0})
+                if len(fallback) >= 80:
+                    break
+            selected = [
+                item for item in fallback
+            ]
+        serialized = [self._serialize_chunk(item) for item in selected]
+        for index, item in enumerate(serialized):
+            item["suggested"] = index < 6
+            item["rank_reason"] = "Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk"
+        return serialized, diagnostics
+
+    def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "") -> str:
+        deals = [self._serialize_deal(deal) for deal in Deal.objects.filter(id__in=deal_ids).prefetch_related("phase_logs")]
+        context_data, _diagnostics = self._format_context_data(plan, deals, chunks)
+        if extra_context:
+            context_data = f"{context_data}\n\n[SAVED/ANALYST CONTEXT]\n{extra_context}"
+        return context_data
 
     def _decide_query_builder_usage(self, user_message: str, history_context: str) -> Dict[str, Any]:
         if not history_context or "ASSISTANT:" not in history_context:
@@ -2075,6 +2260,7 @@ class UniversalChatService:
         excerpt = chunk.content[: int(self._stage_settings("context_assembly").get("chunk_excerpt_chars", 1400) or 1400)]
         metadata = chunk.metadata or {}
         return {
+            "chunk_id": str(chunk.id),
             "deal": chunk.deal.title,
             "deal_id": str(chunk.deal_id),
             "source_type": chunk.source_type,

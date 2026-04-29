@@ -212,6 +212,11 @@ class Deal(models.Model):
         help_text='Status of background file processing from OneDrive'
     )
     processing_error = models.TextField(blank=True, null=True)
+    analysis_prompt = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Deal-specific analysis directive appended to the AI personality for full rewrites and analysis runs.'
+    )
 
     class Meta:
         db_table = 'deal'
@@ -355,6 +360,102 @@ class DealAnalysis(models.Model):
 
     def __str__(self):
         return f"Analysis v{self.version} for {self.deal.title}"
+
+
+class DealRelationshipContext(models.Model):
+    class RelationshipType(models.TextChoices):
+        COMPETITOR = 'competitor', 'Competitor'
+        SISTER_COMPANY = 'sister_company', 'Sister Company'
+        PARENT_COMPANY = 'parent_company', 'Parent Company'
+        SUBSIDIARY = 'subsidiary', 'Subsidiary'
+        COMPARABLE = 'comparable', 'Comparable'
+        CUSTOMER = 'customer', 'Customer'
+        VENDOR = 'vendor', 'Vendor'
+        OTHER = 'other', 'Other'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='relationship_contexts',
+    )
+    related_deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='related_to_contexts',
+        null=True,
+        blank=True,
+    )
+    relationship_type = models.CharField(
+        max_length=40,
+        choices=RelationshipType.choices,
+        default=RelationshipType.COMPARABLE,
+    )
+    notes = models.TextField(blank=True, null=True)
+    selected_deal_ids = models.JSONField(default=list, blank=True)
+    selected_document_ids = models.JSONField(default=list, blank=True)
+    selected_chunk_ids = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        'accounts.Profile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_relationship_context'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['deal', 'relationship_type']),
+            models.Index(fields=['related_deal']),
+        ]
+
+    def __str__(self):
+        target = self.related_deal.title if self.related_deal else "Selected deals"
+        return f"{self.deal.title} -> {target} ({self.relationship_type})"
+
+
+class DealGeneratedDocument(models.Model):
+    class DocumentKind(models.TextChoices):
+        DIRECTIVE = 'directive', 'Directive Document'
+        IC_NOTE = 'ic_note', 'IC Note'
+        FINANCIAL_MODEL = 'financial_model', 'Financial Model'
+        DILIGENCE_MEMO = 'diligence_memo', 'Diligence Memo'
+        RISK_REGISTER = 'risk_register', 'Risk Register'
+        OTHER = 'other', 'Other'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='generated_documents',
+    )
+    title = models.CharField(max_length=255)
+    kind = models.CharField(max_length=40, choices=DocumentKind.choices, default=DocumentKind.DIRECTIVE)
+    directive = models.TextField()
+    content = models.TextField(blank=True, null=True)
+    selected_deal_ids = models.JSONField(default=list, blank=True)
+    selected_document_ids = models.JSONField(default=list, blank=True)
+    selected_chunk_ids = models.JSONField(default=list, blank=True)
+    audit_log_id = models.CharField(max_length=255, blank=True, null=True)
+    created_by = models.ForeignKey(
+        'accounts.Profile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_generated_document'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['deal', 'kind']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} ({self.deal.title})"
 
 
 class DealPhaseLog(models.Model):
