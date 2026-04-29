@@ -288,6 +288,11 @@ def generate_deal_helper_analysis_async(
         saved_context = chat_service._saved_relationship_context_for_deal(deal)
         deal_specific_prompt = (deal.analysis_prompt or "").strip()
         documents = list(deal.documents.all().order_by("-created_at")[:80])
+        active_deal_documents = "\n\n".join(
+            f"[{doc.title} | {doc.document_type} | indexed={doc.is_indexed}]\n{(doc.normalized_text or doc.extracted_text or '')[:3000]}"
+            for doc in documents
+            if (doc.normalized_text or doc.extracted_text)
+        )
         document_context = "\n\n".join(
             f"[{doc.title} | {doc.document_type}]\n{(doc.normalized_text or doc.extracted_text or '')[:6000]}"
             for doc in documents
@@ -298,12 +303,20 @@ def generate_deal_helper_analysis_async(
         task_label = "full rewrite" if mode == "full_rewrite" else "user-directed addendum"
         prompt = (
             f"You are creating a saved {task_label} for deal: {deal.title}.\n\n"
+            "Active deal baseline:\n"
+            f"- Title: {deal.title}\n"
+            f"- Sector: {deal.sector or 'N/A'}\n"
+            f"- Industry: {deal.industry or 'N/A'}\n"
+            f"- Funding ask: {deal.funding_ask or 'N/A'}\n"
+            f"- Deal summary: {deal.deal_summary or 'No deal summary available.'}\n"
+            f"- Current analysis report: {current_report or 'No current analysis available.'}\n"
+            f"- Active deal prompt: {deal_specific_prompt or 'None'}\n\n"
             f"Deal-specific analysis prompt:\n{deal_specific_prompt or 'None'}\n\n"
             f"User directive:\n{directive}\n\n"
             "The directive controls the output format completely. If the user asks for an IC note, financial model, memo, table, risk register, or any other structure, produce that structure.\n\n"
-            f"Current analysis:\n{current_report or 'No current analysis available.'}\n\n"
             f"Saved related-deal context:\n{saved_context or 'None'}\n\n"
             f"Deal metadata:\nIndustry: {deal.industry or 'N/A'}\nSector: {deal.sector or 'N/A'}\nFunding ask: {deal.funding_ask or 'N/A'}\n\n"
+            f"Active deal documents:\n{active_deal_documents or 'No active deal documents available.'}\n\n"
             f"Selected evidence context:\n{selected_context or 'No manually selected evidence context supplied.'}\n\n"
             f"Documents:\n{document_context or 'No extracted document text available.'}"
         )

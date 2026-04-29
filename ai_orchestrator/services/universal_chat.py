@@ -463,8 +463,12 @@ class UniversalChatService:
             deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
             serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
             for index, item in enumerate(serialized_deals):
-                item["suggested"] = index < 3
-                item["rank_reason"] = "Top reranked pipeline match" if index < 3 else "Additional reranked candidate"
+                item["suggested_score"] = item.get("retrieval_score")
+                item["rank_reason"] = (
+                    getattr(deals[index], "_deal_text_rerank_reason", None)
+                    or "Reranked pipeline match"
+                )
+            self._apply_dynamic_suggestions(serialized_deals, score_key="suggested_score")
             return {
                 "route": route,
                 "query_plan": plan,
@@ -523,11 +527,49 @@ class UniversalChatService:
                 "rank_reason": "Reranker found relevant chunks in this document" if score else "Available deal document",
             })
 
-        payload.sort(key=lambda item: (bool(item.get("suggested")), float(item.get("suggested_score") or 0), bool(item.get("is_indexed"))), reverse=True)
-        for index, item in enumerate(payload):
-            if index < 3 and item.get("is_indexed"):
-                item["suggested"] = True
-                item["rank_reason"] = item.get("rank_reason") or "Top indexed document candidate"
+        payload.sort(key=lambda item: (float(item.get("suggested_score") or 0), bool(item.get("is_indexed"))), reverse=True)
+        llm_candidates = []
+        for item in payload[: min(len(payload), 8)]:
+            llm_candidates.append({
+                "title": item["title"],
+                "summary": self._truncate_for_prompt(
+                    next(
+                        (
+                            (chunk["chunk"].metadata or {}).get("document_summary")
+                            for chunk in chunks
+                            if self._normalize_document_match_key(str(chunk["chunk"].source_id or "")) == self._normalize_document_match_key(item["id"])
+                        ),
+                        "",
+                    ),
+                    900,
+                ),
+                "context": self._truncate_for_prompt(json.dumps({
+                    "document_type": item["document_type"],
+                    "is_indexed": item["is_indexed"],
+                    "is_ai_analyzed": item["is_ai_analyzed"],
+                    "rank_reason": item["rank_reason"],
+                }, default=str, ensure_ascii=True), 800),
+                "base_score": item["suggested_score"] or 0,
+            })
+
+        llm_adjustments = self._text_model_rerank(
+            label="document",
+            query=self._build_rerank_query(plan),
+            active_context=self._build_deal_active_context(deal),
+            candidates=llm_candidates,
+            candidate_limit=min(len(llm_candidates), 8),
+        )
+        if llm_adjustments:
+            for index, item in enumerate(payload):
+                adjustment = llm_adjustments.get(index)
+                if not adjustment:
+                    continue
+                base_score = float(item.get("suggested_score") or 0)
+                llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 1.8
+                final_score = round(base_score + llm_boost, 3)
+                item["suggested_score"] = final_score if final_score > 0 else None
+                item["rank_reason"] = adjustment.get("reason") or item["rank_reason"]
+        self._apply_dynamic_suggestions(payload, score_key="suggested_score")
         return payload
 
     def _normalize_document_match_key(self, value: str) -> str:
@@ -536,13 +578,159 @@ class UniversalChatService:
             normalized = normalized[:-5]
         return normalized
 
+    def _truncate_for_prompt(self, value: Any, limit: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
+
+    def _suggestion_threshold(self, scores: List[float], *, base_ratio: float = 0.82, min_gap: float = 25.0) -> float:
+        if not scores:
+            return 0.0
+        cleaned = sorted(float(score) for score in scores if score is not None)
+        if not cleaned:
+            return 0.0
+        top = cleaned[-1]
+        if top <= 0:
+            return 0.0
+        median = cleaned[len(cleaned) // 2]
+        adaptive_gap = max(min_gap, (top - median) * 0.5)
+        return max(top * base_ratio, top - adaptive_gap)
+
+    def _apply_dynamic_suggestions(self, items: List[Dict[str, Any]], *, score_key: str = "suggested_score") -> None:
+        scores = [float(item.get(score_key) or 0) for item in items if float(item.get(score_key) or 0) > 0]
+        threshold = self._suggestion_threshold(scores)
+        for item in items:
+            score = float(item.get(score_key) or 0)
+            item["suggested"] = score > 0 and score >= threshold
+            if item["suggested"] and not item.get("rank_reason"):
+                item["rank_reason"] = "High-confidence reranked match"
+
+    def _build_deal_active_context(self, deal: Deal) -> str:
+        current_analysis = deal.current_analysis if isinstance(deal.current_analysis, dict) else {}
+        canonical_snapshot = current_analysis.get("canonical_snapshot") if isinstance(current_analysis, dict) else {}
+        documents = []
+        for document in deal.documents.all().order_by("-created_at")[:12]:
+            documents.append({
+                "title": document.title,
+                "type": document.document_type,
+                "indexed": document.is_indexed,
+                "summary": self._truncate_for_prompt(document.normalized_text or document.extracted_text or "", 700),
+            })
+        context = {
+            "title": deal.title,
+            "industry": deal.industry,
+            "sector": deal.sector,
+            "city": deal.city,
+            "funding_ask": deal.funding_ask,
+            "funding_ask_for": deal.funding_ask_for,
+            "priority": deal.priority,
+            "deal_summary": self._truncate_for_prompt(deal.deal_summary or canonical_snapshot.get("analyst_report") or "", 1500),
+            "analysis_prompt": self._truncate_for_prompt(deal.analysis_prompt or "", 1000),
+            "documents": documents,
+        }
+        return json.dumps(context, default=str, ensure_ascii=True, indent=2)
+
+    def _text_model_rerank(
+        self,
+        *,
+        label: str,
+        query: str,
+        active_context: str,
+        candidates: List[Dict[str, Any]],
+        candidate_limit: int = 8,
+    ) -> Dict[int, Dict[str, Any]]:
+        if not candidates:
+            return {}
+
+        preview = []
+        for index, candidate in enumerate(candidates[:candidate_limit]):
+            preview.append({
+                "index": index,
+                "title": self._truncate_for_prompt(candidate.get("title"), 120),
+                "summary": self._truncate_for_prompt(candidate.get("summary"), 800),
+                "context": self._truncate_for_prompt(candidate.get("context"), 1200),
+                "base_score": candidate.get("base_score"),
+            })
+
+        prompt = (
+            f"You are reranking {label} suggestions for an active deal workflow.\n\n"
+            f"Active deal context:\n{self._truncate_for_prompt(active_context, 8000) or 'None'}\n\n"
+            f"User query or planner intent:\n{self._truncate_for_prompt(query, 2000) or 'None'}\n\n"
+            "Candidate list:\n"
+            f"{json.dumps(preview, default=str, ensure_ascii=True, indent=2)}\n\n"
+            "Task:\n"
+            "Score each candidate from 0 to 100 for relevance to the active deal and the user intent.\n"
+            "Use the active deal as the comparison anchor.\n"
+            "Prefer candidates that improve the comparison, evidence quality, or deal-specific specificity.\n"
+            "Return exactly one JSON object with this shape:\n"
+            "{\n"
+            '  "results": [\n'
+            '    {"index": 0, "relevance_score": 0, "suggested": true, "reason": "short reason", "compare_to_active_deal": "short comparison"}\n'
+            "  ]\n"
+            "}\n"
+            "Do not include any extra text."
+        )
+
+        try:
+            result = self.ai_service.process_content(
+                content=prompt,
+                personality_name="default",
+                skill_name=None,
+                metadata={
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.0,
+                    "max_tokens": 1800,
+                },
+                source_type=f"deal_helper_{label}_rerank",
+                source_id="hybrid-rerank",
+                stream=False,
+            )
+        except Exception as exc:
+            logger.warning("Text-model rerank failed for %s: %s", label, exc)
+            return {}
+
+        parsed = result if isinstance(result, dict) else {}
+        payload = parsed.get("parsed_json") if isinstance(parsed.get("parsed_json"), dict) else None
+        raw_response = parsed.get("response") if isinstance(parsed, dict) else ""
+        if payload is None:
+            extracted = ResponseParserService.extract_json(raw_response or "")
+            if extracted:
+                try:
+                    payload = json.loads(extracted)
+                except Exception:
+                    payload = None
+        if not isinstance(payload, dict):
+            return {}
+
+        results = payload.get("results")
+        if not isinstance(results, list):
+            return {}
+
+        normalized: Dict[int, Dict[str, Any]] = {}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            try:
+                candidate_index = int(item.get("index"))
+                relevance_score = float(item.get("relevance_score"))
+            except (TypeError, ValueError):
+                continue
+            normalized[candidate_index] = {
+                "relevance_score": max(0.0, min(100.0, relevance_score)),
+                "suggested": bool(item.get("suggested", relevance_score >= 60)),
+                "reason": self._truncate_for_prompt(item.get("reason") or item.get("compare_to_active_deal") or "", 220),
+                "compare_to_active_deal": self._truncate_for_prompt(item.get("compare_to_active_deal") or "", 220),
+            }
+        return normalized
+
     def chunks_for_selected_deals(self, *, plan: Dict[str, Any], deal_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         deals = list(Deal.objects.filter(id__in=deal_ids).prefetch_related("phase_logs"))
         chunks, diagnostics = self._search_ranked_chunks(plan, deals)
         serialized = [self._serialize_chunk(item) for item in chunks]
         for index, item in enumerate(serialized):
             item["suggested"] = index < 6
-            item["rank_reason"] = "Top reranked evidence chunk" if index < 6 else "Additional evidence chunk"
+            item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional evidence chunk")
         return serialized, diagnostics
 
     def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -598,7 +786,7 @@ class UniversalChatService:
         serialized = [self._serialize_chunk(item) for item in selected]
         for index, item in enumerate(serialized):
             item["suggested"] = index < 6
-            item["rank_reason"] = "Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk"
+            item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk")
         return serialized, diagnostics
 
     def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "") -> str:
@@ -1316,6 +1504,43 @@ class UniversalChatService:
         blended.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
         if len(scored) > candidate_limit:
             blended.extend(scored[candidate_limit:])
+
+        llm_candidates = [
+            {
+                "title": deal.title,
+                "summary": self._truncate_for_prompt(deal.deal_summary or "", 1000),
+                "context": self._truncate_for_prompt(self._build_deal_rerank_document(deal, plan), 1800),
+                "base_score": round(base_score, 3),
+            }
+            for base_score, deal in blended[: min(len(blended), 8)]
+        ]
+        llm_adjustments = self._text_model_rerank(
+            label="deal",
+            query=self._build_rerank_query(plan),
+            active_context=json.dumps({
+                "query_plan": plan,
+                "candidate_scope": "related_deals",
+            }, default=str, ensure_ascii=True, indent=2),
+            candidates=llm_candidates,
+            candidate_limit=min(len(llm_candidates), 8),
+        )
+        if llm_adjustments:
+            rebased: List[Tuple[float, Deal]] = []
+            for index, (base_score, deal) in enumerate(blended):
+                adjustment = llm_adjustments.get(index)
+                if adjustment:
+                    llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 3.0
+                    components = dict(getattr(deal, "_retrieval_components", {}) or {})
+                    components["text_model_relevance"] = round(llm_boost, 3)
+                    final_score = round(base_score + llm_boost, 3)
+                    setattr(deal, "_retrieval_score", final_score)
+                    setattr(deal, "_retrieval_components", components)
+                    setattr(deal, "_deal_text_rerank_reason", adjustment.get("reason"))
+                    rebased.append((final_score, deal))
+                else:
+                    rebased.append((base_score, deal))
+            rebased.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
+            blended = rebased
         return blended
 
     def _keyword_candidate_pool(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
@@ -1736,6 +1961,51 @@ class UniversalChatService:
             scored_items.append({"chunk": chunk, "score": round(score, 3)})
 
         scored_items.sort(key=lambda item: item["score"], reverse=True)
+        llm_candidates = []
+        if scored_items:
+            active_context = json.dumps(
+                {
+                    "deals": [self._serialize_deal(deal) for deal in scoped_deals[:6]],
+                    "query_plan": plan,
+                },
+                default=str,
+                ensure_ascii=True,
+                indent=2,
+            )
+            for item in scored_items[: min(len(scored_items), 8)]:
+                chunk = item["chunk"]
+                document_metadata = self._document_metadata_for_chunk(chunk)
+                llm_candidates.append({
+                    "title": document_metadata.get("document_name") or (chunk.metadata or {}).get("title") or (chunk.metadata or {}).get("filename") or chunk.source_type,
+                    "summary": self._truncate_for_prompt(document_metadata.get("document_summary") or "", 900),
+                    "context": self._truncate_for_prompt(
+                        json.dumps({
+                            "deal": chunk.deal.title,
+                            "source_type": chunk.source_type,
+                            "source_id": chunk.source_id,
+                            "chunk_kind": (chunk.metadata or {}).get("chunk_kind"),
+                            "chunk_text": chunk.content[:1600],
+                        }, default=str, ensure_ascii=True),
+                        1600,
+                    ),
+                    "base_score": item["score"],
+                })
+            llm_adjustments = self._text_model_rerank(
+                label="chunk",
+                query=self._build_rerank_query(plan),
+                active_context=active_context,
+                candidates=llm_candidates,
+                candidate_limit=min(len(llm_candidates), 8),
+            )
+            if llm_adjustments:
+                for index, item in enumerate(scored_items):
+                    adjustment = llm_adjustments.get(index)
+                    if not adjustment:
+                        continue
+                    llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 1.2
+                    item["score"] = round(item["score"] + llm_boost, 3)
+                    item["llm_reason"] = adjustment.get("reason")
+                scored_items.sort(key=lambda item: item["score"], reverse=True)
         self._trace_chunks("score_done", scored_items=len(scored_items), dropped_by_zero_score=dropped_by_zero_score)
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
@@ -2267,6 +2537,9 @@ class UniversalChatService:
             "source_id": chunk.source_id,
             "source_title": metadata.get("title") or metadata.get("filename"),
             "score": item["score"],
+            "suggested": bool(item.get("suggested", False)),
+            "suggested_score": item.get("score"),
+            "rank_reason": item.get("llm_reason") or item.get("rank_reason"),
             "text": excerpt,
             "metadata": metadata,
             "document_metadata": self._document_metadata_for_chunk(chunk),
