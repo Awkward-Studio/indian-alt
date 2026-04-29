@@ -459,7 +459,8 @@ class UniversalChatService:
         documents = list(deal.documents.all().order_by("-created_at"))
 
         if route == "related_deals":
-            plan["deal_limit"] = max(int(plan.get("deal_limit") or 8), 8)
+            # Increase limit for interactive selection so analyst has more choices (e.g. at least 12)
+            plan["deal_limit"] = max(int(plan.get("deal_limit") or 12), 12)
             deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
             serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
             for index, item in enumerate(serialized_deals):
@@ -724,13 +725,22 @@ class UniversalChatService:
             }
         return normalized
 
-    def chunks_for_selected_deals(self, *, plan: Dict[str, Any], deal_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        deals = list(Deal.objects.filter(id__in=deal_ids).prefetch_related("phase_logs"))
+    def chunks_for_selected_deals(self, *, plan: Dict[str, Any], deal_ids: List[str], current_deal_id: str | None = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        target_ids = list(deal_ids)
+        if current_deal_id and current_deal_id not in target_ids:
+            target_ids.append(current_deal_id)
+
+        deals = list(Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs"))
         chunks, diagnostics = self._search_ranked_chunks(plan, deals)
         serialized = [self._serialize_chunk(item) for item in chunks]
-        for index, item in enumerate(serialized):
-            item["suggested"] = index < 6
-            item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional evidence chunk")
+        
+        # Mark current deal chunks
+        for item in serialized:
+            if current_deal_id and str(item.get("deal_id")) == str(current_deal_id):
+                item["is_current_deal"] = True
+
+        # In chunks_for_selected_deals, these are pipeline deals, so we just use dynamic suggestions
+        self._apply_dynamic_suggestions(serialized, score_key="score")
         return serialized, diagnostics
 
     def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

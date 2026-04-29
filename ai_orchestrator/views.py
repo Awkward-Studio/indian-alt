@@ -372,6 +372,7 @@ class DealHelperView(APIView):
         chunks, diagnostics = service.chunks_for_selected_deals(
             plan=session["query_plan"],
             deal_ids=selected_deal_ids,
+            current_deal_id=session["deal_id"]
         )
         deal = Deal.objects.get(id=session["deal_id"])
         related_deals = list(Deal.objects.filter(id__in=selected_deal_ids))
