@@ -140,6 +140,15 @@ def _deal_comparison_context(deal, selected_deal_ids: list | None = None) -> str
 
     return json.dumps(payload, default=str, ensure_ascii=True, indent=2)
 
+
+def _truncate_text(value: str | None, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    head = max(limit - 400, limit // 2)
+    tail = max(limit - head - 40, 0)
+    return f"{text[:head]}\n\n[...TRUNCATED...]\n\n{text[-tail:] if tail else ''}".strip()
+
 @shared_task(bind=True)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
     """
@@ -493,17 +502,17 @@ def generate_deal_helper_analysis_async(
             .select_related("deal")
             .order_by("deal__title", "-created_at")
         )
-        documents = selected_documents if selected_documents else current_deal_documents
+        documents = (selected_documents if selected_documents else current_deal_documents)[:50]
         document_evidence = [
             {
                 "document_name": doc.title,
                 "document_type": doc.document_type,
                 "deal": doc.deal.title if doc.deal else deal.title,
-                "document_summary": (doc.normalized_text or doc.extracted_text or "")[:3000],
+                "document_summary": _truncate_text(doc.normalized_text or doc.extracted_text, 1400),
                 "claims": [],
                 "metrics": [],
                 "citations": [doc.title] if doc.title else [],
-                "normalized_text": (doc.normalized_text or doc.extracted_text or "")[:3000],
+                "normalized_text": _truncate_text(doc.normalized_text or doc.extracted_text, 1400),
                 "source_map": {
                     "document_id": str(doc.id),
                     "document_name": doc.title,
@@ -517,7 +526,7 @@ def generate_deal_helper_analysis_async(
             {
                 "source_title": doc.title,
                 "deal": doc.deal.title if doc.deal else deal.title,
-                "text": (doc.normalized_text or doc.extracted_text or "")[:1800],
+                "text": _truncate_text(doc.normalized_text or doc.extracted_text, 900),
             }
             for doc in documents[:30]
             if (doc.normalized_text or doc.extracted_text)
@@ -526,7 +535,7 @@ def generate_deal_helper_analysis_async(
             supporting_raw_chunks.insert(0, {
                 "source_title": "Deal helper selected evidence",
                 "deal": deal.title,
-                "text": selected_context[:12000],
+                "text": _truncate_text(selected_context, 8000),
             })
         selected_pipeline_context = _deal_comparison_context(deal, selected_deal_ids)
         current_analysis = deal.current_analysis if isinstance(deal.current_analysis, dict) else {}
@@ -563,10 +572,13 @@ def generate_deal_helper_analysis_async(
                 "supporting_raw_chunks_json": json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True),
                 "deal_specific_prompt": deal_specific_prompt or "No deal-specific prompt saved.",
                 "related_deal_context": saved_context or "No stored competitor or related-deal context.",
-                "selected_context": selected_context[:16000] if selected_context else "No manually selected evidence context supplied.",
+                "selected_context": _truncate_text(selected_context, 10000) if selected_context else "No manually selected evidence context supplied.",
                 "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": 4096,
             },
         )
+        if isinstance(result, dict) and result.get("error"):
+            raise ValueError(f"deal_synthesis failed: {result.get('error')}")
         if isinstance(result, dict) and isinstance(result.get("parsed_json"), dict):
             analysis = result["parsed_json"]
             clean_thinking = result.get("thinking") or analysis.get("thinking") or ""

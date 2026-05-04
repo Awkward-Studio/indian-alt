@@ -4,8 +4,8 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from unittest.mock import MagicMock, patch
 
-from deals.models import Deal, DealRelationshipContext
-from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
+from deals.models import Deal, DealDocument, DealRelationshipContext
+from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill, DocumentChunk
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -1291,6 +1291,60 @@ class UniversalChatServiceTests(TestCase):
         self.assertIn("Metrics:", document)
         self.assertIn("Tables:", document)
         self.assertIn("Risks:", document)
+
+    def test_selected_document_chunks_are_augmented_beyond_semantic_cap(self):
+        deal = Deal.objects.create(title="Acme", industry="Consumer")
+        doc_one = DealDocument.objects.create(
+            deal=deal,
+            title="Financial model.xlsx",
+            document_type="Financials",
+            is_indexed=True,
+            normalized_text="Revenue and EBITDA model.",
+        )
+        doc_two = DealDocument.objects.create(
+            deal=deal,
+            title="Pitch deck.pdf",
+            document_type="Pitch Deck",
+            is_indexed=True,
+            normalized_text="Company overview and risks.",
+        )
+        model_chunk = DocumentChunk.objects.create(
+            deal=deal,
+            source_type="document",
+            source_id=str(doc_one.id),
+            content="Revenue grew 30%.",
+            metadata={"title": doc_one.title, "chunk_index": 0},
+        )
+        DocumentChunk.objects.create(
+            deal=deal,
+            source_type="document",
+            source_id=str(doc_one.id),
+            content="EBITDA margin improved.",
+            metadata={"title": doc_one.title, "chunk_index": 1},
+        )
+        DocumentChunk.objects.create(
+            deal=deal,
+            source_type="document",
+            source_id=str(doc_two.id),
+            content="Founder background and salon footprint.",
+            metadata={"title": doc_two.title, "chunk_index": 0},
+        )
+
+        with patch.object(
+            self.service,
+            "_search_ranked_chunks",
+            return_value=([{"chunk": model_chunk, "score": 9.0}], {"selected_chunk_count": 1}),
+        ):
+            chunks, diagnostics = self.service.chunks_for_selected_documents(
+                plan={"semantic_queries": ["financial comparison"]},
+                deal_id=str(deal.id),
+                document_ids=[str(doc_one.id), str(doc_two.id)],
+            )
+
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertEqual(diagnostics["direct_selected_document_chunk_count"], 2)
+        self.assertEqual(diagnostics["returned_selected_document_chunk_count"], len(chunks))
+        self.assertEqual({chunk["source_id"] for chunk in chunks}, {str(doc_one.id), str(doc_two.id)})
 
     def test_stats_mode_count_skips_chunk_retrieval_when_global_limit_zero(self):
         plan = {

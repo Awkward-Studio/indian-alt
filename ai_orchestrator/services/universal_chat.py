@@ -1123,34 +1123,19 @@ class UniversalChatService:
                 selected.append(item)
         self._trace_chunks("chunks_for_selected_documents_multi_deal_filtering_done", selected=len(selected))
 
-        if not selected and allowed_keys:
-            self._trace_chunks("chunks_for_selected_documents_multi_deal_fallback_start")
-            fallback = []
-            for chunk in (
-                DocumentChunk.objects.filter(deal_id__in=[document.deal_id for document in selected_documents])
-                .select_related("deal")
-                .order_by("-created_at")
-                .iterator(chunk_size=100)
-            ):
-                metadata = chunk.metadata or {}
-                document_metadata = self._document_metadata_for_chunk(chunk)
-                deal_id = str(chunk.deal_id or "")
-                chunk_keys = {
-                    (deal_id, self._normalize_document_match_key(value))
-                    for value in [
-                        str(chunk.source_id or ""),
-                        str(metadata.get("document_id") or ""),
-                        str(metadata.get("title") or ""),
-                        str(metadata.get("filename") or ""),
-                        str(document_metadata.get("document_name") or ""),
-                    ]
-                }
-                if allowed_keys.intersection(key for key in chunk_keys if key[1]):
-                    fallback.append({"chunk": chunk, "score": 1.0})
-                if len(fallback) >= 120:
-                    break
-            selected = fallback
-            self._trace_chunks("chunks_for_selected_documents_multi_deal_fallback_done", fallback=len(fallback))
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_direct_scan_start")
+        direct_chunks = self._direct_chunks_for_selected_documents(
+            selected_documents,
+            existing_items=selected,
+            per_document_limit=8,
+            max_total=120,
+        )
+        selected = self._merge_selected_chunk_items(selected, direct_chunks)
+        self._trace_chunks(
+            "chunks_for_selected_documents_multi_deal_direct_scan_done",
+            direct_chunks=len(direct_chunks),
+            selected=len(selected),
+        )
 
         self._trace_chunks("chunks_for_selected_documents_multi_deal_serialization_start")
         serialized = [self._serialize_chunk(item) for item in selected]
@@ -1160,7 +1145,105 @@ class UniversalChatService:
         self._trace_chunks("chunks_for_selected_documents_multi_deal_apply_suggestions_start")
         self._apply_balanced_selected_document_chunk_suggestions(serialized, selected_documents)
         self._trace_chunks("chunks_for_selected_documents_multi_deal_done", serialized=len(serialized))
+        if isinstance(diagnostics, dict):
+            diagnostics["direct_selected_document_chunk_count"] = len(direct_chunks)
+            diagnostics["returned_selected_document_chunk_count"] = len(serialized)
         return serialized, diagnostics
+
+    def _selected_document_match_entries(self, selected_documents: List[DealDocument]) -> List[Dict[str, str]]:
+        entries = []
+        for document in selected_documents:
+            for value in [str(document.id), str(document.onedrive_id or ""), str(document.title or "")]:
+                normalized = self._normalize_document_match_key(value)
+                if normalized:
+                    entries.append({
+                        "deal_id": str(document.deal_id or ""),
+                        "document_id": str(document.id),
+                        "key": normalized,
+                    })
+        return entries
+
+    def _matching_selected_document_id(self, chunk: DocumentChunk, match_entries: List[Dict[str, str]]) -> str | None:
+        metadata = chunk.metadata or {}
+        document_metadata = self._document_metadata_for_chunk(chunk)
+        deal_id = str(chunk.deal_id or "")
+        chunk_keys = {
+            self._normalize_document_match_key(value)
+            for value in [
+                str(chunk.source_id or ""),
+                str(metadata.get("document_id") or ""),
+                str(metadata.get("title") or ""),
+                str(metadata.get("filename") or ""),
+                str(document_metadata.get("document_name") or ""),
+            ]
+        }
+        chunk_keys = {key for key in chunk_keys if key}
+        if not chunk_keys:
+            return None
+        for entry in match_entries:
+            if entry["deal_id"] == deal_id and entry["key"] in chunk_keys:
+                return entry["document_id"]
+        return None
+
+    def _direct_chunks_for_selected_documents(
+        self,
+        selected_documents: List[DealDocument],
+        *,
+        existing_items: List[Dict[str, Any]] | None = None,
+        per_document_limit: int = 8,
+        max_total: int = 120,
+    ) -> List[Dict[str, Any]]:
+        match_entries = self._selected_document_match_entries(selected_documents)
+        if not match_entries:
+            return []
+
+        selected_doc_ids = {entry["document_id"] for entry in match_entries}
+        deal_ids = list({document.deal_id for document in selected_documents if document.deal_id})
+        seen_chunk_ids = {
+            str(item["chunk"].id)
+            for item in (existing_items or [])
+            if item.get("chunk") is not None and getattr(item["chunk"], "id", None)
+        }
+        counts = {document_id: 0 for document_id in selected_doc_ids}
+        direct_items = []
+
+        for chunk in (
+            DocumentChunk.objects.filter(deal_id__in=deal_ids)
+            .select_related("deal")
+            .order_by("-created_at")
+            .iterator(chunk_size=100)
+        ):
+            chunk_id = str(chunk.id)
+            if chunk_id in seen_chunk_ids:
+                continue
+            document_id = self._matching_selected_document_id(chunk, match_entries)
+            if not document_id or counts.get(document_id, 0) >= per_document_limit:
+                continue
+            seen_chunk_ids.add(chunk_id)
+            counts[document_id] = counts.get(document_id, 0) + 1
+            direct_items.append({
+                "chunk": chunk,
+                "score": getattr(chunk, "rerank_score", None) or 1.0,
+                "rank_reason": "Direct chunk from a selected document",
+            })
+            if len(direct_items) >= max_total or all(counts.get(document_id, 0) >= per_document_limit for document_id in selected_doc_ids):
+                break
+
+        return direct_items
+
+    def _merge_selected_chunk_items(self, *item_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged = []
+        seen_ids = set()
+        for item_list in item_lists:
+            for item in item_list or []:
+                chunk = item.get("chunk")
+                chunk_id = str(getattr(chunk, "id", "") or "")
+                if chunk_id and chunk_id in seen_ids:
+                    continue
+                if chunk_id:
+                    seen_ids.add(chunk_id)
+                merged.append(item)
+        return merged
 
     def _apply_balanced_selected_document_chunk_suggestions(self, items: List[Dict[str, Any]], selected_documents: List[DealDocument]) -> None:
         for item in items:
@@ -1234,32 +1317,20 @@ class UniversalChatService:
             }
             if allowed_keys.intersection(key for key in chunk_keys if key):
                 selected.append(item)
-        if not selected and allowed_keys:
-            fallback = []
-            for chunk in DocumentChunk.objects.filter(deal=deal).select_related("deal").order_by("-created_at").iterator(chunk_size=100):
-                metadata = chunk.metadata or {}
-                document_metadata = self._document_metadata_for_chunk(chunk)
-                chunk_keys = {
-                    self._normalize_document_match_key(value)
-                    for value in [
-                        str(chunk.source_id or ""),
-                        str(metadata.get("document_id") or ""),
-                        str(metadata.get("title") or ""),
-                        str(metadata.get("filename") or ""),
-                        str(document_metadata.get("document_name") or ""),
-                    ]
-                }
-                if allowed_keys.intersection(key for key in chunk_keys if key):
-                    fallback.append({"chunk": chunk, "score": 1.0})
-                if len(fallback) >= 80:
-                    break
-            selected = [
-                item for item in fallback
-            ]
+        direct_chunks = self._direct_chunks_for_selected_documents(
+            selected_documents,
+            existing_items=selected,
+            per_document_limit=8,
+            max_total=80,
+        )
+        selected = self._merge_selected_chunk_items(selected, direct_chunks)
         serialized = [self._serialize_chunk(item) for item in selected]
         for index, item in enumerate(serialized):
             item["suggested"] = index < 6
             item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk")
+        if isinstance(diagnostics, dict):
+            diagnostics["direct_selected_document_chunk_count"] = len(direct_chunks)
+            diagnostics["returned_selected_document_chunk_count"] = len(serialized)
         return serialized, diagnostics
 
     def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "", current_deal_id: str | None = None) -> str:

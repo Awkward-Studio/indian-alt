@@ -165,7 +165,13 @@ class VLLMProviderService:
             json=body,
             timeout=timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = (response.text or "").strip()
+            if len(detail) > 1000:
+                detail = f"{detail[:1000]}..."
+            raise requests.HTTPError(f"{exc}. Response body: {detail}", response=response) from exc
         data = response.json()
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
