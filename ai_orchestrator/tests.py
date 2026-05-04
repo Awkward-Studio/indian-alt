@@ -1,8 +1,11 @@
-from django.test import TestCase, override_settings
+import json
+
+from django.core.management import call_command
+from django.test import SimpleTestCase, TestCase, override_settings
 from unittest.mock import MagicMock, patch
 
-from deals.models import Deal
-from ai_orchestrator.models import AIAuditLog
+from deals.models import Deal, DealRelationshipContext
+from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -12,7 +15,52 @@ from ai_orchestrator.services.flow_config import (
     DEFAULT_PLANNER_PROMPT,
     UniversalChatFlowService,
 )
+from ai_orchestrator.tasks import _extract_markdown_report
 from ai_orchestrator.services.universal_chat import UniversalChatService
+
+
+class DealHelperAnalysisTaskTests(SimpleTestCase):
+    def test_extract_markdown_report_prefers_parsed_report(self):
+        report = _extract_markdown_report({
+            "parsed_json": {"report": "# Financial Comparison\n\n| Deal | Revenue |\n|---|---|"},
+            "response": '{"report":"wrong"}',
+        })
+
+        self.assertEqual(report, "# Financial Comparison\n\n| Deal | Revenue |\n|---|---|")
+
+    def test_extract_markdown_report_prefers_top_level_report(self):
+        report = _extract_markdown_report({
+            "report": "# Selected Deal Comparison\n\n| Deal | EBITDA |",
+            "response": '{"report":"wrapped fallback"}',
+        })
+
+        self.assertEqual(report, "# Selected Deal Comparison\n\n| Deal | EBITDA |")
+
+    def test_extract_markdown_report_decodes_json_response_wrapper(self):
+        report = _extract_markdown_report({
+            "response": '{"report":"# FINANCE COMPARISON\\n\\nConcrete markdown body"}',
+            "thinking": "",
+        })
+
+        self.assertEqual(report, "# FINANCE COMPARISON\n\nConcrete markdown body")
+
+
+class PromptSeedTests(TestCase):
+    def test_seeded_deal_synthesis_owns_client_analysis_structure(self):
+        call_command("seed_ai_prompts", verbosity=0)
+
+        personality = AIPersonality.objects.get(is_default=True)
+        deal_synthesis = AISkill.objects.get(name="deal_synthesis")
+
+        self.assertIn("Company Overview", deal_synthesis.prompt_template)
+        self.assertIn("Promoters and Their Background", deal_synthesis.prompt_template)
+        self.assertIn("Key Financial Highlights", deal_synthesis.prompt_template)
+        self.assertIn("DuPont analysis", deal_synthesis.prompt_template)
+        self.assertIn("Key Peers and Valuation Multiples", deal_synthesis.prompt_template)
+        self.assertIn("related_deal_context", deal_synthesis.prompt_template)
+        self.assertIn("deal_specific_prompt", deal_synthesis.prompt_template)
+        self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
+        self.assertNotIn("## Company Overview", personality.system_instructions)
 
 
 class ResponseParserServiceTests(TestCase):
@@ -122,6 +170,33 @@ class UniversalChatServiceTests(TestCase):
             flow_config=UniversalChatFlowService.build_default_config(),
             flow_version=None,
         )
+
+    def test_saved_relationship_context_hydrates_selected_competitor_deals(self):
+        active = Deal.objects.create(title="Active Co", industry="Consumer", sector="Beauty")
+        competitor = Deal.objects.create(
+            title="Peer Co",
+            industry="Consumer",
+            sector="Beauty",
+            funding_ask="INR 50 Cr",
+            deal_summary="Peer has INR 120 Cr revenue and 18% EBITDA margin.",
+        )
+        DealRelationshipContext.objects.create(
+            deal=active,
+            relationship_type=DealRelationshipContext.RelationshipType.COMPETITOR,
+            notes="Use as closest branded consumer peer.",
+            selected_deal_ids=[str(competitor.id)],
+            selected_document_ids=["doc-1"],
+            selected_chunk_ids=["chunk-1"],
+        )
+
+        context = self.service._saved_relationship_context_for_deal(active)
+        payload = json.loads(context)
+
+        self.assertEqual(payload[0]["relationship_type"], DealRelationshipContext.RelationshipType.COMPETITOR)
+        self.assertEqual(payload[0]["analyst_notes"], "Use as closest branded consumer peer.")
+        self.assertEqual(payload[0]["related_deals"][0]["title"], "Peer Co")
+        self.assertEqual(payload[0]["related_deals"][0]["funding_ask"], "INR 50 Cr")
+        self.assertIn("18% EBITDA margin", payload[0]["related_deals"][0]["analysis_excerpt"])
 
     def test_follow_up_clarification_skips_query_builder(self):
         with patch.object(self.service, "_build_query_plan") as build_query_plan:

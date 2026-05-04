@@ -186,16 +186,18 @@ class UniversalChatService:
             "document_type": artifact.get("document_type") or fallback_metadata.get("document_type") or fallback_metadata.get("doc_type"),
             "citation_label": artifact.get("citation_label") or fallback_metadata.get("citation_label"),
             "document_summary": artifact.get("document_summary") or fallback_metadata.get("summary"),
-            "metrics": metrics[:10],
-            "tables_summary": tables[:6],
-            "risks": risks[:8],
-            "claims": claims[:8],
+            "metrics": metrics[:12],
+            "tables_summary": tables[:8],
+            "risks": risks[:10],
+            "claims": claims[:10],
             "metric_names": fallback_metadata.get("metric_names") or [
                 metric.get("name")
                 for metric in metrics
                 if isinstance(metric, dict) and metric.get("name")
-            ][:10],
-            "source_map": artifact.get("source_map") or fallback_metadata.get("source_map") or {},
+            ][:12],
+            # source_map is ONLY needed for the final answer UI, not for reranking or selection.
+            # Removing it saves massive amounts of memory during multi-deal retrieval.
+            "source_map": {}, 
         }
 
     def _document_metadata_for_chunk(self, chunk: DocumentChunk) -> Dict[str, Any]:
@@ -431,15 +433,52 @@ class UniversalChatService:
             contexts = deal.relationship_contexts.select_related("related_deal", "created_by").all()[:20]
         except Exception:
             return ""
-        lines = []
+        payload = []
         for item in contexts:
-            related_title = item.related_deal.title if item.related_deal else "Multiple selected deals"
-            notes = (item.notes or "").strip()
-            lines.append(
-                f"- {related_title} | Relation: {item.relationship_type}"
-                + (f" | Analyst notes: {notes}" if notes else "")
-            )
-        return "\n".join(lines)
+            selected_ids = [str(value) for value in (item.selected_deal_ids or []) if value]
+            if item.related_deal_id and str(item.related_deal_id) not in selected_ids:
+                selected_ids.append(str(item.related_deal_id))
+
+            related_deals = []
+            if selected_ids:
+                deal_by_id = {
+                    str(candidate.id): candidate
+                    for candidate in Deal.objects.filter(id__in=selected_ids).order_by("title")
+                }
+                for related_id in selected_ids:
+                    candidate = deal_by_id.get(str(related_id))
+                    if not candidate:
+                        continue
+                    current_analysis = candidate.current_analysis if isinstance(candidate.current_analysis, dict) else {}
+                    canonical_snapshot = current_analysis.get("canonical_snapshot") if isinstance(current_analysis, dict) else {}
+                    deal_model_data = current_analysis.get("deal_model_data") if isinstance(current_analysis, dict) else {}
+                    report = (
+                        current_analysis.get("analyst_report")
+                        or canonical_snapshot.get("analyst_report")
+                        or candidate.deal_summary
+                        or ""
+                    )
+                    related_deals.append({
+                        "id": str(candidate.id),
+                        "title": candidate.title,
+                        "industry": candidate.industry,
+                        "sector": candidate.sector,
+                        "current_phase": candidate.current_phase,
+                        "priority": candidate.priority,
+                        "funding_ask": candidate.funding_ask,
+                        "funding_ask_for": candidate.funding_ask_for,
+                        "deal_model_data": deal_model_data if isinstance(deal_model_data, dict) else {},
+                        "analysis_excerpt": self._truncate_for_prompt(report, 1800),
+                    })
+
+            payload.append({
+                "relationship_type": item.relationship_type,
+                "analyst_notes": (item.notes or "").strip(),
+                "selected_document_ids": item.selected_document_ids or [],
+                "selected_chunk_ids": item.selected_chunk_ids or [],
+                "related_deals": related_deals,
+            })
+        return json.dumps(payload, default=str, ensure_ascii=True, indent=2) if payload else ""
 
     def classify_deal_helper_route(self, user_message: str) -> str:
         lowered = (user_message or "").lower()
@@ -447,7 +486,12 @@ class UniversalChatService:
             return "analysis_full_rewrite"
         if any(term in lowered for term in ["addendum", "ic note", "financial model", "memo", "risk register", "new analysis", "v2", "v3"]):
             return "analysis_user_directive_addendum"
-        if any(term in lowered for term in ["competitor", "competitors", "similar deal", "similar deals", "comparable", "other deals", "pipeline", "sister", "parent", "subsidiary"]):
+        if any(term in lowered for term in [
+            "competitor", "competitors", "similar deal", "similar deals", "comparable",
+            "other deals", "pipeline", "sister", "parent", "subsidiary", "compare",
+            "compared", "comparison", " vs ", " versus ", "benchmark", "relative to",
+            "how does this compare",
+        ]):
             return "related_deals"
         return "current_deal"
 
@@ -461,6 +505,7 @@ class UniversalChatService:
         if route == "related_deals":
             # Increase limit for interactive selection so analyst has more choices (e.g. at least 12)
             plan["deal_limit"] = max(int(plan.get("deal_limit") or 12), 12)
+            plan["_active_deal_context"] = self._active_deal_context_for_related_selection(deal)
             deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
             serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
             for index, item in enumerate(serialized_deals):
@@ -469,7 +514,7 @@ class UniversalChatService:
                     getattr(deals[index], "_deal_text_rerank_reason", None)
                     or "Reranked pipeline match"
                 )
-            self._apply_dynamic_suggestions(serialized_deals, score_key="suggested_score")
+            self._apply_related_deal_suggestions(serialized_deals, plan)
             return {
                 "route": route,
                 "query_plan": plan,
@@ -484,6 +529,28 @@ class UniversalChatService:
             "saved_context": saved_context,
             "candidate_deals": [],
             "documents": self._rank_deal_documents_for_helper(deal, plan, documents),
+        }
+
+    def _apply_related_deal_suggestions(self, items: List[Dict[str, Any]], plan: Dict[str, Any]) -> None:
+        if not isinstance(plan.get("_active_deal_context"), dict):
+            self._apply_dynamic_suggestions(items, score_key="suggested_score")
+            return
+        suggestion_count = min(3, len(items))
+        for index, item in enumerate(items):
+            item["suggested"] = index < suggestion_count
+            if item["suggested"] and not item.get("rank_reason"):
+                item["rank_reason"] = "Top comparable to active deal"
+
+    def _active_deal_context_for_related_selection(self, deal: Deal) -> Dict[str, Any]:
+        return {
+            "deal_id": str(deal.id),
+            "title": deal.title,
+            "industry": deal.industry,
+            "sector": deal.sector,
+            "themes": deal.themes if isinstance(deal.themes, list) else [],
+            "summary": self._truncate_for_prompt(deal.deal_summary or "", 1800),
+            "funding_ask": deal.funding_ask,
+            "funding_ask_for": deal.funding_ask_for,
         }
 
     def _rank_deal_documents_for_helper(self, deal: Deal, plan: Dict[str, Any], documents: List[DealDocument]) -> List[Dict[str, Any]]:
@@ -743,6 +810,402 @@ class UniversalChatService:
         self._apply_dynamic_suggestions(serialized, score_key="score")
         return serialized, diagnostics
 
+    def documents_for_selected_deals(self, *, plan: Dict[str, Any], deal_ids: List[str], current_deal_id: str | None = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        self._trace_chunks("documents_for_selected_deals_start", deal_ids=deal_ids)
+        target_ids = [str(item) for item in deal_ids if item]
+        if current_deal_id and str(current_deal_id) not in target_ids:
+            target_ids.append(str(current_deal_id))
+
+        deals = list(Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs"))
+        self._trace_chunks("documents_for_selected_deals_query_ranked_chunks_start")
+        chunks, diagnostics = self._search_ranked_chunks(plan, deals)
+        self._trace_chunks("documents_for_selected_deals_query_ranked_chunks_done", chunks=len(chunks))
+        
+        score_by_document_key: Dict[Tuple[str, str], float] = {}
+        reason_by_document_key: Dict[Tuple[str, str], str] = {}
+
+        for item in chunks:
+            chunk = item["chunk"]
+            score = float(item.get("score") or 0)
+            metadata = chunk.metadata or {}
+            document_metadata = self._document_metadata_for_chunk(chunk)
+            deal_id = str(chunk.deal_id or "")
+            keys = [
+                str(chunk.source_id or ""),
+                str(metadata.get("document_id") or ""),
+                str(metadata.get("title") or ""),
+                str(metadata.get("filename") or ""),
+                str(document_metadata.get("document_name") or ""),
+            ]
+            for key in keys:
+                normalized = self._normalize_document_match_key(key)
+                if not normalized:
+                    continue
+                compound_key = (deal_id, normalized)
+                if score > score_by_document_key.get(compound_key, 0):
+                    score_by_document_key[compound_key] = score
+                    reason_by_document_key[compound_key] = item.get("llm_reason") or item.get("rank_reason") or "Reranker found relevant evidence in this document"
+
+        self._trace_chunks("documents_for_selected_deals_fetch_docs_start")
+        documents = list(
+            DealDocument.objects.filter(deal_id__in=target_ids, is_indexed=True)
+            .select_related("deal")
+            .only(
+                "id", "deal_id", "deal__title", "title", "document_type", 
+                "is_indexed", "is_ai_analyzed", "transcription_status", 
+                "chunking_status", "file_url", "created_at",
+                "onedrive_id"
+            )
+            .order_by("deal__title", "-created_at")
+        )
+        self._trace_chunks("documents_for_selected_deals_fetch_docs_done", documents=len(documents))
+        
+        self._trace_chunks("documents_for_selected_deals_rerank_start")
+        document_rerank_scores = self._rerank_selected_deal_documents(plan, documents)
+        self._trace_chunks("documents_for_selected_deals_rerank_done")
+        
+        payload: List[Dict[str, Any]] = []
+        for document_index, document in enumerate(documents):
+            deal_id = str(document.deal_id)
+            keys = [
+                str(document.id),
+                str(document.onedrive_id or ""),
+                str(document.title or ""),
+            ]
+            scored_keys = [
+                (deal_id, self._normalize_document_match_key(key))
+                for key in keys
+                if self._normalize_document_match_key(key)
+            ]
+            score = max((score_by_document_key.get(key, 0) for key in scored_keys), default=0)
+            direct_document_score = document_rerank_scores.get(document_index, 0.0)
+            if direct_document_score:
+                score = max(score, direct_document_score)
+            
+            rank_reason = next(
+                (reason_by_document_key.get(key) for key in scored_keys if reason_by_document_key.get(key)),
+                "Reranked document match" if direct_document_score else "Available indexed document",
+            )
+            payload.append({
+                "id": str(document.id),
+                "deal_id": deal_id,
+                "deal": document.deal.title if document.deal else "",
+                "title": document.title,
+                "document_type": document.document_type,
+                "is_indexed": document.is_indexed,
+                "is_ai_analyzed": document.is_ai_analyzed,
+                "transcription_status": document.transcription_status,
+                "chunking_status": document.chunking_status,
+                "file_url": document.file_url,
+                "is_current_deal": bool(current_deal_id and deal_id == str(current_deal_id)),
+                "suggested": score > 0,
+                "suggested_score": round(score, 3) if score else None,
+                "rank_reason": rank_reason,
+            })
+
+        self._trace_chunks("documents_for_selected_deals_guidance_start")
+        # Apply guidance adjustment to suggested candidates
+        suggested_candidates = [item for item in payload if item["suggested"]]
+        if suggested_candidates:
+            guidance_ids = [item["id"] for item in suggested_candidates[:HARD_MAX_RERANK_CANDIDATES]]
+            guidance_map = {
+                doc.id: doc 
+                for doc in DealDocument.objects.filter(id__in=guidance_ids)
+                .only("id", "title", "document_type", "key_metrics_json", "evidence_json")
+            }
+            for item in payload:
+                doc = guidance_map.get(item["id"])
+                if not doc:
+                    continue
+                score = float(item.get("suggested_score") or 0)
+                adjustment = self._document_guidance_adjustment(plan, doc)
+                if adjustment:
+                    item["suggested_score"] = round(max(0.0, score + adjustment), 3)
+
+        payload.sort(
+            key=lambda item: (
+                float(item.get("suggested_score") or 0),
+                bool(item.get("is_current_deal")),
+                item.get("deal") or "",
+                item.get("title") or "",
+            ),
+            reverse=True,
+        )
+        self._apply_selected_document_suggestions(payload)
+        self._trace_chunks("documents_for_selected_deals_done", payload=len(payload))
+        return payload, diagnostics
+
+    def _document_guidance_adjustment(self, plan: Dict[str, Any], document: DealDocument) -> float:
+        title = str(document.title or "").lower()
+        doc_type = str(document.document_type or "").lower()
+        
+        # Build context preview from metadata instead of raw heavy text
+        evidence = document.evidence_json if isinstance(document.evidence_json, dict) else {}
+        summary = str(evidence.get("document_summary") or "").lower()
+        metrics = json.dumps(document.key_metrics_json or [], default=str).lower()
+        
+        text_preview = f"{title} {doc_type} {summary[:1500]} {metrics[:1000]}".lower()
+        adjustment = 0.0
+
+        legal_markers = ["nda", "non disclosure", "non-disclosure", "confidentiality", "legal"]
+        if any(marker in title or marker in doc_type for marker in legal_markers):
+            adjustment -= 700.0
+
+        metric_terms = [str(item).lower() for item in plan.get("metric_terms", []) if str(item).strip()]
+        metric_intent = bool(metric_terms) or plan.get("evidence_preference") == "metrics"
+        if metric_intent:
+            metric_doc_markers = [
+                "investor deck", "deck", "financial", "model", "xls", "xlsx", "dealinfo",
+                "p&l", "profit", "revenue", "ebitda", "margin", "unit economics", "irr",
+                "valuation", "pat", "cash flow", "balance sheet",
+            ]
+            if any(marker in text_preview for marker in metric_doc_markers):
+                adjustment += 360.0
+            matched_metric_terms = sum(1 for term in metric_terms if term in text_preview)
+            if matched_metric_terms:
+                adjustment += min(300.0, matched_metric_terms * 75.0)
+
+        return adjustment
+
+    def _apply_selected_document_suggestions(self, items: List[Dict[str, Any]]) -> None:
+        for item in items:
+            item["suggested"] = False
+
+        by_deal: Dict[str, List[Dict[str, Any]]] = {}
+        for item in items:
+            by_deal.setdefault(str(item.get("deal_id") or ""), []).append(item)
+
+        for deal_items in by_deal.values():
+            ranked = sorted(deal_items, key=lambda item: float(item.get("suggested_score") or 0), reverse=True)
+            for item in ranked[:2]:
+                if float(item.get("suggested_score") or 0) > 0:
+                    item["suggested"] = True
+                    if not item.get("rank_reason") or item.get("rank_reason") == "Available indexed document":
+                        item["rank_reason"] = "Top document match for this selected deal"
+
+    def _rerank_selected_deal_documents(self, plan: Dict[str, Any], documents: List[DealDocument]) -> Dict[int, float]:
+        reranker_model = getattr(self.embed_service, "reranker_model", "")
+        if not reranker_model or not documents:
+            return {}
+
+        candidate_limit = min(len(documents), HARD_MAX_RERANK_CANDIDATES)
+        query = self._build_rerank_query(plan)
+        
+        rerank_settings = self._stage_settings("chunk_rerank")
+        # Use a small hydration batch size to keep memory low
+        batch_size = max(1, int(rerank_settings.get("chunk_rerank_batch_size") or 12))
+        
+        scores: Dict[int, float] = {}
+        try:
+            for start in range(0, candidate_limit, batch_size):
+                end = min(start + batch_size, candidate_limit)
+                batch_ids = [doc.id for doc in documents[start:end]]
+                
+                self._trace_chunks("document_rerank_hydrate_start", batch_start=start, batch_count=len(batch_ids))
+                
+                # Hydrate only this small batch
+                hydrated_batch = list(
+                    DealDocument.objects.filter(id__in=batch_ids)
+                    .select_related("deal")
+                    .only(
+                        "id", "deal_id", "deal__title", "deal__industry", "deal__sector",
+                        "title", "document_type",
+                        "key_metrics_json", "evidence_json", "table_json"
+                    )
+                )
+                
+                # Maintain original order for reranking results mapping
+                id_to_doc = {doc.id: doc for doc in hydrated_batch}
+                target_docs = [id_to_doc.get(doc_id) for doc_id in batch_ids if id_to_doc.get(doc_id)]
+                
+                self._trace_chunks("document_rerank_batch_call_start", batch_size=len(target_docs))
+                
+                payload = [self._build_helper_document_text(document) for document in target_docs]
+                
+                batch_results = self.embed_service.reranker.rerank(
+                    model=reranker_model,
+                    query=query,
+                    documents=payload,
+                )
+                
+                for item in batch_results or []:
+                    index = item.get("index")
+                    score = item.get("score")
+                    if index is None or score is None:
+                        continue
+                    scores[int(index) + start] = round(float(score) * 1000.0, 3)
+                
+                self._trace_chunks(
+                    "document_rerank_batch_done",
+                    batch_start=start,
+                    batch_size=len(target_docs),
+                    results=len(batch_results or []),
+                )
+                
+                # Explicitly clear batch objects to help GC
+                del hydrated_batch
+                del target_docs
+                del payload
+                
+        except Exception as exc:
+            logger.error("Selected-deal document reranker failed: %s", exc, exc_info=True)
+            return {}
+
+        return scores
+
+    def _build_helper_document_text(self, document: DealDocument) -> str:
+        # Surgical slice of potentially massive JSON fields to avoid OOM during serialization
+        metrics = (document.key_metrics_json or [])[:12]
+        evidence = (document.evidence_json or {})
+        if isinstance(evidence, dict):
+            # Only keep high-level evidence points for reranking context
+            evidence = {k: v for k, v in list(evidence.items())[:10] if k != "full_text"}
+            
+        tables = (document.table_json or [])[:8]
+        
+        evidence_payload = {
+            "key_metrics": metrics,
+            "evidence": evidence,
+            "tables": tables,
+        }
+        
+        parts = [
+            f"Deal: {document.deal.title if document.deal else ''}",
+            f"Deal Industry: {document.deal.industry if document.deal else ''}",
+            f"Deal Sector: {document.deal.sector if document.deal else ''}",
+            f"Document Title: {document.title or ''}",
+            f"Document Type: {document.document_type or ''}",
+            f"Artifact Metadata: {json.dumps(evidence_payload, default=str, ensure_ascii=True)[:2500]}",
+            # User request: Do not include full normalized text in document selection reranking.
+            # We rely on the AI-extracted metadata and summary instead.
+        ]
+        return "\n".join(part for part in parts if part).strip()
+
+    def chunks_for_selected_documents_multi_deal(self, *, plan: Dict[str, Any], document_ids: List[str], current_deal_id: str | None = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_start", document_ids=document_ids)
+        selected_documents = list(
+            DealDocument.objects.filter(id__in=document_ids, is_indexed=True)
+            .select_related("deal")
+        )
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_fetch_docs_done", documents=len(selected_documents))
+        
+        deals = list({document.deal_id: document.deal for document in selected_documents if document.deal}.values())
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_search_ranked_chunks_start", deals=len(deals))
+        chunks, diagnostics = self._search_ranked_chunks(plan, deals)
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_search_ranked_chunks_done", chunks=len(chunks))
+        
+        allowed_keys = set()
+        for document in selected_documents:
+            deal_id = str(document.deal_id)
+            for value in [str(document.id), str(document.onedrive_id or ""), str(document.title or "")]:
+                normalized = self._normalize_document_match_key(value)
+                if normalized:
+                    allowed_keys.add((deal_id, normalized))
+
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_filtering_start", allowed_keys=len(allowed_keys))
+        selected = []
+        for item in chunks:
+            chunk = item["chunk"]
+            metadata = chunk.metadata or {}
+            document_metadata = self._document_metadata_for_chunk(chunk)
+            deal_id = str(chunk.deal_id or "")
+            chunk_keys = {
+                (deal_id, self._normalize_document_match_key(value))
+                for value in [
+                    str(chunk.source_id or ""),
+                    str(metadata.get("document_id") or ""),
+                    str(metadata.get("title") or ""),
+                    str(metadata.get("filename") or ""),
+                    str(document_metadata.get("document_name") or ""),
+                ]
+            }
+            if allowed_keys.intersection(key for key in chunk_keys if key[1]):
+                selected.append(item)
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_filtering_done", selected=len(selected))
+
+        if not selected and allowed_keys:
+            self._trace_chunks("chunks_for_selected_documents_multi_deal_fallback_start")
+            fallback = []
+            for chunk in (
+                DocumentChunk.objects.filter(deal_id__in=[document.deal_id for document in selected_documents])
+                .select_related("deal")
+                .order_by("-created_at")
+                .iterator(chunk_size=100)
+            ):
+                metadata = chunk.metadata or {}
+                document_metadata = self._document_metadata_for_chunk(chunk)
+                deal_id = str(chunk.deal_id or "")
+                chunk_keys = {
+                    (deal_id, self._normalize_document_match_key(value))
+                    for value in [
+                        str(chunk.source_id or ""),
+                        str(metadata.get("document_id") or ""),
+                        str(metadata.get("title") or ""),
+                        str(metadata.get("filename") or ""),
+                        str(document_metadata.get("document_name") or ""),
+                    ]
+                }
+                if allowed_keys.intersection(key for key in chunk_keys if key[1]):
+                    fallback.append({"chunk": chunk, "score": 1.0})
+                if len(fallback) >= 120:
+                    break
+            selected = fallback
+            self._trace_chunks("chunks_for_selected_documents_multi_deal_fallback_done", fallback=len(fallback))
+
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_serialization_start")
+        serialized = [self._serialize_chunk(item) for item in selected]
+        for item in serialized:
+            item["is_current_deal"] = bool(current_deal_id and str(item.get("deal_id")) == str(current_deal_id))
+        
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_apply_suggestions_start")
+        self._apply_balanced_selected_document_chunk_suggestions(serialized, selected_documents)
+        self._trace_chunks("chunks_for_selected_documents_multi_deal_done", serialized=len(serialized))
+        return serialized, diagnostics
+
+    def _apply_balanced_selected_document_chunk_suggestions(self, items: List[Dict[str, Any]], selected_documents: List[DealDocument]) -> None:
+        for item in items:
+            item["suggested"] = False
+
+        selected_deal_ids: List[str] = []
+        for document in selected_documents:
+            deal_id = str(document.deal_id or "")
+            if deal_id and deal_id not in selected_deal_ids:
+                selected_deal_ids.append(deal_id)
+        if not selected_deal_ids:
+            selected_deal_ids = []
+            for item in items:
+                deal_id = str(item.get("deal_id") or "")
+                if deal_id and deal_id not in selected_deal_ids:
+                    selected_deal_ids.append(deal_id)
+
+        deal_count = max(len(selected_deal_ids), 1)
+        suggestion_cap = min(HARD_MAX_GLOBAL_CHUNKS, max(12, min(24, deal_count * 6)))
+        per_deal_cap = max(2, min(6, (suggestion_cap + deal_count - 1) // deal_count))
+        selected_count = 0
+
+        for deal_id in selected_deal_ids:
+            deal_items = [item for item in items if str(item.get("deal_id") or "") == deal_id]
+            for item in deal_items[:per_deal_cap]:
+                item["suggested"] = True
+                selected_count += 1
+                if not item.get("rank_reason"):
+                    item["rank_reason"] = "Top semantic chunk from this selected deal's documents"
+                if selected_count >= suggestion_cap:
+                    return
+
+        if selected_count >= suggestion_cap:
+            return
+
+        for item in items:
+            if item.get("suggested"):
+                continue
+            item["suggested"] = True
+            selected_count += 1
+            if not item.get("rank_reason"):
+                item["rank_reason"] = "Additional high-ranking chunk from selected documents"
+            if selected_count >= suggestion_cap:
+                break
+
     def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         deal = Deal.objects.get(id=deal_id)
         selected_documents = list(deal.documents.filter(id__in=document_ids))
@@ -799,8 +1262,18 @@ class UniversalChatService:
             item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk")
         return serialized, diagnostics
 
-    def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "") -> str:
-        deals = [self._serialize_deal(deal) for deal in Deal.objects.filter(id__in=deal_ids).prefetch_related("phase_logs")]
+    def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "", current_deal_id: str | None = None) -> str:
+        target_ids = [str(item) for item in deal_ids if item]
+        if current_deal_id and str(current_deal_id) not in target_ids:
+            target_ids.append(str(current_deal_id))
+        deals_qs = Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs")
+        deals = []
+        for deal in deals_qs:
+            sd = self._serialize_deal(deal)
+            if current_deal_id and str(deal.id) == str(current_deal_id):
+                sd["is_primary_deal"] = True
+            deals.append(sd)
+            
         context_data, _diagnostics = self._format_context_data(plan, deals, chunks)
         if extra_context:
             context_data = f"{context_data}\n\n[SAVED/ANALYST CONTEXT]\n{extra_context}"
@@ -1356,6 +1829,8 @@ class UniversalChatService:
             result_limit=result_limit,
             rerank_settings=rerank_settings,
         )
+        if isinstance(plan.get("_active_deal_context"), dict):
+            scored = self._prioritize_related_comparables(scored, plan)
         scoped_scored = self._apply_result_shape_scope(scored, plan, result_limit=result_limit)
         if scoped_scored:
             scored = scoped_scored
@@ -1374,6 +1849,43 @@ class UniversalChatService:
                 selected_deals = list(pool[:result_limit])
 
         return list(selected_deals)
+
+    def _prioritize_related_comparables(self, scored: List[Tuple[float, Deal]], plan: Dict[str, Any]) -> List[Tuple[float, Deal]]:
+        active_context = plan.get("_active_deal_context") if isinstance(plan.get("_active_deal_context"), dict) else {}
+        if not active_context:
+            return scored
+
+        def comparable_tier(deal: Deal) -> Tuple[int, float]:
+            active_industry = str(active_context.get("industry") or "")
+            active_sector = str(active_context.get("sector") or "").strip().lower()
+            candidate_industry = str(deal.industry or "").strip().lower()
+            candidate_sector = str(deal.sector or "").strip().lower()
+            candidate_text = self._deal_combined_text(deal)
+
+            specific_tokens = self._specific_business_tokens(active_industry)
+            specific_hits = sum(1 for token in specific_tokens if token in candidate_text)
+            if specific_hits:
+                return 4, float(specific_hits)
+            if active_industry and candidate_industry and active_industry.lower() == candidate_industry:
+                return 4, 0.0
+            if active_sector and candidate_sector and active_sector == candidate_sector:
+                return 2, 0.0
+            active_label_tokens = self._token_set(" ".join([active_industry, active_sector]))
+            candidate_label_tokens = self._token_set(" ".join([candidate_industry, candidate_sector]))
+            if active_label_tokens.intersection(candidate_label_tokens):
+                return 1, float(len(active_label_tokens.intersection(candidate_label_tokens)))
+            return 0, 0.0
+
+        return sorted(
+            scored,
+            key=lambda item: (
+                comparable_tier(item[1])[0],
+                comparable_tier(item[1])[1],
+                item[0],
+                item[1].created_at,
+            ),
+            reverse=True,
+        )
 
     def _promote_plan_from_resolved_named_deals(self, plan: Dict[str, Any], resolved_named_deals: List[Deal]) -> None:
         if (plan.get("stats_mode") or "none") != "none":
@@ -1439,7 +1951,9 @@ class UniversalChatService:
 
         evidence_preference = plan.get("evidence_preference")
         ordered_blocks: List[str] = []
-        if evidence_preference == "metrics":
+        if plan.get("_active_deal_context"):
+            ordered_blocks.extend([summary_block, risk_block, metrics_block])
+        elif evidence_preference == "metrics":
             ordered_blocks.extend([metrics_block, summary_block, risk_block])
         elif evidence_preference == "risks":
             ordered_blocks.extend([risk_block, summary_block, metrics_block])
@@ -1475,7 +1989,7 @@ class UniversalChatService:
         rerank_weight = float(rerank_settings.get("deal_rerank_weight") or 180)
         rerank_input = scored[:candidate_limit]
         documents = [self._build_deal_rerank_document(deal, plan) for _, deal in rerank_input]
-        query = self._build_rerank_query(plan)
+        query = self._build_deal_selection_query(plan)
         try:
             results = self.embed_service.reranker.rerank(
                 model=reranker_model,
@@ -1526,10 +2040,16 @@ class UniversalChatService:
         ]
         llm_adjustments = self._text_model_rerank(
             label="deal",
-            query=self._build_rerank_query(plan),
+            query=self._build_deal_selection_query(plan),
             active_context=json.dumps({
                 "query_plan": plan,
                 "candidate_scope": "related_deals",
+                "active_deal_context": plan.get("_active_deal_context") or {},
+                "selection_rule": (
+                    "Rank true business competitors/comparables to the active deal first. "
+                    "Industry, sector, customer segment, product/service model, revenue model, and customer geography "
+                    "outrank generic availability of financial metrics. Financial richness is secondary evidence quality."
+                ),
             }, default=str, ensure_ascii=True, indent=2),
             candidates=llm_candidates,
             candidate_limit=min(len(llm_candidates), 8),
@@ -1539,7 +2059,8 @@ class UniversalChatService:
             for index, (base_score, deal) in enumerate(blended):
                 adjustment = llm_adjustments.get(index)
                 if adjustment:
-                    llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 3.0
+                    # Increased multiplier from 3.0 to 12.0 to allow LLM to significantly impact the final ranking
+                    llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 12.0
                     components = dict(getattr(deal, "_retrieval_components", {}) or {})
                     components["text_model_relevance"] = round(llm_boost, 3)
                     final_score = round(base_score + llm_boost, 3)
@@ -1552,6 +2073,30 @@ class UniversalChatService:
             rebased.sort(key=lambda item: (item[0], item[1].created_at), reverse=True)
             blended = rebased
         return blended
+
+    def _build_deal_selection_query(self, plan: Dict[str, Any]) -> str:
+        active_context = plan.get("_active_deal_context") if isinstance(plan.get("_active_deal_context"), dict) else {}
+        if not active_context:
+            return self._build_rerank_query(plan)
+
+        parts = [
+            "Select true pipeline competitors/comparables to the active deal.",
+            "Rank by business comparability first: same/adjacent industry, sector, customer, product/service model, revenue model, geography, and deal stage.",
+            "Do not rank candidates higher merely because they have financial metrics or richer documents.",
+            "The user's requested metric/detail type is for later evidence retrieval after comparable deals are selected.",
+            "active_deal: "
+            + " | ".join(
+                str(value or "").strip()
+                for value in [
+                    active_context.get("title"),
+                    active_context.get("industry"),
+                    active_context.get("sector"),
+                    active_context.get("summary"),
+                ]
+                if str(value or "").strip()
+            ),
+        ]
+        return "\n".join(parts)
 
     def _keyword_candidate_pool(self, queryset, plan: Dict[str, Any], *, limit: int) -> List[Deal]:
         named_terms = self._extract_named_deal_terms(plan)
@@ -1749,6 +2294,7 @@ class UniversalChatService:
         exact_terms = [term.lower() for term in plan.get("exact_terms", [])]
         metric_terms = [term.lower() for term in plan.get("metric_terms", [])]
         components: Dict[str, float] = {}
+        active_context = plan.get("_active_deal_context") if isinstance(plan.get("_active_deal_context"), dict) else {}
 
         for phrase in exact_terms + named_terms:
             if not phrase:
@@ -1760,17 +2306,116 @@ class UniversalChatService:
             elif phrase in combined:
                 components["context_phrase_match"] = components.get("context_phrase_match", 0.0) + 80.0
 
-        for metric in metric_terms:
-            if metric in combined:
-                components["metric_term"] = components.get("metric_term", 0.0) + float(rerank_settings.get("deal_metric_boost") or 20) + 18.0
+        if not active_context:
+            for metric in metric_terms:
+                if metric in combined:
+                    components["metric_term"] = components.get("metric_term", 0.0) + float(rerank_settings.get("deal_metric_boost") or 20) + 18.0
 
         if semantic_rank is not None:
             components["semantic_rank"] = max(0.0, float((semantic_limit - semantic_rank) * 14))
         if plan.get("hard_filters"):
             components["hard_filter_scope"] = 5.0 * len(plan.get("hard_filters", {}))
+        if active_context:
+            components.update(self._related_deal_comparability_components(deal, active_context))
 
         score = round(sum(components.values()), 3)
         return score, components
+
+    def _related_deal_comparability_components(self, deal: Deal, active_context: Dict[str, Any]) -> Dict[str, float]:
+        components: Dict[str, float] = {}
+        active_id = str(active_context.get("deal_id") or "")
+        if active_id and str(deal.id) == active_id:
+            components["active_deal_exclusion_penalty"] = -1000.0
+            return components
+
+        candidate_industry = str(deal.industry or "").strip().lower()
+        candidate_sector = str(deal.sector or "").strip().lower()
+        active_industry = str(active_context.get("industry") or "").strip().lower()
+        active_sector = str(active_context.get("sector") or "").strip().lower()
+
+        # Improved matching for sector/industry with segment awareness
+        def get_segments(text: str) -> set[str]:
+            return {s.strip().lower() for s in re.split(r"[/,&()]", text) if s.strip()}
+
+        active_sector_segments = get_segments(active_sector)
+        candidate_sector_segments = get_segments(candidate_sector)
+        if active_sector and candidate_sector:
+            if active_sector == candidate_sector:
+                components["same_sector"] = 260.0
+            elif active_sector_segments & candidate_sector_segments:
+                components["sector_segment_match"] = 220.0
+            elif active_sector in candidate_sector or candidate_sector in active_sector:
+                components["sector_phrase_overlap"] = 180.0
+
+        active_industry_segments = get_segments(active_industry)
+        candidate_industry_segments = get_segments(candidate_industry)
+        if active_industry and candidate_industry:
+            if active_industry == candidate_industry:
+                components["same_industry"] = 1000.0
+            elif active_industry_segments & candidate_industry_segments:
+                components["industry_segment_match"] = 920.0
+            else:
+                active_tokens = self._token_set(active_industry)
+                candidate_tokens = self._token_set(candidate_industry)
+                if active_tokens and candidate_tokens:
+                    overlap = len(active_tokens.intersection(candidate_tokens)) / len(active_tokens.union(active_tokens))
+                    if overlap:
+                        components["industry_token_overlap"] = round(overlap * 900.0, 3)
+
+        # Fix: use summary_excerpt which is the correct key from _serialize_deal
+        summary_text = str(active_context.get("summary_excerpt") or active_context.get("summary") or "")
+        active_label_tokens = self._token_set(
+            " ".join(
+                str(value or "")
+                for value in [active_context.get("industry"), active_context.get("sector"), summary_text]
+            )
+        )
+        candidate_label_tokens = self._token_set(self._deal_label_text(deal))
+        if active_label_tokens and candidate_label_tokens:
+            overlap = len(active_label_tokens.intersection(candidate_label_tokens)) / max(len(candidate_label_tokens), 1)
+            if overlap:
+                components["active_label_overlap"] = round(overlap * 120.0, 3)
+
+        active_themes = {
+            str(item).strip().lower()
+            for item in active_context.get("themes", [])
+            if str(item).strip()
+        }
+        candidate_themes = {
+            str(item).strip().lower()
+            for item in (deal.themes if isinstance(deal.themes, list) else [])
+            if str(item).strip()
+        }
+        if active_themes and candidate_themes:
+            overlap_count = len(active_themes.intersection(candidate_themes))
+            if overlap_count:
+                components["theme_overlap"] = min(120.0, overlap_count * 40.0)
+
+        has_business_overlap = any(
+            key in components
+            for key in [
+                "same_sector",
+                "sector_phrase_overlap",
+                "same_industry",
+                "industry_token_overlap",
+                "active_label_overlap",
+                "theme_overlap",
+            ]
+        )
+        if not has_business_overlap:
+            components["no_active_business_overlap_penalty"] = -260.0
+
+        return components
+
+    def _specific_business_tokens(self, text: str) -> set[str]:
+        broad_terms = {
+            "business", "company", "companies", "pipeline", "project", "model", "models",
+            "service", "services", "platform", "solutions", "india", "indian",
+            "healthcare", "health", "financial", "finance", "consumer", "technology",
+            "tech", "bfsi", "retail", "enterprise", "digital", "private", "limited",
+            "ltd", "pvt", "sector", "industry",
+        }
+        return {token for token in self._token_set(text) if token not in broad_terms}
 
     def _apply_result_shape_scope(
         self,
@@ -1973,6 +2618,7 @@ class UniversalChatService:
         scored_items.sort(key=lambda item: item["score"], reverse=True)
         llm_candidates = []
         if scored_items:
+            self._trace_chunks("score_llm_rerank_context_build_start", scored_items=len(scored_items))
             active_context = json.dumps(
                 {
                     "deals": [self._serialize_deal(deal) for deal in scoped_deals[:6]],
@@ -2000,6 +2646,7 @@ class UniversalChatService:
                     ),
                     "base_score": item["score"],
                 })
+            self._trace_chunks("score_llm_rerank_call_start", candidates=len(llm_candidates))
             llm_adjustments = self._text_model_rerank(
                 label="chunk",
                 query=self._build_rerank_query(plan),
@@ -2016,6 +2663,7 @@ class UniversalChatService:
                     item["score"] = round(item["score"] + llm_boost, 3)
                     item["llm_reason"] = adjustment.get("reason")
                 scored_items.sort(key=lambda item: item["score"], reverse=True)
+            self._trace_chunks("score_llm_rerank_done")
         self._trace_chunks("score_done", scored_items=len(scored_items), dropped_by_zero_score=dropped_by_zero_score)
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
@@ -2447,6 +3095,21 @@ class UniversalChatService:
 
     def _build_rerank_query(self, plan: Dict[str, Any]) -> str:
         parts: List[str] = []
+        active_context = plan.get("_active_deal_context") if isinstance(plan.get("_active_deal_context"), dict) else {}
+        if active_context:
+            parts.append(
+                "active_deal: "
+                + " | ".join(
+                    str(value or "").strip()
+                    for value in [
+                        active_context.get("title"),
+                        active_context.get("industry"),
+                        active_context.get("sector"),
+                    ]
+                    if str(value or "").strip()
+                )
+            )
+            parts.append("related_deal_rule: select same/adjacent industry competitors first, then retrieve requested evidence within them")
         named_entities = [
             str(entity.get("text") or "").strip()
             for entity in plan.get("named_entities", [])
@@ -2512,6 +3175,16 @@ class UniversalChatService:
             }
             for log in deal.phase_logs.all().order_by("-changed_at")[:3]
         ]
+        
+        # Omit the massive analysis_json/current_analysis blob to avoid OOM in large retrieval turns.
+        # Everything needed for the context or UI is already extracted into top-level fields.
+        compact_analysis = {
+            "report": current_analysis.get("report") or "",
+            "kind": current_analysis.get("kind"),
+            "created_at": current_analysis.get("created_at"),
+            "documents_analyzed": current_analysis.get("documents_analyzed", []),
+        }
+
         return {
             "deal_id": str(deal.id),
             "title": deal.title,
@@ -2529,7 +3202,7 @@ class UniversalChatService:
             "reasons_for_passing": deal.reasons_for_passing,
             "has_extracted_documents": getattr(deal, "is_indexed", False) or bool(deal.extracted_text),
             "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
-            "current_analysis": current_analysis,
+            "current_analysis": compact_analysis,
             "recent_timeline": recent_timeline,
             "retrieval_score": getattr(deal, "_retrieval_score", None),
             "retrieval_components": getattr(deal, "_retrieval_components", None),
@@ -2557,10 +3230,25 @@ class UniversalChatService:
 
     def _format_context_data(self, plan: Dict[str, Any], deals: List[Dict[str, Any]], chunks: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> Tuple[str, Dict[str, Any]]:
         diagnostics = diagnostics or {}
+        
+        # Identify primary deal for explicit labeling
+        primary_deal = next((d for d in deals if d.get("is_primary_deal")), None)
+        
         sections = [
             "[PIPELINE OVERVIEW]",
             self._build_pipeline_overview_from_payload(deals),
             "",
+        ]
+        
+        if primary_deal:
+            sections.extend([
+                "[PRIMARY DEAL - ACTIVE CONTEXT]",
+                f"THE CURRENT DEAL BEING ANALYZED IS: {primary_deal['title'].upper()}",
+                "Use this deal as the anchor for all comparisons and reasoning.",
+                "",
+            ])
+
+        sections.extend([
             "[QUERY PLAN]",
             json.dumps(plan, default=str, indent=2),
             "",
@@ -2568,13 +3256,14 @@ class UniversalChatService:
             "* NOTE: Deals marked 'Has Extracted Docs: NO' are legacy records containing ONLY high-level metadata, stats, and comments.",
             "* DO NOT hallucinate or assume the existence of deep-dive financial models or full documents for these deals.",
             "",
-        ]
+        ])
 
         if deals:
             for deal in deals:
                 has_docs_str = "YES" if deal.get("has_extracted_documents") else "NO"
+                is_primary_str = " [PRIMARY DEAL]" if deal.get("is_primary_deal") else ""
                 sections.append(
-                    f"- {deal['title']} | Has Extracted Docs: {has_docs_str} | Industry: {deal.get('industry') or 'N/A'} | "
+                    f"- {deal['title']}{is_primary_str} | Has Extracted Docs: {has_docs_str} | Industry: {deal.get('industry') or 'N/A'} | "
                     f"Sector: {deal.get('sector') or 'N/A'} | Priority: {deal.get('priority') or 'N/A'} | "
                     f"Phase: {deal.get('current_phase') or 'N/A'} | Themes: {', '.join(deal.get('themes') or []) or 'N/A'}"
                 )

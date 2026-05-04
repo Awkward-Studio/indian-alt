@@ -281,6 +281,74 @@ class DealHelperView(APIView):
     def _profile(self, request):
         return getattr(request.user, "profile", None)
 
+    def _touch_conversation(self, conversation: AIConversation) -> None:
+        conversation.updated_at = timezone.now()
+        conversation.save(update_fields=["updated_at"])
+
+    def _helper_event(
+        self,
+        *,
+        conversation: AIConversation,
+        session_id: str,
+        route: str | None,
+        event_type: str,
+        title: str,
+        summary: str,
+        data: Dict[str, Any] | None = None,
+    ) -> AIMessage:
+        message = AIMessage.objects.create(
+            conversation=conversation,
+            role="assistant",
+            content=summary,
+            data_points=data or {},
+            applied_filters={
+                "kind": "deal_helper_event",
+                "event_type": event_type,
+                "session_id": session_id,
+                "route": route,
+                "title": title,
+            },
+        )
+        self._touch_conversation(conversation)
+        return message
+
+    def _summarize_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "chunk_id": str(chunk.get("chunk_id") or ""),
+                "deal_id": str(chunk.get("deal_id") or ""),
+                "deal": chunk.get("deal") or "",
+                "source_type": chunk.get("source_type") or "",
+                "source_id": str(chunk.get("source_id") or ""),
+                "source_title": chunk.get("source_title") or chunk.get("source_type") or "",
+                "score": chunk.get("score"),
+                "excerpt": str(chunk.get("text") or "")[:500],
+                "is_current_deal": bool(chunk.get("is_current_deal")),
+            }
+            for chunk in chunks
+        ]
+
+    def _commit_relationship_context(
+        self,
+        *,
+        request,
+        deal: Deal,
+        session: Dict[str, Any],
+        selected_chunk_ids: List[str],
+    ) -> None:
+        if session.get("route") != "related_deals" or not session.get("selected_deal_ids"):
+            return
+        DealRelationshipContext.objects.create(
+            deal=deal,
+            related_deal=None,
+            relationship_type=session.get("relationship_type") or DealRelationshipContext.RelationshipType.COMPARABLE,
+            notes=session.get("relationship_notes") or "",
+            selected_deal_ids=session.get("selected_deal_ids") or [],
+            selected_document_ids=session.get("selected_document_ids") or [],
+            selected_chunk_ids=selected_chunk_ids,
+            created_by=self._profile(request),
+        )
+
     def post(self, request, action: str):
         handlers = {
             "start": self.start,
@@ -327,7 +395,10 @@ class DealHelperView(APIView):
             return Response({"error": "deal_id and message are required."}, status=400)
         deal = Deal.objects.get(id=deal_id)
         conversation = self._conversation_for_deal(request, deal, request.data.get("conversation_id"), message)
-        history_context = ""
+        from .tasks import _build_history_context
+        user_message = AIMessage.objects.create(conversation=conversation, role="user", content=message)
+        self._touch_conversation(conversation)
+        history_context, _history_messages_used, _history_chars_used = _build_history_context(conversation)
         service = UniversalChatService(AIProcessorService())
         helper = service.start_deal_helper_session(
             deal_id=str(deal.id),
@@ -349,17 +420,35 @@ class DealHelperView(APIView):
             "relationship_type": None,
             "relationship_notes": "",
             "saved_context": helper.get("saved_context") or "",
+            "user_message_id": str(user_message.id),
         }
         self._save_session(session_id, payload)
+        self._helper_event(
+            conversation=conversation,
+            session_id=session_id,
+            route=helper["route"],
+            event_type="start",
+            title="Started Deal Helper",
+            summary=f"Started deal helper workflow: {helper['route'].replace('_', ' ')}.",
+            data={
+                "deal": {"id": str(deal.id), "title": deal.title},
+                "message": message,
+                "route": helper["route"],
+                "candidate_deal_count": len(helper.get("candidate_deals") or []),
+                "document_count": len(helper.get("documents") or []),
+            },
+        )
         return Response({
             **helper,
             "session_id": session_id,
             "conversation_id": str(conversation.id),
+            "user_message_id": str(user_message.id),
             "deal": {"id": str(deal.id), "title": deal.title},
         })
 
     def select_deals(self, request):
         session_id = request.data.get("session_id")
+        logger.info("[deal-helper] select_deals start session=%s", session_id)
         session = self._get_session(session_id)
         if not session:
             return Response({"error": "Session expired or not found."}, status=404)
@@ -368,57 +457,150 @@ class DealHelperView(APIView):
             return Response({"error": "Select at least one deal."}, status=400)
         relationship_type = request.data.get("relationship_type") or DealRelationshipContext.RelationshipType.COMPARABLE
         notes = str(request.data.get("notes") or "").strip()
-        service = UniversalChatService(AIProcessorService())
-        chunks, diagnostics = service.chunks_for_selected_deals(
-            plan=session["query_plan"],
-            deal_ids=selected_deal_ids,
-            current_deal_id=session["deal_id"]
+        # Offload to Celery
+        from .tasks import discover_documents_async
+        
+        personality = AIRuntimeService.get_default_personality()
+        skill = AIRuntimeService.get_skill("deal_chat")
+
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="deal_helper_discovery",
+            source_id=session["deal_id"],
+            context_label=f"Document Discovery for Session {session_id}",
+            personality=personality,
+            skill=skill,
+            status="PENDING",
+            is_success=False,
+            user_prompt=session["message"],
         )
-        deal = Deal.objects.get(id=session["deal_id"])
-        related_deals = list(Deal.objects.filter(id__in=selected_deal_ids))
-        for related_deal in related_deals:
-            DealRelationshipContext.objects.create(
-                deal=deal,
-                related_deal=related_deal,
-                relationship_type=relationship_type,
-                notes=notes,
-                selected_deal_ids=selected_deal_ids,
-                created_by=self._profile(request),
-            )
+
+        task = discover_documents_async.apply_async(kwargs={
+            "session_id": session_id,
+            "query_plan": session["query_plan"],
+            "deal_ids": selected_deal_ids,
+            "current_deal_id": session["deal_id"],
+            "audit_log_id": str(audit_log.id)
+        })
+
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=["celery_task_id"])
+
+        # Update session
         session.update({
             "selected_deal_ids": selected_deal_ids,
             "relationship_type": relationship_type,
             "relationship_notes": notes,
-            "candidate_chunks": chunks,
         })
         self._save_session(session_id, session)
-        return Response({"chunks": chunks, "retrieval_diagnostics": diagnostics})
+
+        conversation = AIConversation.objects.filter(id=session["conversation_id"], user=request.user).first()
+        if conversation:
+            self._helper_event(
+                conversation=conversation,
+                session_id=session_id,
+                route=session.get("route"),
+                event_type="select_deals",
+                title="Selected Related Deals",
+                summary=f"Selected {len(selected_deal_ids)} related deal(s) as {relationship_type.replace('_', ' ')}. Document discovery queued.",
+                data={
+                    "relationship_type": relationship_type,
+                    "notes": notes,
+                    "audit_log_id": str(audit_log.id),
+                    "task_id": task.id,
+                },
+            )
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "documents": [],
+            "chunks": [],
+            "retrieval_diagnostics": {}
+        })
 
     def select_documents(self, request):
         session_id = request.data.get("session_id")
+        logger.info("[deal-helper] select_documents start session=%s", session_id)
         session = self._get_session(session_id)
         if not session:
             return Response({"error": "Session expired or not found."}, status=404)
         deal = Deal.objects.get(id=session["deal_id"])
+        is_related_deal_flow = session.get("route") == "related_deals" and session.get("selected_deal_ids")
         if request.data.get("select_all_indexed"):
-            document_ids = [str(doc.id) for doc in deal.documents.filter(is_indexed=True)]
+            if is_related_deal_flow:
+                allowed_deal_ids = [str(deal.id), *[str(item) for item in session.get("selected_deal_ids") or []]]
+                document_ids = [str(doc.id) for doc in DealDocument.objects.filter(deal_id__in=allowed_deal_ids, is_indexed=True)]
+            else:
+                document_ids = [str(doc.id) for doc in deal.documents.filter(is_indexed=True)]
         else:
             document_ids = [str(item) for item in request.data.get("document_ids", []) if item]
+            if is_related_deal_flow:
+                allowed_deal_ids = [str(deal.id), *[str(item) for item in session.get("selected_deal_ids") or []]]
+                indexed_ids = set(str(item) for item in DealDocument.objects.filter(deal_id__in=allowed_deal_ids, id__in=document_ids, is_indexed=True).values_list("id", flat=True))
+            else:
+                indexed_ids = set(str(item) for item in deal.documents.filter(id__in=document_ids, is_indexed=True).values_list("id", flat=True))
+            document_ids = [item for item in document_ids if item in indexed_ids]
         if not document_ids:
             return Response({"error": "Select at least one indexed document."}, status=400)
-        service = UniversalChatService(AIProcessorService())
-        chunks, diagnostics = service.chunks_for_selected_documents(
-            plan=session["query_plan"],
-            deal_id=str(deal.id),
-            document_ids=document_ids,
+        
+        # Offload to Celery
+        from .tasks import discover_chunks_async
+        
+        personality = AIRuntimeService.get_default_personality()
+        skill = AIRuntimeService.get_skill("deal_chat")
+
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="deal_helper_discovery",
+            source_id=session["deal_id"],
+            context_label=f"Chunk Discovery for Session {session_id}",
+            personality=personality,
+            skill=skill,
+            status="PENDING",
+            is_success=False,
+            user_prompt=session["message"],
         )
+
+        task = discover_chunks_async.apply_async(kwargs={
+            "session_id": session_id,
+            "query_plan": session["query_plan"],
+            "document_ids": document_ids,
+            "current_deal_id": str(deal.id),
+            "is_multi_deal": is_related_deal_flow,
+            "audit_log_id": str(audit_log.id)
+        })
+
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=["celery_task_id"])
+
+        # Update session
         session.update({
-            "selected_deal_ids": [str(deal.id)],
+            "selected_deal_ids": session.get("selected_deal_ids") if is_related_deal_flow else [str(deal.id)],
             "selected_document_ids": document_ids,
-            "candidate_chunks": chunks,
         })
         self._save_session(session_id, session)
-        return Response({"chunks": chunks, "retrieval_diagnostics": diagnostics})
+
+        conversation = AIConversation.objects.filter(id=session["conversation_id"], user=request.user).first()
+        if conversation:
+            self._helper_event(
+                conversation=conversation,
+                session_id=session_id,
+                route=session.get("route"),
+                event_type="select_documents",
+                title="Selected Documents",
+                summary=f"Selected {len(document_ids)} document(s). Chunk discovery queued.",
+                data={
+                    "selected_document_ids": document_ids,
+                    "audit_log_id": str(audit_log.id),
+                    "task_id": task.id,
+                },
+            )
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "chunks": [],
+            "retrieval_diagnostics": {}
+        })
 
     def answer(self, request):
         session_id = request.data.get("session_id")
@@ -432,18 +614,21 @@ class DealHelperView(APIView):
             return Response({"error": "Select at least one chunk."}, status=400)
         deal = Deal.objects.get(id=session["deal_id"])
         conversation = self._conversation_for_deal(request, deal, session.get("conversation_id"), session.get("message"))
-        AIMessage.objects.create(conversation=conversation, role="user", content=session["message"])
-        if session.get("selected_deal_ids") and session.get("route") == "related_deals":
-            DealRelationshipContext.objects.create(
-                deal=deal,
-                related_deal=None,
-                relationship_type=session.get("relationship_type") or DealRelationshipContext.RelationshipType.COMPARABLE,
-                notes=session.get("relationship_notes") or "",
-                selected_deal_ids=session.get("selected_deal_ids") or [],
-                selected_document_ids=session.get("selected_document_ids") or [],
-                selected_chunk_ids=list(selected_chunk_ids),
-                created_by=self._profile(request),
-            )
+        self._commit_relationship_context(
+            request=request,
+            deal=deal,
+            session=session,
+            selected_chunk_ids=list(selected_chunk_ids),
+        )
+        self._helper_event(
+            conversation=conversation,
+            session_id=session_id,
+            route=session.get("route"),
+            event_type="select_chunks",
+            title="Selected Evidence Chunks",
+            summary=f"Selected {len(chunks)} evidence chunk(s) for answer generation.",
+            data={"chunks": self._summarize_chunks(chunks)},
+        )
         service = UniversalChatService(AIProcessorService())
         selected_deal_ids = session.get("selected_deal_ids") or [str(deal.id)]
         extra_context = "\n".join(
@@ -459,6 +644,7 @@ class DealHelperView(APIView):
             deal_ids=selected_deal_ids,
             chunks=chunks,
             extra_context=extra_context,
+            current_deal_id=session["deal_id"]
         )
         personality = AIPersonality.objects.filter(is_default=True).first()
         skill = AISkill.objects.filter(name='deal_chat').first()
@@ -498,6 +684,19 @@ class DealHelperView(APIView):
         })
         audit_log.celery_task_id = task.id
         audit_log.save(update_fields=["celery_task_id"])
+        self._helper_event(
+            conversation=conversation,
+            session_id=session_id,
+            route=session.get("route"),
+            event_type="answer_queued",
+            title="Queued Answer",
+            summary="Queued answer generation from the selected evidence.",
+            data={
+                "audit_log_id": str(audit_log.id),
+                "task_id": task.id,
+                "selected_chunk_ids": list(selected_chunk_ids),
+            },
+        )
         session["selected_chunks"] = chunks
         self._save_session(session_id, session)
         return Response({
@@ -523,6 +722,8 @@ class DealHelperView(APIView):
         selected_context = ""
         selected_deal_ids = []
         selected_document_ids = []
+        helper_session = {}
+        candidate_chunks = []
         if session_id:
             helper_session = self._get_session(session_id) or {}
             selected_deal_ids = helper_session.get("selected_deal_ids") or []
@@ -534,7 +735,7 @@ class DealHelperView(APIView):
                 if not selected_chunk_ids or str(chunk.get("chunk_id")) in selected_chunk_ids
             )
         personality = AIPersonality.objects.filter(is_default=True).first()
-        skill = AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
+        skill = AISkill.objects.filter(name='deal_synthesis').first() or AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
         generated_document = None
         if mode != "full_rewrite":
             generated_document = DealGeneratedDocument.objects.create(
@@ -582,6 +783,46 @@ class DealHelperView(APIView):
             generated_document.save(update_fields=["audit_log_id"])
         audit_log.celery_task_id = task.id
         audit_log.save(update_fields=["celery_task_id"])
+        if helper_session:
+            self._commit_relationship_context(
+                request=request,
+                deal=deal,
+                session=helper_session,
+                selected_chunk_ids=selected_chunk_ids,
+            )
+            conversation = AIConversation.objects.filter(id=helper_session.get("conversation_id"), user=request.user).first()
+            if conversation:
+                selected_chunks = [
+                    chunk for chunk in candidate_chunks
+                    if not selected_chunk_ids or str(chunk.get("chunk_id")) in selected_chunk_ids
+                ]
+                if selected_chunks:
+                    self._helper_event(
+                        conversation=conversation,
+                        session_id=session_id,
+                        route=helper_session.get("route"),
+                        event_type="select_chunks",
+                        title="Selected Evidence Chunks",
+                        summary=f"Selected {len(selected_chunks)} evidence chunk(s) for saved analysis.",
+                        data={"chunks": self._summarize_chunks(selected_chunks)},
+                    )
+                self._helper_event(
+                    conversation=conversation,
+                    session_id=session_id,
+                    route=helper_session.get("route"),
+                    event_type="analysis_queued",
+                    title="Queued Saved Analysis",
+                    summary=f"Queued {'full rewrite' if mode == 'full_rewrite' else 'directive document'} from the selected evidence.",
+                    data={
+                        "mode": mode,
+                        "directive": directive,
+                        "document_title": document_title,
+                        "audit_log_id": str(audit_log.id),
+                        "task_id": task.id,
+                        "generated_document_id": str(generated_document.id) if generated_document else None,
+                        "selected_chunk_ids": selected_chunk_ids,
+                    },
+                )
         return Response({
             "status": "queued",
             "task_id": task.id,
