@@ -101,6 +101,58 @@ Rules:
 - If unrelated documents are present, explicitly flag them as excluded or low relevance.
 - Do not invent values absent from evidence; use N/A or [VERIFY] and add missing-information requests where the output mode supports them."""
 
+DEAL_HELPER_DIRECTIVE_DOCUMENT_SYSTEM_TEMPLATE = """### DEAL HELPER DIRECTIVE DOCUMENT SKILL
+Use this skill only for deal-helper generated documents created from an analyst directive.
+
+Output contract:
+- Return only the final client-facing Markdown document.
+- Do not return JSON, metadata wrappers, markdown fences, prompt instructions, or hidden reasoning.
+- Follow the analyst's directive and requested document title as the primary shape, format, and emphasis.
+- Do not force the canonical deal synthesis 7-section structure unless the directive explicitly asks for it.
+
+Evidence discipline:
+- Use selected deal-helper context, document evidence, supporting raw chunks, stored related-deal context, and selected pipeline context as the source material.
+- Do not invent values absent from evidence; use N/A or [VERIFY].
+- Preserve source names or citations for material factual claims when available."""
+
+DEAL_HELPER_DIRECTIVE_DOCUMENT_PROMPT_TEMPLATE = """Create a generated deal document from the analyst directive and selected evidence.
+
+[DOCUMENT TITLE]
+{{ document_title }}
+
+[DEAL BASELINE JSON]
+{{ deal_baseline_json }}
+
+[DOCUMENT EVIDENCE JSON]
+{{ document_evidence_json }}
+
+[SUPPORTING RAW CHUNKS JSON]
+{{ supporting_raw_chunks_json }}
+
+[STORED COMPETITOR / RELATED-DEAL CONTEXT]
+{{ related_deal_context }}
+
+[SELECTED PIPELINE CONTEXT]
+{{ selected_pipeline_context }}
+
+[SELECTED DEAL HELPER CONTEXT]
+{{ selected_context }}
+
+[ANALYST DIRECTIVE]
+{{ directive }}
+
+[TASK]
+{{ content }}
+
+Write the document in Markdown according to the analyst directive. If the directive requests an IC note, diligence memo, risk register, comparison table, financial summary, or other custom artifact, use the natural structure for that artifact. Do not use the canonical deal synthesis 7-section Markdown structure unless the directive explicitly asks for that exact structure.
+
+Rules:
+- Start with a useful title or heading only when it improves the requested document.
+- Use tables where the directive asks for comparison, metrics, risks, action items, or financial detail.
+- Tie material claims to available source names or citations.
+- Mark unsupported or ambiguous facts with [VERIFY].
+- Keep the output focused on the requested document, not a full rewrite of the deal analysis."""
+
 class Command(BaseCommand):
     help = 'Seeds the database with high-fidelity PE Analyst personalities and skills from local DB'
 
@@ -180,6 +232,13 @@ class Command(BaseCommand):
                     "cross_document_conflicts": "array",
                     "missing_information_requests": "array"
                 }
+            },
+            {
+                "name": "deal_helper_directive_document",
+                "description": "Creates a deal-helper generated Markdown document that follows the analyst directive rather than the canonical deal synthesis shape.",
+                "system_template": DEAL_HELPER_DIRECTIVE_DOCUMENT_SYSTEM_TEMPLATE,
+                "prompt_template": DEAL_HELPER_DIRECTIVE_DOCUMENT_PROMPT_TEMPLATE,
+                "output_schema": {}
             },
             {
                 "name": "document_evidence_extraction",

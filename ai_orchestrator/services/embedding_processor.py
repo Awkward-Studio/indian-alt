@@ -645,7 +645,7 @@ class EmbeddingService:
         )
         return self._rerank_chunks(candidates, normalized_query, limit)
 
-    def search_global_chunks(self, query: str, limit: int = 10, deal_ids: Optional[List[str]] = None) -> List[DocumentChunk]:
+    def search_global_chunks(self, query: str, limit: int = 10, deal_ids: Optional[List[str]] = None, source_ids: Optional[List[str]] = None) -> List[DocumentChunk]:
         """Global search across all deals with term priority for SQLite."""
         normalized_query = self._normalize_query_text(query)
         if self.is_sqlite:
@@ -662,6 +662,8 @@ class EmbeddingService:
             queryset = self._retrievable_chunk_queryset().filter(q_obj)
             if deal_ids:
                 queryset = queryset.filter(deal_id__in=deal_ids)
+            if source_ids:
+                queryset = queryset.filter(source_id__in=source_ids)
             candidates = list(queryset[: self._candidate_fetch_limit(limit)])
             return self._rerank_chunks(candidates, normalized_query, limit)
 
@@ -671,6 +673,8 @@ class EmbeddingService:
         queryset = self._retrievable_chunk_queryset()
         if deal_ids:
             queryset = queryset.filter(deal_id__in=deal_ids)
+        if source_ids:
+            queryset = queryset.filter(source_id__in=source_ids)
         candidates = list(
             queryset.annotate(distance=CosineDistance('embedding', query_embedding))
             .order_by('distance')[: self._candidate_fetch_limit(limit)]

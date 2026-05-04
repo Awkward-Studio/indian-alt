@@ -508,11 +508,11 @@ def generate_deal_helper_analysis_async(
                 "document_name": doc.title,
                 "document_type": doc.document_type,
                 "deal": doc.deal.title if doc.deal else deal.title,
-                "document_summary": _truncate_text(doc.normalized_text or doc.extracted_text, 1400),
+                "document_summary": _truncate_text(doc.normalized_text or doc.extracted_text, 2500),
                 "claims": [],
                 "metrics": [],
                 "citations": [doc.title] if doc.title else [],
-                "normalized_text": _truncate_text(doc.normalized_text or doc.extracted_text, 1400),
+                "normalized_text": _truncate_text(doc.normalized_text or doc.extracted_text, 2500),
                 "source_map": {
                     "document_id": str(doc.id),
                     "document_name": doc.title,
@@ -526,7 +526,7 @@ def generate_deal_helper_analysis_async(
             {
                 "source_title": doc.title,
                 "deal": doc.deal.title if doc.deal else deal.title,
-                "text": _truncate_text(doc.normalized_text or doc.extracted_text, 900),
+                "text": _truncate_text(doc.normalized_text or doc.extracted_text, 1500),
             }
             for doc in documents[:30]
             if (doc.normalized_text or doc.extracted_text)
@@ -535,27 +535,58 @@ def generate_deal_helper_analysis_async(
             supporting_raw_chunks.insert(0, {
                 "source_title": "Deal helper selected evidence",
                 "deal": deal.title,
-                "text": _truncate_text(selected_context, 8000),
+                "text": _truncate_text(selected_context, 24000),
             })
         selected_pipeline_context = _deal_comparison_context(deal, selected_deal_ids)
-        task_label = "full rewrite" if mode == "full_rewrite" else "user-directed addendum"
-        prompt = (
-            f"Create a saved {task_label} for deal: {deal.title}.\n\n"
-            f"User directive:\n{directive}\n\n"
-            "Use the selected document evidence, selected helper context, stored related-deal context, "
-            "selected pipeline comparison set, and deal-specific directive supplied to the skill."
-        )
+        if mode == "full_rewrite":
+            skill_name = "deal_synthesis"
+            prompt = (
+                f"Create a saved full rewrite for deal: {deal.title}.\n\n"
+                f"User directive:\n{directive}\n\n"
+                "Use the selected document evidence, selected helper context, stored related-deal context, "
+                "selected pipeline comparison set, and deal-specific directive supplied to the skill."
+            )
+            output_mode = "markdown_document"
+        else:
+            skill_name = "deal_helper_directive_document"
+            prompt = (
+                f"Create generated document '{document_title or directive[:80] or 'Directive Document'}' "
+                f"for deal: {deal.title}.\n\n"
+                f"Analyst directive:\n{directive}\n\n"
+                "Follow the directive's requested artifact type, structure, and format. "
+                "Use only the selected evidence and supplied deal context for factual claims."
+            )
+            output_mode = "directive_document"
+            if not AISkill.objects.filter(name=skill_name).exists():
+                skill_name = None
+                prompt = (
+                    "Create a generated deal document in Markdown.\n\n"
+                    "Return only the final Markdown document. Do not return JSON, markdown fences, "
+                    "prompt instructions, or hidden reasoning. Follow the analyst directive as the "
+                    "primary structure and format. Do not force the canonical deal synthesis 7-section "
+                    "structure unless the directive explicitly asks for it.\n\n"
+                    f"[DOCUMENT TITLE]\n{document_title or directive[:80] or 'Directive Document'}\n\n"
+                    f"[DEAL]\n{deal.title}\n\n"
+                    f"[ANALYST DIRECTIVE]\n{directive}\n\n"
+                    f"[DOCUMENT EVIDENCE JSON]\n{json.dumps(document_evidence, default=str, ensure_ascii=True)}\n\n"
+                    f"[SUPPORTING RAW CHUNKS JSON]\n{json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True)}\n\n"
+                    f"[STORED COMPETITOR / RELATED-DEAL CONTEXT]\n{saved_context or 'No stored competitor or related-deal context.'}\n\n"
+                    f"[SELECTED PIPELINE CONTEXT]\n{selected_pipeline_context}\n\n"
+                    f"[SELECTED DEAL HELPER CONTEXT]\n{_truncate_text(selected_context, 24000) if selected_context else 'No manually selected evidence context supplied.'}"
+                )
         result = ai_service.process_content(
             content=prompt,
-            skill_name="deal_synthesis",
+            skill_name=skill_name,
             source_type="deal_helper_analysis",
             source_id=str(deal.id),
             metadata={
                 "audit_log_id": str(audit_log.id) if audit_log else audit_log_id,
                 "mode": mode,
+                "directive": directive,
+                "document_title": document_title or directive[:80] or "Directive Document",
                 "document_evidence_json": json.dumps(document_evidence, default=str, ensure_ascii=True),
                 "supporting_raw_chunks_json": json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True),
-                "output_mode": "markdown_document",
+                "output_mode": output_mode,
                 "deal_title": deal.title,
                 "deal_baseline_json": json.dumps({
                     "title": deal.title,
@@ -567,7 +598,7 @@ def generate_deal_helper_analysis_async(
                 "deal_specific_prompt": deal_specific_prompt or "No deal-specific prompt saved.",
                 "related_deal_context": saved_context or "No stored competitor or related-deal context.",
                 "selected_pipeline_context": selected_pipeline_context,
-                "selected_context": _truncate_text(selected_context, 10000) if selected_context else "No manually selected evidence context supplied.",
+                "selected_context": _truncate_text(selected_context, 24000) if selected_context else "No manually selected evidence context supplied.",
                 "response_mode": "markdown",
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_tokens": 4096,
@@ -631,6 +662,7 @@ def generate_deal_helper_analysis_async(
             audit_log.status = "COMPLETED"
             audit_log.is_success = True
             audit_log.save(update_fields=["raw_response", "raw_thinking", "status", "is_success"])
+            broadcast_audit_log_update(audit_log, done=True)
         return {"status": "success", "version": next_version, "generated_document_id": generated_document_id}
     except Exception as e:
         audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
@@ -639,5 +671,6 @@ def generate_deal_helper_analysis_async(
             audit_log.error_message = str(e)
             audit_log.is_success = False
             audit_log.save(update_fields=["status", "error_message", "is_success"])
+            broadcast_audit_log_update(audit_log, done=True)
         logger.error("Deal helper analysis failed: %s", e, exc_info=True)
         raise e

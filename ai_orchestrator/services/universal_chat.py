@@ -506,6 +506,14 @@ class UniversalChatService:
             # Increase limit for interactive selection so analyst has more choices (e.g. at least 12)
             plan["deal_limit"] = max(int(plan.get("deal_limit") or 12), 12)
             plan["_active_deal_context"] = self._active_deal_context_for_related_selection(deal)
+            
+            # Enhance the semantic query with the active deal's metadata so that
+            # generic user queries like "compare" actually pull comparable deals.
+            search_enhancement = " ".join([str(val) for val in [deal.industry, deal.sector, deal.title] if val])
+            plan["user_query"] = f"{plan.get('user_query', '')} {search_enhancement}".strip()
+            if plan.get("semantic_queries"):
+                plan["semantic_queries"] = [f"{q} {search_enhancement}".strip() for q in plan["semantic_queries"]]
+            
             deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
             serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
             for index, item in enumerate(serialized_deals):
@@ -992,18 +1000,19 @@ class UniversalChatService:
         query = self._build_rerank_query(plan)
         
         rerank_settings = self._stage_settings("chunk_rerank")
-        # Use a small hydration batch size to keep memory low
-        batch_size = max(1, int(rerank_settings.get("chunk_rerank_batch_size") or 12))
+        # Standardize batch size to avoid endpoint warnings and reduce memory pressure
+        batch_size = max(1, int(rerank_settings.get("chunk_rerank_batch_size") or 32))
         
         scores: Dict[int, float] = {}
         try:
             for start in range(0, candidate_limit, batch_size):
                 end = min(start + batch_size, candidate_limit)
-                batch_ids = [doc.id for doc in documents[start:end]]
+                batch_docs = documents[start:end]
+                batch_ids = [doc.id for doc in batch_docs]
                 
                 self._trace_chunks("document_rerank_hydrate_start", batch_start=start, batch_count=len(batch_ids))
                 
-                # Hydrate only this small batch
+                # Hydrate only this small batch with only necessary fields
                 hydrated_batch = list(
                     DealDocument.objects.filter(id__in=batch_ids)
                     .select_related("deal")
@@ -1020,6 +1029,7 @@ class UniversalChatService:
                 
                 self._trace_chunks("document_rerank_batch_call_start", batch_size=len(target_docs))
                 
+                # Surgical serialization to prevent OOM
                 payload = [self._build_helper_document_text(document) for document in target_docs]
                 
                 batch_results = self.embed_service.reranker.rerank(
@@ -1091,7 +1101,7 @@ class UniversalChatService:
         
         deals = list({document.deal_id: document.deal for document in selected_documents if document.deal}.values())
         self._trace_chunks("chunks_for_selected_documents_multi_deal_search_ranked_chunks_start", deals=len(deals))
-        chunks, diagnostics = self._search_ranked_chunks(plan, deals)
+        chunks, diagnostics = self._search_ranked_chunks(plan, deals, document_ids=document_ids)
         self._trace_chunks("chunks_for_selected_documents_multi_deal_search_ranked_chunks_done", chunks=len(chunks))
         
         allowed_keys = set()
@@ -1193,40 +1203,58 @@ class UniversalChatService:
         per_document_limit: int = 8,
         max_total: int = 120,
     ) -> List[Dict[str, Any]]:
-        match_entries = self._selected_document_match_entries(selected_documents)
-        if not match_entries:
+        if not selected_documents:
             return []
 
-        selected_doc_ids = {entry["document_id"] for entry in match_entries}
-        deal_ids = list({document.deal_id for document in selected_documents if document.deal_id})
+        # Collect all possible source_ids that chunks might use
+        target_source_ids = set()
+        doc_id_map = {} # Map source_id to document_id for lookup
+        
+        for doc in selected_documents:
+            did = str(doc.id)
+            target_source_ids.add(did)
+            doc_id_map[did] = did
+            
+            if doc.onedrive_id:
+                oid = str(doc.onedrive_id)
+                target_source_ids.add(oid)
+                doc_id_map[oid] = did
+
         seen_chunk_ids = {
             str(item["chunk"].id)
             for item in (existing_items or [])
             if item.get("chunk") is not None and getattr(item["chunk"], "id", None)
         }
-        counts = {document_id: 0 for document_id in selected_doc_ids}
+        
+        counts = {str(doc.id): 0 for doc in selected_documents}
         direct_items = []
 
-        for chunk in (
-            DocumentChunk.objects.filter(deal_id__in=deal_ids)
+        # Targeted database query instead of scanning all deal chunks
+        queryset = (
+            DocumentChunk.objects.filter(source_id__in=list(target_source_ids))
             .select_related("deal")
+            .only("id", "deal_id", "deal__title", "source_type", "source_id", "content", "metadata", "created_at")
             .order_by("-created_at")
-            .iterator(chunk_size=100)
-        ):
+        )
+
+        for chunk in queryset:
             chunk_id = str(chunk.id)
             if chunk_id in seen_chunk_ids:
                 continue
-            document_id = self._matching_selected_document_id(chunk, match_entries)
-            if not document_id or counts.get(document_id, 0) >= per_document_limit:
+                
+            doc_id = doc_id_map.get(str(chunk.source_id))
+            if not doc_id or counts.get(doc_id, 0) >= per_document_limit:
                 continue
+                
             seen_chunk_ids.add(chunk_id)
-            counts[document_id] = counts.get(document_id, 0) + 1
+            counts[doc_id] += 1
             direct_items.append({
                 "chunk": chunk,
                 "score": getattr(chunk, "rerank_score", None) or 1.0,
                 "rank_reason": "Direct chunk from a selected document",
             })
-            if len(direct_items) >= max_total or all(counts.get(document_id, 0) >= per_document_limit for document_id in selected_doc_ids):
+            
+            if len(direct_items) >= max_total:
                 break
 
         return direct_items
@@ -1292,7 +1320,7 @@ class UniversalChatService:
     def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         deal = Deal.objects.get(id=deal_id)
         selected_documents = list(deal.documents.filter(id__in=document_ids))
-        chunks, diagnostics = self._search_ranked_chunks(plan, [deal])
+        chunks, diagnostics = self._search_ranked_chunks(plan, [deal], document_ids=document_ids)
         selected = []
         allowed_keys = set()
         for document in selected_documents:
@@ -2570,8 +2598,8 @@ class UniversalChatService:
             return deals
         return deals
 
-    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        self._trace_chunks("start_search_ranked_chunks", deals=len(deals), selection_mode=plan.get("selection_mode"))
+    def _search_ranked_chunks(self, plan: Dict[str, Any], deals: List[Deal], document_ids: List[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        self._trace_chunks("start_search_ranked_chunks", deals=len(deals), selection_mode=plan.get("selection_mode"), document_ids_filter=len(document_ids) if document_ids else 0)
         if (plan.get("stats_mode") or "none") != "none" and int(plan.get("global_chunk_limit") or 0) == 0:
             return [], {
                 "candidate_chunk_count": 0,
@@ -2593,18 +2621,28 @@ class UniversalChatService:
         retrieval_settings = self._stage_settings("chunk_retrieval")
         scoped_deals = self._scope_deals_for_chunk_retrieval(plan, deals)
         deal_ids = [str(deal.id) for deal in scoped_deals]
+        
+        # Use provided document_ids to restrict semantic search if available
+        search_source_ids = None
+        if document_ids:
+            # Normalize and resolve potential OneDrive IDs or titles if needed, 
+            # but usually source_id is the primary UUID or specific identifier.
+            search_source_ids = [str(did) for did in document_ids if did]
+
         candidate_limit = self._cap(int(retrieval_settings.get("vector_limit") or 60), HARD_MAX_VECTOR_CANDIDATES)
         self._trace_chunks("scoped_deals", scoped_deals=len(scoped_deals), candidate_limit=candidate_limit)
         candidate_chunks: List[DocumentChunk] = []
         semantic_queries = plan.get("semantic_queries") or [plan["user_query"]]
         if not self.disable_hard_caps:
             semantic_queries = semantic_queries[:HARD_MAX_SEMANTIC_QUERIES]
+        
         for semantic_query in semantic_queries:
             self._trace_chunks("semantic_search_start", query=str(semantic_query)[:80])
             query_matches = self.embed_service.search_global_chunks(
                 semantic_query,
                 limit=candidate_limit,
                 deal_ids=deal_ids or None,
+                source_ids=search_source_ids,
             )
             candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
             self._trace_chunks("semantic_search_done", query_matches=len(query_matches), candidate_chunks=len(candidate_chunks))

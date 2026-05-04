@@ -1,0 +1,49 @@
+/home/omi/Omi_Home_NAS/Code/Work/India-Alternatives/indian-alt/venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+Reranker endpoint enforces max batch size=32; chunking 36 documents.
+[chunk-trace] documents_for_selected_deals_start vmrss_kb=1390488 maxrss_kb=1427988 deal_ids=['cde226a1-d11d-40d5-aba3-6aef97ed2a44', '3c77985a-cc94-4ecc-b256-dc0aec9a3df9', '1e8a3256-3d54-4341-879e-47f0c82298ea']
+[chunk-trace] documents_for_selected_deals_query_ranked_chunks_start vmrss_kb=1578928 maxrss_kb=1578788 
+[chunk-trace] start_search_ranked_chunks vmrss_kb=1578920 maxrss_kb=1578788 deals=4 selection_mode=balanced
+[chunk-trace] scoped_deals vmrss_kb=1578924 maxrss_kb=1578788 scoped_deals=4 candidate_limit=120
+[chunk-trace] semantic_search_start vmrss_kb=1578920 maxrss_kb=1578788 query=competitors of this deal in the current pipeline
+Reranker endpoint enforces max batch size=32; chunking 96 documents.
+[chunk-trace] semantic_search_done vmrss_kb=1563124 maxrss_kb=1578788 query_matches=93 candidate_chunks=93
+[chunk-trace] semantic_search_start vmrss_kb=1563124 maxrss_kb=1578788 query=similar deals to this deal in the pipeline
+Reranker endpoint enforces max batch size=32; chunking 96 documents.
+[chunk-trace] semantic_search_done vmrss_kb=1563124 maxrss_kb=1578788 query_matches=78 candidate_chunks=137
+[chunk-trace] synthesis_augment_start vmrss_kb=1563124 maxrss_kb=1578788 candidate_chunks=137
+[chunk-trace] synthesis_candidates_config vmrss_kb=1563132 maxrss_kb=1578788 deals=4 per_deal_limit=72
+[chunk-trace] synthesis_deal_entries vmrss_kb=1563168 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea document_entries=69
+[chunk-trace] synthesis_scan_start vmrss_kb=1563184 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea scan_limit=432
+[chunk-trace] synthesis_scan_progress vmrss_kb=1563476 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea scanned=100 matched=99
+[chunk-trace] synthesis_scan_progress vmrss_kb=1563680 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea scanned=200 matched=197
+[chunk-trace] synthesis_scan_progress vmrss_kb=1564124 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea scanned=300 matched=296
+[chunk-trace] synthesis_scan_progress vmrss_kb=1564584 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea scanned=400 matched=396
+[chunk-trace] synthesis_scan_done vmrss_kb=1564740 maxrss_kb=1578788 deal_id=1e8a3256-3d54-4341-879e-47f0c82298ea matched=429
+[chunk-trace] synthesis_deal_entries vmrss_kb=1564872 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf document_entries=9
+[chunk-trace] synthesis_scan_start vmrss_kb=1564872 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf scan_limit=432
+[chunk-trace] synthesis_scan_progress vmrss_kb=1564872 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf scanned=100 matched=98
+[chunk-trace] synthesis_scan_progress vmrss_kb=1564880 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf scanned=200 matched=198
+[chunk-trace] synthesis_scan_progress vmrss_kb=1564968 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf scanned=300 matched=293
+[chunk-trace] synthesis_scan_progress vmrss_kb=1565020 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf scanned=400 matched=293
+[chunk-trace] synthesis_scan_done vmrss_kb=1565020 maxrss_kb=1578788 deal_id=741e8fb2-be22-4e81-a711-359fc5f4c6cf matched=293
+[chunk-trace] synthesis_deal_entries vmrss_kb=1565352 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 document_entries=68
+[chunk-trace] synthesis_scan_start vmrss_kb=1565352 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 scan_limit=432
+[chunk-trace] synthesis_scan_progress vmrss_kb=1565352 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 scanned=100 matched=99
+[chunk-trace] synthesis_scan_progress vmrss_kb=1565396 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 scanned=200 matched=199
+[chunk-trace] synthesis_scan_progress vmrss_kb=1565408 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 scanned=300 matched=299
+[chunk-trace] synthesis_scan_progress vmrss_kb=1565416 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 scanned=400 matched=399
+[chunk-trace] synthesis_scan_done vmrss_kb=1565464 maxrss_kb=1578788 deal_id=3c77985a-cc94-4ecc-b256-dc0aec9a3df9 matched=432
+[chunk-trace] synthesis_deal_entries vmrss_kb=1311216 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 document_entries=344
+[chunk-trace] synthesis_scan_start vmrss_kb=1311216 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 scan_limit=432
+[chunk-trace] synthesis_scan_progress vmrss_kb=1311204 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 scanned=100 matched=99
+[chunk-trace] synthesis_scan_progress vmrss_kb=1311204 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 scanned=200 matched=199
+[chunk-trace] synthesis_scan_progress vmrss_kb=1311204 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 scanned=300 matched=299
+[chunk-trace] synthesis_scan_progress vmrss_kb=1311208 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 scanned=400 matched=399
+[chunk-trace] synthesis_scan_done vmrss_kb=1311208 maxrss_kb=1578788 deal_id=cde226a1-d11d-40d5-aba3-6aef97ed2a44 matched=432
+[chunk-trace] synthesis_augment_done vmrss_kb=1311212 maxrss_kb=1578788 synthesis_document_candidates=288 candidate_chunks=425
+[chunk-trace] deal_summary_augment_start vmrss_kb=1311212 maxrss_kb=1578788 candidate_chunks=425
+[chunk-trace] deal_summary_augment_done vmrss_kb=1940328 maxrss_kb=1939944 candidate_chunks=457
+[chunk-trace] rerank_start vmrss_kb=1362712 maxrss_kb=1939944 candidate_chunks=96
+[chunk-trace] rerank_batch_done vmrss_kb=3158592 maxrss_kb=3177096 batch_start=0 batch_size=32 results=32
+[chunk-trace] rerank_batch_done vmrss_kb=5037136 maxrss_kb=5045084 batch_start=32 batch_size=32 results=32

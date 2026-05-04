@@ -735,7 +735,10 @@ class DealHelperView(APIView):
                 if not selected_chunk_ids or str(chunk.get("chunk_id")) in selected_chunk_ids
             )
         personality = AIPersonality.objects.filter(is_default=True).first()
-        skill = AISkill.objects.filter(name='deal_synthesis').first() or AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
+        if mode == "full_rewrite":
+            skill = AISkill.objects.filter(name='deal_synthesis').first() or AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
+        else:
+            skill = AISkill.objects.filter(name='deal_helper_directive_document').first() or AISkill.objects.filter(name='deal_chat').first()
         generated_document = None
         if mode != "full_rewrite":
             generated_document = DealGeneratedDocument.objects.create(

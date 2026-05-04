@@ -111,7 +111,7 @@ class AIProcessorService:
         if stream:
             return self._stream_response(payload, audit_log)
         
-        result = self._standard_response(payload, audit_log)
+        result = self._standard_response(payload, audit_log, response_mode)
         result["_full_context"] = cleaned_text
         return result
 
@@ -263,7 +263,7 @@ class AIProcessorService:
             
             yield json.dumps({"response": f"Error: {str(e)}", "done": True})
 
-    def _standard_response(self, payload: dict, audit_log: AIAuditLog) -> Dict[str, Any]:
+    def _standard_response(self, payload: dict, audit_log: AIAuditLog, response_mode: str | None = None) -> Dict[str, Any]:
         """
         Orchestrates standard execution and delegates parsing.
         """

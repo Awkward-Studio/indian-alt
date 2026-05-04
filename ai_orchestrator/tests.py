@@ -15,7 +15,7 @@ from ai_orchestrator.services.flow_config import (
     DEFAULT_PLANNER_PROMPT,
     UniversalChatFlowService,
 )
-from ai_orchestrator.tasks import _extract_markdown_report
+from ai_orchestrator.tasks import _extract_markdown_report, generate_deal_helper_analysis_async
 from ai_orchestrator.services.universal_chat import UniversalChatService
 
 
@@ -65,6 +65,107 @@ class PromptSeedTests(TestCase):
         self.assertIn("canonical_json", deal_synthesis.prompt_template)
         self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
         self.assertNotIn("## Company Overview", personality.system_instructions)
+
+    def test_seeded_deal_helper_directive_document_follows_directive_shape(self):
+        call_command("seed_ai_prompts", verbosity=0)
+
+        directive_skill = AISkill.objects.get(name="deal_helper_directive_document")
+
+        self.assertIn("Follow the analyst's directive", directive_skill.system_template)
+        self.assertIn("Do not force the canonical deal synthesis 7-section structure", directive_skill.system_template)
+        self.assertIn("{{ directive }}", directive_skill.prompt_template)
+        self.assertIn("{{ document_title }}", directive_skill.prompt_template)
+        self.assertIn("Do not use the canonical deal synthesis 7-section Markdown structure", directive_skill.prompt_template)
+
+
+class DealHelperAnalysisRoutingTests(TestCase):
+    def setUp(self):
+        self.personality = AIPersonality.objects.create(
+            name="Default Analyst",
+            description="",
+            model_provider="vllm",
+            text_model_name="default",
+            vision_model_name="default",
+            system_instructions="You are an analyst.",
+            is_default=True,
+        )
+        self.deal_synthesis = AISkill.objects.create(
+            name="deal_synthesis",
+            description="",
+            system_template="",
+            prompt_template="{{ content }}",
+        )
+        self.directive_skill = AISkill.objects.create(
+            name="deal_helper_directive_document",
+            description="",
+            system_template="",
+            prompt_template="{{ content }}",
+        )
+        self.deal = Deal.objects.create(title="Acme Foods", sector="Consumer", industry="Food")
+
+    def _audit_log(self, skill):
+        return AIAuditLog.objects.create(
+            source_type="deal_helper_analysis",
+            source_id=str(self.deal.id),
+            context_label="Deal Helper Analysis: Acme Foods",
+            personality=self.personality,
+            skill=skill,
+            model_used="default",
+            system_prompt="queued",
+            user_prompt="queued",
+            raw_response="",
+            status="PENDING",
+            is_success=False,
+        )
+
+    @patch("ai_orchestrator.tasks.broadcast_audit_log_update")
+    @patch("ai_orchestrator.tasks.AIProcessorService")
+    def test_full_rewrite_uses_deal_synthesis_markdown_document_mode(self, mock_ai_processor, _mock_broadcast):
+        audit_log = self._audit_log(self.deal_synthesis)
+        processor = mock_ai_processor.return_value
+        processor.process_content.return_value = {"response": "## Company Overview\n\nReport body"}
+
+        result = generate_deal_helper_analysis_async.run(
+            deal_id=str(self.deal.id),
+            directive="Rewrite using the standard investment memo shape.",
+            mode="full_rewrite",
+            audit_log_id=str(audit_log.id),
+        )
+
+        self.assertEqual(result["status"], "success")
+        _, kwargs = processor.process_content.call_args
+        self.assertEqual(kwargs["skill_name"], "deal_synthesis")
+        self.assertEqual(kwargs["metadata"]["output_mode"], "markdown_document")
+
+    @patch("ai_orchestrator.tasks.broadcast_audit_log_update")
+    @patch("ai_orchestrator.tasks.AIProcessorService")
+    def test_directive_document_uses_directive_document_skill(self, mock_ai_processor, _mock_broadcast):
+        audit_log = self._audit_log(self.directive_skill)
+        generated_document = self.deal.generated_documents.create(
+            title="Customer Risk Register",
+            kind="directive",
+            directive="Create a customer risk register table.",
+            content="Queued...",
+        )
+        processor = mock_ai_processor.return_value
+        processor.process_content.return_value = {"response": "# Customer Risk Register\n\n| Risk | Evidence |\n|---|---|"}
+
+        result = generate_deal_helper_analysis_async.run(
+            deal_id=str(self.deal.id),
+            directive="Create a customer risk register table.",
+            mode="user_directive_addendum",
+            audit_log_id=str(audit_log.id),
+            document_title="Customer Risk Register",
+            generated_document_id=str(generated_document.id),
+        )
+
+        self.assertEqual(result["status"], "success")
+        _, kwargs = processor.process_content.call_args
+        self.assertEqual(kwargs["skill_name"], "deal_helper_directive_document")
+        self.assertEqual(kwargs["metadata"]["output_mode"], "directive_document")
+        self.assertEqual(kwargs["metadata"]["directive"], "Create a customer risk register table.")
+        generated_document.refresh_from_db()
+        self.assertIn("Customer Risk Register", generated_document.content)
 
 
 class ResponseParserServiceTests(TestCase):
