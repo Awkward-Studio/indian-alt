@@ -202,6 +202,11 @@ CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_WORKER_PREFETCH_MULTIPLIER = config('CELERY_WORKER_PREFETCH_MULTIPLIER', default=1, cast=int)
 CELERY_TASK_ACKS_LATE = config('CELERY_TASK_ACKS_LATE', default=True, cast=bool)
 CELERY_WORKER_MAX_TASKS_PER_CHILD = config('CELERY_WORKER_MAX_TASKS_PER_CHILD', default=25, cast=int)
+CELERY_IMPORTS = (
+    'ai_orchestrator.tasks',
+    'deals.tasks',
+    'microsoft.tasks',
+)
 
 # Cache Configuration
 CACHES = {
