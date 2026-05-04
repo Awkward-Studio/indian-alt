@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from typing import Dict, Any, Optional, Iterator
 
@@ -69,6 +70,13 @@ class AIProcessorService:
         log_worker_event(audit_log, f"Preparing prompt for {resolved_text_model}.")
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         prompt_template = skill.prompt_template if skill else "{{ content }}"
+        response_mode = (metadata or {}).get("response_mode")
+        if response_mode == "markdown":
+            system_instructions = re.sub(
+                r"\n\nIMPORTANT: Return ONLY a valid JSON object\. Do not include any thinking text in the final response\.",
+                "",
+                system_instructions,
+            )
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
 
@@ -276,7 +284,11 @@ class AIProcessorService:
                 "email_intermediate_fusion",
                 "deal_routing"
             }
-            is_extraction = audit_log.skill and audit_log.skill.name in extraction_skills
+            is_extraction = (
+                response_mode != "markdown"
+                and audit_log.skill
+                and audit_log.skill.name in extraction_skills
+            )
             
             parsed_json, success, clean_resp, clean_think = ResponseParserService.parse_standard_response(
                 raw_response, thinking, is_extraction_skill=is_extraction

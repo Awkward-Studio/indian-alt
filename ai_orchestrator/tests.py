@@ -59,6 +59,10 @@ class PromptSeedTests(TestCase):
         self.assertIn("Key Peers and Valuation Multiples", deal_synthesis.prompt_template)
         self.assertIn("related_deal_context", deal_synthesis.prompt_template)
         self.assertIn("deal_specific_prompt", deal_synthesis.prompt_template)
+        self.assertIn("markdown_document", deal_synthesis.prompt_template)
+        self.assertIn("return only a Markdown document", deal_synthesis.prompt_template)
+        self.assertIn("additional deal-level writing directive", deal_synthesis.prompt_template)
+        self.assertIn("canonical_json", deal_synthesis.prompt_template)
         self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
         self.assertNotIn("## Company Overview", personality.system_instructions)
 

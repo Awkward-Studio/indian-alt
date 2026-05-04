@@ -538,27 +538,12 @@ def generate_deal_helper_analysis_async(
                 "text": _truncate_text(selected_context, 8000),
             })
         selected_pipeline_context = _deal_comparison_context(deal, selected_deal_ids)
-        current_analysis = deal.current_analysis if isinstance(deal.current_analysis, dict) else {}
-        current_report = current_analysis.get("report") or deal.deal_summary or ""
         task_label = "full rewrite" if mode == "full_rewrite" else "user-directed addendum"
         prompt = (
             f"Create a saved {task_label} for deal: {deal.title}.\n\n"
-            "Current deal baseline metadata:\n"
-            f"- Title: {deal.title}\n"
-            f"- Sector: {deal.sector or 'N/A'}\n"
-            f"- Industry: {deal.industry or 'N/A'}\n"
-            f"- Funding ask: {deal.funding_ask or 'N/A'}\n"
-            f"- Current deal summary excerpt: {(deal.deal_summary or current_report or 'No current analysis available.')[:1600]}\n\n"
             f"User directive:\n{directive}\n\n"
-            "For a full rewrite, use the deal_synthesis 7-section analyst_report structure as the default document structure. "
-            "For a directive document, satisfy the user directive while retaining the same evidence discipline and financial-analysis standards.\n\n"
-            "If the directive asks for a competitor or pipeline comparison, compare the current deal directly against the selected_pipeline_competitor records below. "
-            "Build a concrete comparison table inside analyst_report with one row per current/competitor deal and columns for available financial metrics, funding ask, revenue/ARR/GMV, EBITDA/PAT/margins, valuation, leverage/debt, capex, growth, and key financial risks. "
-            "Use N/A where a metric is missing; do not substitute generic industry benchmarks as competitors. "
-            "After the table, add concise notes on which competitors have insufficient financial evidence and the exact missing items to request.\n\n"
-            f"Selected pipeline comparison set:\n{selected_pipeline_context}\n\n"
-            f"Deal metadata:\nIndustry: {deal.industry or 'N/A'}\nSector: {deal.sector or 'N/A'}\nFunding ask: {deal.funding_ask or 'N/A'}\n\n"
-            "Prefer primary selected evidence over existing deal summaries because the user explicitly selected it for this document."
+            "Use the selected document evidence, selected helper context, stored related-deal context, "
+            "selected pipeline comparison set, and deal-specific directive supplied to the skill."
         )
         result = ai_service.process_content(
             content=prompt,
@@ -570,9 +555,20 @@ def generate_deal_helper_analysis_async(
                 "mode": mode,
                 "document_evidence_json": json.dumps(document_evidence, default=str, ensure_ascii=True),
                 "supporting_raw_chunks_json": json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True),
+                "output_mode": "markdown_document",
+                "deal_title": deal.title,
+                "deal_baseline_json": json.dumps({
+                    "title": deal.title,
+                    "sector": deal.sector or "N/A",
+                    "industry": deal.industry or "N/A",
+                    "funding_ask": deal.funding_ask or "N/A",
+                    "funding_ask_for": deal.funding_ask_for or "N/A",
+                }, default=str, ensure_ascii=True),
                 "deal_specific_prompt": deal_specific_prompt or "No deal-specific prompt saved.",
                 "related_deal_context": saved_context or "No stored competitor or related-deal context.",
+                "selected_pipeline_context": selected_pipeline_context,
                 "selected_context": _truncate_text(selected_context, 10000) if selected_context else "No manually selected evidence context supplied.",
+                "response_mode": "markdown",
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_tokens": 4096,
             },

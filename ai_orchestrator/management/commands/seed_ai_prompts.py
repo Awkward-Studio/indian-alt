@@ -1,6 +1,106 @@
 from django.core.management.base import BaseCommand
 from ai_orchestrator.models import AIPersonality, AISkill
 
+DEAL_SYNTHESIS_SYSTEM_TEMPLATE = """### DEAL SYNTHESIS SKILL
+Use this skill for both canonical deal synthesis and deal-helper analysis writing.
+Follow the output mode in the user prompt:
+- `canonical_json` or blank: return the structured deal synthesis JSON required by deal creation.
+- `markdown_document`: return only the final client-facing Markdown document.
+
+Evidence discipline always applies:
+- Treat document_evidence_json as the primary source of truth.
+- Use supporting raw chunks, selected deal helper context, stored related-deal context, selected pipeline context, and deal-specific directives only to refine the analysis.
+- Do not invent values absent from evidence; use N/A or [VERIFY].
+- Preserve citations/source names for material factual claims."""
+
+DEAL_SYNTHESIS_PROMPT_TEMPLATE = """Synthesize deal analysis from structured document evidence, supporting raw chunks, selected analyst context, saved deal-specific directives, stored competitor context, and selected pipeline context.
+
+[OUTPUT MODE]
+{{ output_mode }}
+
+[DEAL BASELINE JSON]
+{{ deal_baseline_json }}
+
+[DOCUMENT EVIDENCE JSON]
+{{ document_evidence_json }}
+
+[SUPPORTING RAW CHUNKS JSON]
+{{ supporting_raw_chunks_json }}
+
+[DEAL-SPECIFIC ANALYSIS DIRECTIVE]
+{{ deal_specific_prompt }}
+
+[STORED COMPETITOR / RELATED-DEAL CONTEXT]
+{{ related_deal_context }}
+
+[SELECTED PIPELINE CONTEXT]
+{{ selected_pipeline_context }}
+
+[SELECTED DEAL HELPER CONTEXT]
+{{ selected_context }}
+
+[TASK]
+{{ content }}
+
+If OUTPUT MODE is `markdown_document`, return only a Markdown document. Do not return JSON, deal_model_data, metadata, document_evidence, cross_document_conflicts, missing_information_requests, markdown fences, or prompt instructions.
+
+For `markdown_document`, use exactly this 7-section Markdown structure:
+1. ## Company Overview
+2. ## Promoters and Their Background
+3. ## Location and Start Date
+4. ## Key Financial Highlights
+5. ## Industry Analysis
+6. ## Key Peers and Valuation Multiples
+7. ## Key Observations, Risks, and Open Points
+
+For `markdown_document`, do not use the legacy 8-section top-level structure with Executive Summary, Strategic Fit, Operational Due Diligence, Risk Matrix, Valuation & Exit Range, Red Flags, or Next Steps as top-level headings.
+
+For `markdown_document`, section requirements:
+- Company Overview: business model, products/services, customers, scale, ownership context, and transaction context.
+- Promoters and Their Background: founders, promoters, management, prior experience, governance indicators, banker/advisor references, and open background checks.
+- Location and Start Date: headquarters, operating locations, plant/site footprint, incorporation/start date, and source conflicts.
+- Key Financial Highlights: revenue growth for 1 year and 3 years where available; EBITDA margin movement; segment-wise revenue and margin breakdown; working capital; cash; PPE; capex; return ratios; DuPont analysis; leverage/debt; and quality of earnings.
+- Industry Analysis: market structure, demand drivers, value-chain mapping, key players at each value-chain level, market share if evidenced, regulation, and recent reports/news only if supplied in evidence.
+- Key Peers and Valuation Multiples: use stored competitor/related-deal context and selected pipeline context when available. Compare peers on revenue, EBITDA/PAT, margins, growth, valuation multiple, funding ask, and risk factors where evidenced.
+- Key Observations, Risks, and Open Points: investment view, top risks, red flags, diligence gaps, verification requests, and concrete next steps.
+
+If OUTPUT MODE is blank or `canonical_json`, return exactly one valid JSON object and nothing else:
+{
+  "deal_model_data": {
+    "title": "Exact Company Name",
+    "industry": "Industry Name",
+    "sector": "Sub-sector",
+    "funding_ask": "Numerical value in INR Cr as a string",
+    "funding_ask_for": "Use of funds",
+    "priority": "High/Medium/Low",
+    "city": "HQ City",
+    "themes": ["India Alternative themes only"]
+  },
+  "metadata": {
+    "ambiguous_points": ["Unresolved points requiring verification"],
+    "sources_cited": ["Document names or citation labels used"],
+    "documents_analyzed": ["Document names included in this synthesis"],
+    "analysis_input_files": [{"file_id": "source id", "file_name": "Document name"}],
+    "failed_files": [{"file_id": "source id", "file_name": "Document name", "reason": "Why it failed"}]
+  },
+  "analyst_report": "Markdown memo using the 7-section client analysis structure when appropriate, with citations",
+  "document_evidence": [],
+  "cross_document_conflicts": [
+    {
+      "topic": "Metric or claim in conflict",
+      "details": "Why the documents conflict",
+      "citations": ["Source labels"]
+    }
+  ],
+  "missing_information_requests": ["Follow-up diligence requests implied by the evidence"]
+}
+
+Rules:
+- Apply deal_specific_prompt as an additional deal-level writing directive; it augments this skill prompt and must not replace the evidence discipline or output mode.
+- Use related_deal_context for competitor, peer, comparable, parent, subsidiary, customer, or vendor context when present.
+- If unrelated documents are present, explicitly flag them as excluded or low relevance.
+- Do not invent values absent from evidence; use N/A or [VERIFY] and add missing-information requests where the output mode supports them."""
+
 class Command(BaseCommand):
     help = 'Seeds the database with high-fidelity PE Analyst personalities and skills from local DB'
 
@@ -37,7 +137,7 @@ class Command(BaseCommand):
                 "name": "deal_extraction",
                 "description": "Forensic deal extraction from folders and emails.",
                 "system_template": "### DEAL EXTRACTION OUTPUT CONTRACT:\n- Return exactly one JSON object and nothing else.\n- Do not wrap the JSON in markdown fences or <json> tags.\n- Do not repeat keys or restart the JSON object.\n- Keep `analyst_report` concise and bounded; prefer summary quality over length.\n- `funding_ask` must be a string in INR Cr, not a number.\n- `themes`, `ambiguous_points`, and `sources_cited` must be JSON arrays of strings.",
-                "prompt_template": "Analyze the provided documents and extract deal signals using the Forensic PE Analyst framework.\n\n### INPUT DATA:\n{{ content }}\n\n### STRUCTURED OUTPUT REQUIREMENTS:\n1. Executive Summary: Verdict (Buy/Hold/Pass) + Top 3 reasons.\n2. Strategic Fit & Market Opportunity.\n3. Operational Due Diligence.\n4. Financial Deep Dive.\n5. Risk Matrix (Top 5 risks).\n6. Valuation & Exit range.\n7. Red Flags & Warning Signs.\n8. Next Steps / Data Requests.\n\nReturn exactly one valid JSON object and nothing else. Do not use markdown fences or <json> tags. Use these keys:\n{\n  \"deal_model_data\": {\n    \"title\": \"Exact Company Name\",\n    \"industry\": \"Industry Name\",\n    \"sector\": \"Sub-sector\",\n    \"funding_ask\": \"Numerical value in INR Cr as a string\",\n    \"funding_ask_for\": \"Use of funds (e.g. Working Capital, Expansion)\",\n    \"priority\": \"High/Medium/Low based on Phase 4 results\",\n    \"city\": \"HQ City\",\n    \"themes\": [\"List of India Alternative themes\"]\n  },\n  \"contact_discovery\": {\n    \"firm_name\": \"Investment Bank or Advisory Firm Name\",\n    \"firm_domain\": \"Website domain of the firm (e.g. website.com)\",\n    \"name\": \"Primary Banker or Contact Name\",\n    \"designation\": \"Designation/Title of the Contact\",\n    \"linkedin\": \"LinkedIn URL if available\",\n    \"email\": \"Email address of the contact if available\"\n  },\n  \"metadata\": {\n    \"ambiguous_points\": [\"Specific risks or gaps needing verification\"],\n    \"sources_cited\": [\"Exact filename where data was found\"]\n  },\n  \"analyst_report\": \"Your full formatted markdown narrative from sections 1-8\"\n}\n\nRULES:\n- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes:\n  a. Women Oriented Consumption\n  b. Health & Wellness\n  c. Financial Services + Tech\n  d. Gen Z + Millennials\n  e. Climate & Sustainability\n- BANKERS: Investment Banker and advisory team details are typically located on the final pages of the pitch deck or teaser. Extract them carefully into the 'contact_discovery' object. If none are found, output null for contact_discovery.\n- Do not repeat the JSON object or any keys.\n- Keep 'analyst_report' concise enough to fit in a single response.\n- Every claim in 'analyst_report' must include citations [Source: DocName].",
+                "prompt_template": "Analyze the provided documents and extract deal signals using the Forensic PE Analyst framework.\n\n### INPUT DATA:\n{{ content }}\n\n### STRUCTURED OUTPUT REQUIREMENTS:\n1. Company Overview.\n2. Promoters and their background.\n3. Location and when the company was started.\n4. Key Financial Highlights (Revenue growth 1 & 3 year, EBITDA margin movement, Segment breakdown, WC, cash, PPE, capex, return ratios, DuPont analysis).\n5. Industry Analysis (Value chain mapping, Key players, Market share).\n6. Key Observations (Risk factors, open points for analysis).\n\nReturn exactly one valid JSON object and nothing else. Do not use markdown fences or <json> tags. Use these keys:\n{\n  \"deal_model_data\": {\n    \"title\": \"Exact Company Name\",\n    \"industry\": \"Industry Name\",\n    \"sector\": \"Sub-sector\",\n    \"funding_ask\": \"Numerical value in INR Cr as a string\",\n    \"funding_ask_for\": \"Use of funds (e.g. Working Capital, Expansion)\",\n    \"priority\": \"High/Medium/Low based on Phase 4 results\",\n    \"city\": \"HQ City\",\n    \"themes\": [\"List of India Alternative themes\"]\n  },\n  \"contact_discovery\": {\n    \"firm_name\": \"Investment Bank or Advisory Firm Name\",\n    \"firm_domain\": \"Website domain of the firm (e.g. website.com)\",\n    \"name\": \"Primary Banker or Contact Name\",\n    \"designation\": \"Designation/Title of the Contact\",\n    \"linkedin\": \"LinkedIn URL if available\",\n    \"email\": \"Email address of the contact if available\"\n  },\n  \"metadata\": {\n    \"ambiguous_points\": [\"Specific risks or gaps needing verification\"],\n    \"sources_cited\": [\"Exact filename where data was found\"]\n  },\n  \"analyst_report\": \"Your full formatted markdown narrative from sections 1-8\"\n}\n\nRULES:\n- THEMES: Every deal MUST be linked to one or more of the following India Alternative themes ONLY. Do not use any other themes:\n  a. Women Oriented Consumption\n  b. Health & Wellness\n  c. Financial Services + Tech\n  d. Gen Z + Millennials\n  e. Climate & Sustainability\n- BANKERS: Investment Banker and advisory team details are typically located on the final pages of the pitch deck or teaser. Extract them carefully into the 'contact_discovery' object. If none are found, output null for contact_discovery.\n- Do not repeat the JSON object or any keys.\n- Keep 'analyst_report' concise enough to fit in a single response.\n- Every claim in 'analyst_report' must include citations [Source: DocName].",
                 "output_schema": {
                     "metadata": {"sources_cited": ["string"], "ambiguous_points": ["string"]},
                     "analyst_report": "string",
@@ -70,8 +170,8 @@ class Command(BaseCommand):
             {
                 "name": "deal_synthesis",
                 "description": "Synthesizes the main client-facing deal analysis from document evidence, selected context, and supporting raw chunks.",
-                "system_template": "### DEAL SYNTHESIS OUTPUT CONTRACT:\n- Return exactly one JSON object and nothing else.\n- `analyst_report` must be a string with citations.\n- `document_evidence`, `cross_document_conflicts`, and `missing_information_requests` must be arrays.\n- `metadata` must include `ambiguous_points`, `sources_cited`, `documents_analyzed`, `analysis_input_files`, and `failed_files`.\n- Preserve supporting citations from the supplied evidence where possible.",
-                "prompt_template": "Synthesize the main client-facing deal analysis from structured document evidence, selected analyst context, saved deal-specific directives, stored competitor context, and supporting raw chunks.\n\n[DOCUMENT EVIDENCE JSON]\n{{ document_evidence_json }}\n\n[SUPPORTING RAW CHUNKS JSON]\n{{ supporting_raw_chunks_json }}\n\n[DEAL-SPECIFIC ANALYSIS DIRECTIVE]\n{{ deal_specific_prompt }}\n\n[STORED COMPETITOR / RELATED-DEAL CONTEXT]\n{{ related_deal_context }}\n\n[SELECTED DEAL HELPER CONTEXT]\n{{ selected_context }}\n\n[TASK]\n{{ content }}\n\nReturn exactly one valid JSON object and nothing else:\n{\n  \"deal_model_data\": {\n    \"title\": \"Exact Company Name\",\n    \"industry\": \"Industry Name\",\n    \"sector\": \"Sub-sector\",\n    \"funding_ask\": \"Numerical value in INR Cr as a string\",\n    \"funding_ask_for\": \"Use of funds\",\n    \"priority\": \"High/Medium/Low\",\n    \"city\": \"HQ City\",\n    \"themes\": [\"India Alternative themes only\"]\n  },\n  \"metadata\": {\n    \"ambiguous_points\": [\"Unresolved points requiring verification\"],\n    \"sources_cited\": [\"Document names or citation labels used\"],\n    \"documents_analyzed\": [\"Document names included in this synthesis\"],\n    \"analysis_input_files\": [{\"file_id\": \"source id\", \"file_name\": \"Document name\"}],\n    \"failed_files\": [{\"file_id\": \"source id\", \"file_name\": \"Document name\", \"reason\": \"Why it failed\"}]\n  },\n  \"analyst_report\": \"Markdown memo using the mandatory 7-section structure below, with citations\",\n  \"document_evidence\": [],\n  \"cross_document_conflicts\": [\n    {\n      \"topic\": \"Metric or claim in conflict\",\n      \"details\": \"Why the documents conflict\",\n      \"citations\": [\"Source labels\"]\n    }\n  ],\n  \"missing_information_requests\": [\"Follow-up diligence requests implied by the evidence\"]\n}\n\nMandatory analyst_report structure:\n1. ## Company Overview\n   Cover business model, products/services, customers, scale, ownership context, and transaction context.\n2. ## Promoters and Their Background\n   Cover promoters/founders/management, prior experience, governance indicators, banker/advisor references, and open background checks.\n3. ## Location and Start Date\n   Cover headquarters, operating locations, plant/site footprint, incorporation/start date, and any source conflicts.\n4. ## Key Financial Highlights\n   Cover revenue growth for 1 year and 3 years where available; EBITDA margin movement; segment-wise revenue and margin breakdown; working capital; cash; PPE; capex; return ratios; DuPont analysis; leverage/debt; and quality of earnings. Use INR Cr/Lakhs consistently. If financial model data is insufficient, state the exact missing schedules needed.\n5. ## Industry Analysis\n   Cover market structure, demand drivers, value chain mapping, key players at each value-chain level, market share if evidenced, regulation, and recent industry insights present in the supplied documents. Do not claim latest external reports/news unless they are in the supplied evidence; if absent, add a missing-information request for recent reports/news.\n6. ## Key Peers and Valuation Multiples\n   Use stored competitor/related-deal context and selected pipeline context when available. Compare peers on revenue, EBITDA/PAT, margins, growth, valuation multiple, funding ask, and risk factors where evidenced. Use N/A for missing peer data and request the specific missing peer files or metrics.\n7. ## Key Observations, Risks, and Open Points\n   Summarize the investment view, top risks, red flags, diligence gaps, verification requests, and concrete next steps.\n\nRules:\n- Treat document_evidence_json as the primary source of truth.\n- Use supporting_raw_chunks_json and selected_context only to refine detail and citations.\n- Apply deal_specific_prompt as the deal-level writing directive, but do not let it override evidence discipline or the JSON output contract.\n- Use related_deal_context for competitor, peer, comparable, parent, subsidiary, customer, or vendor context when present.\n- Preserve citations in every material section of analyst_report.\n- Surface contradictions explicitly in cross_document_conflicts.\n- Include metadata.documents_analyzed and metadata.analysis_input_files in the final JSON.\n- Do not invent values absent from the evidence; use N/A or [VERIFY] and add missing_information_requests.",
+                "system_template": DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
+                "prompt_template": DEAL_SYNTHESIS_PROMPT_TEMPLATE,
                 "output_schema": {
                     "metadata": "object",
                     "analyst_report": "string",
@@ -119,7 +219,7 @@ class Command(BaseCommand):
                 "name": "email_thread_synthesis",
                 "description": "Synthesizes final institutional deal record from an email thread history.",
                 "system_template": "You are a Lead PE Analyst at India Alternatives. Return exactly one valid JSON object following the Institutional Portable Deal Data schema. NO conversational text outside JSON.",
-                "prompt_template": "[INSTITUTIONAL DIRECTIVE]\nAct as a Lead PE Analyst. You are performing a FINAL SYNTHESIS of a deal from a cleaned email thread and its analyzed documents.\n\n[CRITICAL: DEAL TITLE]\nIdentify the ACTUAL Investee Company name. \n1. IGNORE phrases like \"Investment Opportunity\", \"Project\", \"Teaser\", or \"Forensic Audit\".\n2. If the thread refers to \"Project Foil\", the target is likely \"Foil\" or the legal company name mentioned in the body (e.g. SGR Foods).\n3. The \"title\" field in deal_model_data MUST be the company name, NOT the email subject.\n\n[INDIA ALTERNATIVE THEMES]\n- Women Oriented Consumption\n- Health & Wellness\n- Financial Services + Tech\n- Gen Z + Millennials\n- Climate & Sustainability\n\n[ANALYST_REPORT REQUIREMENTS]\nYou MUST generate the analyst_report field using this exact Markdown structure:\n1. ## Executive Summary\n   - **Verdict:** Buy / Hold / Pass\n   - **Top 3 Reasons**\n2. ## Strategic Fit & Market Opportunity\n3. ## Operational Due Diligence\n4. ## Financial Deep Dive (Include Revenue, EBITDA, Margins)\n5. ## Risk Matrix (Top 5 Risks)\n6. ## Valuation & Exit Range\n7. ## Red Flags & Warning Signs\n8. ## Next Steps / Data Requests\n\n[INTELLIGENCE CONTEXT]\n{{ content }}\n\nReturn exactly one valid JSON object. Populate every deal parameter possible from the context."
+                "prompt_template": "[INSTITUTIONAL DIRECTIVE]\nAct as a Lead PE Analyst. You are performing a FINAL SYNTHESIS of a deal from a cleaned email thread and its analyzed documents.\n\n[CRITICAL: DEAL TITLE]\nIdentify the ACTUAL Investee Company name. \n1. IGNORE phrases like \"Investment Opportunity\", \"Project\", \"Teaser\", or \"Forensic Audit\".\n2. If the thread refers to \"Project Foil\", the target is likely \"Foil\" or the legal company name mentioned in the body (e.g. SGR Foods).\n3. The \"title\" field in deal_model_data MUST be the company name, NOT the email subject.\n\n[INDIA ALTERNATIVE THEMES]\n- Women Oriented Consumption\n- Health & Wellness\n- Financial Services + Tech\n- Gen Z + Millennials\n- Climate & Sustainability\n\n[ANALYST_REPORT REQUIREMENTS]\nYou MUST generate the analyst_report field using this exact Markdown structure:\n1. ## Company Overview\n2. ## Promoters and their background\n3. ## Location and when the company was started\n4. ## Key Financial Highlights (Include Revenue, EBITDA, Margins, DuPont analysis)\n5. ## Industry Analysis (Value chain mapping, Key players, Market share)\n6. ## Key Observations (Risk factors, open points for analysis)\n\n[INTELLIGENCE CONTEXT]\n{{ content }}\n\nReturn exactly one valid JSON object. Populate every deal parameter possible from the context."
             },
             {
                 "name": "email_unroll",
