@@ -73,7 +73,9 @@ class Command(BaseCommand):
         url = f"{base_url.rstrip('/')}/vendor/company-full/"
         headers = {
             "x-api-key": api_key,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
         payload = {}
@@ -98,7 +100,16 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS("SUCCESS: Successfully connected to Venture Intelligence API!"))
                 try:
                     data = response.json()
-                    results = data.get("results", {})
+                    self.stdout.write(self.style.SUCCESS("=== Raw Response Keys ==="))
+                    self.stdout.write(f"Top-level keys: {list(data.keys())}")
+                    if "results" in data and isinstance(data["results"], dict):
+                        self.stdout.write(f"Results keys: {list(data['results'].keys())}")
+                    self.stdout.write("-" * 60)
+                    
+                    results = data.get("results") or {}
+                    if not isinstance(results, dict):
+                        results = {}
+                        
                     profile = results.get("profile", {})
                     if profile:
                         self.stdout.write(self.style.SUCCESS("-" * 40))
@@ -112,6 +123,9 @@ class Command(BaseCommand):
                         self.stdout.write(self.style.SUCCESS("-" * 40))
                     else:
                         self.stdout.write(self.style.WARNING("Response success, but no company profile data was found."))
+                        self.stdout.write(self.style.WARNING("=== Full Raw Response Body ==="))
+                        self.stdout.write(json.dumps(data, indent=2))
+                        self.stdout.write(self.style.WARNING("=============================="))
                     
                     pl_count = len(results.get("profit_loss", [])) if results.get("profit_loss") else 0
                     bs_count = len(results.get("balance_sheet", [])) if results.get("balance_sheet") else 0
