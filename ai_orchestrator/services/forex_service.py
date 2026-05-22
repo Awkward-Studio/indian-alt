@@ -11,22 +11,34 @@ class ForexService:
     """
     CACHE_KEY = "live_usd_inr_rate"
     FALLBACK = 84.0
+    _local_cache = None
 
     def get_rate(self) -> float:
-        rate = cache.get(self.CACHE_KEY)
-        if rate: return float(rate)
+        try:
+            rate = cache.get(self.CACHE_KEY)
+            if rate: return float(rate)
+        except Exception as e:
+            logger.warning(f"Redis cache get failed: {str(e)}")
+
+        if ForexService._local_cache is not None:
+            return ForexService._local_cache
 
         try:
             # Reliable free public API
             resp = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=3)
             if resp.status_code == 200:
                 new_rate = resp.json().get('rates', {}).get('INR', self.FALLBACK)
-                cache.set(self.CACHE_KEY, new_rate, 60 * 60 * 24) # 24h cache
+                try:
+                    cache.set(self.CACHE_KEY, new_rate, 60 * 60 * 24) # 24h cache
+                except Exception as e:
+                    logger.warning(f"Redis cache set failed: {str(e)}")
+                ForexService._local_cache = float(new_rate)
                 return float(new_rate)
         except Exception as e:
             logger.warning(f"Forex API unreachable, using fallback: {str(e)}")
         
         return self.FALLBACK
+
 
     def get_crore_string(self) -> str:
         """Returns e.g. '8.35 Cr'"""

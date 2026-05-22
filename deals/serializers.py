@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus
+from .models import (
+    Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus,
+    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation
+)
 from accounts.models import Profile
 from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
@@ -265,11 +268,40 @@ class DealSerializer(serializers.ModelSerializer):
         read_only_fields = ('id',)
 
 
+class VentureIntelligenceFinancialStatementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceFinancialStatement
+        fields = '__all__'
+
+
+class VentureIntelligenceCompanyProfileSerializer(serializers.ModelSerializer):
+    financial_statements = VentureIntelligenceFinancialStatementSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = VentureIntelligenceCompanyProfile
+        fields = '__all__'
+
+
+class VentureIntelligenceCompanyRelationSerializer(serializers.ModelSerializer):
+    company_profile = VentureIntelligenceCompanyProfileSerializer(read_only=True)
+    company_profile_id = serializers.PrimaryKeyRelatedField(
+        queryset=VentureIntelligenceCompanyProfile.objects.all(),
+        source='company_profile',
+        write_only=True
+    )
+
+    class Meta:
+        model = VentureIntelligenceCompanyRelation
+        fields = ['id', 'deal', 'company_profile', 'company_profile_id', 'relation_type', 'notes', 'created_at']
+        read_only_fields = ('id', 'created_at')
+
+
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     generated_documents = DealGeneratedDocumentSerializer(many=True, read_only=True)
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     file_tree = serializers.SerializerMethodField()
+    vi_relations = VentureIntelligenceCompanyRelationSerializer(many=True, read_only=True)
 
     def get_file_tree(self, obj):
         from .services.folder_analysis import FolderAnalysisService
@@ -289,7 +321,7 @@ class DealDetailSerializer(DealSerializer):
             'generated_documents', 'analysis_prompt',
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
-            'file_tree',
+            'file_tree', 'vi_relations',
         )
         read_only_fields = ('id',)
 
@@ -347,3 +379,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'rejection_stage_id', 'rejection_reason'
         )
         read_only_fields = ('id', 'created_at')
+
+
+
+

@@ -1589,3 +1589,72 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["mode"], "fallback_text")
         self.assertEqual(result["normalized_text"], "Local text")
         mock_local_extract.assert_called_once()
+
+
+class AnthropicIntegrationTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import User
+        from ai_orchestrator.models import AIConversation
+        self.user = User.objects.create_user(username="testuser", password="password")
+        self.personality = AIPersonality.objects.create(name="test_personality", is_default=True)
+        self.skill_uc = AISkill.objects.create(name="universal_chat", system_template="System prompt", prompt_template="{{ content }}")
+        self.skill_dc = AISkill.objects.create(name="deal_chat", system_template="System prompt", prompt_template="{{ content }}")
+        self.deal = Deal.objects.create(title="ACME Corporation")
+        self.conversation = AIConversation.objects.create(user=self.user, title="Test Chat", metadata={"model_provider": "anthropic"})
+
+    def test_anthropic_provider_payload_building(self):
+        from ai_orchestrator.services.llm_providers import AnthropicProviderService
+        service = AnthropicProviderService()
+        payload = {
+            "model": "claude-3-7-sonnet-latest",
+            "prompt": "What is ACME Corp?",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5}
+        }
+        built = service._build_anthropic_payload(payload, stream=False)
+        self.assertEqual(built["model"], "claude-3-7-sonnet-latest")
+        self.assertEqual(built["system"], "Be concise")
+        self.assertEqual(built["messages"][0]["content"], "What is ACME Corp?")
+        self.assertEqual(built["tools"][0]["type"], "web_search_20260209")
+        # Claude 3.7 should enforce temperature=1.0 and enable thinking
+        self.assertEqual(built["temperature"], 1.0)
+        self.assertEqual(built["thinking"]["type"], "enabled")
+
+    @patch("ai_orchestrator.services.universal_chat.Deal.objects.only")
+    def test_rag_bypass_universal_chat(self, mock_deal_only):
+        from ai_orchestrator.services.universal_chat import UniversalChatService
+        mock_deal_only.return_value = [self.deal]
+        
+        ai_processor = AIProcessorService()
+        chat_service = UniversalChatService(ai_processor)
+        
+        # When model_provider is 'anthropic', it should bypass standard RAG planning
+        res = chat_service.process_intent_and_build_metadata(
+            user_message="Tell me about ACME Corporation",
+            conversation_id=str(self.conversation.id),
+            history_context="",
+            audit_log_id="test-log-id"
+        )
+        
+        self.assertFalse(res["used_query_builder"])
+        self.assertEqual(res["gate_mode"], "privacy_bypass")
+        self.assertIn("ACME Corporation", res["context_data"])
+        self.assertEqual(res["deals_considered"], 1)
+
+    def test_rag_bypass_deal_chat(self):
+        from ai_orchestrator.services.universal_chat import UniversalChatService
+        ai_processor = AIProcessorService()
+        chat_service = UniversalChatService(ai_processor)
+        
+        res = chat_service.process_single_deal_build_metadata(
+            user_message="What did they do?",
+            conversation_id=str(self.conversation.id),
+            history_context="",
+            audit_log_id="test-log-id",
+            deal_id=str(self.deal.id)
+        )
+        
+        self.assertFalse(res["used_query_builder"])
+        self.assertEqual(res["gate_mode"], "privacy_bypass")
+        self.assertIn("ACME Corporation", res["context_data"])
+

@@ -265,6 +265,45 @@ class UniversalChatService:
         return compact
 
     def process_intent_and_build_metadata(self, user_message: str, conversation_id: str, history_context: str, audit_log_id: str) -> dict:
+        from ..models import AIConversation
+        conversation = AIConversation.objects.filter(id=conversation_id).first()
+        model_provider = conversation.metadata.get('model_provider', 'vllm') if conversation else 'vllm'
+        answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
+
+        if model_provider == 'anthropic':
+            from deals.models import Deal
+            candidate_deals = list(Deal.objects.only('id', 'title'))
+            matched_deals = []
+            for d in candidate_deals:
+                if d.title and (d.title.lower() in user_message.lower() or d.title.lower() in history_context.lower()):
+                    matched_deals.append(d.title)
+            
+            if matched_deals:
+                context_data = "You are chatting about the following deal(s): " + ", ".join(matched_deals) + "."
+            else:
+                context_data = "No specific deal from the database was matched in the query."
+                
+            return {
+                "history_context": history_context,
+                "context_data": context_data,
+                "audit_log_id": audit_log_id,
+                "query_plan": {
+                    "mode": "privacy_bypass",
+                    "user_query": user_message,
+                    "matched_deals": matched_deals
+                },
+                "flow_version": getattr(self.flow_version, "version", None),
+                "flow_config_id": str(self.flow_version.id) if getattr(self.flow_version, "id", None) else None,
+                "answer_generation_prompt": answer_prompt,
+                "used_query_builder": False,
+                "gate_mode": "privacy_bypass",
+                "gate_reason": "RAG-bypass enforced for Claude model privacy.",
+                "deals_considered": len(matched_deals),
+                "retrieved_chunk_count": 0,
+                "selected_chunk_count": 0,
+                "selected_sources": [],
+            }
+
         gate = self._decide_query_builder_usage(user_message, history_context)
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
 
@@ -368,6 +407,30 @@ class UniversalChatService:
     ) -> dict:
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
         deal = Deal.objects.get(id=deal_id)
+
+        from ..models import AIConversation
+        conversation = AIConversation.objects.filter(id=conversation_id).first()
+        model_provider = conversation.metadata.get('model_provider', 'vllm') if conversation else 'vllm'
+
+        if model_provider == 'anthropic':
+            return {
+                "history_context": history_context,
+                "context_data": f"You are chatting about the deal: {deal.title}.",
+                "deal_context": f"You are chatting about the deal: {deal.title}.",
+                "audit_log_id": audit_log_id,
+                "query_plan": {"mode": "privacy_bypass", "user_query": user_message},
+                "flow_version": getattr(self.flow_version, "version", None),
+                "flow_config_id": str(self.flow_version.id) if getattr(self.flow_version, "id", None) else None,
+                "answer_generation_prompt": answer_prompt,
+                "used_query_builder": False,
+                "gate_mode": "privacy_bypass",
+                "gate_reason": "RAG-bypass enforced for Claude model privacy.",
+                "deals_considered": 1,
+                "retrieved_chunk_count": 0,
+                "selected_chunk_count": 0,
+                "selected_sources": [],
+            }
+
         plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
         plan["deal_limit"] = 1
 

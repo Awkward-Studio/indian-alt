@@ -699,3 +699,83 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             logger = logging.getLogger(__name__)
             logger.error(f"Manual upload failed: {str(e)}")
             return Response({"error": str(e)}, status=500)
+
+
+from rest_framework.views import APIView
+from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.serializers import VentureIntelligenceCompanyProfileSerializer
+
+class VentureIntelligencePreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        company_name = request.data.get("company_name")
+        cin = request.data.get("cin")
+        
+        if not company_name and not cin:
+            return Response({"error": "Either company_name or cin is required"}, status=400)
+            
+        vi_service = VentureIntelligenceService()
+        resolved_cin = cin
+        
+        # If only company_name is provided, try direct query first, then fall back to AI resolution
+        if not resolved_cin and company_name:
+            try:
+                data = vi_service.fetch_company_details(company_name=company_name)
+                return Response(data)
+            except Exception:
+                logger.info(f"Direct preview query failed for '{company_name}', trying AI resolution...")
+                ai_res = vi_service.resolve_cin_via_ai(company_name)
+                resolved_cin = ai_res.get("cin")
+                company_name = ai_res.get("entity_name") or company_name
+                
+        if not resolved_cin:
+            return Response({"error": "Could not resolve Corporate Identity Number (CIN)"}, status=404)
+
+        try:
+            data = vi_service.fetch_company_details(company_name=company_name, cin=resolved_cin)
+            # Append resolved cin info for frontend matching visibility
+            data["resolved_cin"] = resolved_cin
+            data["resolved_name"] = company_name
+            return Response(data)
+        except Exception as e:
+            return Response({"error": f"Failed to fetch from Venture Intelligence: {str(e)}"}, status=500)
+
+
+class DealEnrichView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            deal = Deal.objects.get(id=pk)
+        except Deal.DoesNotExist:
+            return Response({"error": "Deal not found"}, status=404)
+
+        company_name = request.data.get("company_name")
+        cin = request.data.get("cin")
+        relation_type = request.data.get("relation_type", "target")
+        
+        if relation_type not in ["target", "competitor"]:
+            return Response({"error": "Invalid relation_type. Must be 'target' or 'competitor'"}, status=400)
+
+        if not company_name and not cin:
+            company_name = deal.title  # Fallback to deal title if empty
+
+        vi_service = VentureIntelligenceService()
+        try:
+            profile = vi_service.enrich_deal(
+                deal_id=deal.id,
+                company_name=company_name,
+                cin=cin,
+                relation_type=relation_type
+            )
+            serializer = VentureIntelligenceCompanyProfileSerializer(profile)
+            return Response({
+                "status": "success",
+                "message": f"Successfully enriched deal with {relation_type} company profile.",
+                "profile": serializer.data
+            })
+        except Exception as e:
+            logger.error(f"Enrichment failed for Deal {deal.id}: {e}", exc_info=True)
+            return Response({"error": f"Enrichment failed: {str(e)}"}, status=500)
+

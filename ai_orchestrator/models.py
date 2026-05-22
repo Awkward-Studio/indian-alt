@@ -17,6 +17,7 @@ class AIPersonality(models.Model):
         default='vllm',
         choices=[
             ('vllm', 'vLLM (OpenAI-Compatible)'),
+            ('anthropic', 'Anthropic Claude API'),
         ]
     )
     text_model_name = models.CharField(max_length=200, default='default', help_text="Model for text-only tasks")

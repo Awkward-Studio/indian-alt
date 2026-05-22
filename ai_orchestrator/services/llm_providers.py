@@ -440,3 +440,147 @@ class RerankerProviderService:
                 continue
             normalized.append({"index": int(index), "score": float(score)})
         return normalized
+
+
+class AnthropicProviderService:
+    """
+    Transport for Anthropic's Claude API, supporting streaming and native web search tool.
+    Normalizes responses to the legacy internal shape.
+    """
+
+    def __init__(self):
+        self.api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+        self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-3-7-sonnet-latest")
+        self.base_url = "https://api.anthropic.com/v1/messages"
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+    def _build_anthropic_payload(self, payload: dict, stream: bool) -> dict[str, Any]:
+        model = payload.get("model") or self.model
+        if model == "default":
+            model = self.model
+            
+        system_prompt = payload.get("system") or ""
+        user_prompt = payload.get("prompt") or ""
+        
+        # Determine options
+        max_tokens = (payload.get("options") or {}).get("max_tokens") or 8192
+        temperature = (payload.get("options") or {}).get("temperature") or 0.1
+
+        anthropic_payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "stream": stream,
+        }
+
+        if system_prompt:
+            anthropic_payload["system"] = system_prompt
+
+        # Enable native web search tool
+        anthropic_payload["tools"] = [
+            {
+                "type": "web_search_20260209"
+            }
+        ]
+
+        # Handle thinking budget and temperature constraints for Claude 3.7
+        if "claude-3-7" in model:
+            anthropic_payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": min(2048, max_tokens - 1000) if max_tokens > 2000 else 1024
+            }
+            anthropic_payload["temperature"] = 1.0
+        else:
+            anthropic_payload["temperature"] = temperature
+
+        return anthropic_payload
+
+    def health_check(self) -> bool:
+        if not self.api_key:
+            return False
+        try:
+            response = requests.head("https://api.anthropic.com", timeout=5)
+            return response.status_code < 500
+        except Exception:
+            return False
+
+    def get_available_models(self) -> list[str]:
+        return [self.model, "claude-3-7-sonnet-latest", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"]
+
+    def execute_stream(self, payload: dict) -> Iterator[str]:
+        body = self._build_anthropic_payload(payload, stream=True)
+        response = requests.post(
+            self.base_url,
+            headers=self._headers(),
+            json=body,
+            stream=True,
+            timeout=300,
+        )
+        response.raise_for_status()
+
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line or raw_line.startswith(":"):
+                continue
+            if raw_line.startswith("data: "):
+                raw_line = raw_line[6:]
+            
+            try:
+                data = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = data.get("type")
+            if event_type == "content_block_delta":
+                delta = data.get("delta") or {}
+                delta_type = delta.get("type")
+                if delta_type == "text_delta":
+                    text = delta.get("text") or ""
+                    yield json.dumps({"response": text, "thinking": "", "done": False})
+                elif delta_type == "thinking_delta":
+                    thinking = delta.get("thinking") or ""
+                    yield json.dumps({"response": "", "thinking": thinking, "done": False})
+            elif event_type in ("message_stop", "message_delta") or (
+                event_type == "message_delta" and (data.get("delta") or {}).get("stop_reason") is not None
+            ):
+                yield json.dumps({"response": "", "thinking": "", "done": True})
+                break
+
+    def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
+        body = self._build_anthropic_payload(payload, stream=False)
+        response = requests.post(
+            self.base_url,
+            headers=self._headers(),
+            json=body,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        content_blocks = data.get("content") or []
+        response_text = ""
+        thinking_text = ""
+        
+        for block in content_blocks:
+            if block.get("type") == "text":
+                response_text += block.get("text") or ""
+            elif block.get("type") == "thinking":
+                thinking_text += block.get("thinking") or ""
+
+        return {
+            "response": response_text,
+            "thinking": thinking_text,
+            "usage": data.get("usage") or {},
+            "raw": data,
+        }
+

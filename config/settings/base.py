@@ -215,9 +215,12 @@ CACHES = {
         "LOCATION": REDIS_URL,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True,
         }
     }
 }
+DJANGO_REDIS_IGNORE_EXCEPTIONS = True
+
 
 CELERY_TASK_ROUTES = {
     'ai_orchestrator.tasks.generate_chat_response_async': {'queue': 'high_priority'},
@@ -263,6 +266,10 @@ RERANKER_MODEL = config('RERANKER_MODEL', default='')
 RERANKER_TIMEOUT = config('RERANKER_TIMEOUT', default=30, cast=int)
 DOC_PROCESSOR_URL = config('DOC_PROCESSOR_URL', default='')
 DOC_PROCESSOR_API_KEY = config('DOC_PROCESSOR_API_KEY', default='')
+
+# Anthropic Settings
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+CLAUDE_TEXT_MODEL = config('CLAUDE_TEXT_MODEL', default='claude-3-7-sonnet-latest')
 DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 
 # Database Configuration
@@ -305,3 +312,8 @@ else:
             'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
         }
     }
+
+# Venture Intelligence API
+VENTURE_INTELLIGENCE_API_KEY = config('VENTURE_INTELLIGENCE_API_KEY', default='')
+VENTURE_INTELLIGENCE_BASE_URL = config('VENTURE_INTELLIGENCE_BASE_URL', default='https://api-hub.ventureintelligence.com')
+

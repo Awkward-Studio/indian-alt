@@ -647,3 +647,95 @@ class DealDocument(models.Model):
 
     def __str__(self):
         return f"{self.document_type}: {self.title}"
+
+
+class VentureIntelligenceCompanyProfile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cin = models.CharField(max_length=21, unique=True, null=True, blank=True, db_index=True)
+    name = models.TextField()
+    registered_name = models.TextField(null=True, blank=True)
+    website = models.TextField(null=True, blank=True)
+    industry = models.TextField(null=True, blank=True)
+    sector = models.TextField(null=True, blank=True)
+    email = models.TextField(null=True, blank=True)
+    year_founded = models.CharField(max_length=10, null=True, blank=True)
+    city = models.TextField(null=True, blank=True)
+    total_funding = models.TextField(null=True, blank=True)
+    raw_profile_json = models.JSONField(default=dict, blank=True, help_text="Full raw JSON response from VI")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'vi_company_profile'
+        verbose_name = 'VI Company Profile'
+        verbose_name_plural = 'VI Company Profiles'
+
+    def __str__(self):
+        return f"{self.name} ({self.cin or 'No CIN'})"
+
+
+class VentureIntelligenceStatementType(models.TextChoices):
+    PROFIT_LOSS = 'profit_loss', 'Profit & Loss'
+    BALANCE_SHEET = 'balance_sheet', 'Balance Sheet'
+    CASH_FLOW = 'cash_flow', 'Cash Flow'
+
+
+class VentureIntelligenceFinancialStatement(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='financial_statements'
+    )
+    statement_type = models.CharField(
+        max_length=20,
+        choices=VentureIntelligenceStatementType.choices
+    )
+    fy = models.CharField(max_length=20, db_index=True)  # e.g., "FY23", "2023"
+    fin_type = models.CharField(max_length=50, default="Standalone")  # Standalone or Consolidated
+    data = models.JSONField(default=dict, help_text="Structured row key-value data")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_financial_statement'
+        unique_together = ('company_profile', 'statement_type', 'fy', 'fin_type')
+        ordering = ['-fy', 'statement_type']
+
+    def __str__(self):
+        return f"{self.company_profile.name} - {self.statement_type} - {self.fy} ({self.fin_type})"
+
+
+class VentureIntelligenceRelationType(models.TextChoices):
+    TARGET = 'target', 'Target Company'
+    COMPETITOR = 'competitor', 'Competitor Company'
+
+
+class VentureIntelligenceCompanyRelation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='vi_relations'
+    )
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='deal_relations'
+    )
+    relation_type = models.CharField(
+        max_length=20,
+        choices=VentureIntelligenceRelationType.choices,
+        default=VentureIntelligenceRelationType.TARGET
+    )
+    notes = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_company_relation'
+        unique_together = ('deal', 'company_profile')
+        verbose_name = 'VI Company Relation'
+        verbose_name_plural = 'VI Company Relations'
+
+    def __str__(self):
+        return f"{self.deal.title} -> {self.company_profile.name} ({self.relation_type})"
+

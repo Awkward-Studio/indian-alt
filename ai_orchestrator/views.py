@@ -168,6 +168,12 @@ class DealChatView(APIView):
                 defaults={'id': uuid.uuid4()} # Using deal ID as a reference? No, use new UUID.
             )
 
+            model_provider = request.data.get('model_provider', 'vllm')
+            if not isinstance(conversation.metadata, dict):
+                conversation.metadata = {}
+            conversation.metadata['model_provider'] = model_provider
+            conversation.save(update_fields=['metadata'])
+
             task_info: Dict[str, Any] = {}
 
             def _enqueue_task():
@@ -178,6 +184,7 @@ class DealChatView(APIView):
                         'skill_name': 'deal_chat',
                         'metadata': {
                             'deal_id': str(deal.id),
+                            'model_provider': model_provider,
                         },
                         'audit_log_id': str(audit_log.id)
                     }
@@ -218,6 +225,12 @@ class UniversalChatView(APIView):
             
             AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
             
+            model_provider = request.data.get('model_provider', 'vllm')
+            if not isinstance(conversation.metadata, dict):
+                conversation.metadata = {}
+            conversation.metadata['model_provider'] = model_provider
+            conversation.save(update_fields=['metadata'])
+
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='universal_chat').first()
             
@@ -243,7 +256,9 @@ class UniversalChatView(APIView):
                         'conversation_id': str(conversation.id),
                         'user_message': user_message,
                         'skill_name': 'universal_chat',
-                        'metadata': {}, # We will build the context entirely inside the Celery task
+                        'metadata': {
+                            'model_provider': model_provider,
+                        }, # We will build the context entirely inside the Celery task
                         'audit_log_id': str(audit_log.id)
                     }
                 )
@@ -395,6 +410,13 @@ class DealHelperView(APIView):
             return Response({"error": "deal_id and message are required."}, status=400)
         deal = Deal.objects.get(id=deal_id)
         conversation = self._conversation_for_deal(request, deal, request.data.get("conversation_id"), message)
+        
+        # Save/update model_provider to conversation metadata
+        model_provider = request.data.get('model_provider', 'vllm')
+        if not isinstance(conversation.metadata, dict):
+            conversation.metadata = {}
+        conversation.metadata['model_provider'] = model_provider
+        conversation.save(update_fields=['metadata'])
         from .tasks import _build_history_context
         user_message = AIMessage.objects.create(conversation=conversation, role="user", content=message)
         self._touch_conversation(conversation)
@@ -833,6 +855,122 @@ class DealHelperView(APIView):
             "message": "Analysis queued.",
         })
 
+import threading
+
+# Global fallback state for local AI connection status
+LOCAL_AI_STATE = {
+    "vm_online": False,
+    "vm_status": "unknown",
+    "available_models": [],
+    "telemetry": {"loaded_models": []},
+    "status": "pending",
+    "checked_at": 0
+}
+
+def _run_connection_probe():
+    global LOCAL_AI_STATE
+    from django.core.cache import cache
+    import time
+    from .services.ai_processor import AIProcessorService
+    from .services.vm_service import VMControlService
+    
+    logger.info("Executing thread-based background local AI connection probe...")
+
+    ai_service = AIProcessorService()
+    vm_service = VMControlService()
+
+    vm_online = False
+    available_models = []
+    vm_status = "unknown"
+
+    try:
+        vm_status = vm_service.get_status()
+    except Exception as e:
+        logger.warning("Failed to check VM status in thread: %s", e)
+
+    try:
+        vm_online = ai_service.provider.health_check()
+        if vm_online:
+            available_models = ai_service.provider.get_available_models()
+    except Exception as e:
+        logger.warning("vLLM connectivity probe failed in thread: %s", e)
+
+    result = {
+        "vm_online": vm_online,
+        "vm_status": vm_status,
+        "available_models": available_models,
+        "telemetry": {
+            "loaded_models": [{"name": m, "vram_gb": "unknown"} for m in available_models]
+        },
+        "status": "completed",
+        "checked_at": time.time()
+    }
+
+    LOCAL_AI_STATE = result
+    try:
+        cache.set("local_ai_connection_status", result, timeout=300)
+    except Exception as e:
+        logger.warning("Failed to set connection cache in thread: %s", e)
+
+
+def trigger_background_check(force=False):
+    global LOCAL_AI_STATE
+    import time
+    from django.core.cache import cache
+    
+    now = time.time()
+    
+    # Try fetching from cache first
+    cached_status = None
+    try:
+        cached_status = cache.get("local_ai_connection_status")
+    except Exception as e:
+        logger.warning("Cache access failed (Redis might be down): %s", e)
+        
+    if cached_status:
+        LOCAL_AI_STATE = cached_status
+        
+    # Check if we need to trigger a check
+    should_trigger = False
+    if force:
+        should_trigger = True
+    elif LOCAL_AI_STATE.get("status") != "pending" and now - LOCAL_AI_STATE.get("checked_at", 0) > 60:
+        should_trigger = True
+        
+    if should_trigger:
+        LOCAL_AI_STATE["status"] = "pending"
+        LOCAL_AI_STATE["vm_status"] = "checking..."
+        LOCAL_AI_STATE["checked_at"] = now
+        
+        try:
+            cache.set("local_ai_connection_status", LOCAL_AI_STATE, timeout=30)
+        except Exception:
+            pass
+            
+        # 1. Try to trigger via Celery
+        try:
+            from .tasks import check_local_ai_connection_task
+            check_local_ai_connection_task.delay()
+            logger.info("Triggered connection check Celery task successfully.")
+        except Exception as e:
+            # 2. Fallback to background thread
+            logger.warning("Celery dispatch failed (Redis down/refused). Falling back to background thread: %s", e)
+            thread = threading.Thread(target=_run_connection_probe)
+            thread.daemon = True
+            thread.start()
+            
+    return LOCAL_AI_STATE
+
+
+class AIConnectionStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        force_refresh = request.GET.get("refresh") == "true"
+        status_data = trigger_background_check(force=force_refresh)
+        return Response(status_data)
+
+
 class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
@@ -840,26 +978,12 @@ class AISettingsView(APIView):
             from .models import AnalysisProtocol
             from .serializers import AIPersonalitySerializer, AISkillSerializer, AnalysisProtocolSerializer
             
-            ai_service = AIProcessorService()
-            vm_service = VMControlService()
-            
             personalities = AIPersonality.objects.all()
             skills = AISkill.objects.all()
             protocols = AnalysisProtocol.objects.all()
             flow_state = UniversalChatFlowService.serialize_state()
             
-            # Fast Check for VM Connectivity
-            vm_online = False
-            available_models = []
-            telemetry = {"loaded_models": []}
-            vm_status = vm_service.get_status()
-            
-            try:
-                vm_online = ai_service.provider.health_check()
-                if vm_online:
-                    available_models = ai_service.provider.get_available_models()
-            except Exception as e:
-                logger.warning("vLLM connectivity probe failed: %s", e)
+            status_data = trigger_background_check(force=False)
 
             # Live Forex
             from .services.forex_service import ForexService
@@ -871,14 +995,16 @@ class AISettingsView(APIView):
                 "skills": AISkillSerializer(skills, many=True).data,
                 "protocols": AnalysisProtocolSerializer(protocols, many=True).data,
                 "universal_chat_flow": flow_state,
-                "available_models": available_models,
-                "telemetry": telemetry,
-                "vm_online": vm_online,
-                "vm_status": vm_status,
+                "available_models": status_data.get("available_models", []),
+                "telemetry": status_data.get("telemetry", {"loaded_models": []}),
+                "vm_online": status_data.get("vm_online", False),
+                "vm_status": status_data.get("vm_status", "unknown"),
                 "live_rate": live_rate
             })
         except Exception as e: 
             return Response({"error": str(e)}, status=500)
+
+
 
     def post(self, request):
         """

@@ -5,7 +5,7 @@ import time
 from typing import Dict, Any, Optional, Iterator
 
 from ..models import AIPersonality, AISkill, AIAuditLog
-from .llm_providers import VLLMProviderService
+from .llm_providers import VLLMProviderService, AnthropicProviderService
 from .prompts import PromptBuilderService
 from .parsers import ResponseParserService
 from .ocr import OCRService
@@ -27,9 +27,12 @@ class AIProcessorService:
     """
 
     def __init__(self):
-        self.provider = VLLMProviderService()
+        self.vllm_provider = VLLMProviderService()
+        self.anthropic_provider = AnthropicProviderService()
+        self.provider = self.vllm_provider
+        self.current_provider = self.vllm_provider
         self.ocr_service = OCRService()
-        self.available_models = self.provider.get_available_models()
+        self.available_models = self.vllm_provider.get_available_models()
         self.channel_layer = get_channel_layer()
 
     def process_content(
@@ -45,6 +48,12 @@ class AIProcessorService:
         stream: bool = False
     ) -> Any:
         
+        model_provider = (metadata or {}).get("model_provider", "vllm")
+        if model_provider == "anthropic":
+            self.current_provider = self.anthropic_provider
+        else:
+            self.current_provider = self.vllm_provider
+
         if skill_name:
             print(f"[AI-PROCESSOR] Loading skill: {skill_name}")
             
@@ -69,6 +78,14 @@ class AIProcessorService:
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
         log_worker_event(audit_log, f"Preparing prompt for {resolved_text_model}.")
         system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
+        if model_provider == "anthropic":
+            system_instructions += (
+                "\n\n[PRIVACY & SEARCH DIRECTIVE]\n"
+                "You are routed through a secure privacy-preserving gateway.\n"
+                "You DO NOT have access to private database fields, uploaded files, financial details, internal metrics, or comments for any deals.\n"
+                "To answer the user's questions about deals, companies, markets, or news, you must autonomously use your native web search tool. "
+                "Ground your answers in public information and provide citations for your sources."
+            )
         prompt_template = skill.prompt_template if skill else "{{ content }}"
         response_mode = (metadata or {}).get("response_mode")
         if response_mode == "markdown":
@@ -176,7 +193,7 @@ class AIProcessorService:
             full_thinking = ""
             chunk_counter = 0
 
-            stream_iterator = self.provider.execute_stream(payload)
+            stream_iterator = self.current_provider.execute_stream(payload)
             
             for ui_chunk, thinking_delta, response_delta in ResponseParserService.parse_stream(stream_iterator):
                 full_thinking += thinking_delta
@@ -269,7 +286,7 @@ class AIProcessorService:
         """
         start_time = time.time()
         try:
-            data = self.provider.execute_standard(payload)
+            data = self.current_provider.execute_standard(payload)
             
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")

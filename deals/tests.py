@@ -6,10 +6,16 @@ from unittest.mock import MagicMock, patch
 from django.core.management import call_command
 from django.core.cache import cache
 from django.test import TestCase
+from django.contrib.auth.models import User
+from rest_framework.test import APIClient
+from django.urls import reverse
 
 from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
 from ai_orchestrator.services.embedding_processor import EmbeddingService
-from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument, InitialAnalysisStatus
+from deals.models import (
+    AnalysisKind, Deal, DealAnalysis, DealDocument, InitialAnalysisStatus,
+    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation
+)
 from deals.serializers import DealDetailSerializer, DealSerializer
 from contacts.serializers import ContactSerializer
 from contacts.models import Contact
@@ -21,6 +27,7 @@ from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
 from deals.services.bulk_sync_resolution import folder_aliases, resolve_existing_deal, synthesis_canonical_title
 from deals.tasks import analyze_additional_documents_async, analyze_selection_async, process_single_document_async
+from deals.services.venture_intelligence import VentureIntelligenceService
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -1070,3 +1077,200 @@ class RebuildDerivedDealStateCommandTests(TestCase):
 
         self.assertTrue(Deal.objects.filter(id=matched_deal.id).exists())
         self.assertFalse(Deal.objects.filter(id=unmatched_deal.id).exists())
+
+
+class VentureIntelligenceServiceTests(TestCase):
+    def setUp(self):
+        self.deal = Deal.objects.create(
+            title="Flipkart",
+            industry="Old Industry",
+            sector="Old Sector",
+            city="Old City"
+        )
+        self.service = VentureIntelligenceService()
+        self.service.api_key = "test-api-key"
+
+    @patch("deals.services.venture_intelligence.requests.post")
+    def test_fetch_company_details_success(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"success": True, "results": {"profile": {"name": "Flipkart"}}}
+        mock_post.return_value = mock_response
+
+        data = self.service.fetch_company_details(company_name="Flipkart")
+        self.assertTrue(data["success"])
+        self.assertEqual(data["results"]["profile"]["name"], "Flipkart")
+        mock_post.assert_called_once()
+
+    @patch("deals.services.venture_intelligence.requests.post")
+    def test_fetch_company_details_not_found(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(ValueError):
+            self.service.fetch_company_details(company_name="NonExistent")
+
+    @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
+    def test_resolve_cin_via_ai(self, mock_process_content):
+        mock_process_content.return_value = {
+            "response": '{"cin": "U74999KA2012PTC066107", "entity_name": "Flipkart Private Limited", "confidence": 0.95}'
+        }
+        res = self.service.resolve_cin_via_ai("Flipkart")
+        self.assertEqual(res["cin"], "U74999KA2012PTC066107")
+        self.assertEqual(res["entity_name"], "Flipkart Private Limited")
+
+    @patch("deals.services.venture_intelligence.requests.post")
+    @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
+    def test_enrich_deal_target(self, mock_process_content, mock_post):
+        # Mock AI resolution to return a CIN
+        mock_process_content.return_value = {
+            "response": '{"cin": "U74999KA2012PTC066107", "entity_name": "Flipkart Private Limited"}'
+        }
+        
+        # Mock VI API response
+        mock_vi_response = MagicMock()
+        mock_vi_response.status_code = 200
+        mock_vi_response.json.return_value = {
+            "success": True,
+            "results": {
+                "profile": {
+                    "cin": "U74999KA2012PTC066107",
+                    "name": "Flipkart",
+                    "registered_name": "Flipkart Private Limited",
+                    "website": "https://flipkart.com",
+                    "industry": "Retail",
+                    "sector": "E-Commerce",
+                    "email": "contact@flipkart.com",
+                    "year_founded": "2007",
+                    "city": {"name": "Bengaluru"},
+                    "total_funding": "3000",
+                    "management_info": [
+                        {"name": "Kalyan Krishnamurthy", "designation": "CEO", "belongs_to_firm_name": "Flipkart"}
+                    ],
+                    "board_info": [
+                        {"name": "Sachin Bansal", "designation": "Director", "belongs_to_firm_name": "Flipkart Board"}
+                    ]
+                },
+                "profit_loss": [
+                    {"fy": "FY23", "fin_type": "Consolidated", "revenue": "10000"}
+                ],
+                "balance_sheet": [
+                    {"fy": "FY23", "fin_type": "Consolidated", "assets": "5000"}
+                ],
+                "cash_flow": [
+                    {"fy": "FY23", "fin_type": "Consolidated", "operating_cash": "800"}
+                ]
+            }
+        }
+        # First call fails to trigger AI resolution, second call succeeds with the resolved CIN
+        mock_post.side_effect = [Exception("Not found directly"), mock_vi_response]
+
+        # Call enrich
+        profile = self.service.enrich_deal(deal_id=self.deal.id, company_name="Flipkart")
+        
+        self.assertEqual(profile.cin, "U74999KA2012PTC066107")
+        self.assertEqual(profile.name, "Flipkart")
+        self.assertEqual(profile.industry, "Retail")
+        self.assertEqual(profile.sector, "E-Commerce")
+        
+        # Check profiles, statements, relations created
+        self.assertEqual(VentureIntelligenceCompanyProfile.objects.count(), 1)
+        self.assertEqual(VentureIntelligenceFinancialStatement.objects.count(), 3)
+        self.assertEqual(VentureIntelligenceCompanyRelation.objects.count(), 1)
+        
+        relation = VentureIntelligenceCompanyRelation.objects.first()
+        self.assertEqual(relation.deal, self.deal)
+        self.assertEqual(relation.relation_type, "target")
+        
+        # Check Deal update
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.industry, "Retail")
+        self.assertEqual(self.deal.sector, "E-Commerce")
+        self.assertEqual(self.deal.city, "Bengaluru")
+        self.assertEqual(self.deal.company_details, "Flipkart Private Limited")
+
+        # Check Contacts created & linked
+        self.assertEqual(Contact.objects.count(), 2)
+        primary = self.deal.primary_contact
+        self.assertIsNotNone(primary)
+        self.assertEqual(primary.name, "Kalyan Krishnamurthy")
+        self.assertEqual(primary.designation, "CEO")
+        self.assertEqual(self.deal.additional_contacts.count(), 2)
+
+
+class VentureIntelligenceViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="testuser", password="testpassword")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.deal = Deal.objects.create(
+            title="Flipkart",
+            industry="Old Industry",
+            sector="Old Sector",
+            city="Old City"
+        )
+
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.fetch_company_details")
+    def test_preview_view_success(self, mock_fetch):
+        mock_fetch.return_value = {"success": True, "results": {"profile": {"name": "Flipkart", "cin": "U74999KA2012PTC066107"}}}
+        
+        response = self.client.post(
+            reverse("vi-preview"),
+            {"company_name": "Flipkart", "cin": "U74999KA2012PTC066107"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["resolved_cin"], "U74999KA2012PTC066107")
+
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.resolve_cin_via_ai")
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.fetch_company_details")
+    def test_preview_view_resolves_cin(self, mock_fetch, mock_resolve_cin):
+        mock_resolve_cin.return_value = {"cin": "U74999KA2012PTC066107", "entity_name": "Flipkart Private Limited"}
+        # First call by name fails, second call by resolved params succeeds
+        mock_fetch.side_effect = [Exception("Not found"), {"success": True, "results": {"profile": {"name": "Flipkart"}}}]
+        
+        response = self.client.post(
+            reverse("vi-preview"),
+            {"company_name": "Flipkart"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["resolved_cin"], "U74999KA2012PTC066107")
+
+    def test_preview_view_bad_request(self):
+        response = self.client.post(
+            reverse("vi-preview"),
+            {},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.enrich_deal")
+    def test_enrich_view_success(self, mock_enrich):
+        profile = VentureIntelligenceCompanyProfile.objects.create(
+            cin="U74999KA2012PTC066107",
+            name="Flipkart"
+        )
+        mock_enrich.return_value = profile
+        
+        response = self.client.post(
+            reverse("deal-enrich", kwargs={"pk": self.deal.id}),
+            {"company_name": "Flipkart", "cin": "U74999KA2012PTC066107", "relation_type": "target"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["profile"]["cin"], "U74999KA2012PTC066107")
+
+    def test_enrich_view_unauthenticated(self):
+        self.client.force_authenticate(user=None)
+        response = self.client.post(
+            reverse("deal-enrich", kwargs={"pk": self.deal.id}),
+            {"company_name": "Flipkart"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+

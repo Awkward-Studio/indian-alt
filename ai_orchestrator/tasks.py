@@ -283,6 +283,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "selected_sources": task_metadata.get("selected_sources"),
             }
 
+        task_metadata['model_provider'] = (metadata or {}).get('model_provider', 'vllm')
+
         full_text = ""
         full_thinking = ""
         last_save_time = time.time()
@@ -674,3 +676,55 @@ def generate_deal_helper_analysis_async(
             broadcast_audit_log_update(audit_log, done=True)
         logger.error("Deal helper analysis failed: %s", e, exc_info=True)
         raise e
+
+
+@shared_task(bind=True)
+def check_local_ai_connection_task(self):
+    """
+    Background task to check local AI connection and update cache.
+    """
+    from django.core.cache import cache
+    from .services.ai_processor import AIProcessorService
+    from .services.vm_service import VMControlService
+    import time
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info("Executing background local AI connection probe...")
+
+    ai_service = AIProcessorService()
+    vm_service = VMControlService()
+
+    vm_online = False
+    available_models = []
+    vm_status = "unknown"
+
+    try:
+        vm_status = vm_service.get_status()
+    except Exception as e:
+        logger.warning("Failed to check VM status: %s", e)
+
+    try:
+        vm_online = ai_service.provider.health_check()
+        if vm_online:
+            available_models = ai_service.provider.get_available_models()
+    except Exception as e:
+        logger.warning("vLLM connectivity probe failed: %s", e)
+
+    telemetry = {
+        "loaded_models": [{"name": m, "vram_gb": "unknown"} for m in available_models]
+    }
+
+    result = {
+        "vm_online": vm_online,
+        "vm_status": vm_status,
+        "available_models": available_models,
+        "telemetry": telemetry,
+        "status": "completed",
+        "checked_at": time.time()
+    }
+
+    cache.set("local_ai_connection_status", result, timeout=300)
+    logger.info("Background local AI connection probe completed: %s", result)
+    return result
+
