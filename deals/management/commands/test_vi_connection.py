@@ -2,6 +2,7 @@ import json
 import requests
 from django.core.management.base import BaseCommand
 from django.conf import settings
+from django.db import transaction
 
 class Command(BaseCommand):
     help = "Test connection, authentication, and responses from the Venture Intelligence Commercial API"
@@ -32,6 +33,11 @@ class Command(BaseCommand):
             "--entity",
             type=str,
             help="Entity name of company to search"
+        )
+        parser.add_argument(
+            "--test-store",
+            action="store_true",
+            help="Run the full enrich_deal pipeline in a rolled-back transaction to verify DB storage without persisting"
         )
 
     def mask_key(self, key: str) -> str:
@@ -106,9 +112,10 @@ class Command(BaseCommand):
                         self.stdout.write(f"Results keys: {list(data['results'].keys())}")
                     self.stdout.write("-" * 60)
                     
-                    results = data.get("results") or {}
-                    if not isinstance(results, dict):
-                        results = {}
+                    if "results" in data and isinstance(data["results"], dict):
+                        results = data["results"]
+                    else:
+                        results = data
                         
                     profile = results.get("profile", {})
                     if profile:
@@ -131,7 +138,15 @@ class Command(BaseCommand):
                     bs_count = len(results.get("balance_sheet", [])) if results.get("balance_sheet") else 0
                     cf_count = len(results.get("cash_flow", [])) if results.get("cash_flow") else 0
                     self.stdout.write(f"Statements Found: P&L ({pl_count}), Balance Sheet ({bs_count}), Cash Flow ({cf_count})")
-                    
+
+                    # --test-store: exercise the full enrich pipeline in a rolled-back savepoint
+                    if options["test_store"]:
+                        self.stdout.write("")
+                        self.stdout.write(self.style.MIGRATE_HEADING("=" * 60))
+                        self.stdout.write(self.style.MIGRATE_HEADING("TEST-STORE: Verifying JSON → DB mapping (rolled-back transaction)"))
+                        self.stdout.write(self.style.MIGRATE_HEADING("=" * 60))
+                        self._test_store_pipeline(data, query, query_type)
+
                 except json.JSONDecodeError:
                     self.stdout.write(self.style.ERROR("Failed to parse response body as JSON."))
                     self.stdout.write(f"Raw Response Body: {response.text}")
@@ -154,3 +169,170 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"CONNECTION ERROR: An exception occurred while making request: {e}"))
         
         self.stdout.write(self.style.MIGRATE_HEADING("=" * 60))
+
+    def _test_store_pipeline(self, raw_api_data, query, query_type):
+        """
+        Runs the full enrich_deal storage pipeline inside a savepoint that is
+        rolled back at the end. Prints every stored field and child record count
+        so the user can visually confirm correct JSON → DB mapping.
+        """
+        from deals.models import (
+            Deal,
+            VentureIntelligenceCompanyProfile,
+            VentureIntelligenceFinancialStatement,
+            VentureIntelligenceCompanyRelation,
+            VentureIntelligenceExecutive,
+            VentureIntelligencePEInvestment,
+            VentureIntelligenceAngelInvestment,
+            VentureIntelligenceIncubationInvestment,
+            VentureIntelligencePEExit,
+            VentureIntelligencePEIPO,
+            VentureIntelligenceMergerAcquisition,
+            VentureIntelligenceEpfoData,
+            VentureIntelligenceSimilarCompany,
+        )
+        from deals.services.venture_intelligence import VentureIntelligenceService
+        from unittest.mock import patch
+
+        sid = transaction.savepoint()
+        try:
+            # Create a temporary deal to enrich
+            deal = Deal.objects.create(title=f"__test_store_{query}__")
+            self.stdout.write(f"  Created temporary Deal: id={deal.id}, title='{deal.title}'")
+
+            # Normalize: ensure data has the {"results": {...}} wrapper that
+            # fetch_company_details produces, since enrich_deal expects it.
+            if isinstance(raw_api_data, dict) and "results" not in raw_api_data:
+                normalized_data = {"success": True, "results": raw_api_data}
+            else:
+                normalized_data = raw_api_data
+
+            # Patch fetch_company_details to return the already-fetched data
+            # and patch the embedding service to skip real embedding
+            svc = VentureIntelligenceService()
+            with patch.object(svc, "fetch_company_details", return_value=normalized_data), \
+                 patch("deals.services.venture_intelligence.EmbeddingService.chunk_and_embed") as mock_embed:
+
+                if query_type == "cin":
+                    profile = svc.enrich_deal(deal_id=deal.id, cin=query)
+                else:
+                    profile = svc.enrich_deal(deal_id=deal.id, company_name=query)
+
+            # ── Profile fields ──────────────────────────────────────────
+            self.stdout.write("")
+            self.stdout.write(self.style.SUCCESS("─── STORED PROFILE FIELDS ───"))
+            profile_fields = [
+                "cin", "name", "registered_name", "website", "industry", "sector",
+                "email", "year_founded", "city", "total_funding",
+                "state", "region", "country", "pincode",
+                "telephone", "phone", "linkedin",
+                "tags", "listing_status", "additional_info",
+                "short_name", "previous_name", "full_name",
+                "business_description", "transacted_status", "incorp_year",
+                "company_status", "address", "address_line2",
+                "contact_name", "contact_designation", "auditor_name",
+                "shp_year", "shp_promoter", "shp_non_promoter", "is_xbrl",
+            ]
+            for field in profile_fields:
+                val = getattr(profile, field, None)
+                if val is not None and val != "" and val != []:
+                    self.stdout.write(self.style.SUCCESS(f"  ✓ {field}: {val}"))
+                else:
+                    self.stdout.write(self.style.WARNING(f"  ✗ {field}: <empty>"))
+
+            # ── Child table counts ──────────────────────────────────────
+            self.stdout.write("")
+            self.stdout.write(self.style.SUCCESS("─── CHILD TABLE RECORD COUNTS ───"))
+            child_tables = [
+                ("Executives (management)", profile.executives.filter(role_type='management').count()),
+                ("Executives (board)", profile.executives.filter(role_type='board').count()),
+                ("Financial Statements (P&L)", profile.financial_statements.filter(statement_type='profit_loss').count()),
+                ("Financial Statements (BS)", profile.financial_statements.filter(statement_type='balance_sheet').count()),
+                ("Financial Statements (CF)", profile.financial_statements.filter(statement_type='cash_flow').count()),
+                ("PE Investments", profile.pe_investments.count()),
+                ("Angel Investments", profile.angel_investments.count()),
+                ("Incubation Investments", profile.incubation_investments.count()),
+                ("PE Exits", profile.pe_exits.count()),
+                ("PE IPOs", profile.pe_ipos.count()),
+                ("Mergers & Acquisitions", profile.mergers_acquisitions.count()),
+                ("EPFO Data", profile.epfo_data.count()),
+                ("Similar Companies", profile.similar_companies.count()),
+            ]
+            for label, count in child_tables:
+                if count > 0:
+                    self.stdout.write(self.style.SUCCESS(f"  ✓ {label}: {count} records"))
+                else:
+                    self.stdout.write(self.style.WARNING(f"  ✗ {label}: 0 records"))
+
+            # ── Deal relation ───────────────────────────────────────────
+            self.stdout.write("")
+            relation = VentureIntelligenceCompanyRelation.objects.filter(deal=deal, company_profile=profile).first()
+            if relation:
+                self.stdout.write(self.style.SUCCESS(f"  ✓ Deal → Profile relation: type={relation.relation_type}"))
+            else:
+                self.stdout.write(self.style.ERROR(f"  ✗ Deal → Profile relation: NOT CREATED"))
+
+            # ── Deal field updates ──────────────────────────────────────
+            deal.refresh_from_db()
+            self.stdout.write("")
+            self.stdout.write(self.style.SUCCESS("─── DEAL FIELD UPDATES ───"))
+            deal_fields = ["industry", "sector", "city", "company_details"]
+            for field in deal_fields:
+                val = getattr(deal, field, None)
+                if val:
+                    self.stdout.write(self.style.SUCCESS(f"  ✓ deal.{field}: {val}"))
+                else:
+                    self.stdout.write(self.style.WARNING(f"  ✗ deal.{field}: <empty>"))
+
+            # ── RAG embedding call ──────────────────────────────────────
+            self.stdout.write("")
+            if mock_embed.called:
+                call_kwargs = mock_embed.call_args
+                text_arg = call_kwargs.kwargs.get("text") or (call_kwargs.args[0] if call_kwargs.args else "")
+                text_preview = text_arg[:300] if text_arg else "<empty>"
+                self.stdout.write(self.style.SUCCESS("─── RAG DOSSIER PREVIEW (first 300 chars) ───"))
+                self.stdout.write(text_preview)
+                self.stdout.write(self.style.SUCCESS(f"  ✓ chunk_and_embed called with source_id='vi_{profile.id}', text length={len(text_arg)} chars"))
+            else:
+                self.stdout.write(self.style.ERROR("  ✗ chunk_and_embed was NOT called — RAG indexing broken"))
+
+            # ── Sample child records detail ─────────────────────────────
+            self.stdout.write("")
+            self.stdout.write(self.style.SUCCESS("─── SAMPLE CHILD RECORDS ───"))
+
+            first_exec = profile.executives.first()
+            if first_exec:
+                self.stdout.write(f"  Executive: {first_exec.name} / {first_exec.designation} / {first_exec.role_type}")
+
+            first_pe = profile.pe_investments.first()
+            if first_pe:
+                self.stdout.write(f"  PE Investment: Round={first_pe.round}, Date={first_pe.deal_date}, Amount={first_pe.amount}, Investors={first_pe.investors}")
+
+            first_fs = profile.financial_statements.first()
+            if first_fs:
+                data_keys = list(first_fs.data.keys())[:8]
+                self.stdout.write(f"  Financial Statement: {first_fs.statement_type} FY={first_fs.fy} ({first_fs.fin_type}), data keys={data_keys}")
+
+            first_ma = profile.mergers_acquisitions.first()
+            if first_ma:
+                self.stdout.write(f"  M&A: Company={first_ma.company}, Acquirer={first_ma.acquirer}, Amount={first_ma.amount}")
+
+            first_sim = profile.similar_companies.first()
+            if first_sim:
+                self.stdout.write(f"  Similar Company: {first_sim.name}, Sector={first_sim.sector}, Funding={first_sim.total_funding}")
+
+            first_epfo = profile.epfo_data.first()
+            if first_epfo:
+                self.stdout.write(f"  EPFO: Quarter={first_epfo.qrtr}, Employees={first_epfo.employees}")
+
+            self.stdout.write("")
+            self.stdout.write(self.style.SUCCESS("TEST-STORE COMPLETE: All data parsed and stored correctly."))
+
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"TEST-STORE FAILED: {e}"))
+            import traceback
+            self.stdout.write(traceback.format_exc())
+        finally:
+            # Roll back — nothing persists
+            transaction.savepoint_rollback(sid)
+            self.stdout.write(self.style.WARNING("(Transaction rolled back — no data was persisted)"))

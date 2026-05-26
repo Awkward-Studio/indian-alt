@@ -2,6 +2,8 @@ import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import requests
+
 
 from django.core.management import call_command
 from django.core.cache import cache
@@ -14,7 +16,10 @@ from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChu
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from deals.models import (
     AnalysisKind, Deal, DealAnalysis, DealDocument, InitialAnalysisStatus,
-    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation
+    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
+    VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
+    VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
+    VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany
 )
 from deals.serializers import DealDetailSerializer, DealSerializer
 from contacts.serializers import ContactSerializer
@@ -1088,7 +1093,18 @@ class VentureIntelligenceServiceTests(TestCase):
             city="Old City"
         )
         self.service = VentureIntelligenceService()
+        # Always use mock API key so tests never hit the live API.
+        # Use `manage.py test_vi_connection --test-store` for live validation.
         self.service.api_key = "test-api-key"
+
+        self.embedding_patcher = patch(
+            "ai_orchestrator.services.embedding_processor.EmbeddingService._get_embedding",
+            return_value=[0.1] * 1024
+        )
+        self.mock_get_embedding = self.embedding_patcher.start()
+
+    def tearDown(self):
+        self.embedding_patcher.stop()
 
     @patch("deals.services.venture_intelligence.requests.post")
     def test_fetch_company_details_success(self, mock_post):
@@ -1163,26 +1179,27 @@ class VentureIntelligenceServiceTests(TestCase):
                 ]
             }
         }
-        # First call fails to trigger AI resolution, second call succeeds with the resolved CIN
+        
+        # Always use mocks — live API testing is done via `manage.py test_vi_connection --test-store`
         mock_post.side_effect = [Exception("Not found directly"), mock_vi_response]
 
         # Call enrich
         profile = self.service.enrich_deal(deal_id=self.deal.id, company_name="Flipkart")
-        
+
         self.assertEqual(profile.cin, "U74999KA2012PTC066107")
         self.assertEqual(profile.name, "Flipkart")
         self.assertEqual(profile.industry, "Retail")
         self.assertEqual(profile.sector, "E-Commerce")
-        
+
         # Check profiles, statements, relations created
         self.assertEqual(VentureIntelligenceCompanyProfile.objects.count(), 1)
         self.assertEqual(VentureIntelligenceFinancialStatement.objects.count(), 3)
         self.assertEqual(VentureIntelligenceCompanyRelation.objects.count(), 1)
-        
+
         relation = VentureIntelligenceCompanyRelation.objects.first()
         self.assertEqual(relation.deal, self.deal)
         self.assertEqual(relation.relation_type, "target")
-        
+
         # Check Deal update
         self.deal.refresh_from_db()
         self.assertEqual(self.deal.industry, "Retail")
@@ -1197,6 +1214,260 @@ class VentureIntelligenceServiceTests(TestCase):
         self.assertEqual(primary.name, "Kalyan Krishnamurthy")
         self.assertEqual(primary.designation, "CEO")
         self.assertEqual(self.deal.additional_contacts.count(), 2)
+
+    @patch("deals.services.venture_intelligence.requests.post")
+    @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
+    def test_enrich_deal_full_schema(self, mock_process_content, mock_post):
+        # Mock AI resolution to return a CIN
+        mock_process_content.return_value = {
+            "response": '{"cin": "U74999KA2012PTC066107", "entity_name": "Flipkart Private Limited"}'
+        }
+
+        # Mock VI API response with full nested schema
+        mock_vi_response = MagicMock()
+        mock_vi_response.status_code = 200
+        mock_vi_response.json.return_value = {
+            "success": True,
+            "results": {
+                "profile": {
+                    "cin": "U74999KA2012PTC066107",
+                    "name": "Flipkart",
+                    "registered_name": "Flipkart Private Limited",
+                    "website": "https://flipkart.com",
+                    "industry": "Retail",
+                    "sector": "E-Commerce",
+                    "email": "contact@flipkart.com",
+                    "year_founded": "2007",
+                    "city": {"name": "Bengaluru", "state": "Karnataka", "region": "South", "country": "India"},
+                    "total_funding": "3000",
+                    "telephone": "123456",
+                    "phone": "987654",
+                    "linkedin": "https://linkedin.com/company/flipkart",
+                    "tags": "ecommerce,retail,tech",
+                    "listing_status": "Unlisted",
+                    "additional_info": "Some extra notes here",
+                    "management_info": [
+                        {"name": "Kalyan Krishnamurthy", "designation": "CEO", "belongs_to_firm_name": "Flipkart"}
+                    ],
+                    "board_info": [
+                        {"name": "Sachin Bansal", "designation": "Director", "belongs_to_firm_name": "Flipkart Board"}
+                    ]
+                },
+                "cfs_profile": {
+                    "short_name": "FK",
+                    "previous_name": "Flipkart Online",
+                    "full_name": "Flipkart Private Limited",
+                    "business_description": "Online ecommerce store in India.",
+                    "transacted_status": "Active",
+                    "incorp_year": 2007,
+                    "company_status": "Active",
+                    "address": "Building 8",
+                    "address_line2": "Tech Park",
+                    "contact_name": "Kalyan",
+                    "contact_designation": "CEO",
+                    "auditor_name": "PwC",
+                    "shp_year": 2023,
+                    "shp_promoter": 15.5,
+                    "shp_non_promoter": 84.5,
+                    "is_xbrl": True,
+                    "pincode": "560001",
+                    "epfo_data": [
+                        {"qrtr": "2023-Q1", "employees": 15000}
+                    ]
+                },
+                "private_equity": {
+                    "pe_investments": [
+                        {
+                            "round": "Series H",
+                            "deal_date": "2021-07-01",
+                            "amount": "3600",
+                            "amount_inr": "26000",
+                            "investors": ["GIC", "CPPIB", "SoftBank"],
+                            "exit_status": "Active",
+                            "company_valuation_post_money": "37600",
+                            "revenue_multiple_post_money": "5.2",
+                            "is_vc": "No",
+                            "is_amount_hide": False,
+                            "is_debt_deal": False,
+                            "is_agg_hide": False
+                        }
+                    ],
+                    "angel_investments": [
+                        {
+                            "date": "2009-01-01",
+                            "investors": ["Angel Investor A"],
+                            "is_exited": True,
+                            "is_agg_hide": False
+                        }
+                    ],
+                    "incubation_investments": [
+                        {
+                            "date": "2008-01-01",
+                            "status": "Graduated",
+                            "incubator": "Accelerator X"
+                        }
+                    ],
+                    "pe_exits": [
+                        {
+                            "deal_type": "Secondary Sale",
+                            "date": "2018-05-18",
+                            "exit_investors": ["Tiger Global"],
+                            "amount": "16000",
+                            "exit_status": "Exited",
+                            "valuation": "20000",
+                            "revenue_multiple": "3.5",
+                            "is_vc": False,
+                            "is_hide_amount": False
+                        }
+                    ],
+                    "pe_ipos": [
+                        {
+                            "date": "2025-12-01",
+                            "ipo_investors": ["Public"],
+                            "ipo_size": "5000",
+                            "is_investor_sale": True,
+                            "ipo_valuation": "40000",
+                            "is_amount_hide": False,
+                            "is_vc": False
+                        }
+                    ]
+                },
+                "merger_acquisition": [
+                    {
+                        "company": "Myntra",
+                        "date": "2014-05-01",
+                        "amount": "300",
+                        "acquirer": "Flipkart",
+                        "company_valuation": "300",
+                        "company_valuation_post": "300",
+                        "revenue_multiple": "1.2",
+                        "revenue_multiple_post": "1.2",
+                        "is_hide_amount": False,
+                        "is_asset_sale": False,
+                        "is_minority_deal": False
+                    }
+                ],
+                "similar_cos": [
+                    {
+                        "name": "Amazon India",
+                        "sector": "E-Commerce",
+                        "total_funding": "5000",
+                        "latest_investment": {"round": "Corporate Round", "date": "2022-01-01", "amount": "1000"},
+                        "city": "Bengaluru"
+                    }
+                ],
+                "profit_loss": [
+                    {"fy": "FY23", "fin_type": "Consolidated", "revenue": "10000"}
+                ]
+            }
+        }
+        
+        # Always use mocks — live API testing is done via `manage.py test_vi_connection --test-store`
+        mock_post.side_effect = [Exception("Not found directly"), mock_vi_response]
+
+        # Call enrich
+        profile = self.service.enrich_deal(deal_id=self.deal.id, company_name="Flipkart")
+
+        # 1. Assert profile data
+        self.assertEqual(profile.cin, "U74999KA2012PTC066107")
+        self.assertEqual(profile.name, "Flipkart")
+        self.assertEqual(profile.state, "Karnataka")
+        self.assertEqual(profile.region, "South")
+        self.assertEqual(profile.country, "India")
+        self.assertEqual(profile.pincode, "560001")
+        self.assertEqual(profile.telephone, "123456")
+        self.assertEqual(profile.phone, "987654")
+        self.assertEqual(profile.linkedin, "https://linkedin.com/company/flipkart")
+        self.assertEqual(profile.tags, "ecommerce,retail,tech")
+        self.assertEqual(profile.listing_status, "Unlisted")
+        self.assertEqual(profile.additional_info, "Some extra notes here")
+        self.assertEqual(profile.short_name, "FK")
+        self.assertEqual(profile.previous_name, "Flipkart Online")
+        self.assertEqual(profile.business_description, "Online ecommerce store in India.")
+        self.assertEqual(profile.transacted_status, "Active")
+        self.assertEqual(profile.incorp_year, 2007)
+        self.assertEqual(profile.company_status, "Active")
+        self.assertEqual(profile.address, "Building 8")
+        self.assertEqual(profile.address_line2, "Tech Park")
+        self.assertEqual(profile.contact_name, "Kalyan")
+        self.assertEqual(profile.contact_designation, "CEO")
+        self.assertEqual(profile.auditor_name, "PwC")
+        self.assertEqual(profile.shp_year, 2023)
+        self.assertEqual(profile.shp_promoter, 15.5)
+        self.assertEqual(profile.shp_non_promoter, 84.5)
+        self.assertTrue(profile.is_xbrl)
+
+        # 2. Assert child table counts & values
+        # Executives
+        self.assertEqual(profile.executives.count(), 2)
+        exec_mgmt = profile.executives.get(role_type='management')
+        self.assertEqual(exec_mgmt.name, "Kalyan Krishnamurthy")
+        self.assertEqual(exec_mgmt.designation, "CEO")
+        self.assertEqual(exec_mgmt.belongs_to_firm_name, "Flipkart")
+
+        exec_board = profile.executives.get(role_type='board')
+        self.assertEqual(exec_board.name, "Sachin Bansal")
+        self.assertEqual(exec_board.designation, "Director")
+        self.assertEqual(exec_board.belongs_to_firm_name, "Flipkart Board")
+
+        # PE Investments
+        self.assertEqual(profile.pe_investments.count(), 1)
+        pe_inv = profile.pe_investments.first()
+        self.assertEqual(pe_inv.round, "Series H")
+        self.assertEqual(pe_inv.amount, "3600")
+        self.assertEqual(pe_inv.investors, ["GIC", "CPPIB", "SoftBank"])
+
+        # Angel Investments
+        self.assertEqual(profile.angel_investments.count(), 1)
+        angel = profile.angel_investments.first()
+        self.assertEqual(angel.date, "2009-01-01")
+        self.assertEqual(angel.investors, ["Angel Investor A"])
+        self.assertTrue(angel.is_exited)
+
+        # Incubation Investments
+        self.assertEqual(profile.incubation_investments.count(), 1)
+        inc = profile.incubation_investments.first()
+        self.assertEqual(inc.date, "2008-01-01")
+        self.assertEqual(inc.incubator, "Accelerator X")
+
+        # PE Exits
+        self.assertEqual(profile.pe_exits.count(), 1)
+        pe_ex = profile.pe_exits.first()
+        self.assertEqual(pe_ex.deal_type, "Secondary Sale")
+        self.assertEqual(pe_ex.amount, "16000")
+
+        # PE IPOs
+        self.assertEqual(profile.pe_ipos.count(), 1)
+        ipo = profile.pe_ipos.first()
+        self.assertEqual(ipo.date, "2025-12-01")
+        self.assertEqual(ipo.ipo_size, "5000")
+
+        # Mergers & Acquisitions
+        self.assertEqual(profile.mergers_acquisitions.count(), 1)
+        ma_rec = profile.mergers_acquisitions.first()
+        self.assertEqual(ma_rec.company, "Myntra")
+        self.assertEqual(ma_rec.amount, "300")
+
+        # EPFO Data
+        self.assertEqual(profile.epfo_data.count(), 1)
+        epfo = profile.epfo_data.first()
+        self.assertEqual(epfo.qrtr, "2023-Q1")
+        self.assertEqual(epfo.employees, 15000)
+
+        # Similar Companies
+        self.assertEqual(profile.similar_companies.count(), 1)
+        sim = profile.similar_companies.first()
+        self.assertEqual(sim.name, "Amazon India")
+        self.assertEqual(sim.total_funding, "5000")
+
+        # 3. Assert RAG DocumentChunks created
+        chunks = DocumentChunk.objects.filter(source_type='extracted_source', source_id=f"vi_{profile.id}")
+        self.assertTrue(chunks.exists())
+        all_chunks_text = "\n".join(chunk.content for chunk in chunks)
+        self.assertIn("Flipkart", all_chunks_text)
+        self.assertIn("Kalyan Krishnamurthy", all_chunks_text)
+        self.assertIn("Sachin Bansal", all_chunks_text)
+
 
 
 class VentureIntelligenceViewTests(TestCase):

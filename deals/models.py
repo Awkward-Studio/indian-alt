@@ -661,6 +661,39 @@ class VentureIntelligenceCompanyProfile(models.Model):
     year_founded = models.CharField(max_length=10, null=True, blank=True)
     city = models.TextField(null=True, blank=True)
     total_funding = models.TextField(null=True, blank=True)
+
+    # New Location & Contact fields
+    state = models.TextField(null=True, blank=True)
+    region = models.TextField(null=True, blank=True)
+    country = models.TextField(null=True, blank=True)
+    pincode = models.CharField(max_length=20, null=True, blank=True)
+    telephone = models.TextField(null=True, blank=True)
+    phone = models.TextField(null=True, blank=True)
+    linkedin = models.TextField(null=True, blank=True)
+
+    # New Profile & Status fields
+    tags = models.TextField(null=True, blank=True)
+    listing_status = models.TextField(null=True, blank=True)
+    additional_info = models.TextField(null=True, blank=True)
+    short_name = models.TextField(null=True, blank=True)
+    previous_name = models.TextField(null=True, blank=True)
+    full_name = models.TextField(null=True, blank=True)
+    business_description = models.TextField(null=True, blank=True)
+    transacted_status = models.CharField(max_length=100, null=True, blank=True)
+    incorp_year = models.IntegerField(null=True, blank=True)
+    company_status = models.CharField(max_length=100, null=True, blank=True)
+    address = models.TextField(null=True, blank=True)
+    address_line2 = models.TextField(null=True, blank=True)
+    contact_name = models.TextField(null=True, blank=True)
+    contact_designation = models.TextField(null=True, blank=True)
+    auditor_name = models.TextField(null=True, blank=True)
+
+    # New Shareholding & Tech fields
+    shp_year = models.IntegerField(null=True, blank=True)
+    shp_promoter = models.FloatField(null=True, blank=True)
+    shp_non_promoter = models.FloatField(null=True, blank=True)
+    is_xbrl = models.BooleanField(null=True, blank=True)
+
     raw_profile_json = models.JSONField(default=dict, blank=True, help_text="Full raw JSON response from VI")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -672,6 +705,197 @@ class VentureIntelligenceCompanyProfile(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.cin or 'No CIN'})"
+
+
+class VentureIntelligenceExecutive(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='executives'
+    )
+    name = models.TextField()
+    designation = models.TextField(null=True, blank=True)
+    belongs_to_firm_name = models.TextField(null=True, blank=True)
+    role_type = models.CharField(
+        max_length=20,
+        choices=[('management', 'Management'), ('board', 'Board')],
+        default='management'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_executive'
+        verbose_name = 'VI Executive'
+        verbose_name_plural = 'VI Executives'
+
+    def __str__(self):
+        return f"{self.name} - {self.designation} ({self.role_type})"
+
+
+class VentureIntelligencePEInvestment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='pe_investments'
+    )
+    round = models.TextField(null=True, blank=True)
+    deal_date = models.TextField(null=True, blank=True)
+    amount = models.TextField(null=True, blank=True)
+    amount_inr = models.TextField(null=True, blank=True)
+    investors = models.JSONField(default=list, blank=True)
+    exit_status = models.TextField(null=True, blank=True)
+    company_valuation_post_money = models.TextField(null=True, blank=True)
+    revenue_multiple_post_money = models.TextField(null=True, blank=True)
+    is_vc = models.TextField(null=True, blank=True)
+    is_amount_hide = models.BooleanField(null=True, blank=True)
+    is_debt_deal = models.BooleanField(null=True, blank=True)
+    is_agg_hide = models.BooleanField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_pe_investment'
+        ordering = ['-deal_date']
+
+
+class VentureIntelligenceAngelInvestment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='angel_investments'
+    )
+    date = models.TextField(null=True, blank=True)
+    investors = models.JSONField(default=list, blank=True)
+    is_exited = models.BooleanField(null=True, blank=True)
+    is_agg_hide = models.BooleanField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_angel_investment'
+        ordering = ['-date']
+
+
+class VentureIntelligenceIncubationInvestment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='incubation_investments'
+    )
+    date = models.TextField(null=True, blank=True)
+    status = models.TextField(null=True, blank=True)
+    incubator = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_incubation_investment'
+        ordering = ['-date']
+
+
+class VentureIntelligencePEExit(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='pe_exits'
+    )
+    deal_type = models.TextField(null=True, blank=True)
+    date = models.TextField(null=True, blank=True)
+    exit_investors = models.JSONField(default=list, blank=True)
+    amount = models.TextField(null=True, blank=True)
+    exit_status = models.TextField(null=True, blank=True)
+    valuation = models.TextField(null=True, blank=True)
+    revenue_multiple = models.TextField(null=True, blank=True)
+    is_vc = models.BooleanField(null=True, blank=True)
+    is_hide_amount = models.BooleanField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_pe_exit'
+        ordering = ['-date']
+
+
+class VentureIntelligencePEIPO(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='pe_ipos'
+    )
+    date = models.TextField(null=True, blank=True)
+    ipo_investors = models.JSONField(default=list, blank=True)
+    ipo_size = models.TextField(null=True, blank=True)
+    is_investor_sale = models.BooleanField(null=True, blank=True)
+    ipo_valuation = models.TextField(null=True, blank=True)
+    is_amount_hide = models.BooleanField(null=True, blank=True)
+    is_vc = models.BooleanField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_pe_ipo'
+        ordering = ['-date']
+
+
+class VentureIntelligenceMergerAcquisition(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='mergers_acquisitions'
+    )
+    company = models.TextField(null=True, blank=True)
+    date = models.TextField(null=True, blank=True)
+    amount = models.TextField(null=True, blank=True)
+    acquirer = models.TextField(null=True, blank=True)
+    company_valuation = models.TextField(null=True, blank=True)
+    company_valuation_post = models.TextField(null=True, blank=True)
+    revenue_multiple = models.TextField(null=True, blank=True)
+    revenue_multiple_post = models.TextField(null=True, blank=True)
+    is_hide_amount = models.BooleanField(null=True, blank=True)
+    is_asset_sale = models.BooleanField(null=True, blank=True)
+    is_minority_deal = models.BooleanField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_merger_acquisition'
+        ordering = ['-date']
+
+
+class VentureIntelligenceEpfoData(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='epfo_data'
+    )
+    qrtr = models.TextField(null=True, blank=True)
+    employees = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_epfo_data'
+        ordering = ['-qrtr']
+
+
+class VentureIntelligenceSimilarCompany(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company_profile = models.ForeignKey(
+        VentureIntelligenceCompanyProfile,
+        on_delete=models.CASCADE,
+        related_name='similar_companies'
+    )
+    name = models.TextField()
+    sector = models.TextField(null=True, blank=True)
+    total_funding = models.TextField(null=True, blank=True)
+    latest_investment = models.JSONField(default=dict, blank=True)
+    city = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'vi_similar_company'
+        ordering = ['name']
 
 
 class VentureIntelligenceStatementType(models.TextChoices):

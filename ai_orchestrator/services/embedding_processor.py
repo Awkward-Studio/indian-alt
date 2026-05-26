@@ -52,13 +52,14 @@ class EmbeddingService:
             separators=["\n\n", "\n", " ", ""]
         )
 
-    def _get_embedding(self, text: str) -> List[float]:
-        if self.is_sqlite: return [] # Skip embedding calls if on SQLite to save latency
+    def _get_embedding(self, text: str) -> Optional[List[float]]:
+        if self.is_sqlite: return None # Skip embedding calls if on SQLite to save latency
         try:
-            return self.provider.embed(model=self.model_name, text=text, timeout=30)
+            val = self.provider.embed(model=self.model_name, text=text, timeout=30)
+            return val if val else None
         except Exception as e:
             logger.error(f"Error generating embedding: {str(e)}")
-            return []
+            return None
 
     @staticmethod
     def _normalize_query_text(query: str) -> str:
