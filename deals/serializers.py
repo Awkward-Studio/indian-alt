@@ -1,7 +1,10 @@
 from rest_framework import serializers
 from .models import (
     Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus,
-    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation
+    VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
+    VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
+    VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
+    VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany
 )
 from accounts.models import Profile
 from contacts.models import Contact
@@ -274,8 +277,71 @@ class VentureIntelligenceFinancialStatementSerializer(serializers.ModelSerialize
         fields = '__all__'
 
 
+class VentureIntelligenceExecutiveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceExecutive
+        fields = '__all__'
+
+
+class VentureIntelligencePEInvestmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligencePEInvestment
+        fields = '__all__'
+
+
+class VentureIntelligenceAngelInvestmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceAngelInvestment
+        fields = '__all__'
+
+
+class VentureIntelligenceIncubationInvestmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceIncubationInvestment
+        fields = '__all__'
+
+
+class VentureIntelligencePEExitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligencePEExit
+        fields = '__all__'
+
+
+class VentureIntelligencePEIPOSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligencePEIPO
+        fields = '__all__'
+
+
+class VentureIntelligenceMergerAcquisitionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceMergerAcquisition
+        fields = '__all__'
+
+
+class VentureIntelligenceEpfoDataSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceEpfoData
+        fields = '__all__'
+
+
+class VentureIntelligenceSimilarCompanySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentureIntelligenceSimilarCompany
+        fields = '__all__'
+
+
 class VentureIntelligenceCompanyProfileSerializer(serializers.ModelSerializer):
     financial_statements = VentureIntelligenceFinancialStatementSerializer(many=True, read_only=True)
+    executives = VentureIntelligenceExecutiveSerializer(many=True, read_only=True)
+    pe_investments = VentureIntelligencePEInvestmentSerializer(many=True, read_only=True)
+    angel_investments = VentureIntelligenceAngelInvestmentSerializer(many=True, read_only=True)
+    incubation_investments = VentureIntelligenceIncubationInvestmentSerializer(many=True, read_only=True)
+    pe_exits = VentureIntelligencePEExitSerializer(many=True, read_only=True)
+    pe_ipos = VentureIntelligencePEIPOSerializer(many=True, read_only=True)
+    mergers_acquisitions = VentureIntelligenceMergerAcquisitionSerializer(many=True, read_only=True)
+    epfo_data = VentureIntelligenceEpfoDataSerializer(many=True, read_only=True)
+    similar_companies = VentureIntelligenceSimilarCompanySerializer(many=True, read_only=True)
 
     class Meta:
         model = VentureIntelligenceCompanyProfile
