@@ -182,6 +182,17 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         audit_log.status = 'PROCESSING'
         audit_log.save(update_fields=['celery_task_id', 'status'])
 
+        # Update triggering user message with audit_log_id
+        user_msg = AIMessage.objects.filter(
+            conversation=conversation, 
+            role='user'
+        ).order_by('-created_at').first()
+        if user_msg:
+            if not isinstance(user_msg.applied_filters, dict):
+                user_msg.applied_filters = {}
+            user_msg.applied_filters['audit_log_id'] = audit_log_id
+            user_msg.save(update_fields=['applied_filters'])
+
         ai_service = AIProcessorService()
         history_context, history_messages_used, history_chars_used = _build_history_context(conversation)
         
@@ -320,7 +331,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 conversation=conversation,
                 role='assistant',
                 content=full_text,
-                thinking=full_thinking
+                thinking=full_thinking,
+                applied_filters={"audit_log_id": audit_log_id}
             )
             # Finalize Audit Log
             audit_log.raw_response = full_text
