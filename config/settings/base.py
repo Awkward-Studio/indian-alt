@@ -305,11 +305,14 @@ if DATABASE_URL:
     
     DATABASES = {'default': parsed_config}
 else:
-    # Default to SQLite for local development
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
+        },
+        'production': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
         }
     }
 

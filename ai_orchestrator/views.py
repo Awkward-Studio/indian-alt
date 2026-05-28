@@ -981,6 +981,7 @@ class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         try:
+            from django.conf import settings
             from .models import AnalysisProtocol, AISystemSetting
             from .serializers import AIPersonalitySerializer, AISkillSerializer, AnalysisProtocolSerializer
             

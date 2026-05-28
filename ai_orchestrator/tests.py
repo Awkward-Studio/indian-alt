@@ -1607,14 +1607,14 @@ class AnthropicIntegrationTests(TestCase):
         service = AnthropicProviderService()
         payload = {
             "model": "claude-3-7-sonnet-latest",
-            "prompt": "What is ACME Corp?",
+            "prompt": "Search the web for ACME Corp.",
             "system": "Be concise",
             "options": {"max_tokens": 4096, "temperature": 0.5}
         }
         built = service._build_anthropic_payload(payload, stream=False)
         self.assertEqual(built["model"], "claude-3-7-sonnet-latest")
         self.assertEqual(built["system"], "Be concise")
-        self.assertEqual(built["messages"][0]["content"], "What is ACME Corp?")
+        self.assertEqual(built["messages"][0]["content"], "Search the web for ACME Corp.")
         self.assertEqual(built["tools"][0]["type"], "web_search_20260209")
         # Claude 3.7 should enforce temperature=1.0 and enable thinking
         self.assertEqual(built["temperature"], 1.0)
@@ -1698,18 +1698,199 @@ class AnthropicIntegrationTests(TestCase):
             # Verify correct mock execution
             self.assertEqual(res["status"], "success")
 
-    def test_anthropic_payload_building_includes_web_search_tool_for_all_models(self):
+    def test_anthropic_payload_building_gated_web_search_tool(self):
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
         service = AnthropicProviderService()
         
-        # Test standard haiku model
-        payload = {
+        # Test standard haiku model (should NOT have tools/web search even with search intent)
+        payload_haiku = {
             "model": "claude-haiku-4-5-20251001",
             "prompt": "Who are their competitors?",
             "system": "Be concise",
             "options": {"max_tokens": 4096, "temperature": 0.5}
         }
-        built = service._build_anthropic_payload(payload, stream=False)
-        self.assertEqual(built["tools"][0]["type"], "web_search_20260209")
-        self.assertEqual(built["tools"][0]["name"], "web_search")
+        built_haiku = service._build_anthropic_payload(payload_haiku, stream=False)
+        self.assertNotIn("tools", built_haiku)
+        
+        # Test sonnet model with search intent (should have tools/web search)
+        payload_sonnet_search = {
+            "model": "claude-3-7-sonnet-latest",
+            "prompt": "Who are their competitors?",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5}
+        }
+        built_sonnet_search = service._build_anthropic_payload(payload_sonnet_search, stream=False)
+        self.assertEqual(built_sonnet_search["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built_sonnet_search["tools"][0]["name"], "web_search")
+
+        # Test sonnet model WITHOUT search intent (should NOT have tools/web search)
+        payload_sonnet_standard = {
+            "model": "claude-3-7-sonnet-latest",
+            "prompt": "Hello! Please summarize this conversation context.",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5}
+        }
+        built_sonnet_standard = service._build_anthropic_payload(payload_sonnet_standard, stream=False)
+        self.assertNotIn("tools", built_sonnet_standard)
+
+
+
+class VentureIntelligenceSyncTests(TestCase):
+    databases = {'default', 'production'}
+
+    def test_sync_venture_intelligence_data(self):
+        from deals.models import (
+            Deal,
+            VentureIntelligenceCompanyProfile,
+            VentureIntelligenceCompanyRelation,
+            VentureIntelligenceExecutive,
+            VentureIntelligencePEInvestment,
+            VentureIntelligenceAngelInvestment,
+            VentureIntelligenceIncubationInvestment,
+            VentureIntelligencePEExit,
+            VentureIntelligencePEIPO,
+            VentureIntelligenceMergerAcquisition,
+            VentureIntelligenceEpfoData,
+            VentureIntelligenceSimilarCompany,
+            VentureIntelligenceFinancialStatement
+        )
+        from bulk_sync_local_db_to_prod import sync_deal_venture_intelligence
+
+        # Create source objects
+        local_deal = Deal.objects.using('default').create(
+            title="Local Acme Corp",
+            sector="Tech",
+            industry="Software"
+        )
+        
+        profile = VentureIntelligenceCompanyProfile.objects.using('default').create(
+            cin="U72900MH2020PTC345678",
+            name="Acme Tech Private Limited",
+            registered_name="Acme Tech Private Limited",
+            website="https://acme.tech",
+            industry="IT Services",
+            sector="Technology",
+            year_founded="2020",
+            total_funding="5M",
+            city="Mumbai",
+            state="Maharashtra"
+        )
+
+        VentureIntelligenceCompanyRelation.objects.using('default').create(
+            deal=local_deal,
+            company_profile=profile,
+            relation_type='target',
+            notes="Primary target company"
+        )
+
+        # Create child relations under profile
+        VentureIntelligenceExecutive.objects.using('default').create(
+            company_profile=profile,
+            name="John Doe",
+            designation="CEO"
+        )
+        VentureIntelligencePEInvestment.objects.using('default').create(
+            company_profile=profile,
+            round="Series A",
+            deal_date="2021-05-10",
+            amount="2000000.00",
+            amount_inr="150000000.00",
+            investors=["VC Fund A"]
+        )
+        VentureIntelligenceAngelInvestment.objects.using('default').create(
+            company_profile=profile,
+            date="2020-08-01",
+            investors=["Angel B"]
+        )
+        VentureIntelligenceIncubationInvestment.objects.using('default').create(
+            company_profile=profile,
+            date="2020-02-01",
+            incubator="Incubator C"
+        )
+        VentureIntelligencePEExit.objects.using('default').create(
+            company_profile=profile,
+            deal_type="Acquisition",
+            date="2024-03-01",
+            amount="10000000.00",
+            exit_investors=["VC Fund A"]
+        )
+        VentureIntelligencePEIPO.objects.using('default').create(
+            company_profile=profile,
+            date="2025-01-15",
+            ipo_investors=["Public"]
+        )
+        VentureIntelligenceMergerAcquisition.objects.using('default').create(
+            company_profile=profile,
+            company="Acme Target",
+            date="2023-11-20",
+            amount="12000000.00",
+            acquirer="Buyer E"
+        )
+        VentureIntelligenceEpfoData.objects.using('default').create(
+            company_profile=profile,
+            qrtr="2023-Q4",
+            employees=120
+        )
+        VentureIntelligenceSimilarCompany.objects.using('default').create(
+            company_profile=profile,
+            name="Competitor F",
+            sector="Technology"
+        )
+        VentureIntelligenceFinancialStatement.objects.using('default').create(
+            company_profile=profile,
+            statement_type="profit_loss",
+            fy="FY23",
+            fin_type="Consolidated",
+            data={"revenue": 10000000.00}
+        )
+
+        # Create prod deal counterpart
+        prod_deal = Deal.objects.using('production').create(
+            id=local_deal.id,
+            title="Prod Acme Corp",
+            sector="Tech",
+            industry="Software"
+        )
+
+        # Call the sync function (apply-run)
+        synced_count = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=False)
+        self.assertEqual(synced_count, 1)
+
+        # Verify profile is created in TARGET_DB with same UUID
+        prod_profile = VentureIntelligenceCompanyProfile.objects.using('production').get(id=profile.id)
+        self.assertEqual(prod_profile.cin, "U72900MH2020PTC345678")
+        self.assertEqual(prod_profile.name, "Acme Tech Private Limited")
+        self.assertEqual(prod_profile.city, "Mumbai")
+
+        # Verify children are created in TARGET_DB
+        self.assertEqual(prod_profile.executives.using('production').count(), 1)
+        self.assertEqual(prod_profile.executives.using('production').first().name, "John Doe")
+        self.assertEqual(prod_profile.pe_investments.using('production').count(), 1)
+        self.assertEqual(prod_profile.pe_investments.using('production').first().round, "Series A")
+        self.assertEqual(prod_profile.angel_investments.using('production').count(), 1)
+        self.assertEqual(prod_profile.angel_investments.using('production').first().investors, ["Angel B"])
+        self.assertEqual(prod_profile.incubation_investments.using('production').count(), 1)
+        self.assertEqual(prod_profile.incubation_investments.using('production').first().incubator, "Incubator C")
+        self.assertEqual(prod_profile.pe_exits.using('production').count(), 1)
+        self.assertEqual(prod_profile.pe_exits.using('production').first().deal_type, "Acquisition")
+        self.assertEqual(prod_profile.pe_ipos.using('production').count(), 1)
+        self.assertEqual(prod_profile.pe_ipos.using('production').first().ipo_investors, ["Public"])
+        self.assertEqual(prod_profile.mergers_acquisitions.using('production').count(), 1)
+        self.assertEqual(prod_profile.mergers_acquisitions.using('production').first().acquirer, "Buyer E")
+        self.assertEqual(prod_profile.epfo_data.using('production').count(), 1)
+        self.assertEqual(prod_profile.epfo_data.using('production').first().qrtr, "2023-Q4")
+        self.assertEqual(prod_profile.similar_companies.using('production').count(), 1)
+        self.assertEqual(prod_profile.similar_companies.using('production').first().name, "Competitor F")
+        self.assertEqual(prod_profile.financial_statements.using('production').count(), 1)
+        self.assertEqual(prod_profile.financial_statements.using('production').first().data.get("revenue"), 10000000.00)
+
+        # Verify relation is created
+        prod_relation = VentureIntelligenceCompanyRelation.objects.using('production').get(deal=prod_deal)
+        self.assertEqual(prod_relation.company_profile.id, profile.id)
+        self.assertEqual(prod_relation.relation_type, 'target')
+
+        # Test dry-run behavior
+        dry_run_count = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True)
+        self.assertEqual(dry_run_count, 1)
+
 

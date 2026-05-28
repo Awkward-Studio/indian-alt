@@ -1356,6 +1356,268 @@ def replace_retrieval_profile(local_deal: Deal, prod_deal: Deal, dry_run: bool =
     return 1
 
 
+def sync_deal_venture_intelligence(local_deal: Deal, prod_deal: Deal, dry_run: bool = False) -> int:
+    """
+    Sync all Venture Intelligence records associated with the deal to production,
+    including profiles, executives, investments, M&As, EPFO workforce records, and financials.
+    """
+    from deals.models import (
+        VentureIntelligenceCompanyRelation, VentureIntelligenceCompanyProfile,
+        VentureIntelligenceExecutive, VentureIntelligencePEInvestment,
+        VentureIntelligenceAngelInvestment, VentureIntelligenceIncubationInvestment,
+        VentureIntelligencePEExit, VentureIntelligencePEIPO,
+        VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData,
+        VentureIntelligenceSimilarCompany, VentureIntelligenceFinancialStatement
+    )
+    
+    relations = list(VentureIntelligenceCompanyRelation.objects.using(SOURCE_DB).filter(deal=local_deal))
+    if dry_run:
+        return len(relations)
+
+    if not relations:
+        return 0
+
+    for rel in relations:
+        local_profile = rel.company_profile
+        
+        # 1. Upsert VentureIntelligenceCompanyProfile
+        defaults = {
+            'cin': local_profile.cin,
+            'name': local_profile.name,
+            'registered_name': local_profile.registered_name,
+            'website': local_profile.website,
+            'industry': local_profile.industry,
+            'sector': local_profile.sector,
+            'email': local_profile.email,
+            'year_founded': local_profile.year_founded,
+            'city': local_profile.city,
+            'total_funding': local_profile.total_funding,
+            'state': local_profile.state,
+            'region': local_profile.region,
+            'country': local_profile.country,
+            'pincode': local_profile.pincode,
+            'telephone': local_profile.telephone,
+            'phone': local_profile.phone,
+            'linkedin': local_profile.linkedin,
+            'tags': local_profile.tags,
+            'listing_status': local_profile.listing_status,
+            'additional_info': local_profile.additional_info,
+            'short_name': local_profile.short_name,
+            'previous_name': local_profile.previous_name,
+            'full_name': local_profile.full_name,
+            'business_description': local_profile.business_description,
+            'transacted_status': local_profile.transacted_status,
+            'incorp_year': local_profile.incorp_year,
+            'company_status': local_profile.company_status,
+            'address': local_profile.address,
+            'address_line2': local_profile.address_line2,
+            'contact_name': local_profile.contact_name,
+            'contact_designation': local_profile.contact_designation,
+            'auditor_name': local_profile.auditor_name,
+            'shp_year': local_profile.shp_year,
+            'shp_promoter': local_profile.shp_promoter,
+            'shp_non_promoter': local_profile.shp_non_promoter,
+            'is_xbrl': local_profile.is_xbrl,
+            'raw_profile_json': dict(local_profile.raw_profile_json or {}),
+        }
+        prod_profile, _ = VentureIntelligenceCompanyProfile.objects.using(TARGET_DB).update_or_create(
+            id=local_profile.id,
+            defaults=defaults
+        )
+
+        # 2. Rebuild child tables for this company profile
+        # VentureIntelligenceExecutive
+        execs = list(local_profile.executives.using(SOURCE_DB).all())
+        VentureIntelligenceExecutive.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if execs:
+            VentureIntelligenceExecutive.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceExecutive(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    name=item.name,
+                    designation=item.designation,
+                    created_at=item.created_at
+                ) for item in execs
+            ])
+
+        # VentureIntelligencePEInvestment
+        investments = list(local_profile.pe_investments.using(SOURCE_DB).all())
+        VentureIntelligencePEInvestment.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if investments:
+            VentureIntelligencePEInvestment.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligencePEInvestment(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    round=item.round,
+                    deal_date=item.deal_date,
+                    amount=item.amount,
+                    amount_inr=item.amount_inr,
+                    investors=item.investors,
+                    exit_status=item.exit_status,
+                    company_valuation_post_money=item.company_valuation_post_money,
+                    revenue_multiple_post_money=item.revenue_multiple_post_money,
+                    is_vc=item.is_vc,
+                    is_amount_hide=item.is_amount_hide,
+                    is_debt_deal=item.is_debt_deal,
+                    is_agg_hide=item.is_agg_hide,
+                    created_at=item.created_at
+                ) for item in investments
+            ])
+
+        # VentureIntelligenceAngelInvestment
+        angel = list(local_profile.angel_investments.using(SOURCE_DB).all())
+        VentureIntelligenceAngelInvestment.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if angel:
+            VentureIntelligenceAngelInvestment.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceAngelInvestment(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    date=item.date,
+                    investors=item.investors,
+                    is_exited=item.is_exited,
+                    is_agg_hide=item.is_agg_hide,
+                    created_at=item.created_at
+                ) for item in angel
+            ])
+
+        # VentureIntelligenceIncubationInvestment
+        incub = list(local_profile.incubation_investments.using(SOURCE_DB).all())
+        VentureIntelligenceIncubationInvestment.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if incub:
+            VentureIntelligenceIncubationInvestment.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceIncubationInvestment(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    date=item.date,
+                    status=item.status,
+                    incubator=item.incubator,
+                    created_at=item.created_at
+                ) for item in incub
+            ])
+
+        # VentureIntelligencePEExit
+        exits = list(local_profile.pe_exits.using(SOURCE_DB).all())
+        VentureIntelligencePEExit.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if exits:
+            VentureIntelligencePEExit.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligencePEExit(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    deal_type=item.deal_type,
+                    date=item.date,
+                    exit_investors=item.exit_investors,
+                    amount=item.amount,
+                    exit_status=item.exit_status,
+                    valuation=item.valuation,
+                    revenue_multiple=item.revenue_multiple,
+                    is_vc=item.is_vc,
+                    is_hide_amount=item.is_hide_amount,
+                    created_at=item.created_at
+                ) for item in exits
+            ])
+
+        # VentureIntelligencePEIPO
+        ipos = list(local_profile.pe_ipos.using(SOURCE_DB).all())
+        VentureIntelligencePEIPO.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if ipos:
+            VentureIntelligencePEIPO.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligencePEIPO(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    date=item.date,
+                    ipo_investors=item.ipo_investors,
+                    ipo_size=item.ipo_size,
+                    is_investor_sale=item.is_investor_sale,
+                    ipo_valuation=item.ipo_valuation,
+                    is_amount_hide=item.is_amount_hide,
+                    is_vc=item.is_vc,
+                    created_at=item.created_at
+                ) for item in ipos
+            ])
+
+        # VentureIntelligenceMergerAcquisition
+        mas = list(local_profile.mergers_acquisitions.using(SOURCE_DB).all())
+        VentureIntelligenceMergerAcquisition.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if mas:
+            VentureIntelligenceMergerAcquisition.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceMergerAcquisition(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    company=item.company,
+                    date=item.date,
+                    amount=item.amount,
+                    acquirer=item.acquirer,
+                    company_valuation=item.company_valuation,
+                    company_valuation_post=item.company_valuation_post,
+                    revenue_multiple=item.revenue_multiple,
+                    revenue_multiple_post=item.revenue_multiple_post,
+                    is_hide_amount=item.is_hide_amount,
+                    is_asset_sale=item.is_asset_sale,
+                    is_minority_deal=item.is_minority_deal,
+                    created_at=item.created_at
+                ) for item in mas
+            ])
+
+        # VentureIntelligenceEpfoData
+        epfo = list(local_profile.epfo_data.using(SOURCE_DB).all())
+        VentureIntelligenceEpfoData.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if epfo:
+            VentureIntelligenceEpfoData.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceEpfoData(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    qrtr=item.qrtr,
+                    employees=item.employees,
+                    created_at=item.created_at
+                ) for item in epfo
+            ])
+
+        # VentureIntelligenceSimilarCompany
+        similar = list(local_profile.similar_companies.using(SOURCE_DB).all())
+        VentureIntelligenceSimilarCompany.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if similar:
+            VentureIntelligenceSimilarCompany.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceSimilarCompany(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    name=item.name,
+                    sector=item.sector,
+                    total_funding=item.total_funding,
+                    latest_investment=item.latest_investment,
+                    city=item.city,
+                    created_at=item.created_at
+                ) for item in similar
+            ])
+
+        # VentureIntelligenceFinancialStatement
+        financials = list(local_profile.financial_statements.using(SOURCE_DB).all())
+        VentureIntelligenceFinancialStatement.objects.using(TARGET_DB).filter(company_profile=prod_profile).delete()
+        if financials:
+            VentureIntelligenceFinancialStatement.objects.using(TARGET_DB).bulk_create([
+                VentureIntelligenceFinancialStatement(
+                    id=item.id,
+                    company_profile=prod_profile,
+                    statement_type=item.statement_type,
+                    fy=item.fy,
+                    fin_type=item.fin_type,
+                    data=dict(item.data or {}),
+                    created_at=item.created_at
+                ) for item in financials
+            ])
+
+        # 3. Upsert the VentureIntelligenceCompanyRelation row itself
+        VentureIntelligenceCompanyRelation.objects.using(TARGET_DB).update_or_create(
+            deal=prod_deal,
+            company_profile=prod_profile,
+            defaults={
+                'relation_type': rel.relation_type,
+                'notes': rel.notes,
+            }
+        )
+
+    return len(relations)
+
+
 def sync_single_deal(
     local_deal: Deal,
     bank_map: dict[str, Bank],
@@ -1463,6 +1725,8 @@ def sync_single_deal(
             )
             print(f"[DEAL] {local_deal.title or local_deal.id}: replacing retrieval profile", flush=True)
             profile = replace_retrieval_profile(local_deal, prod_deal, dry_run=False)
+            print(f"[DEAL] {local_deal.title or local_deal.id}: syncing Venture Intelligence records", flush=True)
+            vi_records = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=False)
         else:
             print(
                 f"[DEAL] {local_deal.title or local_deal.id}: keeping production analyses/documents/chunks/profile",
@@ -1474,6 +1738,8 @@ def sync_single_deal(
             chunks = prod_deal.chunks.using(TARGET_DB).count()
             profile = int(DealRetrievalProfile.objects.using(TARGET_DB).filter(deal=prod_deal).exists())
             analysis_docs = {"audit_logs": 0, "analysis_documents": 0}
+            from deals.models import VentureIntelligenceCompanyRelation
+            vi_records = VentureIntelligenceCompanyRelation.objects.using(TARGET_DB).filter(deal=prod_deal).count()
 
     return {
         "deal": prod_deal.title,
@@ -1484,6 +1750,7 @@ def sync_single_deal(
         "profile": profile,
         "audit_logs": analysis_docs["audit_logs"],
         "analysis_documents": analysis_docs["analysis_documents"],
+        "vi_records": vi_records if 'vi_records' in locals() else sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True),
     }
 
 

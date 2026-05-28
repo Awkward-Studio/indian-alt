@@ -497,14 +497,26 @@ class AnthropicProviderService:
         if system_prompt:
             anthropic_payload["system"] = system_prompt
 
-        # Enable web search tool for all Anthropic models
-        anthropic_payload["tools"] = [
-            {
-                "type": "web_search_20260209",
-                "name": "web_search",
-                "max_uses": 3,
-            }
+        # Enable web search tool for supported Anthropic models (e.g. Sonnet, Opus, but not Haiku)
+        # only when the user intent indicates a web search is needed.
+        prompt_lower = user_prompt.lower()
+        search_keywords = [
+            "search", "web", "online", "news", "competitor", "peer",
+            "market", "industry", "latest", "recent", "find", "google",
+            "trend", "wikipedia", "current", "exits", "acquisition",
+            "who is", "who are", "website", "competitors", "peers", "news",
+            "founder", "ceo", "funding", "valuation", "revenue", "financials"
         ]
+        has_search_intent = any(kw in prompt_lower for kw in search_keywords)
+
+        if "haiku" not in model.lower() and has_search_intent:
+            anthropic_payload["tools"] = [
+                {
+                    "type": "web_search_20260209",
+                    "name": "web_search",
+                    "max_uses": 3,
+                }
+            ]
 
         # Handle thinking budget and temperature constraints for Claude 3.7
         if "claude-3-7" in model:
@@ -541,7 +553,11 @@ class AnthropicProviderService:
             stream=True,
             timeout=300,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            logger.error(f"Anthropic API Error: {response.status_code} - {response.text}")
+            raise
 
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line or raw_line.startswith(":"):
