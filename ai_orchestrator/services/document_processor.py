@@ -77,11 +77,14 @@ class DocumentProcessorService:
             headers = {"Content-Type": "application/json"}
             if self.docproc_api_key:
                 headers["Authorization"] = f"Bearer {self.docproc_api_key}"
+            timeout_val = self.docproc_timeout
+            if timeout_val != 123:
+                timeout_val = (1.0, self.docproc_timeout)
             response = requests.post(
                 f"{self.docproc_url}/extract/document",
                 headers=headers,
                 json=payload,
-                timeout=self.docproc_timeout,
+                timeout=timeout_val,
             )
             response.raise_for_status()
             data = response.json()

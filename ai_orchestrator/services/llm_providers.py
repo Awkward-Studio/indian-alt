@@ -21,7 +21,7 @@ class OllamaProviderService:
 
     def get_available_models(self) -> list[str]:
         try:
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=(1.0, 4.0))
             response.raise_for_status()
             data = response.json()
             return [model["name"] for model in data.get("models", [])]
@@ -42,7 +42,7 @@ class OllamaProviderService:
                     "stream": False,
                     "keep_alive": 0,
                 },
-                timeout=15,
+                timeout=(1.0, 14.0),
             )
             response.raise_for_status()
             logger.info("Requested Ollama unload for model %s", model)
@@ -52,7 +52,7 @@ class OllamaProviderService:
             return False
 
     def execute_stream(self, payload: dict) -> Iterator[str]:
-        response = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=300)
+        response = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=(1.0, 300.0))
         response.raise_for_status()
 
         for line in response.iter_lines():
@@ -60,7 +60,7 @@ class OllamaProviderService:
                 yield line.decode("utf-8")
 
     def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
-        response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=timeout)
+        response = requests.post(f"{self.ollama_url}/api/generate", json=payload, timeout=(1.0, timeout))
         response.raise_for_status()
         return response.json()
 
@@ -102,7 +102,7 @@ class VLLMProviderService:
                 if not url.endswith("/v1"):
                     url = f"{url}/v1"
                 try:
-                    response = requests.get(f"{url}/models", headers=self._headers(), timeout=5)
+                    response = requests.get(f"{url}/models", headers=self._headers(), timeout=(1.0, 4.0))
                     response.raise_for_status()
                     data = response.json()
                     for m in data.get("data", []):
@@ -118,7 +118,7 @@ class VLLMProviderService:
             url = self.base_url
             if not url.endswith("/v1"):
                 url = f"{url}/v1"
-            response = requests.get(f"{url}/models", headers=self._headers(), timeout=5)
+            response = requests.get(f"{url}/models", headers=self._headers(), timeout=(1.0, 4.0))
             response.raise_for_status()
             return True
         except Exception as exc:
@@ -132,7 +132,7 @@ class VLLMProviderService:
             headers=self._headers(),
             json=body,
             stream=True,
-            timeout=300,
+            timeout=(1.0, 300.0),
         )
         response.raise_for_status()
 
@@ -163,7 +163,7 @@ class VLLMProviderService:
             self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
-            timeout=timeout,
+            timeout=(1.0, timeout),
         )
         try:
             response.raise_for_status()
@@ -193,7 +193,7 @@ class VLLMProviderService:
             f"{url}/embeddings",
             headers=self._headers(),
             json={"model": model, "input": text},
-            timeout=timeout,
+            timeout=(1.0, timeout),
         )
         response.raise_for_status()
         data = response.json()
@@ -296,7 +296,7 @@ class EmbeddingProviderService:
             f"{self.base_url}/embeddings",
             headers=self._headers(),
             json={"model": model, "input": text},
-            timeout=timeout or self.timeout,
+            timeout=(1.0, timeout or self.timeout),
         )
         response.raise_for_status()
         data = response.json()
@@ -350,7 +350,7 @@ class RerankerProviderService:
             f"{self.base_url}/rerank",
             headers=self._headers(),
             json=body,
-            timeout=timeout,
+            timeout=(1.0, timeout),
         )
         response.raise_for_status()
         return response.json()

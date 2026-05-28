@@ -303,7 +303,13 @@ if DATABASE_URL:
     if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
         parsed_config['OPTIONS']['sslmode'] = 'require'
     
-    DATABASES = {'default': parsed_config}
+    DATABASES = {
+        'default': parsed_config,
+        'production': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
+        }
+    }
 else:
     DATABASES = {
         'default': {
