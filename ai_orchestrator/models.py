@@ -344,3 +344,23 @@ class DealRetrievalProfile(models.Model):
 
     def __str__(self):
         return f"Retrieval Profile for {self.deal_id}"
+
+
+class AISystemSetting(models.Model):
+    """
+    Stores system-wide key-value configuration overrides for AI services.
+    """
+    key = models.CharField(max_length=100, unique=True, help_text="Setting key (e.g. CLAUDE_TEXT_MODEL)")
+    value = models.TextField(help_text="Setting value")
+    description = models.TextField(blank=True, null=True, help_text="Optional description of what this setting is for")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "AI System Setting"
+        verbose_name_plural = "AI System Settings"
+        ordering = ['key']
+
+    def __str__(self):
+        return f"{self.key}: {self.value}"
+

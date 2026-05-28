@@ -2,7 +2,7 @@ from django.contrib import admin
 from .models import (
     AIPersonality, AISkill, AIConversation, AIMessage, 
     AIAuditLog, DocumentChunk, DealRetrievalProfile, AnalysisProtocol, 
-    AIFlowDefinition, AIFlowVersion
+    AIFlowDefinition, AIFlowVersion, AISystemSetting
 )
 
 @admin.register(AIPersonality)
@@ -76,3 +76,10 @@ class DealRetrievalProfileAdmin(admin.ModelAdmin):
     def get_deal_title(self, obj):
         return obj.deal.title if obj.deal else "N/A"
     get_deal_title.short_description = 'Deal'
+
+
+@admin.register(AISystemSetting)
+class AISystemSettingAdmin(admin.ModelAdmin):
+    list_display = ('key', 'value', 'updated_at')
+    search_fields = ('key', 'value', 'description')
+

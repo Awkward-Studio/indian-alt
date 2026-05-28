@@ -11,6 +11,7 @@ from .parsers import ResponseParserService
 from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .runtime import AIRuntimeService
+from django.conf import settings
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -32,8 +33,11 @@ class AIProcessorService:
         self.provider = self.vllm_provider
         self.current_provider = self.vllm_provider
         self.ocr_service = OCRService()
-        self.available_models = self.vllm_provider.get_available_models()
         self.channel_layer = get_channel_layer()
+
+    @property
+    def available_models(self) -> list[str]:
+        return self.vllm_provider.get_available_models()
 
     def process_content(
         self,
@@ -61,6 +65,17 @@ class AIProcessorService:
         skill = AIRuntimeService.get_skill(skill_name)
         vision_model = AIRuntimeService.get_vision_model(personality)
         resolved_text_model = model_override or AIRuntimeService.get_text_model(personality)
+        if model_provider == "anthropic":
+            if not resolved_text_model or not resolved_text_model.startswith("claude-"):
+                try:
+                    from ..models import AISystemSetting
+                    setting = AISystemSetting.objects.filter(key="CLAUDE_TEXT_MODEL").first()
+                    if setting and setting.value:
+                        resolved_text_model = setting.value
+                    else:
+                        resolved_text_model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+                except Exception:
+                    resolved_text_model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
 
         # Audit Log Setup (Internal bookkeeping) - Initialize early to avoid UnboundLocalError in log_worker_event
         audit_log = self._setup_audit_log(
@@ -154,6 +169,9 @@ class AIProcessorService:
                 audit_log.system_prompt = system_prompt
                 audit_log.user_prompt = user_prompt
                 audit_log.status = 'PROCESSING'
+                model_provider = metadata.get('model_provider') if metadata else None
+                if model_provider:
+                    audit_log.model_provider = model_provider
                 if resolved_model:
                     audit_log.model_used = resolved_model
                 if source_meta: audit_log.source_metadata = source_meta

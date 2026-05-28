@@ -159,14 +159,19 @@ class DealChatView(APIView):
 
             from .tasks import generate_chat_response_async
             
-            # We don't have a conversation object in DealChat currently, 
-            # but we might need one if we want persistent history. 
-            # For now, we'll try to find or create one for the deal.
-            conversation, _ = AIConversation.objects.get_or_create(
-                user=request.user,
-                title=f"Chat: {deal.title}",
-                defaults={'id': uuid.uuid4()} # Using deal ID as a reference? No, use new UUID.
-            )
+            # If conversation_id is provided, try to find the existing conversation
+            conversation_id = request.data.get('conversation_id')
+            conversation = None
+            if conversation_id:
+                conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
+            if not conversation:
+                conversation = AIConversation.objects.create(
+                    user=request.user,
+                    title=f"Chat: {deal.title}"
+                )
+
+            # Save the user message to DB immediately (fixes Bug 1)
+            AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
 
             model_provider = request.data.get('model_provider', 'vllm')
             if not isinstance(conversation.metadata, dict):
@@ -695,6 +700,7 @@ class DealHelperView(APIView):
             "skill_name": "deal_chat",
             "metadata": {
                 "deal_id": str(deal.id),
+                "model_provider": (conversation.metadata or {}).get("model_provider", "vllm"),
                 "interactive_context_data": context_data,
                 "query_plan": session["query_plan"],
                 "selected_sources": [
@@ -975,7 +981,7 @@ class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         try:
-            from .models import AnalysisProtocol
+            from .models import AnalysisProtocol, AISystemSetting
             from .serializers import AIPersonalitySerializer, AISkillSerializer, AnalysisProtocolSerializer
             
             personalities = AIPersonality.objects.all()
@@ -990,6 +996,10 @@ class AISettingsView(APIView):
             forex = ForexService()
             live_rate = forex.get_crore_string()
 
+            # Claude settings override
+            claude_setting = AISystemSetting.objects.filter(key="CLAUDE_TEXT_MODEL").first()
+            claude_text_model = claude_setting.value if claude_setting else getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+
             return Response({
                 "personalities": AIPersonalitySerializer(personalities, many=True).data,
                 "skills": AISkillSerializer(skills, many=True).data,
@@ -999,7 +1009,8 @@ class AISettingsView(APIView):
                 "telemetry": status_data.get("telemetry", {"loaded_models": []}),
                 "vm_online": status_data.get("vm_online", False),
                 "vm_status": status_data.get("vm_status", "unknown"),
-                "live_rate": live_rate
+                "live_rate": live_rate,
+                "claude_text_model": claude_text_model
             })
         except Exception as e: 
             return Response({"error": str(e)}, status=500)
@@ -1020,6 +1031,17 @@ class AISettingsView(APIView):
             
             import random, string
             def rand_suffix(): return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+
+            if target_type == 'system_setting':
+                key = target_id
+                value = updates.get('value')
+                if key and value is not None:
+                    from .models import AISystemSetting
+                    setting, _ = AISystemSetting.objects.get_or_create(key=key)
+                    setting.value = value
+                    setting.save()
+                    return Response({"success": True})
+                return Response({"error": "Key and value are required"}, status=400)
 
             if target_type == 'personality':
                 if target_id == 'new':

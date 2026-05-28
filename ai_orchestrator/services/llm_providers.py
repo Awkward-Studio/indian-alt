@@ -450,7 +450,17 @@ class AnthropicProviderService:
 
     def __init__(self):
         self.api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
-        self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5")
+        # Resolve model name dynamically from AISystemSetting database overrides first
+        try:
+            from ..models import AISystemSetting
+            setting = AISystemSetting.objects.filter(key="CLAUDE_TEXT_MODEL").first()
+            if setting and setting.value:
+                self.model = setting.value
+            else:
+                self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+        except Exception:
+            self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+            
         self.base_url = "https://api.anthropic.com/v1/messages"
 
     def _headers(self) -> dict[str, str]:
@@ -487,14 +497,17 @@ class AnthropicProviderService:
         if system_prompt:
             anthropic_payload["system"] = system_prompt
 
-        # Handle thinking budget, temperature constraints, and tools for Claude 3.7
+        # Enable web search tool for all Anthropic models
+        anthropic_payload["tools"] = [
+            {
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "max_uses": 3,
+            }
+        ]
+
+        # Handle thinking budget and temperature constraints for Claude 3.7
         if "claude-3-7" in model:
-            anthropic_payload["tools"] = [
-                {
-                    "type": "web_search_20260209",
-                    "name": "web_search"
-                }
-            ]
             anthropic_payload["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": min(2048, max_tokens - 1000) if max_tokens > 2000 else 1024
@@ -515,7 +528,7 @@ class AnthropicProviderService:
             return False
 
     def get_available_models(self) -> list[str]:
-        raw_list = [self.model, "claude-haiku-4-5", "claude-3-7-sonnet-latest", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"]
+        raw_list = [self.model, "claude-haiku-4-5-20251001", "claude-3-7-sonnet-latest", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"]
         seen = set()
         return [m for m in raw_list if not (m in seen or seen.add(m))]
 

@@ -1658,3 +1658,58 @@ class AnthropicIntegrationTests(TestCase):
         self.assertEqual(res["gate_mode"], "privacy_bypass")
         self.assertIn("ACME Corporation", res["context_data"])
 
+    def test_deal_chat_privacy_bypass_includes_basic_deal_name(self):
+        from ai_orchestrator.tasks import generate_chat_response_async
+        from ai_orchestrator.models import AIAuditLog
+        
+        audit_log = AIAuditLog.objects.create(
+            source_type="deal_chat",
+            source_id=str(self.deal.id),
+            context_label="Test",
+            system_prompt="",
+            user_prompt="Who are their competitors?",
+            raw_response="",
+            status="PENDING",
+            is_success=False
+        )
+
+        with patch("ai_orchestrator.tasks.AIProcessorService") as mock_ai_processor:
+            mock_processor_instance = MagicMock()
+            mock_processor_instance.process_content.return_value = ['{"response": "Test response", "done": true}']
+            mock_ai_processor.return_value = mock_processor_instance
+            
+            res = generate_chat_response_async(
+                conversation_id=str(self.conversation.id),
+                user_message="Who are their competitors?",
+                skill_name="deal_chat",
+                metadata={
+                    "deal_id": str(self.deal.id),
+                    "model_provider": "anthropic"
+                },
+                audit_log_id=str(audit_log.id)
+            )
+            
+            # Verify basic deal title is passed as context
+            audit_log.refresh_from_db()
+            source_metadata = audit_log.source_metadata or {}
+            self.assertEqual(source_metadata.get("gate_mode"), "privacy_bypass")
+            self.assertEqual(source_metadata.get("deals_considered"), 1)
+            
+            # Verify correct mock execution
+            self.assertEqual(res["status"], "success")
+
+    def test_anthropic_payload_building_includes_web_search_tool_for_all_models(self):
+        from ai_orchestrator.services.llm_providers import AnthropicProviderService
+        service = AnthropicProviderService()
+        
+        # Test standard haiku model
+        payload = {
+            "model": "claude-haiku-4-5-20251001",
+            "prompt": "Who are their competitors?",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5}
+        }
+        built = service._build_anthropic_payload(payload, stream=False)
+        self.assertEqual(built["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built["tools"][0]["name"], "web_search")
+

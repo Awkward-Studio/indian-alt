@@ -229,7 +229,27 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 )
         elif skill_name == 'deal_chat':
             chat_service = UniversalChatService(ai_service)
-            if (metadata or {}).get("interactive_context_data"):
+            model_provider = (metadata or {}).get("model_provider", "vllm")
+            if model_provider == "anthropic":
+                from deals.models import Deal
+                deal = Deal.objects.filter(id=metadata.get("deal_id")).first()
+                deal_title = deal.title if deal else ""
+                task_metadata = {
+                    "history_context": history_context,
+                    "context_data": f"You are chatting about the deal: {deal_title}.",
+                    "deal_context": f"You are chatting about the deal: {deal_title}.",
+                    "audit_log_id": audit_log_id,
+                    "query_plan": {"mode": "privacy_bypass", "user_query": user_message},
+                    "answer_generation_prompt": "You are a secure Claude assistant. Public search is allowed but no private database access.",
+                    "used_query_builder": False,
+                    "gate_mode": "privacy_bypass",
+                    "gate_reason": "RAG-bypass enforced for Claude model privacy.",
+                    "deals_considered": 1 if deal_title else 0,
+                    "retrieved_chunk_count": 0,
+                    "selected_chunk_count": 0,
+                    "selected_sources": [],
+                }
+            elif (metadata or {}).get("interactive_context_data"):
                 task_metadata = {
                     "history_context": history_context,
                     "context_data": metadata.get("interactive_context_data"),
@@ -320,10 +340,16 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     audit_log.raw_thinking = full_thinking
                     audit_log.save(update_fields=['raw_response', 'raw_thinking'])
                     last_save_time = time.time()
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
         full_text, full_thinking = _split_leaked_thinking(full_text, full_thinking)
+
+        # Check if the stream layer already marked this as failed (fixes Bug 3 and Bug 9)
+        audit_log.refresh_from_db(fields=['status', 'error_message'])
+        if audit_log.status == 'FAILED':
+            logger.warning(f"Stream failed for Conv {conversation_id}: {audit_log.error_message}")
+            return {"status": "error", "error": audit_log.error_message or "Stream failed"}
 
         if full_text:
             # Commit final message to conversation history
