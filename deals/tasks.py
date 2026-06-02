@@ -1781,7 +1781,8 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
             "prompt": prompt,
             "options": {
                 "max_tokens": 4096,
-                "temperature": 0.1
+                "temperature": 0.1,
+                "max_search_uses": 1
             }
         }
         
