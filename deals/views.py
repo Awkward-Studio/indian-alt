@@ -700,6 +700,120 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             logger.error(f"Manual upload failed: {str(e)}")
             return Response({"error": str(e)}, status=500)
 
+    @action(detail=True, methods=['post'])
+    def fetch_competitors(self, request, pk=None):
+        """
+        Triggers an asynchronous background Celery task to research and fetch competitors.
+        """
+        deal = self.get_object()
+        try:
+            from .tasks import fetch_competitors_async_task
+            task = fetch_competitors_async_task.apply_async(
+                kwargs={'deal_id': str(deal.id)},
+                queue='high_priority'
+            )
+            return Response({
+                "status": "queued",
+                "task_id": task.id,
+                "message": "Competitor research background task successfully initialized."
+            })
+        except Exception as e:
+            logger.error(f"Failed to trigger async competitors task for deal {deal.id}: {str(e)}")
+            return Response({"error": f"Failed to initialize competitors research: {str(e)}"}, status=500)
+
+    @action(detail=True, methods=['get'], url_path='fetch_competitors_status/(?P<task_id>[^/.]+)')
+    def fetch_competitors_status(self, request, pk=None, task_id=None):
+        """
+        Polls the execution status of the competitor research background task.
+        """
+        from celery.result import AsyncResult
+        res = AsyncResult(task_id)
+        if res.status == 'SUCCESS':
+            data = res.result or {}
+            if "error" in data:
+                return Response({"status": "FAILURE", "error": data["error"]}, status=500)
+            return Response({
+                "status": "SUCCESS",
+                "response": data.get("response", "")
+            })
+        elif res.status == 'FAILURE':
+            return Response({
+                "status": "FAILURE",
+                "error": str(res.info or "Background execution failed unexpectedly.")
+            }, status=500)
+        
+        return Response({
+            "status": res.status,  # PENDING, STARTED, RETRY
+        })
+
+    @action(detail=True, methods=['post'])
+    def save_competitors(self, request, pk=None):
+        """
+        Saves the competitor list as a permanent DealDocument, updates deal.extracted_text, 
+        and vectorizes the document chunk (with graceful offline degradation).
+        """
+        deal = self.get_object()
+        competitors_text = request.data.get("competitors_text")
+        if not competitors_text:
+            return Response({"error": "competitors_text is required"}, status=400)
+
+        from django.utils import timezone
+        title = request.data.get("title") or f"Top 10 Competitors - {timezone.now().strftime('%Y-%m-%d')}"
+
+        from .models import DocumentType, DealDocument
+        doc = DealDocument.objects.create(
+            deal=deal,
+            title=title,
+            document_type=DocumentType.OTHER,
+            extracted_text=competitors_text,
+            normalized_text=competitors_text,
+            is_indexed=False,
+            is_ai_analyzed=False,
+            extraction_mode="fallback_text",
+            transcription_status="complete",
+            chunking_status="not_chunked",
+            last_transcribed_at=timezone.now(),
+            uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
+        )
+
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
+        from .services.document_artifacts import DocumentArtifactService
+        from ai_orchestrator.services.ai_processor import AIProcessorService
+
+        # 1. Generate local artifact
+        try:
+            ai_service = AIProcessorService()
+            DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=True)
+        except Exception as artifact_err:
+            logger.warning(f"Failed to generate competitor document artifact: {str(artifact_err)}")
+
+        # 2. Append directly to deal.extracted_text
+        try:
+            from .tasks import _sync_deal_extracted_text_for_documents
+            _sync_deal_extracted_text_for_documents(deal, [doc])
+        except Exception as sync_err:
+            logger.warning(f"Failed to sync competitor text via helper task: {str(sync_err)}")
+            # Manual fallback sync
+            new_context = f"\n\n--- MANUAL DOCUMENT: {title} ---\n{competitors_text}"
+            deal.extracted_text = (deal.extracted_text or "") + new_context
+            deal.save(update_fields=['extracted_text'])
+
+        # 3. Graceful vectorization attempts
+        try:
+            embed_service = EmbeddingService()
+            success = embed_service.vectorize_document(doc)
+            if not success:
+                logger.warning("Competitor vectorization returned False.")
+        except Exception as embed_err:
+            logger.warning(f"Graceful vectorization failure (Inference VM is likely offline): {str(embed_err)}")
+
+        from .serializers import DealDocumentSerializer
+        return Response({
+            "status": "success",
+            "document": DealDocumentSerializer(doc).data
+        })
+
+
 
 from rest_framework.views import APIView
 from deals.services.venture_intelligence import VentureIntelligenceService

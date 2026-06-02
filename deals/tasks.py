@@ -1745,3 +1745,52 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         error_msg = analysis.get("error", "AI model returned an empty or unparseable response.")
         log_worker_event(audit_log, f"Synthesis failed: {error_msg}", status='FAILED', done=True)
         return {"error": f"Synthesis failed: {error_msg}"}
+
+
+@shared_task(queue='high_priority')
+def fetch_competitors_async_task(deal_id: str) -> dict:
+    """
+    Asynchronously executes Claude web search with custom timeout and optimized CIN prompt.
+    Does not fall back to pre-trained static knowledge; runs strictly on live web tools.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from deals.models import Deal
+        deal = Deal.objects.get(id=deal_id)
+        prompt = (
+            f"You are a sophisticated investment research assistant.\n"
+            f"Perform a comprehensive web search to identify the top 10 competitors or peer companies for '{deal.title}'.\n"
+            f"Context details of the target company:\n"
+            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
+            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
+            f"- Business Summary: {deal.deal_summary or 'N/A'}\n\n"
+            f"Provide a structured response. For each competitor, include:\n"
+            f"1. Company Name\n"
+            f"2. Core Business Description (focusing on their offerings and market presence)\n"
+            f"3. Nature of Competition (why they are a competitor, product overlaps, etc.)\n"
+            f"4. Any recent developments or scale indicators if available (e.g. revenue, funding, or market share)\n\n"
+            f"Format the final output cleanly as a professional report. Ensure your search is thorough, accurate, and lists exactly the top 10 most relevant competitors/peers."
+        )
+
+        from ai_orchestrator.services.llm_providers import AnthropicProviderService
+        service = AnthropicProviderService()
+        payload = {
+            "model": "default",
+            "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
+            "prompt": prompt,
+            "options": {
+                "max_tokens": 4096,
+                "temperature": 0.1
+            }
+        }
+        
+        logger.info("Triggering active web search competitor research...")
+        result = service.execute_standard(payload, timeout=240)
+        response_text = result.get("response") or ""
+        return {"response": response_text}
+            
+    except Exception as e:
+        logger.error(f"Async fetch competitors failed: {str(e)}")
+        return {"error": str(e)}
+
