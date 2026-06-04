@@ -24,6 +24,26 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 logger = logging.getLogger(__name__)
 
 
+def serialize_vi_cin_candidates(resolution):
+    candidates = resolution.get("cin_candidates") or []
+    if not isinstance(candidates, list):
+        return []
+
+    serialized = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        serialized.append({
+            "cin": candidate.get("cin"),
+            "entity_name": candidate.get("entity_name"),
+            "confidence": candidate.get("confidence"),
+            "source": candidate.get("source"),
+            "rationale": candidate.get("rationale"),
+            "used": candidate.get("cin") == resolution.get("cin"),
+        })
+    return serialized
+
+
 class DealPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
@@ -705,6 +725,30 @@ from rest_framework.views import APIView
 from deals.services.venture_intelligence import VentureIntelligenceService
 from deals.serializers import VentureIntelligenceCompanyProfileSerializer
 
+class VentureIntelligenceResolveCinView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        company_name = request.data.get("company_name")
+        cin = request.data.get("cin")
+
+        if not company_name and not cin:
+            return Response({"error": "Either company_name or cin is required"}, status=400)
+
+        vi_service = VentureIntelligenceService()
+        resolution = vi_service.resolve_company_identity(company_name=company_name, cin=cin)
+        status_code = 200 if resolution.get("is_valid") else 404
+        return Response({
+            "success": bool(resolution.get("is_valid")),
+            "cin": resolution.get("cin"),
+            "entity_name": resolution.get("entity_name"),
+            "confidence": resolution.get("confidence"),
+            "source": resolution.get("source"),
+            "cin_candidates": serialize_vi_cin_candidates(resolution),
+            "message": "Resolved CIN successfully." if resolution.get("is_valid") else resolution.get("error") or "Could not resolve a valid CIN.",
+        }, status=status_code)
+
+
 class VentureIntelligencePreviewView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -715,29 +759,23 @@ class VentureIntelligencePreviewView(APIView):
         if not company_name and not cin:
             return Response({"error": "Either company_name or cin is required"}, status=400)
             
-        vi_service = VentureIntelligenceService()
-        resolved_cin = cin
-        
-        # If only company_name is provided, try direct query first, then fall back to AI resolution
-        if not resolved_cin and company_name:
-            try:
-                data = vi_service.fetch_company_details(company_name=company_name)
-                return Response(data)
-            except Exception:
-                logger.info(f"Direct preview query failed for '{company_name}', trying AI resolution...")
-                ai_res = vi_service.resolve_cin_via_ai(company_name)
-                resolved_cin = ai_res.get("cin")
-                company_name = ai_res.get("entity_name") or company_name
-                
-        if not resolved_cin:
-            return Response({"error": "Could not resolve Corporate Identity Number (CIN)"}, status=404)
-
         try:
-            data = vi_service.fetch_company_details(company_name=company_name, cin=resolved_cin)
-            # Append resolved cin info for frontend matching visibility
-            data["resolved_cin"] = resolved_cin
-            data["resolved_name"] = company_name
+            vi_service = VentureIntelligenceService()
+            data, resolution = vi_service.fetch_resolved_company_details(company_name=company_name, cin=cin)
+            data["resolved_cin"] = resolution.get("cin") or cin
+            data["resolved_name"] = resolution.get("entity_name") or company_name
+            data["resolution"] = {
+                "cin": resolution.get("cin"),
+                "entity_name": resolution.get("entity_name"),
+                "confidence": resolution.get("confidence"),
+                "source": resolution.get("source"),
+                "is_valid": resolution.get("is_valid"),
+                "cin_candidates": serialize_vi_cin_candidates(resolution),
+                "used_cin": resolution.get("cin"),
+            }
             return Response(data)
+        except ValueError as e:
+            return Response({"success": False, "message": str(e), "error": str(e)}, status=404)
         except Exception as e:
             return Response({"error": f"Failed to fetch from Venture Intelligence: {str(e)}"}, status=500)
 

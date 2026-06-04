@@ -887,6 +887,7 @@ class VentureIntelligenceSimilarCompany(models.Model):
         related_name='similar_companies'
     )
     name = models.TextField()
+    cin = models.CharField(max_length=21, null=True, blank=True, db_index=True)
     sector = models.TextField(null=True, blank=True)
     total_funding = models.TextField(null=True, blank=True)
     latest_investment = models.JSONField(default=dict, blank=True)

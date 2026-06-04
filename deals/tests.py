@@ -1350,6 +1350,7 @@ class VentureIntelligenceServiceTests(TestCase):
                 "similar_cos": [
                     {
                         "name": "Amazon India",
+                        "cin": "U51909KA2011FTC060489",
                         "sector": "E-Commerce",
                         "total_funding": "5000",
                         "latest_investment": {"round": "Corporate Round", "date": "2022-01-01", "amount": "1000"},
@@ -1458,6 +1459,7 @@ class VentureIntelligenceServiceTests(TestCase):
         self.assertEqual(profile.similar_companies.count(), 1)
         sim = profile.similar_companies.first()
         self.assertEqual(sim.name, "Amazon India")
+        self.assertEqual(sim.cin, "U51909KA2011FTC060489")
         self.assertEqual(sim.total_funding, "5000")
 
         # 3. Assert RAG DocumentChunks created
@@ -1495,12 +1497,16 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertTrue(response.data["success"])
         self.assertEqual(response.data["resolved_cin"], "U74999KA2012PTC066107")
 
-    @patch("deals.services.venture_intelligence.VentureIntelligenceService.resolve_cin_via_ai")
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.resolve_cin_candidates_via_ai")
     @patch("deals.services.venture_intelligence.VentureIntelligenceService.fetch_company_details")
-    def test_preview_view_resolves_cin(self, mock_fetch, mock_resolve_cin):
-        mock_resolve_cin.return_value = {"cin": "U74999KA2012PTC066107", "entity_name": "Flipkart Private Limited"}
-        # First call by name fails, second call by resolved params succeeds
-        mock_fetch.side_effect = [Exception("Not found"), {"success": True, "results": {"profile": {"name": "Flipkart"}}}]
+    def test_preview_view_resolves_cin(self, mock_fetch, mock_resolve_cin_candidates):
+        mock_resolve_cin_candidates.return_value = [{
+            "cin": "U74999KA2012PTC066107",
+            "entity_name": "Flipkart Private Limited",
+            "confidence": 0.95,
+            "is_valid": True,
+        }]
+        mock_fetch.return_value = {"success": True, "results": {"profile": {"name": "Flipkart"}}}
         
         response = self.client.post(
             reverse("vi-preview"),

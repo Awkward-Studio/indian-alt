@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import requests
 from django.conf import settings
 from django.db import transaction
@@ -26,6 +27,47 @@ from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 
 logger = logging.getLogger(__name__)
+
+CIN_PATTERN = re.compile(r"^[A-Z]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}$")
+TRAILING_DEAL_WORDS_PATTERN = re.compile(
+    r"\b(?:test\s+deal|deal|mandate|project|transaction|opportunity)\b\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_cin(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def is_valid_cin(value):
+    return bool(CIN_PATTERN.match(normalize_cin(value)))
+
+
+def company_name_candidates(company_name):
+    raw_name = str(company_name or "").strip()
+    if not raw_name:
+        return []
+
+    candidates = [raw_name]
+    without_brackets = re.sub(r"\s*[\(\[].*?[\)\]]\s*", " ", raw_name).strip()
+    candidates.append(without_brackets)
+
+    for separator in [" - ", " | ", " / ", ":"]:
+        if separator in without_brackets:
+            candidates.append(without_brackets.split(separator, 1)[0].strip())
+
+    stripped = TRAILING_DEAL_WORDS_PATTERN.sub("", without_brackets).strip(" -_/|:")
+    candidates.append(stripped)
+
+    unique_candidates = []
+    seen = set()
+    for candidate in candidates:
+        normalized = re.sub(r"\s+", " ", candidate).strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            unique_candidates.append(normalized)
+    return unique_candidates
 
 class VentureIntelligenceService:
     def __init__(self):
@@ -67,9 +109,72 @@ class VentureIntelligenceService:
             }
         return data
 
-    def resolve_cin_via_ai(self, company_name: str) -> dict:
+    def _extract_json_object(self, text: str) -> dict:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return {}
+
+        if "```" in cleaned:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(0)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                return {}
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {}
+
+    def normalize_cin_resolution(self, payload: dict, *, source: str = "anthropic_web_search") -> dict:
+        cin = normalize_cin(payload.get("cin"))
+        confidence = payload.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else None
+        except (TypeError, ValueError):
+            confidence = None
+
+        return {
+            "cin": cin if is_valid_cin(cin) else "",
+            "entity_name": payload.get("entity_name") or payload.get("registered_name") or payload.get("company_name") or "",
+            "confidence": confidence,
+            "source": payload.get("source") or source,
+            "raw": payload,
+            "is_valid": is_valid_cin(cin),
+        }
+
+    def normalize_cin_candidates(self, payload: dict, *, source: str = "anthropic_web_search") -> list[dict]:
+        raw_candidates = payload.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raw_candidates = [payload]
+
+        candidates = []
+        seen = set()
+        for raw_candidate in raw_candidates:
+            if not isinstance(raw_candidate, dict):
+                continue
+
+            candidate = self.normalize_cin_resolution(raw_candidate, source=source)
+            cin = candidate.get("cin")
+            if not candidate.get("is_valid") or not cin or cin in seen:
+                continue
+            seen.add(cin)
+            candidate["rationale"] = raw_candidate.get("rationale") or raw_candidate.get("reason") or ""
+            candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda item: item.get("confidence") if item.get("confidence") is not None else 0,
+            reverse=True,
+        )
+        return candidates
+
+    def resolve_cin_candidates_via_ai(self, company_name: str) -> list[dict]:
         """
-        Uses Anthropic's Claude with native web search to resolve the official MCA CIN for a company.
+        Uses Anthropic's Claude with native web search to resolve ranked MCA CIN candidates.
         """
         ai_service = AIProcessorService()
         # Force using Anthropic to leverage native web search tool
@@ -77,10 +182,17 @@ class VentureIntelligenceService:
         ai_service.current_provider = ai_service.anthropic_provider
         
         prompt = (
-            f"Search the web to find the official 21-character Corporate Identity Number (CIN) "
-            f"issued by the Ministry of Corporate Affairs (MCA) in India for the company: \"{company_name}\".\n"
+            f"Search the web to find ranked official 21-character Corporate Identity Number (CIN) candidates "
+            f"issued by the Ministry of Corporate Affairs (MCA) in India for the company or brand: \"{company_name}\".\n"
+            f"Use official MCA/company registry evidence when available. If the company has multiple Indian legal entities, return each plausible Indian legal entity.\n"
+            f"Prefer the operating company most likely to match a Venture Intelligence company profile, but do not collapse multiple entities into one answer.\n"
             f"Return ONLY a JSON object in this format:\n"
             f"{{\n  \"cin\": \"U74999KA2012PTC066107\",\n  \"entity_name\": \"Flipkart Private Limited\",\n  \"confidence\": 0.95\n}}\n"
+            f"Better format when multiple entities exist:\n"
+            f"{{\n  \"candidates\": [\n"
+            f"    {{\"cin\": \"U51909KA2011PTC060489\", \"entity_name\": \"FLIPKART INDIA PRIVATE LIMITED\", \"confidence\": 0.95, \"rationale\": \"Indian operating entity\"}},\n"
+            f"    {{\"cin\": \"U51109KA2007PTC041957\", \"entity_name\": \"FLIPKART INTERNET PRIVATE LIMITED\", \"confidence\": 0.85, \"rationale\": \"Related ecommerce marketplace entity\"}}\n"
+            f"  ]\n}}\n"
             f"Do not return any markdown code blocks, explanations, or extra text."
         )
 
@@ -94,17 +206,198 @@ class VentureIntelligenceService:
                 stream=False
             )
             response_text = result.get("response", "").strip()
-            # Clean JSON formatting wrappers if present
-            if "```" in response_text:
-                import re
-                match = re.search(r"\{.*\}", response_text, re.DOTALL)
-                if match:
-                    response_text = match.group(0)
-            
-            return json.loads(response_text.strip())
+            candidates = self.normalize_cin_candidates(self._extract_json_object(response_text))
+            if not candidates:
+                logger.warning("AI web search did not return a valid CIN for '%s': %s", company_name, response_text[:500])
+            return candidates
         except Exception as e:
             logger.error(f"Failed to resolve CIN via AI web search: {e}", exc_info=True)
-            return {}
+            return []
+
+    def resolve_cin_via_ai(self, company_name: str) -> dict:
+        """
+        Compatibility wrapper that returns the highest-confidence AI CIN candidate.
+        """
+        candidates = self.resolve_cin_candidates_via_ai(company_name)
+        if candidates:
+            return candidates[0]
+        return {
+            "cin": "",
+            "entity_name": "",
+            "confidence": None,
+            "source": "anthropic_web_search",
+            "raw": {},
+            "is_valid": False,
+        }
+
+    def resolve_company_identity(self, company_name=None, cin=None, *, min_confidence=0.6) -> dict:
+        """
+        Resolve a company to a VI-usable identifier.
+
+        Priority:
+        1. Use supplied valid CIN.
+        2. Use Anthropic web search to resolve the MCA CIN.
+        3. Fall back to VI direct company-name lookup only if CIN resolution fails.
+        """
+        if cin:
+            normalized = normalize_cin(cin)
+            is_valid = is_valid_cin(normalized)
+            supplied_candidate = {
+                "cin": normalized if is_valid else "",
+                "entity_name": company_name or "",
+                "confidence": 1.0 if is_valid else 0.0,
+                "source": "user_supplied_cin",
+                "is_valid": is_valid,
+                "rationale": "CIN supplied manually",
+            }
+            return {
+                "cin": normalized,
+                "entity_name": company_name or "",
+                "confidence": supplied_candidate["confidence"],
+                "source": "user_supplied_cin",
+                "is_valid": is_valid,
+                "cin_candidates": [supplied_candidate] if is_valid else [],
+                "vi_data": None,
+            }
+
+        if not company_name:
+            return {
+                "cin": "",
+                "entity_name": "",
+                "confidence": None,
+                "source": "missing_input",
+                "is_valid": False,
+                "vi_data": None,
+            }
+
+        candidates = company_name_candidates(company_name)
+        for lookup_name in candidates:
+            ai_candidates = []
+            for ai_candidate in self.resolve_cin_candidates_via_ai(lookup_name):
+                confidence = ai_candidate.get("confidence")
+                if confidence is not None and confidence < min_confidence:
+                    continue
+                ai_candidates.append(ai_candidate)
+
+            if ai_candidates:
+                ai_resolution = ai_candidates[0]
+                return {
+                    **ai_resolution,
+                    "query_name": lookup_name,
+                    "cin_candidates": ai_candidates,
+                    "vi_data": None,
+                }
+
+        last_lookup_error = None
+        for lookup_name in candidates:
+            try:
+                vi_data = self.fetch_company_details(company_name=lookup_name)
+                profile = vi_data.get("results", {}).get("profile", {}) or {}
+                direct_cin = normalize_cin(profile.get("cin"))
+                if is_valid_cin(direct_cin):
+                    return {
+                        "cin": direct_cin,
+                        "entity_name": profile.get("registered_name") or profile.get("name") or lookup_name,
+                        "confidence": 1.0,
+                        "source": "venture_intelligence_name_lookup",
+                        "is_valid": True,
+                        "vi_data": vi_data,
+                    }
+                return {
+                    "cin": direct_cin,
+                    "entity_name": profile.get("registered_name") or profile.get("name") or lookup_name,
+                    "confidence": 0.5,
+                    "source": "venture_intelligence_name_lookup_invalid_cin",
+                    "is_valid": False,
+                    "vi_data": vi_data,
+                }
+            except Exception as exc:
+                last_lookup_error = exc
+
+        logger.info(
+            "AI CIN resolution failed for '%s' using candidates %s, and direct VI lookup also failed. Last VI error: %s",
+            company_name,
+            candidates,
+            last_lookup_error,
+        )
+
+        return {
+            "cin": "",
+            "entity_name": company_name,
+            "confidence": None,
+            "source": "unresolved",
+            "raw": {"last_vi_error": str(last_lookup_error) if last_lookup_error else ""},
+            "is_valid": False,
+            "vi_data": None,
+        }
+
+    def fetch_resolved_company_details(self, company_name=None, cin=None):
+        resolution = self.resolve_company_identity(company_name=company_name, cin=cin)
+        return self.fetch_company_details_from_resolution(resolution, company_name=company_name)
+
+    def fetch_company_details_from_resolution(self, resolution, company_name=None):
+        if resolution.get("vi_data"):
+            return resolution["vi_data"], resolution
+        if not resolution.get("is_valid") or not resolution.get("cin"):
+            raise ValueError("Could not resolve a valid Corporate Identity Number (CIN).")
+
+        cin_errors = []
+        cin_candidates = resolution.get("cin_candidates")
+        if not isinstance(cin_candidates, list) or not cin_candidates:
+            cin_candidates = [resolution]
+
+        seen_cins = set()
+        for cin_candidate in cin_candidates:
+            candidate_cin = normalize_cin(cin_candidate.get("cin"))
+            if not candidate_cin or candidate_cin in seen_cins:
+                continue
+            seen_cins.add(candidate_cin)
+            try:
+                data = self.fetch_company_details(cin=candidate_cin)
+                profile = data.get("results", {}).get("profile", {}) or {}
+                return data, {
+                    **resolution,
+                    **cin_candidate,
+                    "cin": candidate_cin,
+                    "entity_name": profile.get("registered_name") or profile.get("name") or cin_candidate.get("entity_name") or resolution.get("entity_name"),
+                    "source": cin_candidate.get("source") or resolution.get("source"),
+                    "is_valid": True,
+                }
+            except Exception as exc:
+                cin_errors.append(f"{candidate_cin}: {exc}")
+
+        if resolution.get("source") == "user_supplied_cin":
+            raise ValueError(f"VI lookup failed for supplied CIN: {resolution.get('cin')}")
+
+        try:
+            fallback_names = [
+                resolution.get("entity_name"),
+                *company_name_candidates(company_name),
+            ]
+            tried = set()
+            for fallback_name in fallback_names:
+                key = str(fallback_name or "").strip().casefold()
+                if not key or key in tried:
+                    continue
+                tried.add(key)
+                try:
+                    data = self.fetch_company_details(company_name=fallback_name)
+                    profile = data.get("results", {}).get("profile", {}) or {}
+                    fallback_cin = normalize_cin(profile.get("cin"))
+                    if is_valid_cin(fallback_cin):
+                        resolution = {
+                            **resolution,
+                            "cin": fallback_cin,
+                            "entity_name": profile.get("registered_name") or profile.get("name") or fallback_name,
+                            "source": "venture_intelligence_name_lookup_after_cin_miss",
+                            "is_valid": True,
+                    }
+                    return data, resolution
+                except Exception:
+                    continue
+            raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
+        except Exception:
+            raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
 
     @transaction.atomic
     def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target'):
@@ -113,24 +406,10 @@ class VentureIntelligenceService:
         """
         deal = Deal.objects.get(id=deal_id)
         
-        # 1. Resolve CIN if only company_name is provided
-        resolved_cin = cin
-        if not resolved_cin and company_name:
-            # First try querying directly by name. If fails or not found, resolve via AI.
-            try:
-                vi_data = self.fetch_company_details(company_name=company_name)
-                resolved_cin = vi_data.get("results", {}).get("profile", {}).get("cin")
-            except Exception:
-                logger.info(f"Direct query failed for '{company_name}', trying AI CIN resolution...")
-                ai_resolution = self.resolve_cin_via_ai(company_name)
-                resolved_cin = ai_resolution.get("cin")
-                company_name = ai_resolution.get("entity_name") or company_name
-
-        if not resolved_cin and not company_name:
-            raise ValueError("Could not resolve CIN or company name for Enrichment.")
-
-        # 2. Fetch full details using the resolved parameters
-        vi_data = self.fetch_company_details(company_name=company_name, cin=resolved_cin)
+        # 1. Resolve identity and fetch full details using CIN whenever possible.
+        vi_data, resolution = self.fetch_resolved_company_details(company_name=company_name, cin=cin)
+        resolved_cin = resolution.get("cin") or cin
+        company_name = resolution.get("entity_name") or company_name
         results = vi_data.get("results", {})
         profile_data = results.get("profile", {})
         cfs_profile_data = results.get("cfs_profile", {}) or {}
@@ -362,6 +641,7 @@ class VentureIntelligenceService:
             VentureIntelligenceSimilarCompany.objects.create(
                 company_profile=vi_profile,
                 name=sim.get("name"),
+                cin=normalize_cin(sim.get("cin")) or None,
                 sector=sim.get("sector"),
                 total_funding=sim.get("total_funding"),
                 latest_investment=sim.get("latest_investment") or {},
@@ -369,6 +649,17 @@ class VentureIntelligenceService:
             )
 
         # 6. Create Relation to the main Deal
+        if relation_type == VentureIntelligenceRelationType.COMPETITOR:
+            existing_target = VentureIntelligenceCompanyRelation.objects.filter(
+                deal=deal,
+                relation_type=VentureIntelligenceRelationType.TARGET,
+                company_profile__cin=vi_profile.cin,
+            ).select_related("company_profile").first()
+            if existing_target:
+                raise ValueError(
+                    f"{vi_profile.name} ({vi_profile.cin}) is already saved as this deal's target profile."
+                )
+
         VentureIntelligenceCompanyRelation.objects.update_or_create(
             deal=deal,
             company_profile=vi_profile,
