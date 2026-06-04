@@ -1702,19 +1702,32 @@ class AnthropicIntegrationTests(TestCase):
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
         service = AnthropicProviderService()
         
-        # Test standard haiku model (should NOT have tools/web search even with search intent)
-        payload_haiku = {
+        # Test standard haiku model WITH search intent (should be dynamically upgraded to sonnet and have tools)
+        payload_haiku_search = {
             "model": "claude-haiku-4-5-20251001",
             "prompt": "Who are their competitors?",
             "system": "Be concise",
             "options": {"max_tokens": 4096, "temperature": 0.5}
         }
-        built_haiku = service._build_anthropic_payload(payload_haiku, stream=False)
-        self.assertNotIn("tools", built_haiku)
+        built_haiku_search = service._build_anthropic_payload(payload_haiku_search, stream=False)
+        self.assertEqual(built_haiku_search["model"], service.search_model)
+        self.assertEqual(built_haiku_search["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built_haiku_search["tools"][0]["name"], "web_search")
+
+        # Test standard haiku model WITHOUT search intent (should NOT be upgraded and should NOT have tools)
+        payload_haiku_standard = {
+            "model": "claude-haiku-4-5-20251001",
+            "prompt": "Hello! Please summarize this conversation context.",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5}
+        }
+        built_haiku_standard = service._build_anthropic_payload(payload_haiku_standard, stream=False)
+        self.assertEqual(built_haiku_standard["model"], "claude-haiku-4-5-20251001")
+        self.assertNotIn("tools", built_haiku_standard)
         
         # Test sonnet model with search intent (should have tools/web search)
         payload_sonnet_search = {
-            "model": "claude-3-7-sonnet-latest",
+            "model": "claude-sonnet-4-6",
             "prompt": "Who are their competitors?",
             "system": "Be concise",
             "options": {"max_tokens": 4096, "temperature": 0.5}
@@ -1725,7 +1738,7 @@ class AnthropicIntegrationTests(TestCase):
 
         # Test sonnet model WITHOUT search intent (should NOT have tools/web search)
         payload_sonnet_standard = {
-            "model": "claude-3-7-sonnet-latest",
+            "model": "claude-sonnet-4-6",
             "prompt": "Hello! Please summarize this conversation context.",
             "system": "Be concise",
             "options": {"max_tokens": 4096, "temperature": 0.5}

@@ -235,6 +235,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 deal = Deal.objects.filter(id=metadata.get("deal_id")).first()
                 deal_title = deal.title if deal else ""
                 task_metadata = {
+                    "model_provider": "anthropic",
                     "history_context": history_context,
                     "context_data": f"You are chatting about the deal: {deal_title}.",
                     "deal_context": f"You are chatting about the deal: {deal_title}.",

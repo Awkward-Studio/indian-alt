@@ -269,7 +269,8 @@ DOC_PROCESSOR_API_KEY = config('DOC_PROCESSOR_API_KEY', default='')
 
 # Anthropic Settings
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default=config('CLAUDE_API_KEY', default=''))
-CLAUDE_TEXT_MODEL = config('CLAUDE_TEXT_MODEL', default='claude-haiku-4-5-20251001')
+CLAUDE_TEXT_MODEL = config('CLAUDE_TEXT_MODEL', default='claude-haiku-4-5')
+CLAUDE_SEARCH_MODEL = config('CLAUDE_SEARCH_MODEL', default='claude-sonnet-4-6')
 DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 
 # Database Configuration

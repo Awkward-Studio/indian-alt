@@ -457,9 +457,20 @@ class AnthropicProviderService:
             if setting and setting.value:
                 self.model = setting.value
             else:
-                self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+                self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5")
         except Exception:
-            self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
+            self.model = getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5")
+
+        # Resolve search model dynamically
+        try:
+            from ..models import AISystemSetting
+            setting = AISystemSetting.objects.filter(key="CLAUDE_SEARCH_MODEL").first()
+            if setting and setting.value:
+                self.search_model = setting.value
+            else:
+                self.search_model = getattr(settings, "CLAUDE_SEARCH_MODEL", "claude-sonnet-4-6")
+        except Exception:
+            self.search_model = getattr(settings, "CLAUDE_SEARCH_MODEL", "claude-sonnet-4-6")
             
         self.base_url = "https://api.anthropic.com/v1/messages"
 
@@ -482,6 +493,40 @@ class AnthropicProviderService:
         max_tokens = (payload.get("options") or {}).get("max_tokens") or 8192
         temperature = (payload.get("options") or {}).get("temperature") or 0.1
 
+        prompt_lower = user_prompt.lower()
+        search_keywords = [
+            "search", "web", "online", "news", "competitor", "peer",
+            "market", "industry", "latest", "recent", "find", "google",
+            "trend", "wikipedia", "current", "exits", "acquisition",
+            "who is", "who are", "website", "competitors", "peers", "news",
+            "founder", "ceo", "funding", "valuation", "revenue", "financials"
+        ]
+        disable_search = (payload.get("options") or {}).get("disable_search", False)
+        has_search_intent = any(kw in prompt_lower for kw in search_keywords) and not disable_search
+
+        tools = []
+        if has_search_intent:
+            # Upgrade standard Haiku queries to the configured Sonnet model for web search support
+            if "haiku" in model.lower():
+                upgraded_model = self.search_model
+                logger.info(
+                    "Dynamic Model Upgrade: Upgrading from %s to %s for web search execution.",
+                    model,
+                    upgraded_model
+                )
+                model = upgraded_model
+            
+            # Attach the native web search tool for search-capable models
+            if "haiku" not in model.lower():
+                max_search_uses = (payload.get("options") or {}).get("max_search_uses", 2)
+                tools = [
+                    {
+                        "type": "web_search_20260209",
+                        "name": "web_search",
+                        "max_uses": max_search_uses,
+                    }
+                ]
+
         anthropic_payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -497,26 +542,8 @@ class AnthropicProviderService:
         if system_prompt:
             anthropic_payload["system"] = system_prompt
 
-        # Enable web search tool for supported Anthropic models (e.g. Sonnet, Opus, but not Haiku)
-        # only when the user intent indicates a web search is needed.
-        prompt_lower = user_prompt.lower()
-        search_keywords = [
-            "search", "web", "online", "news", "competitor", "peer",
-            "market", "industry", "latest", "recent", "find", "google",
-            "trend", "wikipedia", "current", "exits", "acquisition",
-            "who is", "who are", "website", "competitors", "peers", "news",
-            "founder", "ceo", "funding", "valuation", "revenue", "financials"
-        ]
-        has_search_intent = any(kw in prompt_lower for kw in search_keywords)
-
-        if "haiku" not in model.lower() and has_search_intent:
-            anthropic_payload["tools"] = [
-                {
-                    "type": "web_search_20260209",
-                    "name": "web_search",
-                    "max_uses": 3,
-                }
-            ]
+        if tools:
+            anthropic_payload["tools"] = tools
 
         # Handle thinking budget and temperature constraints for Claude 3.7
         if "claude-3-7" in model:
