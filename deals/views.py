@@ -293,6 +293,50 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             data.pop('thinking', None)
 
         return Response(data)
+
+    @action(detail=True, methods=['patch'])
+    def update_analysis_report(self, request, pk=None):
+        """
+        Persist analyst edits to a stored analysis report, or to deal_summary
+        when the report is only the legacy fallback summary.
+        """
+        deal = self.get_object()
+        report = request.data.get('report')
+        if not isinstance(report, str):
+            return Response({"error": "report must be a string"}, status=400)
+
+        version = request.data.get('version')
+        analysis = None
+        if version not in (None, ''):
+            try:
+                analysis = deal.analyses.filter(version=int(version)).order_by('-created_at').first()
+            except (TypeError, ValueError):
+                return Response({"error": "version must be a number"}, status=400)
+
+        if analysis:
+            analysis_json = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
+            analysis_json['analyst_report'] = report
+            canonical_snapshot = analysis_json.get('canonical_snapshot')
+            if isinstance(canonical_snapshot, dict):
+                canonical_snapshot['analyst_report'] = report
+                analysis_json['canonical_snapshot'] = canonical_snapshot
+            analysis.analysis_json = analysis_json
+            analysis.save(update_fields=['analysis_json'])
+
+            if deal.latest_analysis and deal.latest_analysis.id == analysis.id:
+                deal.deal_summary = report
+                deal.save(update_fields=['deal_summary'])
+        else:
+            deal.deal_summary = report
+            deal.save(update_fields=['deal_summary'])
+
+        deal.refresh_from_db()
+        return Response({
+            "status": "saved",
+            "deal_summary": deal.deal_summary,
+            "current_analysis": deal.current_analysis,
+            "analysis_history": deal.analysis_history,
+        })
     
     def create(self, request, *args, **kwargs):
         """
@@ -751,10 +795,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if res.status == 'SUCCESS':
             data = res.result or {}
             if "error" in data:
-                return Response({"status": "FAILURE", "error": data["error"]}, status=500)
+                return Response({"status": "FAILURE", "error": data["error"]}, status=200)
             return Response({
                 "status": "SUCCESS",
-                "response": data.get("response", "")
+                "response": data.get("response", ""),
+                "competitors": data.get("competitors", []),
             })
         elif res.status == 'FAILURE':
             return Response({
@@ -827,10 +872,34 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         except Exception as embed_err:
             logger.warning(f"Graceful vectorization failure (Inference VM is likely offline): {str(embed_err)}")
 
+        # 4. Resolve competitor CINs, call Venture Intelligence, and store competitor profiles.
+        vi_enrichment = {"enriched": [], "failed": []}
+        try:
+            from .services.competitor_intelligence import (
+                competitor_names_from_payload,
+                competitor_names_from_text,
+                enrich_competitors_for_deal,
+            )
+
+            requested_competitors = request.data.get("competitors")
+            requested_competitor_name = request.data.get("competitor_name")
+            if requested_competitor_name:
+                competitors = [{"name": requested_competitor_name, "notes": ""}]
+            elif requested_competitors:
+                competitors = competitor_names_from_payload(requested_competitors, limit=10)
+            else:
+                competitors = competitor_names_from_text(competitors_text, limit=10)
+
+            vi_enrichment = enrich_competitors_for_deal(deal, competitors, limit=10)
+        except Exception as vi_err:
+            logger.warning(f"Failed to enrich competitor VI profiles: {str(vi_err)}")
+            vi_enrichment = {"enriched": [], "failed": [{"name": "competitor_enrichment", "error": str(vi_err)}]}
+
         from .serializers import DealDocumentSerializer
         return Response({
             "status": "success",
-            "document": DealDocumentSerializer(doc).data
+            "document": DealDocumentSerializer(doc).data,
+            "vi_enrichment": vi_enrichment,
         })
 
 

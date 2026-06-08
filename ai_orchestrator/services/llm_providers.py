@@ -615,14 +615,27 @@ class AnthropicProviderService:
 
     def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
         body = self._build_anthropic_payload(payload, stream=False)
-        response = requests.post(
-            self.base_url,
-            headers=self._headers(),
-            json=body,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = {}
+        for _ in range(3):
+            response = requests.post(
+                self.base_url,
+                headers=self._headers(),
+                json=body,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("stop_reason") != "pause_turn":
+                break
+
+            body["messages"] = [
+                *(body.get("messages") or []),
+                {
+                    "role": "assistant",
+                    "content": data.get("content") or [],
+                },
+            ]
         
         content_blocks = data.get("content") or []
         response_text = ""

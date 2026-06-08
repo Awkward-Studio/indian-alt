@@ -1765,12 +1765,18 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
             f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
             f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
             f"- Business Summary: {deal.deal_summary or 'N/A'}\n\n"
-            f"Provide a structured response. For each competitor, include:\n"
-            f"1. Company Name\n"
-            f"2. Core Business Description (focusing on their offerings and market presence)\n"
-            f"3. Nature of Competition (why they are a competitor, product overlaps, etc.)\n"
-            f"4. Any recent developments or scale indicators if available (e.g. revenue, funding, or market share)\n\n"
-            f"Format the final output cleanly as a professional report. Ensure your search is thorough, accurate, and lists exactly the top 10 most relevant competitors/peers."
+            f"Return exactly one JSON object and no markdown. Use this shape:\n"
+            f"{{\n"
+            f"  \"competitors\": [\n"
+            f"    {{\n"
+            f"      \"company_name\": \"Exact company or brand name\",\n"
+            f"      \"core_business\": \"One sentence on offerings and market presence\",\n"
+            f"      \"nature_of_competition\": \"Why this company is a competitor or peer\",\n"
+            f"      \"scale_indicators\": \"Revenue, funding, market share, footprint, or recent developments if found\"\n"
+            f"    }}\n"
+            f"  ]\n"
+            f"}}\n"
+            f"List exactly the top 10 most relevant competitors or peers. Prefer Indian operating companies when the target is Indian."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -1789,7 +1795,18 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
         logger.info("Triggering active web search competitor research...")
         result = service.execute_standard(payload, timeout=240)
         response_text = result.get("response") or ""
-        return {"response": response_text}
+        from .services.competitor_intelligence import competitor_names_from_payload, format_competitor_report
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError:
+            parsed = {}
+
+        competitors = competitor_names_from_payload(parsed or response_text, limit=10)
+        report = format_competitor_report(parsed) if parsed else ""
+        return {
+            "response": report or response_text,
+            "competitors": competitors,
+        }
             
     except Exception as e:
         logger.error(f"Async fetch competitors failed: {str(e)}")
