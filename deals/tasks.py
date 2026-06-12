@@ -1758,25 +1758,33 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
     try:
         from deals.models import Deal
         deal = Deal.objects.get(id=deal_id)
+        from .services.competitor_intelligence import demo_competitor_report, demo_competitor_results, is_competitor_demo_mode
+        if is_competitor_demo_mode():
+            competitors = demo_competitor_results(deal)
+            return {
+                "response": demo_competitor_report(deal, competitors),
+                "competitors": competitors,
+            }
+
         prompt = (
             f"You are a sophisticated investment research assistant.\n"
-            f"Perform a comprehensive web search to identify the top 10 competitors or peer companies for '{deal.title}'.\n"
+            f"Run a concise web search to identify the top 10 competitors or peer companies for '{deal.title}'.\n"
             f"Context details of the target company:\n"
             f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
             f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Business Summary: {deal.deal_summary or 'N/A'}\n\n"
+            f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n\n"
             f"Return exactly one JSON object and no markdown. Use this shape:\n"
             f"{{\n"
             f"  \"competitors\": [\n"
             f"    {{\n"
             f"      \"company_name\": \"Exact company or brand name\",\n"
-            f"      \"core_business\": \"One sentence on offerings and market presence\",\n"
-            f"      \"nature_of_competition\": \"Why this company is a competitor or peer\",\n"
-            f"      \"scale_indicators\": \"Revenue, funding, market share, footprint, or recent developments if found\"\n"
+            f"      \"cin\": \"21-character Indian CIN if found, otherwise blank\",\n"
+            f"      \"core_business\": \"Short phrase only\",\n"
+            f"      \"nature_of_competition\": \"Short phrase only\"\n"
             f"    }}\n"
             f"  ]\n"
             f"}}\n"
-            f"List exactly the top 10 most relevant competitors or peers. Prefer Indian operating companies when the target is Indian."
+            f"List exactly 10 companies. Prefer companies with VI/MCA-compatible Indian CINs. Do not include long descriptions, citations, tables, or explanatory text."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -1786,14 +1794,14 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
             "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 4096,
+                "max_tokens": 1800,
                 "temperature": 0.1,
-                "max_search_uses": 1
+                "max_search_uses": 2
             }
         }
         
         logger.info("Triggering active web search competitor research...")
-        result = service.execute_standard(payload, timeout=240)
+        result = service.execute_standard(payload, timeout=600)
         response_text = result.get("response") or ""
         from .services.competitor_intelligence import competitor_names_from_payload, format_competitor_report
         try:

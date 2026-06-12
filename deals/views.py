@@ -770,6 +770,33 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Triggers an asynchronous background Celery task to research and fetch competitors.
         """
         deal = self.get_object()
+        if request.data.get("sync"):
+            try:
+                from .services.competitor_intelligence import annotate_existing_competitors, demo_competitor_report, demo_competitor_results, is_competitor_demo_mode
+                if is_competitor_demo_mode():
+                    competitors = annotate_existing_competitors(deal, demo_competitor_results(deal))
+                    return Response({
+                        "status": "SUCCESS",
+                        "response": demo_competitor_report(deal, competitors),
+                        "competitors": competitors,
+                        "message": "Demo competitor research completed.",
+                    })
+
+                from .tasks import fetch_competitors_async_task
+                result = fetch_competitors_async_task(str(deal.id))
+                if result.get("error"):
+                    return Response({"status": "FAILURE", "error": result["error"]}, status=500)
+                competitors = annotate_existing_competitors(deal, result.get("competitors", []))
+                return Response({
+                    "status": "SUCCESS",
+                    "response": result.get("response", ""),
+                    "competitors": competitors,
+                    "message": "Competitor research completed.",
+                })
+            except Exception as e:
+                logger.error(f"Failed to run synchronous competitors search for deal {deal.id}: {str(e)}", exc_info=True)
+                return Response({"error": f"Failed to run competitors research: {str(e)}"}, status=500)
+
         try:
             from .tasks import fetch_competitors_async_task
             task = fetch_competitors_async_task.apply_async(
@@ -796,10 +823,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             data = res.result or {}
             if "error" in data:
                 return Response({"status": "FAILURE", "error": data["error"]}, status=200)
+            from .services.competitor_intelligence import annotate_existing_competitors
             return Response({
                 "status": "SUCCESS",
                 "response": data.get("response", ""),
-                "competitors": data.get("competitors", []),
+                "competitors": annotate_existing_competitors(self.get_object(), data.get("competitors", [])),
             })
         elif res.status == 'FAILURE':
             return Response({
@@ -821,6 +849,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         competitors_text = request.data.get("competitors_text")
         if not competitors_text:
             return Response({"error": "competitors_text is required"}, status=400)
+        if "competitors" in request.data and not request.data.get("competitors"):
+            return Response({"error": "Select at least one competitor to save."}, status=400)
 
         from django.utils import timezone
         title = request.data.get("title") or f"Top 10 Competitors - {timezone.now().strftime('%Y-%m-%d')}"
@@ -889,6 +919,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 competitors = competitor_names_from_payload(requested_competitors, limit=10)
             else:
                 competitors = competitor_names_from_text(competitors_text, limit=10)
+
+            if not competitors:
+                return Response({"error": "Select at least one competitor to save."}, status=400)
 
             vi_enrichment = enrich_competitors_for_deal(deal, competitors, limit=10)
         except Exception as vi_err:

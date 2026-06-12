@@ -6,6 +6,7 @@ import requests
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from decouple import config
 from deals.models import (
     Deal, 
     VentureIntelligenceCompanyProfile, 
@@ -33,6 +34,21 @@ TRAILING_DEAL_WORDS_PATTERN = re.compile(
     r"\b(?:test\s+deal|deal|mandate|project|transaction|opportunity)\b\s*$",
     re.IGNORECASE,
 )
+VI_DEMO_MODE_ENV = "VI_COMPETITOR_DEMO_MODE"
+DEMO_CIN_BY_NAME = {
+    "amazon": "U74999KA2012PTC066462",
+    "meesho": "U72900KA2015PTC082263",
+    "fashnear": "U72900KA2015PTC082263",
+    "myntra": "U72200KA2007PTC041799",
+    "nykaa": "U74900MH2012PTC230136",
+}
+
+
+def is_vi_demo_mode():
+    value = os.environ.get(VI_DEMO_MODE_ENV)
+    if value is None:
+        value = config(VI_DEMO_MODE_ENV, default="")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def normalize_cin(value):
@@ -69,12 +85,89 @@ def company_name_candidates(company_name):
             unique_candidates.append(normalized)
     return unique_candidates
 
+
+def demo_cin_for_company(company_name=None, cin=None):
+    supplied = normalize_cin(cin)
+    if is_valid_cin(supplied):
+        return supplied
+
+    name = str(company_name or "").casefold()
+    for key, value in DEMO_CIN_BY_NAME.items():
+        if key in name:
+            return value
+    return "U74999KA2012PTC066462"
+
+
+def demo_company_details(company_name=None, cin=None, entity_name=None):
+    resolved_cin = demo_cin_for_company(company_name=company_name or entity_name, cin=cin)
+    display_name = company_name or entity_name or "Demo VI Company"
+    registered_name = display_name
+    if resolved_cin == "U74999KA2012PTC066462":
+        display_name = "Amazon India"
+        registered_name = "Amazon Seller Services Pvt Ltd"
+    elif resolved_cin == "U72900KA2015PTC082263":
+        display_name = "Meesho"
+        registered_name = "Fashnear Technologies Pvt Ltd"
+    elif resolved_cin == "U72200KA2007PTC041799":
+        display_name = "Myntra"
+        registered_name = "Myntra Designs Pvt Ltd"
+    elif resolved_cin == "U74900MH2012PTC230136":
+        display_name = "Nykaa"
+        registered_name = "Nykaa E-Retail Pvt Ltd"
+
+    return {
+        "success": True,
+        "results": {
+            "profile": {
+                "cin": resolved_cin,
+                "name": display_name,
+                "registered_name": registered_name,
+                "website": "https://example.com",
+                "industry": "Consumer Internet",
+                "sector": "E-Commerce",
+                "email": "demo@example.com",
+                "year_founded": "2015",
+                "city": {"name": "Bengaluru", "state": "Karnataka", "region": "South", "country": "India"},
+                "total_funding": "Demo VI funding profile",
+                "management_info": [
+                    {"name": "Demo CEO", "designation": "CEO", "belongs_to_firm_name": display_name}
+                ],
+                "board_info": [
+                    {"name": "Demo Director", "designation": "Director", "belongs_to_firm_name": display_name}
+                ],
+            },
+            "cfs_profile": {
+                "full_name": registered_name,
+                "business_description": f"Demo VI profile for {display_name}, used for workflow recording.",
+                "incorp_year": 2015,
+                "company_status": "Active",
+                "address": "Demo Business Park",
+                "pincode": "560001",
+            },
+            "profit_loss": [
+                {"fy": "FY22", "fin_type": "Standalone", "revenue": "850", "ebitda": "68", "pat": "29.8"},
+                {"fy": "FY23", "fin_type": "Standalone", "revenue": "1120", "ebitda": "89.6", "pat": "39.2"},
+                {"fy": "FY24", "fin_type": "Standalone", "revenue": "1460", "ebitda": "116.8", "pat": "51.1"},
+            ],
+            "balance_sheet": [
+                {"fy": "FY24", "fin_type": "Standalone", "assets": "640", "net_worth": "210"},
+            ],
+            "cash_flow": [
+                {"fy": "FY24", "fin_type": "Standalone", "operating_cash": "74"},
+            ],
+            "similar_cos": [],
+        },
+    }
+
 class VentureIntelligenceService:
     def __init__(self):
         self.api_key = getattr(settings, "VENTURE_INTELLIGENCE_API_KEY", os.environ.get("VENTURE_INTELLIGENCE_API_KEY", ""))
         self.base_url = getattr(settings, "VENTURE_INTELLIGENCE_BASE_URL", "https://api-hub.ventureintelligence.com")
 
     def fetch_company_details(self, company_name=None, cin=None, entity_name=None):
+        if is_vi_demo_mode():
+            return demo_company_details(company_name=company_name, cin=cin, entity_name=entity_name)
+
         if not self.api_key:
             raise ValueError("Venture Intelligence API key is not configured.")
         
@@ -176,6 +269,18 @@ class VentureIntelligenceService:
         """
         Uses Anthropic's Claude with native web search to resolve ranked MCA CIN candidates.
         """
+        if is_vi_demo_mode():
+            cin = demo_cin_for_company(company_name=company_name)
+            return [{
+                "cin": cin,
+                "entity_name": company_name,
+                "confidence": 1.0,
+                "source": "demo_mode",
+                "raw": {"demo_mode": True},
+                "is_valid": True,
+                "rationale": "Demo mode CIN resolution",
+            }]
+
         ai_service = AIProcessorService()
         # Force using Anthropic to leverage native web search tool
         ai_service.model_provider = "anthropic"
@@ -239,6 +344,25 @@ class VentureIntelligenceService:
         2. Use Anthropic web search to resolve the MCA CIN.
         3. Fall back to VI direct company-name lookup only if CIN resolution fails.
         """
+        if is_vi_demo_mode():
+            resolved_cin = demo_cin_for_company(company_name=company_name, cin=cin)
+            return {
+                "cin": resolved_cin,
+                "entity_name": company_name or "Demo VI Company",
+                "confidence": 1.0,
+                "source": "demo_mode",
+                "is_valid": True,
+                "cin_candidates": [{
+                    "cin": resolved_cin,
+                    "entity_name": company_name or "Demo VI Company",
+                    "confidence": 1.0,
+                    "source": "demo_mode",
+                    "is_valid": True,
+                    "rationale": "Demo mode CIN resolution",
+                }],
+                "vi_data": demo_company_details(company_name=company_name, cin=resolved_cin),
+            }
+
         if cin:
             normalized = normalize_cin(cin)
             is_valid = is_valid_cin(normalized)
