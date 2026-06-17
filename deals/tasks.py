@@ -1747,8 +1747,36 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         return {"error": f"Synthesis failed: {error_msg}"}
 
 
+def _competitor_result_key(item: dict) -> str:
+    if not isinstance(item, dict):
+        return "name:"
+    cin = str((item or {}).get("cin") or "").strip().upper()
+    if cin:
+        return f"cin:{cin}"
+    name = str((item or {}).get("name") or (item or {}).get("company_name") or "").strip().casefold()
+    return f"name:{name}"
+
+
+def _format_competitor_items_report(competitors: list[dict], *, title: str) -> str:
+    if not competitors:
+        return f"# {title}\n\nNo new competitors were found for the requested search."
+
+    lines = [f"# {title}", ""]
+    for index, competitor in enumerate(competitors, start=1):
+        name = competitor.get("name") or competitor.get("company_name") or "Unknown company"
+        cin = competitor.get("cin") or ""
+        notes = competitor.get("notes") or competitor.get("nature_of_competition") or competitor.get("core_business") or ""
+        lines.append(f"## {index}. {name}")
+        if cin:
+            lines.append(f"- CIN: {cin}")
+        if notes:
+            lines.append(f"- Notes: {notes}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 @shared_task(queue='high_priority')
-def fetch_competitors_async_task(deal_id: str) -> dict:
+def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
     Asynchronously executes Claude web search with custom timeout and optimized CIN prompt.
     Does not fall back to pre-trained static knowledge; runs strictly on live web tools.
@@ -1758,14 +1786,41 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
     try:
         from deals.models import Deal
         deal = Deal.objects.get(id=deal_id)
+        instruction = str(instruction or "").strip()
+        existing_competitors = existing_competitors or []
+        existing_keys = {
+            _competitor_result_key(item)
+            for item in existing_competitors
+            if _competitor_result_key(item) not in {"name:", "cin:"}
+        }
+        existing_names = [
+            str(item.get("name") or item.get("company_name") or "").strip()
+            for item in existing_competitors
+            if isinstance(item, dict) and str(item.get("name") or item.get("company_name") or "").strip()
+        ][:30]
+
+        search_directive = (
+            f"Follow this user instruction exactly: {instruction}\n"
+            f"Use web search to find additional competitor candidates that satisfy the instruction. "
+            f"This can include regional peers, direct named companies, or companies outside India."
+        ) if instruction else (
+            f"Run a concise web search to identify the top 10 competitors or peer companies for '{deal.title}'."
+        )
+        count_instruction = (
+            "Return up to 8 net-new companies unless the user asked for a specific named company."
+            if instruction
+            else "List exactly 10 companies."
+        )
 
         prompt = (
             f"You are a sophisticated investment research assistant.\n"
-            f"Run a concise web search to identify the top 10 competitors or peer companies for '{deal.title}'.\n"
+            f"{search_directive}\n"
             f"Context details of the target company:\n"
+            f"- Target Company: {deal.title}\n"
             f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
             f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n\n"
+            f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n"
+            f"- Existing candidates to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
             f"Return exactly one JSON object and no markdown. Use this shape:\n"
             f"{{\n"
             f"  \"competitors\": [\n"
@@ -1777,7 +1832,9 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
             f"    }}\n"
             f"  ]\n"
             f"}}\n"
-            f"List exactly 10 companies. Prefer companies with VI/MCA-compatible Indian CINs. Do not include long descriptions, citations, tables, or explanatory text."
+            f"{count_instruction} Prefer companies with VI/MCA-compatible Indian CINs for Indian entities. "
+            f"For non-Indian competitors, leave cin blank and include the country or region in nature_of_competition. "
+            f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -1796,14 +1853,24 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
         logger.info("Triggering active web search competitor research...")
         result = service.execute_standard(payload, timeout=600)
         response_text = result.get("response") or ""
-        from .services.competitor_intelligence import competitor_names_from_payload, format_competitor_report
+        from .services.competitor_intelligence import competitor_names_from_payload
         try:
             parsed = json.loads(response_text)
         except json.JSONDecodeError:
             parsed = {}
 
-        competitors = competitor_names_from_payload(parsed or response_text, limit=10)
-        report = format_competitor_report(parsed) if parsed else ""
+        raw_competitors = competitor_names_from_payload(parsed or response_text, limit=10)
+        competitors = []
+        seen_keys = set(existing_keys)
+        for competitor in raw_competitors:
+            key = _competitor_result_key(competitor)
+            if key in {"name:", "cin:"} or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            competitors.append(competitor)
+
+        report_title = "Additional Competitor Search" if instruction else "Competitor Search Results"
+        report = _format_competitor_items_report(competitors, title=report_title)
         return {
             "response": report or response_text,
             "competitors": competitors,

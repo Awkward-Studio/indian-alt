@@ -1072,11 +1072,20 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Triggers an asynchronous background Celery task to research and fetch competitors.
         """
         deal = self.get_object()
+        instruction = str(request.data.get("instruction") or "").strip()
+        existing_competitors = request.data.get("existing_competitors") or []
+        if not isinstance(existing_competitors, list):
+            existing_competitors = []
+
         if request.data.get("sync"):
             try:
                 from .services.competitor_intelligence import annotate_existing_competitors
                 from .tasks import fetch_competitors_async_task
-                result = fetch_competitors_async_task(str(deal.id))
+                result = fetch_competitors_async_task(
+                    str(deal.id),
+                    instruction=instruction,
+                    existing_competitors=existing_competitors,
+                )
                 if result.get("error"):
                     return Response({"status": "FAILURE", "error": result["error"]}, status=500)
                 competitors = annotate_existing_competitors(deal, result.get("competitors", []))
@@ -1093,7 +1102,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         try:
             from .tasks import fetch_competitors_async_task
             task = fetch_competitors_async_task.apply_async(
-                kwargs={'deal_id': str(deal.id)},
+                kwargs={
+                    'deal_id': str(deal.id),
+                    'instruction': instruction,
+                    'existing_competitors': existing_competitors,
+                },
                 queue='high_priority'
             )
             return Response({
