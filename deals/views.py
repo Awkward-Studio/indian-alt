@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
 import django_filters.rest_framework as django_filters
@@ -19,6 +20,7 @@ from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
 from .services.deal_flow import DealFlowService
 from .services.folder_analysis import FolderAnalysisService
+from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
@@ -239,6 +241,306 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return float(Decimal(cleaned_value))
         except (InvalidOperation, ValueError, TypeError):
             return 0.0
+
+    @staticmethod
+    def _isoformat(value):
+        return value.isoformat() if value else None
+
+    @staticmethod
+    def _truncate_text(value, limit=500):
+        compact = " ".join((value or "").split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[:limit].rstrip()}..."
+
+    @staticmethod
+    def _chunk_kind(chunk):
+        metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+        return metadata.get("chunk_kind") or metadata.get("kind") or "text"
+
+    @staticmethod
+    def _chunk_source_title(chunk, documents_by_id):
+        metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+        if chunk.source_type == "document" and chunk.source_id:
+            document = documents_by_id.get(str(chunk.source_id))
+            if document:
+                return document.title
+        return (
+            metadata.get("title")
+            or metadata.get("filename")
+            or metadata.get("document_name")
+            or metadata.get("citation_label")
+            or chunk.source_type.replace("_", " ").title()
+        )
+
+    def _serialize_chunk_inventory_item(self, chunk, documents_by_id):
+        return {
+            "id": str(chunk.id),
+            "source_type": chunk.source_type,
+            "source_id": chunk.source_id,
+            "source_title": self._chunk_source_title(chunk, documents_by_id),
+            "chunk_kind": self._chunk_kind(chunk),
+            "content_preview": self._truncate_text(chunk.content, 700),
+            "content_length": len(chunk.content or ""),
+            "metadata": chunk.metadata or {},
+            "embedding": {
+                "is_embedded": chunk.embedding is not None,
+                "model": chunk.embedding_model,
+                "dimensions": chunk.embedding_dimensions,
+                "indexed_at": self._isoformat(chunk.indexed_at),
+            },
+            "created_at": self._isoformat(chunk.created_at),
+        }
+
+    @action(detail=True, methods=['get'])
+    def chunks(self, request, pk=None):
+        """
+        Paginated inventory of chunks and embeddings available to local deal chat.
+        """
+        deal = self.get_object()
+        documents_by_id = {
+            str(document.id): document
+            for document in deal.documents.all()
+        }
+
+        queryset = DocumentChunk.objects.filter(deal=deal).order_by('-indexed_at', '-created_at')
+        source_type = request.query_params.get("source_type")
+        source_id = request.query_params.get("source_id")
+        chunk_kind = request.query_params.get("chunk_kind")
+        embedded = request.query_params.get("embedded")
+
+        if source_type:
+            queryset = queryset.filter(source_type=source_type)
+        if source_id:
+            queryset = queryset.filter(source_id=source_id)
+        if chunk_kind:
+            queryset = queryset.filter(metadata__chunk_kind=chunk_kind)
+        if embedded in ("true", "1", "yes"):
+            queryset = queryset.filter(embedding__isnull=False)
+        elif embedded in ("false", "0", "no"):
+            queryset = queryset.filter(embedding__isnull=True)
+
+        paginator = DealPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        items = [
+            self._serialize_chunk_inventory_item(chunk, documents_by_id)
+            for chunk in (page if page is not None else queryset)
+        ]
+        return paginator.get_paginated_response(items)
+
+    @action(detail=True, methods=['get'])
+    def knowledge_graph(self, request, pk=None):
+        """
+        Evidence map for the deal: documents, chunks, analyses, generated outputs,
+        VI profiles, and saved relationship contexts.
+        """
+        deal = self.get_object()
+        documents = list(deal.documents.all().order_by('-created_at'))
+        documents_by_id = {str(document.id): document for document in documents}
+        chunks = list(DocumentChunk.objects.filter(deal=deal).order_by('-indexed_at', '-created_at'))
+        graph_chunk_node_limit = min(int(request.query_params.get("chunk_node_limit", 150)), 300)
+
+        nodes = []
+        edges = []
+        node_ids = set()
+        edge_ids = set()
+
+        def add_node(node_id, node_type, label, status=None, metadata=None):
+            if node_id in node_ids:
+                return
+            node_ids.add(node_id)
+            nodes.append({
+                "id": node_id,
+                "type": node_type,
+                "label": label,
+                "status": status,
+                "metadata": metadata or {},
+            })
+
+        def add_edge(source, target, relationship, metadata=None):
+            if source not in node_ids or target not in node_ids:
+                return
+            edge_id = f"{source}->{target}:{relationship}"
+            if edge_id in edge_ids:
+                return
+            edge_ids.add(edge_id)
+            edges.append({
+                "id": edge_id,
+                "source": source,
+                "target": target,
+                "relationship": relationship,
+                "metadata": metadata or {},
+            })
+
+        deal_node_id = f"deal:{deal.id}"
+        add_node(deal_node_id, "deal", deal.title, deal.current_phase, {
+            "priority": deal.priority,
+            "deal_status": deal.deal_status,
+            "sector": deal.sector,
+            "industry": deal.industry,
+            "fund": deal.fund,
+        })
+
+        for document in documents:
+            artifact_status = None
+            try:
+                artifact_status = DocumentArtifactService.artifact_status(
+                    DocumentArtifactService.artifact_from_document(document)
+                )
+            except Exception:
+                artifact_status = None
+            status_value = "indexed" if document.is_indexed else document.chunking_status or "not_indexed"
+            document_node_id = f"document:{document.id}"
+            add_node(document_node_id, "document", document.title, status_value, {
+                "document_type": document.document_type,
+                "is_indexed": document.is_indexed,
+                "is_ai_analyzed": document.is_ai_analyzed,
+                "initial_analysis_status": document.initial_analysis_status,
+                "transcription_status": document.transcription_status,
+                "chunking_status": document.chunking_status,
+                "artifact_status": artifact_status,
+                "onedrive_id": document.onedrive_id,
+                "created_at": self._isoformat(document.created_at),
+            })
+            add_edge(deal_node_id, document_node_id, "has_document")
+
+        chunks_by_source = defaultdict(list)
+        for chunk in chunks:
+            chunks_by_source[(chunk.source_type, chunk.source_id or "none")].append(chunk)
+
+        chunk_node_ids_by_chunk_id = {}
+        rendered_chunk_count = 0
+
+        for (source_type, source_id), source_chunks in chunks_by_source.items():
+            first_chunk = source_chunks[0]
+            source_title = self._chunk_source_title(first_chunk, documents_by_id)
+            embedded_count = sum(1 for chunk in source_chunks if chunk.embedding is not None)
+            group_status = (
+                "embedded" if embedded_count == len(source_chunks)
+                else "partial" if embedded_count > 0
+                else "not_embedded"
+            )
+            group_id = f"chunk_group:{source_type}:{source_id}"
+            add_node(group_id, "chunk_group", source_title, group_status, {
+                "source_type": source_type,
+                "source_id": None if source_id == "none" else source_id,
+                "chunk_count": len(source_chunks),
+                "embedded_chunk_count": embedded_count,
+                "chunk_kinds": sorted({self._chunk_kind(chunk) for chunk in source_chunks}),
+            })
+
+            parent_id = deal_node_id
+            if source_type == "document" and str(source_id) in documents_by_id:
+                parent_id = f"document:{source_id}"
+            add_edge(parent_id, group_id, "has_chunks")
+
+            for chunk in source_chunks:
+                if rendered_chunk_count >= graph_chunk_node_limit:
+                    continue
+                chunk_id = f"chunk:{chunk.id}"
+                chunk_node_ids_by_chunk_id[str(chunk.id)] = chunk_id
+                rendered_chunk_count += 1
+                add_node(chunk_id, "chunk", f"{self._chunk_kind(chunk).replace('_', ' ').title()} Chunk", "embedded" if chunk.embedding is not None else "not_embedded", {
+                    "source_type": chunk.source_type,
+                    "source_id": chunk.source_id,
+                    "source_title": source_title,
+                    "chunk_kind": self._chunk_kind(chunk),
+                    "content_preview": self._truncate_text(chunk.content, 500),
+                    "content_length": len(chunk.content or ""),
+                    "embedding_model": chunk.embedding_model,
+                    "embedding_dimensions": chunk.embedding_dimensions,
+                    "indexed_at": self._isoformat(chunk.indexed_at),
+                    "created_at": self._isoformat(chunk.created_at),
+                })
+                add_edge(group_id, chunk_id, "contains_chunk")
+
+        analyses = list(deal.analyses.all().order_by('-version', '-created_at'))
+        for analysis in analyses:
+            analysis_node_id = f"analysis:{analysis.id}"
+            analysis_json = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
+            metadata = analysis_json.get("metadata") if isinstance(analysis_json.get("metadata"), dict) else {}
+            add_node(analysis_node_id, "analysis", f"Analysis v{analysis.version}", analysis.analysis_kind, {
+                "version": analysis.version,
+                "analysis_kind": analysis.analysis_kind,
+                "documents_analyzed": metadata.get("analysis_input_files") or [],
+                "failed_files": metadata.get("failed_files") or [],
+                "ambiguity_count": len(analysis.ambiguities or []),
+                "created_at": self._isoformat(analysis.created_at),
+            })
+            add_edge(deal_node_id, analysis_node_id, "has_analysis")
+
+        for generated_document in deal.generated_documents.all().order_by('-created_at'):
+            generated_node_id = f"generated_document:{generated_document.id}"
+            add_node(generated_node_id, "generated_document", generated_document.title, "ready" if generated_document.content else "queued", {
+                "kind": generated_document.kind,
+                "selected_deal_ids": generated_document.selected_deal_ids or [],
+                "selected_document_ids": generated_document.selected_document_ids or [],
+                "selected_chunk_ids": generated_document.selected_chunk_ids or [],
+                "audit_log_id": generated_document.audit_log_id,
+                "created_at": self._isoformat(generated_document.created_at),
+            })
+            add_edge(deal_node_id, generated_node_id, "generated")
+            for document_id in generated_document.selected_document_ids or []:
+                add_edge(generated_node_id, f"document:{document_id}", "used_document")
+            for chunk_id in generated_document.selected_chunk_ids or []:
+                add_edge(generated_node_id, chunk_node_ids_by_chunk_id.get(str(chunk_id), ""), "used_chunk")
+
+        for relation in deal.vi_relations.select_related('company_profile').all():
+            profile = relation.company_profile
+            relation_type = relation.relation_type or "target"
+            vi_node_id = f"vi:{profile.id}:{relation_type}"
+            add_node(vi_node_id, "vi_competitor" if relation_type == "competitor" else "vi_target", profile.name or profile.registered_name, relation_type, {
+                "profile_id": str(profile.id),
+                "relation_type": relation_type,
+                "registered_name": profile.registered_name,
+                "cin": profile.cin,
+                "sector": profile.sector,
+                "industry": profile.industry,
+                "website": profile.website,
+                "total_funding": profile.total_funding,
+                "city": profile.city,
+                "created_at": self._isoformat(relation.created_at),
+            })
+            add_edge(deal_node_id, vi_node_id, "has_vi_profile")
+
+        for context in deal.relationship_contexts.select_related('related_deal').all():
+            context_node_id = f"relationship_context:{context.id}"
+            label = context.related_deal.title if context.related_deal else context.relationship_type.replace("_", " ").title()
+            add_node(context_node_id, "relationship_context", label, context.relationship_type, {
+                "related_deal_id": str(context.related_deal_id) if context.related_deal_id else None,
+                "notes": self._truncate_text(context.notes, 300),
+                "selected_deal_ids": context.selected_deal_ids or [],
+                "selected_document_ids": context.selected_document_ids or [],
+                "selected_chunk_ids": context.selected_chunk_ids or [],
+                "created_at": self._isoformat(context.created_at),
+            })
+            add_edge(deal_node_id, context_node_id, "has_relationship_context")
+            for document_id in context.selected_document_ids or []:
+                add_edge(context_node_id, f"document:{document_id}", "references_document")
+            for chunk_id in context.selected_chunk_ids or []:
+                add_edge(context_node_id, chunk_node_ids_by_chunk_id.get(str(chunk_id), ""), "references_chunk")
+
+        embedded_chunk_count = sum(1 for chunk in chunks if chunk.embedding is not None)
+        last_indexed_at = next((chunk.indexed_at for chunk in chunks if chunk.indexed_at), None)
+        return Response({
+            "summary": {
+                "deal_id": str(deal.id),
+                "document_count": len(documents),
+                "indexed_document_count": sum(1 for document in documents if document.is_indexed),
+                "chunk_count": len(chunks),
+                "embedded_chunk_count": embedded_chunk_count,
+                "vi_target_count": deal.vi_relations.filter(relation_type="target").count(),
+                "vi_competitor_count": deal.vi_relations.filter(relation_type="competitor").count(),
+                "analysis_count": len(analyses),
+                "generated_document_count": deal.generated_documents.count(),
+                "relationship_context_count": deal.relationship_contexts.count(),
+                "last_indexed_at": self._isoformat(last_indexed_at),
+                "graph_chunk_node_limit": graph_chunk_node_limit,
+                "omitted_chunk_nodes": max(0, len(chunks) - rendered_chunk_count),
+            },
+            "nodes": nodes,
+            "edges": edges,
+        })
 
     @action(detail=False, methods=['get'])
     def dashboard_metrics(self, request):
@@ -902,13 +1204,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         except Exception as embed_err:
             logger.warning(f"Graceful vectorization failure (Inference VM is likely offline): {str(embed_err)}")
 
-        # 4. Resolve competitor CINs, call Venture Intelligence, and store competitor profiles.
-        vi_enrichment = {"enriched": [], "failed": []}
+        # 4. Resolve competitor CINs, call Venture Intelligence, and store competitor profiles asynchronously.
+        competitors = []
         try:
             from .services.competitor_intelligence import (
                 competitor_names_from_payload,
                 competitor_names_from_text,
-                enrich_competitors_for_deal,
             )
 
             requested_competitors = request.data.get("competitors")
@@ -922,24 +1223,60 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
             if not competitors:
                 return Response({"error": "Select at least one competitor to save."}, status=400)
-
-            vi_enrichment = enrich_competitors_for_deal(deal, competitors, limit=10)
         except Exception as vi_err:
-            logger.warning(f"Failed to enrich competitor VI profiles: {str(vi_err)}")
-            vi_enrichment = {"enriched": [], "failed": [{"name": "competitor_enrichment", "error": str(vi_err)}]}
+            logger.warning(f"Failed to parse competitor VI enrichment request: {str(vi_err)}")
+            return Response({"error": f"Failed to parse selected competitors: {str(vi_err)}"}, status=400)
+
+        from .tasks import enrich_competitors_vi_async_task
+        task = enrich_competitors_vi_async_task.apply_async(
+            kwargs={
+                "deal_id": str(deal.id),
+                "competitors": competitors,
+                "limit": 10,
+            },
+            queue='high_priority'
+        )
 
         from .serializers import DealDocumentSerializer
         return Response({
-            "status": "success",
+            "status": "queued",
+            "task_id": task.id,
+            "message": "Competitor context saved. VI enrichment queued in Celery.",
             "document": DealDocumentSerializer(doc).data,
-            "vi_enrichment": vi_enrichment,
         })
+
+    @action(detail=True, methods=['get'], url_path='competitor_vi_status/(?P<task_id>[^/.]+)')
+    def competitor_vi_status(self, request, pk=None, task_id=None):
+        """
+        Polls the execution status of the competitor VI enrichment background task.
+        """
+        from celery.result import AsyncResult
+        res = AsyncResult(task_id)
+        if res.status == 'SUCCESS':
+            data = res.result or {}
+            if data.get("status") == "FAILURE" or "error" in data:
+                return Response({
+                    "status": "FAILURE",
+                    "error": data.get("error", "Competitor VI enrichment failed."),
+                }, status=200)
+            return Response({
+                "status": "SUCCESS",
+                "vi_enrichment": data.get("vi_enrichment") or {"enriched": [], "failed": [], "skipped": []},
+            })
+        if res.status == 'FAILURE':
+            return Response({
+                "status": "FAILURE",
+                "error": str(res.info or "Background competitor VI enrichment failed unexpectedly."),
+            }, status=500)
+
+        return Response({"status": res.status})
 
 
 
 from rest_framework.views import APIView
 from deals.services.venture_intelligence import VentureIntelligenceService
 from deals.serializers import VentureIntelligenceCompanyProfileSerializer
+from deals.models import VentureIntelligenceCompanyProfile
 
 class VentureIntelligenceResolveCinView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1015,6 +1352,23 @@ class DealEnrichView(APIView):
         if not company_name and not cin:
             company_name = deal.title  # Fallback to deal title if empty
 
+        if request.data.get("async"):
+            from .tasks import enrich_deal_vi_async_task
+            task = enrich_deal_vi_async_task.apply_async(
+                kwargs={
+                    "deal_id": str(deal.id),
+                    "company_name": company_name,
+                    "cin": cin,
+                    "relation_type": relation_type,
+                },
+                queue='high_priority'
+            )
+            return Response({
+                "status": "queued",
+                "task_id": task.id,
+                "message": f"Queued {relation_type} Venture Intelligence enrichment.",
+            })
+
         vi_service = VentureIntelligenceService()
         try:
             profile = vi_service.enrich_deal(
@@ -1033,3 +1387,32 @@ class DealEnrichView(APIView):
             logger.error(f"Enrichment failed for Deal {deal.id}: {e}", exc_info=True)
             return Response({"error": f"Enrichment failed: {str(e)}"}, status=500)
 
+
+class DealEnrichStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk, task_id):
+        from celery.result import AsyncResult
+
+        result = AsyncResult(task_id)
+        if result.status == 'SUCCESS':
+            data = result.result or {}
+            if data.get("status") == "FAILURE" or "error" in data:
+                return Response({
+                    "status": "FAILURE",
+                    "error": data.get("error", "VI enrichment failed."),
+                }, status=200)
+
+            profile = VentureIntelligenceCompanyProfile.objects.filter(id=data.get("profile_id")).first()
+            return Response({
+                "status": "SUCCESS",
+                "profile": VentureIntelligenceCompanyProfileSerializer(profile).data if profile else None,
+            })
+
+        if result.status == 'FAILURE':
+            return Response({
+                "status": "FAILURE",
+                "error": str(result.info or "Background VI enrichment failed unexpectedly."),
+            }, status=500)
+
+        return Response({"status": result.status})

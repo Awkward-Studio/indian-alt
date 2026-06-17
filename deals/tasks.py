@@ -1820,3 +1820,51 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
         logger.error(f"Async fetch competitors failed: {str(e)}")
         return {"error": str(e)}
 
+
+@shared_task(queue='high_priority')
+def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limit: int = 10) -> dict:
+    """
+    Enrich selected competitors with Venture Intelligence data in the Celery worker.
+    """
+    try:
+        from deals.models import Deal
+        from deals.services.competitor_intelligence import enrich_competitors_for_deal
+
+        deal = Deal.objects.get(id=deal_id)
+        vi_enrichment = enrich_competitors_for_deal(deal, competitors or [], limit=limit)
+        return {
+            "status": "SUCCESS",
+            "vi_enrichment": vi_enrichment,
+        }
+    except Exception as e:
+        logger.error(f"Async competitor VI enrichment failed: {str(e)}")
+        return {
+            "status": "FAILURE",
+            "error": str(e),
+        }
+
+
+@shared_task(queue='high_priority')
+def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin: str | None = None, relation_type: str = "target") -> dict:
+    """
+    Enrich a deal target or competitor VI profile in the Celery worker.
+    """
+    try:
+        from deals.services.venture_intelligence import VentureIntelligenceService
+
+        profile = VentureIntelligenceService().enrich_deal(
+            deal_id=deal_id,
+            company_name=company_name,
+            cin=cin,
+            relation_type=relation_type,
+        )
+        return {
+            "status": "SUCCESS",
+            "profile_id": str(profile.id),
+        }
+    except Exception as e:
+        logger.error(f"Async deal VI enrichment failed: {str(e)}")
+        return {
+            "status": "FAILURE",
+            "error": str(e),
+        }

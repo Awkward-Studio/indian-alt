@@ -88,7 +88,7 @@ def company_name_candidates(company_name):
 
 def demo_cin_for_company(company_name=None, cin=None):
     supplied = normalize_cin(cin)
-    if is_valid_cin(supplied):
+    if supplied:
         return supplied
 
     name = str(company_name or "").casefold()
@@ -100,7 +100,7 @@ def demo_cin_for_company(company_name=None, cin=None):
 
 def demo_company_details(company_name=None, cin=None, entity_name=None):
     resolved_cin = demo_cin_for_company(company_name=company_name or entity_name, cin=cin)
-    display_name = company_name or entity_name or "Demo VI Company"
+    display_name = company_name or entity_name or f"Demo VI Company {resolved_cin}"
     registered_name = display_name
     if resolved_cin == "U74999KA2012PTC066462":
         display_name = "Amazon India"
