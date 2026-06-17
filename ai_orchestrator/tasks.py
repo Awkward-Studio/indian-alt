@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 CHAT_HISTORY_MESSAGE_LIMIT = 3
 CHAT_HISTORY_CHAR_LIMIT = 12000
 
+DEAL_CHAT_CONVERSATIONAL_PROMPT = """[CHAT HISTORY]
+{{ history_context }}
+
+[AVAILABLE DEAL CONTEXT]
+{{ context_data }}
+
+[USER MESSAGE]
+{{ content }}
+
+[RESPONSE STYLE]
+Answer conversationally as a deal chat assistant. Be direct, useful, and grounded in the available deal context.
+Do not write a formal report, memo, diligence document, or long structured analysis unless the user explicitly asks for that artifact.
+Use bullets or a small table only when it makes the answer easier to scan.
+If the context does not contain enough evidence, say what is missing instead of inventing facts.
+"""
+
 
 def _split_leaked_thinking(response: str, thinking: str = "") -> tuple[str, str]:
     response = response or ""
@@ -316,6 +332,9 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             }
 
         task_metadata['model_provider'] = (metadata or {}).get('model_provider', 'vllm')
+        if skill_name == 'deal_chat':
+            task_metadata['personality_only_system'] = True
+            task_metadata['prompt_template_override'] = DEAL_CHAT_CONVERSATIONAL_PROMPT
 
         full_text = ""
         full_thinking = ""
@@ -522,6 +541,7 @@ def generate_deal_helper_analysis_async(
     selected_deal_ids: list | None = None,
     selected_document_ids: list | None = None,
     selected_chunk_ids: list | None = None,
+    model_provider: str = "vllm",
 ):
     try:
         from deals.models import Deal, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealDocument
@@ -622,6 +642,7 @@ def generate_deal_helper_analysis_async(
             source_id=str(deal.id),
             metadata={
                 "audit_log_id": str(audit_log.id) if audit_log else audit_log_id,
+                "model_provider": model_provider,
                 "mode": mode,
                 "directive": directive,
                 "document_title": document_title or directive[:80] or "Directive Document",
@@ -766,4 +787,3 @@ def check_local_ai_connection_task(self):
     cache.set("local_ai_connection_status", result, timeout=300)
     logger.info("Background local AI connection probe completed: %s", result)
     return result
-

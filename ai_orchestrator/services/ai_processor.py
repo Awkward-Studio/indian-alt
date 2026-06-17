@@ -92,7 +92,10 @@ class AIProcessorService:
 
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
         log_worker_event(audit_log, f"Preparing prompt for {resolved_text_model}.")
-        system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
+        if metadata and metadata.get("personality_only_system"):
+            system_instructions = getattr(personality, "system_instructions", None) or "You are a professional PE analyst."
+        else:
+            system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         if model_provider == "anthropic":
             system_instructions += (
                 "\n\n[PRIVACY & SEARCH DIRECTIVE]\n"
@@ -101,7 +104,7 @@ class AIProcessorService:
                 "To answer the user's questions about deals, companies, markets, or news, you must autonomously use your native web search tool. "
                 "Ground your answers in public information and provide citations for your sources."
             )
-        prompt_template = skill.prompt_template if skill else "{{ content }}"
+        prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
         response_mode = (metadata or {}).get("response_mode")
         if response_mode == "markdown":
             system_instructions = re.sub(

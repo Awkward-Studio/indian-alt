@@ -14,7 +14,7 @@ from rest_framework.decorators import action
 from rest_framework import status, viewsets
 from django.http import StreamingHttpResponse
 
-from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog
+from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog, DocumentChunk
 from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
 from .services.ai_processor import AIProcessorService
 from .services.embedding_processor import EmbeddingService
@@ -560,13 +560,24 @@ class DealHelperView(APIView):
             else:
                 document_ids = [str(doc.id) for doc in deal.documents.filter(is_indexed=True)]
         else:
-            document_ids = [str(item) for item in request.data.get("document_ids", []) if item]
+            submitted_ids = [str(item) for item in request.data.get("document_ids", []) if item]
+            vi_source_ids = [
+                item for item in submitted_ids
+                if item.startswith("vi_")
+                and DocumentChunk.objects.filter(deal_id=deal.id, source_type="extracted_source", source_id=item).exists()
+            ]
+            document_ids = [item for item in submitted_ids if not item.startswith("vi_")]
             if is_related_deal_flow:
                 allowed_deal_ids = [str(deal.id), *[str(item) for item in session.get("selected_deal_ids") or []]]
                 indexed_ids = set(str(item) for item in DealDocument.objects.filter(deal_id__in=allowed_deal_ids, id__in=document_ids, is_indexed=True).values_list("id", flat=True))
+                vi_source_ids = [
+                    item for item in submitted_ids
+                    if item.startswith("vi_")
+                    and DocumentChunk.objects.filter(deal_id__in=allowed_deal_ids, source_type="extracted_source", source_id=item).exists()
+                ]
             else:
                 indexed_ids = set(str(item) for item in deal.documents.filter(id__in=document_ids, is_indexed=True).values_list("id", flat=True))
-            document_ids = [item for item in document_ids if item in indexed_ids]
+            document_ids = [item for item in document_ids if item in indexed_ids] + vi_source_ids
         if not document_ids:
             return Response({"error": "Select at least one indexed document."}, status=400)
         
@@ -741,6 +752,7 @@ class DealHelperView(APIView):
         document_title = str(request.data.get("document_title") or "").strip()
         session_id = request.data.get("session_id")
         selected_chunk_ids = [str(item) for item in request.data.get("selected_chunk_ids", []) if item]
+        model_provider = request.data.get("model_provider", "vllm")
         if not deal_id or not directive:
             return Response({"error": "deal_id and directive are required."}, status=400)
         deal = Deal.objects.get(id=deal_id)
@@ -794,8 +806,11 @@ class DealHelperView(APIView):
                 "mode": mode,
                 "generated_document_id": str(generated_document.id) if generated_document else None,
                 "selected_chunk_ids": selected_chunk_ids,
+                "model_provider": model_provider,
             },
         )
+        audit_log.model_provider = model_provider
+        audit_log.save(update_fields=["model_provider"])
         from .tasks import generate_deal_helper_analysis_async
         task = generate_deal_helper_analysis_async.apply_async(kwargs={
             "deal_id": str(deal.id),
@@ -808,6 +823,7 @@ class DealHelperView(APIView):
             "selected_deal_ids": selected_deal_ids,
             "selected_document_ids": selected_document_ids,
             "selected_chunk_ids": selected_chunk_ids,
+            "model_provider": model_provider,
         }, queue="high_priority")
         if generated_document:
             generated_document.audit_log_id = str(audit_log.id)

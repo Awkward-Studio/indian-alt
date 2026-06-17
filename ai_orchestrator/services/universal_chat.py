@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple
 from django.db import connection
 from django.db.models import Count, Q
 
-from deals.models import Deal, DealDocument, FolderAnalysisDocument
+from deals.models import Deal, DealDocument, FolderAnalysisDocument, VentureIntelligenceCompanyProfile
 from ..models import DocumentChunk
 from .ai_processor import AIProcessorService
 from .embedding_processor import EmbeddingService
@@ -249,15 +249,15 @@ class UniversalChatService:
                 }
         elif chunk.source_type == "extracted_source":
             artifact = {
-                "document_name": metadata.get("filename") or metadata.get("title"),
-                "document_type": metadata.get("doc_type") or metadata.get("document_type") or "Other",
+                "document_name": metadata.get("filename") or metadata.get("title") or metadata.get("company_name"),
+                "document_type": metadata.get("doc_type") or metadata.get("document_type") or ("Venture Intelligence" if str(chunk.source_id or "").startswith("vi_") else "Other"),
                 "document_summary": metadata.get("summary") or "",
                 "metrics": metadata.get("metrics") or [],
                 "tables_summary": metadata.get("tables_summary") or [],
                 "risks": metadata.get("risks") or [],
                 "claims": metadata.get("claims") or [],
                 "source_map": metadata.get("source_map") or {},
-                "citation_label": metadata.get("citation_label") or metadata.get("filename") or metadata.get("title"),
+                "citation_label": metadata.get("citation_label") or metadata.get("filename") or metadata.get("title") or metadata.get("company_name"),
             }
 
         compact = self._compact_document_metadata(artifact or {}, fallback_metadata=metadata)
@@ -709,6 +709,52 @@ class UniversalChatService:
                 item["suggested_score"] = final_score if final_score > 0 else None
                 item["rank_reason"] = adjustment.get("reason") or item["rank_reason"]
         self._apply_dynamic_suggestions(payload, score_key="suggested_score")
+        return [*payload, *self._vi_source_documents_for_deals([deal])]
+
+    def _vi_source_documents_for_deals(self, deals: List[Deal]) -> List[Dict[str, Any]]:
+        deal_ids = [str(deal.id) for deal in deals if deal]
+        if not deal_ids:
+            return []
+        source_ids = set(
+            DocumentChunk.objects
+            .filter(deal_id__in=deal_ids, source_type="extracted_source", source_id__startswith="vi_")
+            .values_list("source_id", flat=True)
+        )
+        if not source_ids:
+            return []
+        profile_ids = [
+            source_id[3:]
+            for source_id in source_ids
+            if str(source_id).startswith("vi_")
+            and re.fullmatch(r"[0-9a-fA-F-]{32,36}", str(source_id)[3:])
+        ]
+        profiles = {
+            str(profile.id): profile
+            for profile in VentureIntelligenceCompanyProfile.objects.filter(id__in=profile_ids)
+        }
+        relation_by_source = {}
+        for deal in deals:
+            for relation in deal.vi_relations.select_related("company_profile").all():
+                relation_by_source[f"vi_{relation.company_profile_id}"] = relation.relation_type
+        payload = []
+        for source_id in sorted(source_ids):
+            profile = profiles.get(str(source_id)[3:])
+            relation_type = relation_by_source.get(source_id) or "target"
+            payload.append({
+                "id": source_id,
+                "title": f"{profile.name if profile else source_id} VI Profile",
+                "document_type": "Venture Intelligence",
+                "is_indexed": True,
+                "is_ai_analyzed": True,
+                "transcription_status": "complete",
+                "chunking_status": "chunked",
+                "file_url": None,
+                "suggested": relation_type == "competitor",
+                "suggested_score": 100 if relation_type == "competitor" else 80,
+                "rank_reason": f"Structured Venture Intelligence {relation_type} profile indexed for this deal.",
+                "deal": profile.name if profile else None,
+                "is_current_deal": True,
+            })
         return payload
 
     def _normalize_document_match_key(self, value: str) -> str:
@@ -1002,6 +1048,7 @@ class UniversalChatService:
             ),
             reverse=True,
         )
+        payload.extend(self._vi_source_documents_for_deals(deals))
         self._apply_selected_document_suggestions(payload)
         self._trace_chunks("documents_for_selected_deals_done", payload=len(payload))
         return payload, diagnostics
@@ -1156,8 +1203,10 @@ class UniversalChatService:
 
     def chunks_for_selected_documents_multi_deal(self, *, plan: Dict[str, Any], document_ids: List[str], current_deal_id: str | None = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         self._trace_chunks("chunks_for_selected_documents_multi_deal_start", document_ids=document_ids)
+        vi_source_ids = [str(item) for item in document_ids if str(item).startswith("vi_")]
+        regular_document_ids = [str(item) for item in document_ids if not str(item).startswith("vi_")]
         selected_documents = list(
-            DealDocument.objects.filter(id__in=document_ids, is_indexed=True)
+            DealDocument.objects.filter(id__in=regular_document_ids, is_indexed=True)
             .select_related("deal")
         )
         self._trace_chunks("chunks_for_selected_documents_multi_deal_fetch_docs_done", documents=len(selected_documents))
@@ -1203,7 +1252,8 @@ class UniversalChatService:
             per_document_limit=8,
             max_total=120,
         )
-        selected = self._merge_selected_chunk_items(selected, direct_chunks)
+        vi_chunks = self._direct_chunks_for_vi_sources(vi_source_ids, existing_items=selected, per_source_limit=10, max_total=80)
+        selected = self._merge_selected_chunk_items(selected, direct_chunks, vi_chunks)
         self._trace_chunks(
             "chunks_for_selected_documents_multi_deal_direct_scan_done",
             direct_chunks=len(direct_chunks),
@@ -1220,6 +1270,7 @@ class UniversalChatService:
         self._trace_chunks("chunks_for_selected_documents_multi_deal_done", serialized=len(serialized))
         if isinstance(diagnostics, dict):
             diagnostics["direct_selected_document_chunk_count"] = len(direct_chunks)
+            diagnostics["direct_selected_vi_chunk_count"] = len(vi_chunks)
             diagnostics["returned_selected_document_chunk_count"] = len(serialized)
         return serialized, diagnostics
 
@@ -1322,6 +1373,47 @@ class UniversalChatService:
 
         return direct_items
 
+    def _direct_chunks_for_vi_sources(
+        self,
+        source_ids: List[str],
+        *,
+        existing_items: List[Dict[str, Any]] | None = None,
+        per_source_limit: int = 10,
+        max_total: int = 80,
+    ) -> List[Dict[str, Any]]:
+        cleaned_source_ids = [str(item) for item in source_ids if str(item).startswith("vi_")]
+        if not cleaned_source_ids:
+            return []
+        seen_chunk_ids = {
+            str(item["chunk"].id)
+            for item in (existing_items or [])
+            if item.get("chunk") is not None and getattr(item["chunk"], "id", None)
+        }
+        counts = {source_id: 0 for source_id in cleaned_source_ids}
+        direct_items = []
+        queryset = (
+            DocumentChunk.objects
+            .filter(source_type="extracted_source", source_id__in=cleaned_source_ids)
+            .select_related("deal")
+            .only("id", "deal_id", "deal__title", "source_type", "source_id", "content", "metadata", "created_at")
+            .order_by("source_id", "-created_at")
+        )
+        for chunk in queryset:
+            chunk_id = str(chunk.id)
+            source_id = str(chunk.source_id)
+            if chunk_id in seen_chunk_ids or counts.get(source_id, 0) >= per_source_limit:
+                continue
+            seen_chunk_ids.add(chunk_id)
+            counts[source_id] += 1
+            direct_items.append({
+                "chunk": chunk,
+                "score": getattr(chunk, "rerank_score", None) or 1.0,
+                "rank_reason": "Direct chunk from a selected Venture Intelligence dossier",
+            })
+            if len(direct_items) >= max_total:
+                break
+        return direct_items
+
     def _merge_selected_chunk_items(self, *item_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged = []
         seen_ids = set()
@@ -1382,8 +1474,10 @@ class UniversalChatService:
 
     def chunks_for_selected_documents(self, *, plan: Dict[str, Any], deal_id: str, document_ids: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         deal = Deal.objects.get(id=deal_id)
-        selected_documents = list(deal.documents.filter(id__in=document_ids))
-        chunks, diagnostics = self._search_ranked_chunks(plan, [deal], document_ids=document_ids)
+        vi_source_ids = [str(item) for item in document_ids if str(item).startswith("vi_")]
+        regular_document_ids = [str(item) for item in document_ids if not str(item).startswith("vi_")]
+        selected_documents = list(deal.documents.filter(id__in=regular_document_ids))
+        chunks, diagnostics = self._search_ranked_chunks(plan, [deal], document_ids=regular_document_ids)
         selected = []
         allowed_keys = set()
         for document in selected_documents:
@@ -1414,13 +1508,15 @@ class UniversalChatService:
             per_document_limit=8,
             max_total=80,
         )
-        selected = self._merge_selected_chunk_items(selected, direct_chunks)
+        vi_chunks = self._direct_chunks_for_vi_sources(vi_source_ids, existing_items=selected, per_source_limit=10, max_total=80)
+        selected = self._merge_selected_chunk_items(selected, direct_chunks, vi_chunks)
         serialized = [self._serialize_chunk(item) for item in selected]
         for index, item in enumerate(serialized):
             item["suggested"] = index < 6
             item["rank_reason"] = item.get("rank_reason") or ("Top reranked evidence chunk" if index < 6 else "Additional selected-document chunk")
         if isinstance(diagnostics, dict):
             diagnostics["direct_selected_document_chunk_count"] = len(direct_chunks)
+            diagnostics["direct_selected_vi_chunk_count"] = len(vi_chunks)
             diagnostics["returned_selected_document_chunk_count"] = len(serialized)
         return serialized, diagnostics
 
@@ -3375,9 +3471,71 @@ class UniversalChatService:
             "has_extracted_documents": getattr(deal, "is_indexed", False) or bool(deal.extracted_text),
             "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
             "current_analysis": compact_analysis,
+            "vi_context": self._serialize_vi_context(deal),
             "recent_timeline": recent_timeline,
             "retrieval_score": getattr(deal, "_retrieval_score", None),
             "retrieval_components": getattr(deal, "_retrieval_components", None),
+        }
+
+    def _serialize_vi_context(self, deal: Deal) -> Dict[str, Any]:
+        relations = []
+        prefetched = getattr(deal, "_prefetched_objects_cache", {}).get("vi_relations")
+        relation_iterable = prefetched if prefetched is not None else deal.vi_relations.select_related("company_profile").all()
+        for relation in relation_iterable:
+            profile = relation.company_profile
+            financials = list(profile.financial_statements.all().order_by("-fy")[:3])
+            epfo_records = list(profile.epfo_data.all().order_by("-qrtr")[:4])
+            pe_investments = list(profile.pe_investments.all().order_by("-deal_date")[:3])
+            relations.append({
+                "relation_type": relation.relation_type,
+                "notes": relation.notes or "",
+                "profile_id": str(profile.id),
+                "source_id": f"vi_{profile.id}",
+                "name": profile.name,
+                "registered_name": profile.registered_name,
+                "cin": profile.cin,
+                "sector": profile.sector,
+                "industry": profile.industry,
+                "city": profile.city,
+                "website": profile.website,
+                "total_funding": profile.total_funding,
+                "business_description": self._truncate_for_prompt(profile.business_description or profile.additional_info or "", 1200),
+                "latest_financials": [
+                    {
+                        "fy": item.fy,
+                        "statement_type": item.statement_type,
+                        "fin_type": item.fin_type,
+                        "data": item.data,
+                    }
+                    for item in financials
+                ],
+                "recent_pe_investments": [
+                    {
+                        "round": item.round,
+                        "date": item.deal_date,
+                        "amount": item.amount,
+                        "amount_inr": item.amount_inr,
+                        "valuation": item.company_valuation_post_money,
+                        "revenue_multiple": item.revenue_multiple_post_money,
+                        "investors": item.investors,
+                    }
+                    for item in pe_investments
+                ],
+                "epfo_trend": [{"quarter": item.qrtr, "employees": item.employees} for item in epfo_records],
+                "similar_companies": [
+                    {
+                        "name": item.name,
+                        "cin": item.cin,
+                        "sector": item.sector,
+                        "city": item.city,
+                        "total_funding": item.total_funding,
+                    }
+                    for item in profile.similar_companies.all()[:8]
+                ],
+            })
+        return {
+            "targets": [item for item in relations if item.get("relation_type") == "target"],
+            "competitors": [item for item in relations if item.get("relation_type") == "competitor"],
         }
 
     def _serialize_chunk(self, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -3447,6 +3605,30 @@ class UniversalChatService:
                     sections.append(f"  Institutional Comments: {deal['comments']}")
                 if deal.get("deal_details"):
                     sections.append(f"  Legacy Details: {deal['deal_details']}")
+                vi_context = deal.get("vi_context") or {}
+                vi_targets = vi_context.get("targets") or []
+                vi_competitors = vi_context.get("competitors") or []
+                if vi_targets or vi_competitors:
+                    sections.append("  Venture Intelligence Context:")
+                    for label, items in (("Target", vi_targets), ("Competitor", vi_competitors)):
+                        for profile in items[:8]:
+                            sections.append(
+                                f"    - [{label}] {profile.get('name') or profile.get('registered_name') or 'Unknown'} | "
+                                f"CIN: {profile.get('cin') or 'N/A'} | Sector: {profile.get('sector') or 'N/A'} | "
+                                f"Funding: {profile.get('total_funding') or 'N/A'} | VI Source: {profile.get('source_id') or 'N/A'}"
+                            )
+                            if profile.get("business_description"):
+                                sections.append(f"      Description: {profile['business_description']}")
+                            if profile.get("latest_financials"):
+                                sections.append(
+                                    "      Latest Financials: "
+                                    + json.dumps(profile["latest_financials"][:2], default=str, ensure_ascii=True)
+                                )
+                            if profile.get("epfo_trend"):
+                                sections.append(
+                                    "      EPFO Trend: "
+                                    + json.dumps(profile["epfo_trend"], default=str, ensure_ascii=True)
+                                )
         else:
             sections.append("- No strong candidate deals found.")
 
