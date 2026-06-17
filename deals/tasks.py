@@ -1758,13 +1758,6 @@ def fetch_competitors_async_task(deal_id: str) -> dict:
     try:
         from deals.models import Deal
         deal = Deal.objects.get(id=deal_id)
-        from .services.competitor_intelligence import demo_competitor_report, demo_competitor_results, is_competitor_demo_mode
-        if is_competitor_demo_mode():
-            competitors = demo_competitor_results(deal)
-            return {
-                "response": demo_competitor_report(deal, competitors),
-                "competitors": competitors,
-            }
 
         prompt = (
             f"You are a sophisticated investment research assistant.\n"

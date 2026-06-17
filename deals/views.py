@@ -1074,16 +1074,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = self.get_object()
         if request.data.get("sync"):
             try:
-                from .services.competitor_intelligence import annotate_existing_competitors, demo_competitor_report, demo_competitor_results, is_competitor_demo_mode
-                if is_competitor_demo_mode():
-                    competitors = annotate_existing_competitors(deal, demo_competitor_results(deal))
-                    return Response({
-                        "status": "SUCCESS",
-                        "response": demo_competitor_report(deal, competitors),
-                        "competitors": competitors,
-                        "message": "Demo competitor research completed.",
-                    })
-
+                from .services.competitor_intelligence import annotate_existing_competitors
                 from .tasks import fetch_competitors_async_task
                 result = fetch_competitors_async_task(str(deal.id))
                 if result.get("error"):

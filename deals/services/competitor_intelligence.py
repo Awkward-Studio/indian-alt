@@ -16,6 +16,12 @@ DEMO_MODE_ENV = "VI_COMPETITOR_DEMO_MODE"
 
 
 def is_competitor_demo_mode() -> bool:
+    """Return whether competitor VI enrichment should use local demo VI profiles.
+
+    This intentionally does not control competitor web search. Competitor research
+    should still run through Claude web search; only the downstream VI profile
+    fetch/enrichment is mocked by this flag.
+    """
     value = os.environ.get(DEMO_MODE_ENV)
     if value is None:
         value = config(DEMO_MODE_ENV, default="")
