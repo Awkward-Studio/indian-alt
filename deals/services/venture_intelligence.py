@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import requests
+import hashlib
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -95,7 +96,11 @@ def demo_cin_for_company(company_name=None, cin=None):
     for key, value in DEMO_CIN_BY_NAME.items():
         if key in name:
             return value
-    return "U74999KA2012PTC066462"
+
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    activity_code = 10000 + (int(digest[:8], 16) % 90000)
+    suffix = int(digest[8:16], 16) % 1000000
+    return f"U{activity_code:05d}KA2015PTC{suffix:06d}"
 
 
 def demo_company_details(company_name=None, cin=None, entity_name=None):

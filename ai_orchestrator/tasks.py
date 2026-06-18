@@ -499,6 +499,17 @@ def discover_chunks_async(
                 deal_id=current_deal_id,
                 document_ids=document_ids,
             )
+
+        from django.core.cache import cache
+        session_key = f"deal_helper_session:{session_id}"
+        session_payload = cache.get(session_key)
+        if isinstance(session_payload, dict):
+            session_payload.update({
+                "selected_document_ids": document_ids,
+                "candidate_chunks": chunks,
+                "chunk_diagnostics": diagnostics,
+            })
+            cache.set(session_key, session_payload, timeout=60 * 60 * 4)
             
         if audit_log:
             audit_log.status = 'COMPLETED'
@@ -544,9 +555,11 @@ def generate_deal_helper_analysis_async(
     model_provider: str = "vllm",
 ):
     try:
-        from deals.models import Deal, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealDocument
+        from deals.models import Deal, DealGeneratedDocument, DealDocument
 
         deal = Deal.objects.get(id=deal_id)
+        if mode == "full_rewrite":
+            raise ValueError("Full rewrite is no longer supported from deal helper.")
         audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
         if audit_log:
             audit_log.status = "PROCESSING"
@@ -599,42 +612,32 @@ def generate_deal_helper_analysis_async(
                 "text": _truncate_text(selected_context, 24000),
             })
         selected_pipeline_context = _deal_comparison_context(deal, selected_deal_ids)
-        if mode == "full_rewrite":
-            skill_name = "deal_synthesis"
+        skill_name = "deal_helper_directive_document"
+        prompt = (
+            f"Create generated document '{document_title or directive[:80] or 'Directive Document'}' "
+            f"for deal: {deal.title}.\n\n"
+            f"Analyst directive:\n{directive}\n\n"
+            "Follow the directive's requested artifact type, structure, and format. "
+            "Use only the selected evidence and supplied deal context for factual claims."
+        )
+        output_mode = "directive_document"
+        if not AISkill.objects.filter(name=skill_name).exists():
+            skill_name = None
             prompt = (
-                f"Create a saved full rewrite for deal: {deal.title}.\n\n"
-                f"User directive:\n{directive}\n\n"
-                "Use the selected document evidence, selected helper context, stored related-deal context, "
-                "selected pipeline comparison set, and deal-specific directive supplied to the skill."
+                "Create a generated deal document in Markdown.\n\n"
+                "Return only the final Markdown document. Do not return JSON, markdown fences, "
+                "prompt instructions, or hidden reasoning. Follow the analyst directive as the "
+                "primary structure and format. Do not force the canonical deal synthesis 7-section "
+                "structure unless the directive explicitly asks for it.\n\n"
+                f"[DOCUMENT TITLE]\n{document_title or directive[:80] or 'Directive Document'}\n\n"
+                f"[DEAL]\n{deal.title}\n\n"
+                f"[ANALYST DIRECTIVE]\n{directive}\n\n"
+                f"[DOCUMENT EVIDENCE JSON]\n{json.dumps(document_evidence, default=str, ensure_ascii=True)}\n\n"
+                f"[SUPPORTING RAW CHUNKS JSON]\n{json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True)}\n\n"
+                f"[STORED COMPETITOR / RELATED-DEAL CONTEXT]\n{saved_context or 'No stored competitor or related-deal context.'}\n\n"
+                f"[SELECTED PIPELINE CONTEXT]\n{selected_pipeline_context}\n\n"
+                f"[SELECTED DEAL HELPER CONTEXT]\n{_truncate_text(selected_context, 24000) if selected_context else 'No manually selected evidence context supplied.'}"
             )
-            output_mode = "markdown_document"
-        else:
-            skill_name = "deal_helper_directive_document"
-            prompt = (
-                f"Create generated document '{document_title or directive[:80] or 'Directive Document'}' "
-                f"for deal: {deal.title}.\n\n"
-                f"Analyst directive:\n{directive}\n\n"
-                "Follow the directive's requested artifact type, structure, and format. "
-                "Use only the selected evidence and supplied deal context for factual claims."
-            )
-            output_mode = "directive_document"
-            if not AISkill.objects.filter(name=skill_name).exists():
-                skill_name = None
-                prompt = (
-                    "Create a generated deal document in Markdown.\n\n"
-                    "Return only the final Markdown document. Do not return JSON, markdown fences, "
-                    "prompt instructions, or hidden reasoning. Follow the analyst directive as the "
-                    "primary structure and format. Do not force the canonical deal synthesis 7-section "
-                    "structure unless the directive explicitly asks for it.\n\n"
-                    f"[DOCUMENT TITLE]\n{document_title or directive[:80] or 'Directive Document'}\n\n"
-                    f"[DEAL]\n{deal.title}\n\n"
-                    f"[ANALYST DIRECTIVE]\n{directive}\n\n"
-                    f"[DOCUMENT EVIDENCE JSON]\n{json.dumps(document_evidence, default=str, ensure_ascii=True)}\n\n"
-                    f"[SUPPORTING RAW CHUNKS JSON]\n{json.dumps(supporting_raw_chunks, default=str, ensure_ascii=True)}\n\n"
-                    f"[STORED COMPETITOR / RELATED-DEAL CONTEXT]\n{saved_context or 'No stored competitor or related-deal context.'}\n\n"
-                    f"[SELECTED PIPELINE CONTEXT]\n{selected_pipeline_context}\n\n"
-                    f"[SELECTED DEAL HELPER CONTEXT]\n{_truncate_text(selected_context, 24000) if selected_context else 'No manually selected evidence context supplied.'}"
-                )
         result = ai_service.process_content(
             content=prompt,
             skill_name=skill_name,
@@ -694,30 +697,19 @@ def generate_deal_helper_analysis_async(
             "selected_chunk_ids": selected_chunk_ids or [],
         })
         next_version = None
-        if mode == "full_rewrite":
-            next_version = (deal.analyses.order_by("-version").values_list("version", flat=True).first() or 0) + 1
-            DealAnalysis.objects.create(
-                deal=deal,
-                version=next_version,
-                analysis_kind=AnalysisKind.SUPPLEMENTAL,
-                thinking=clean_thinking,
-                ambiguities=metadata.get("ambiguous_points", []),
-                analysis_json=analysis,
-            )
-        else:
-            generated_document = DealGeneratedDocument.objects.filter(id=generated_document_id).first() if generated_document_id else None
-            if generated_document:
-                generated_document.title = (document_title or generated_document.title or directive[:80] or "Directive Document")[:255]
-                generated_document.directive = directive
-                generated_document.content = report
-                generated_document.selected_deal_ids = selected_deal_ids or []
-                generated_document.selected_document_ids = selected_document_ids or []
-                generated_document.selected_chunk_ids = selected_chunk_ids or []
-                generated_document.audit_log_id = audit_log_id
-                generated_document.save(update_fields=[
-                    "title", "directive", "content", "selected_deal_ids",
-                    "selected_document_ids", "selected_chunk_ids", "audit_log_id",
-                ])
+        generated_document = DealGeneratedDocument.objects.filter(id=generated_document_id).first() if generated_document_id else None
+        if generated_document:
+            generated_document.title = (document_title or generated_document.title or directive[:80] or "Directive Document")[:255]
+            generated_document.directive = directive
+            generated_document.content = report
+            generated_document.selected_deal_ids = selected_deal_ids or []
+            generated_document.selected_document_ids = selected_document_ids or []
+            generated_document.selected_chunk_ids = selected_chunk_ids or []
+            generated_document.audit_log_id = audit_log_id
+            generated_document.save(update_fields=[
+                "title", "directive", "content", "selected_deal_ids",
+                "selected_document_ids", "selected_chunk_ids", "audit_log_id",
+            ])
         if audit_log:
             audit_log.raw_response = report
             audit_log.raw_thinking = clean_thinking

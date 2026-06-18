@@ -755,10 +755,9 @@ class DealHelperView(APIView):
         model_provider = request.data.get("model_provider", "vllm")
         if not deal_id or not directive:
             return Response({"error": "deal_id and directive are required."}, status=400)
-        deal = Deal.objects.get(id=deal_id)
         if mode == "full_rewrite":
-            deal.analysis_prompt = directive
-            deal.save(update_fields=["analysis_prompt"])
+            return Response({"error": "Full rewrite is no longer supported from deal helper."}, status=400)
+        deal = Deal.objects.get(id=deal_id)
         selected_context = ""
         selected_deal_ids = []
         selected_document_ids = []
@@ -775,23 +774,18 @@ class DealHelperView(APIView):
                 if not selected_chunk_ids or str(chunk.get("chunk_id")) in selected_chunk_ids
             )
         personality = AIPersonality.objects.filter(is_default=True).first()
-        if mode == "full_rewrite":
-            skill = AISkill.objects.filter(name='deal_synthesis').first() or AISkill.objects.filter(name='vdr_incremental_analysis').first() or AISkill.objects.filter(name='deal_chat').first()
-        else:
-            skill = AISkill.objects.filter(name='deal_helper_directive_document').first() or AISkill.objects.filter(name='deal_chat').first()
-        generated_document = None
-        if mode != "full_rewrite":
-            generated_document = DealGeneratedDocument.objects.create(
-                deal=deal,
-                title=document_title or directive[:80] or "Directive Document",
-                kind=DealGeneratedDocument.DocumentKind.DIRECTIVE,
-                directive=directive,
-                content="Queued...",
-                selected_deal_ids=selected_deal_ids,
-                selected_document_ids=selected_document_ids,
-                selected_chunk_ids=selected_chunk_ids,
-                created_by=self._profile(request),
-            )
+        skill = AISkill.objects.filter(name='deal_helper_directive_document').first() or AISkill.objects.filter(name='deal_chat').first()
+        generated_document = DealGeneratedDocument.objects.create(
+            deal=deal,
+            title=document_title or directive[:80] or "Directive Document",
+            kind=DealGeneratedDocument.DocumentKind.DIRECTIVE,
+            directive=directive,
+            content="Queued...",
+            selected_deal_ids=selected_deal_ids,
+            selected_document_ids=selected_document_ids,
+            selected_chunk_ids=selected_chunk_ids,
+            created_by=self._profile(request),
+        )
         audit_log = AIRuntimeService.create_audit_log(
             source_type='deal_helper_analysis',
             source_id=str(deal.id),
@@ -859,7 +853,7 @@ class DealHelperView(APIView):
                     route=helper_session.get("route"),
                     event_type="analysis_queued",
                     title="Queued Saved Analysis",
-                    summary=f"Queued {'full rewrite' if mode == 'full_rewrite' else 'directive document'} from the selected evidence.",
+                    summary="Queued directive document from the selected evidence.",
                     data={
                         "mode": mode,
                         "directive": directive,

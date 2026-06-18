@@ -253,12 +253,18 @@ def resolve_competitor_cins_for_deal(deal: Deal, competitors: list[dict[str, str
     skipped = []
     target_key = (deal.title or "").strip().casefold()
     existing_by_name, existing_by_cin = _existing_competitor_relations(deal)
+    seen_names = set()
+    seen_cins = set()
 
     for item in competitors[:limit]:
         name = _clean_company_name(item.get("name") if isinstance(item, dict) else "")
         supplied_cin = normalize_cin(item.get("cin") if isinstance(item, dict) else "")
         if not name:
             continue
+        name_key = name.casefold()
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
         if target_key and name.casefold() == target_key:
             failed.append({"name": name, "error": "Skipped target company name."})
             continue
@@ -287,6 +293,14 @@ def resolve_competitor_cins_for_deal(deal: Deal, competitors: list[dict[str, str
                     "resolution": resolution,
                 })
                 continue
+            if resolved_cin in seen_cins:
+                skipped.append({
+                    "name": name,
+                    "cin": resolved_cin,
+                    "reason": "Duplicate resolved CIN in this selection.",
+                })
+                continue
+            seen_cins.add(resolved_cin)
             resolved.append({
                 "name": name,
                 "cin": resolved_cin,
@@ -309,6 +323,7 @@ def fetch_competitor_vi_profiles_for_deal(deal: Deal, resolved_competitors: list
     failed = []
     skipped = []
     existing_by_name, existing_by_cin = _existing_competitor_relations(deal)
+    seen_cins = set()
 
     for item in resolved_competitors[:limit]:
         name = _clean_company_name(item.get("name"))
@@ -316,6 +331,10 @@ def fetch_competitor_vi_profiles_for_deal(deal: Deal, resolved_competitors: list
         if not name or not is_valid_cin(cin):
             failed.append({"name": name or "Unknown", "cin": cin, "error": "Missing valid resolved CIN."})
             continue
+        if cin in seen_cins:
+            skipped.append({"name": name, "cin": cin, "reason": "Duplicate resolved CIN in this selection."})
+            continue
+        seen_cins.add(cin)
 
         existing = existing_by_cin.get(cin) or existing_by_name.get(name.casefold())
         if existing:
@@ -356,9 +375,6 @@ def fetch_competitor_vi_profiles_for_deal(deal: Deal, resolved_competitors: list
 
 
 def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
-    if is_competitor_demo_mode():
-        return enrich_demo_competitors_for_deal(deal, competitors, limit=limit)
-
     cin_resolution = resolve_competitor_cins_for_deal(deal, competitors, limit=limit)
     vi_fetch = fetch_competitor_vi_profiles_for_deal(deal, cin_resolution["resolved"], limit=limit)
     return {

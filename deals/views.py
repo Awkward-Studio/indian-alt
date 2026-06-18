@@ -639,6 +639,108 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "current_analysis": deal.current_analysis,
             "analysis_history": deal.analysis_history,
         })
+
+    @action(detail=True, methods=['post'])
+    def rewrite_analysis_section(self, request, pk=None):
+        """
+        Generate a preview rewrite for one analysis report section.
+        The rewritten markdown is returned to the caller and is not persisted.
+        """
+        deal = self.get_object()
+        section_markdown = request.data.get('section_markdown')
+        section_title = request.data.get('section_title')
+        instruction = request.data.get('instruction')
+        full_report = request.data.get('full_report')
+
+        for field_name, value in (
+            ('section_markdown', section_markdown),
+            ('section_title', section_title),
+            ('instruction', instruction),
+            ('full_report', full_report),
+        ):
+            if not isinstance(value, str):
+                return Response({"error": f"{field_name} must be a string"}, status=400)
+
+        section_markdown = section_markdown.strip()
+        section_title = section_title.strip() or "Untitled Section"
+        instruction = instruction.strip()
+        full_report = full_report.strip()
+
+        if not section_markdown:
+            return Response({"error": "section_markdown cannot be empty"}, status=400)
+        if not instruction:
+            return Response({"error": "instruction cannot be empty"}, status=400)
+
+        version = request.data.get('version')
+        if version not in (None, ''):
+            try:
+                int(version)
+            except (TypeError, ValueError):
+                return Response({"error": "version must be a number"}, status=400)
+
+        prompt = f"""
+You are editing one section of a private equity analysis report.
+
+Rewrite only the selected section according to the analyst instruction. Use the full report only for context and consistency.
+
+Rules:
+- Return Markdown only.
+- Preserve the selected section heading unless the analyst explicitly asks to rename it.
+- Do not add commentary, JSON, code fences, or explanations.
+- Do not invent new facts. If the instruction asks for emphasis, reframe using facts already present in the selected section or full report.
+- Keep tables as valid Markdown tables when the source section contains tables.
+
+[DEAL]
+{deal.title}
+
+[SELECTED SECTION TITLE]
+{section_title}
+
+[ANALYST INSTRUCTION]
+{instruction}
+
+[SELECTED SECTION MARKDOWN]
+{section_markdown}
+
+[FULL REPORT CONTEXT]
+{full_report}
+""".strip()
+
+        try:
+            from ai_orchestrator.services.ai_processor import AIProcessorService
+
+            ai_service = AIProcessorService()
+            result = ai_service.process_content(
+                content=prompt,
+                skill_name=None,
+                source_type="analysis_section_rewrite",
+                source_id=str(deal.id),
+                metadata={
+                    "model_provider": "vllm",
+                    "response_mode": "markdown",
+                    "personality_only_system": True,
+                    "deal_id": str(deal.id),
+                    "section_title": section_title,
+                    "analysis_version": version,
+                },
+            )
+            if isinstance(result, dict):
+                rewritten = (
+                    result.get('response')
+                    or result.get('_raw_response')
+                    or result.get('content')
+                    or ""
+                ).strip()
+            else:
+                rewritten = str(result or "").strip()
+
+            if not rewritten:
+                return Response({"error": "AI did not return a rewritten section"}, status=502)
+
+            return Response({"section_markdown": rewritten})
+        except Exception as exc:
+            logger.exception("Failed to rewrite analysis section for deal %s", deal.id)
+            return Response({"error": str(exc)}, status=500)
     
     def create(self, request, *args, **kwargs):
         """
@@ -1148,58 +1250,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def save_competitors(self, request, pk=None):
         """
-        Saves selected competitors as a permanent DealDocument, then queues the
-        ordered CIN -> VI -> embedding pipeline in Celery.
+        Queues selected competitors for the ordered CIN -> VI -> embedding pipeline.
+        Competitor research is stored as competitor VI relations, not as deal documents.
         """
         deal = self.get_object()
         competitors_text = request.data.get("competitors_text")
-        if not competitors_text:
-            return Response({"error": "competitors_text is required"}, status=400)
         if "competitors" in request.data and not request.data.get("competitors"):
             return Response({"error": "Select at least one competitor to save."}, status=400)
 
-        from django.utils import timezone
-        title = request.data.get("title") or f"Top 10 Competitors - {timezone.now().strftime('%Y-%m-%d')}"
-
-        from .models import DocumentType, DealDocument
-        doc = DealDocument.objects.create(
-            deal=deal,
-            title=title,
-            document_type=DocumentType.OTHER,
-            extracted_text=competitors_text,
-            normalized_text=competitors_text,
-            is_indexed=False,
-            is_ai_analyzed=False,
-            extraction_mode="fallback_text",
-            transcription_status="complete",
-            chunking_status="not_chunked",
-            last_transcribed_at=timezone.now(),
-            uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
-        )
-
-        from .services.document_artifacts import DocumentArtifactService
-        from ai_orchestrator.services.ai_processor import AIProcessorService
-
-        # 1. Generate local artifact
-        try:
-            ai_service = AIProcessorService()
-            DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=True)
-        except Exception as artifact_err:
-            logger.warning(f"Failed to generate competitor document artifact: {str(artifact_err)}")
-
-        # 2. Append directly to deal.extracted_text
-        try:
-            from .tasks import _sync_deal_extracted_text_for_documents
-            _sync_deal_extracted_text_for_documents(deal, [doc])
-        except Exception as sync_err:
-            logger.warning(f"Failed to sync competitor text via helper task: {str(sync_err)}")
-            # Manual fallback sync
-            new_context = f"\n\n--- MANUAL DOCUMENT: {title} ---\n{competitors_text}"
-            deal.extracted_text = (deal.extracted_text or "") + new_context
-            deal.save(update_fields=['extracted_text'])
-
-        # 3. Resolve competitor CINs, call Venture Intelligence, and embed the saved
-        # competitor document asynchronously in that order.
         competitors = []
         try:
             from .services.competitor_intelligence import (
@@ -1228,17 +1286,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 "deal_id": str(deal.id),
                 "competitors": competitors,
                 "limit": 10,
-                "document_id": str(doc.id),
             },
             queue='high_priority'
         )
 
-        from .serializers import DealDocumentSerializer
         return Response({
             "status": "queued",
             "task_id": task.id,
-            "message": "Competitor context saved. CIN resolution, VI fetch, and embedding queued in Celery.",
-            "document": DealDocumentSerializer(doc).data,
+            "message": "Competitor CIN resolution, VI fetch, and VI profile embedding queued in Celery.",
         })
 
     @action(detail=True, methods=['get'], url_path='competitor_vi_status/(?P<task_id>[^/.]+)')

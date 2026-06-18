@@ -545,17 +545,20 @@ class UniversalChatService:
 
     def classify_deal_helper_route(self, user_message: str) -> str:
         lowered = (user_message or "").lower()
-        if any(term in lowered for term in ["full rewrite", "rewrite analysis", "rewrite the analysis", "regenerate analysis"]):
-            return "analysis_full_rewrite"
-        if any(term in lowered for term in ["addendum", "ic note", "financial model", "memo", "risk register", "new analysis", "v2", "v3"]):
+        if any(term in lowered for term in [
+            "addendum", "ic note", "financial model", "memo", "risk register",
+            "new analysis", "v2", "v3", "directive document",
+            "create document", "generate document",
+        ]):
             return "analysis_user_directive_addendum"
         if any(term in lowered for term in [
-            "competitor", "competitors", "similar deal", "similar deals", "comparable",
-            "other deals", "pipeline", "sister", "parent", "subsidiary", "compare",
-            "compared", "comparison", " vs ", " versus ", "benchmark", "relative to",
-            "how does this compare",
+            "use document", "use documents", "select document", "select documents",
+            "choose document", "choose documents", "from the cim", "from cim",
+            "from the deck", "from deck", "from the vdr", "from vdr",
+            "based on the document", "based on documents",
+            "using the document", "using documents",
         ]):
-            return "related_deals"
+            return "current_deal"
         return "current_deal"
 
     def start_deal_helper_session(self, *, deal_id: str, user_message: str, conversation_id: str, history_context: str = "") -> Dict[str, Any]:
@@ -564,35 +567,6 @@ class UniversalChatService:
         plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
         saved_context = self._saved_relationship_context_for_deal(deal)
         documents = list(deal.documents.all().order_by("-created_at"))
-
-        if route == "related_deals":
-            # Increase limit for interactive selection so analyst has more choices (e.g. at least 12)
-            plan["deal_limit"] = max(int(plan.get("deal_limit") or 12), 12)
-            plan["_active_deal_context"] = self._active_deal_context_for_related_selection(deal)
-            
-            # Enhance the semantic query with the active deal's metadata so that
-            # generic user queries like "compare" actually pull comparable deals.
-            search_enhancement = " ".join([str(val) for val in [deal.industry, deal.sector, deal.title] if val])
-            plan["user_query"] = f"{plan.get('user_query', '')} {search_enhancement}".strip()
-            if plan.get("semantic_queries"):
-                plan["semantic_queries"] = [f"{q} {search_enhancement}".strip() for q in plan["semantic_queries"]]
-            
-            deals = [candidate for candidate in self._get_candidate_deals(plan) if str(candidate.id) != str(deal.id)]
-            serialized_deals = [self._serialize_deal(candidate) for candidate in deals]
-            for index, item in enumerate(serialized_deals):
-                item["suggested_score"] = item.get("retrieval_score")
-                item["rank_reason"] = (
-                    getattr(deals[index], "_deal_text_rerank_reason", None)
-                    or "Reranked pipeline match"
-                )
-            self._apply_related_deal_suggestions(serialized_deals, plan)
-            return {
-                "route": route,
-                "query_plan": plan,
-                "saved_context": saved_context,
-                "candidate_deals": serialized_deals,
-                "documents": [],
-            }
 
         return {
             "route": route,

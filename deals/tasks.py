@@ -1885,16 +1885,15 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
 
 
 @shared_task(queue='high_priority')
-def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limit: int = 10, document_id: str | None = None) -> dict:
+def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limit: int = 10) -> dict:
     """
     Enrich selected competitors in ordered phases:
     1. Resolve CINs for selected companies.
     2. Fetch and store VI profiles using those CINs.
-    3. Embed the saved competitor document after enrichment completes.
+    3. Embed the fetched VI profiles for local AI retrieval.
     """
     try:
-        from deals.models import Deal, DealDocument, VentureIntelligenceCompanyProfile
-        from ai_orchestrator.services.embedding_processor import EmbeddingService
+        from deals.models import Deal, VentureIntelligenceCompanyProfile
         from deals.services.competitor_intelligence import enrich_competitors_for_deal
         from deals.services.venture_intelligence import VentureIntelligenceService
 
@@ -1902,7 +1901,6 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
         vi_enrichment = enrich_competitors_for_deal(deal, competitors or [], limit=limit)
         embedding_result = {
             "status": "skipped",
-            "document_id": document_id or "",
             "vi_profiles_indexed": 0,
             "vi_profile_errors": [],
         }
@@ -1925,28 +1923,7 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
                     "error": str(profile_embed_err),
                 })
         embedding_result["vi_profile_errors"] = vi_profile_errors
-
-        if document_id:
-            try:
-                doc = DealDocument.objects.get(id=document_id, deal=deal)
-                success = EmbeddingService().vectorize_document(doc)
-                embedding_result = {
-                    "status": "success" if success else "failed",
-                    "document_id": str(doc.id),
-                    "vi_profiles_indexed": embedding_result["vi_profiles_indexed"],
-                    "vi_profile_errors": vi_profile_errors,
-                }
-                if not success:
-                    logger.warning("Competitor document vectorization returned False for document %s.", doc.id)
-            except Exception as embed_err:
-                logger.warning("Competitor document embedding failed after VI enrichment: %s", embed_err)
-                embedding_result = {
-                    "status": "failed",
-                    "document_id": document_id,
-                    "vi_profiles_indexed": embedding_result["vi_profiles_indexed"],
-                    "vi_profile_errors": vi_profile_errors,
-                    "error": str(embed_err),
-                }
+        embedding_result["status"] = "success" if not vi_profile_errors else "partial"
 
         vi_enrichment["steps"] = {
             **(vi_enrichment.get("steps") or {}),
