@@ -1148,8 +1148,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def save_competitors(self, request, pk=None):
         """
-        Saves the competitor list as a permanent DealDocument, updates deal.extracted_text, 
-        and vectorizes the document chunk (with graceful offline degradation).
+        Saves selected competitors as a permanent DealDocument, then queues the
+        ordered CIN -> VI -> embedding pipeline in Celery.
         """
         deal = self.get_object()
         competitors_text = request.data.get("competitors_text")
@@ -1177,7 +1177,6 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
         )
 
-        from ai_orchestrator.services.embedding_processor import EmbeddingService
         from .services.document_artifacts import DocumentArtifactService
         from ai_orchestrator.services.ai_processor import AIProcessorService
 
@@ -1199,16 +1198,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             deal.extracted_text = (deal.extracted_text or "") + new_context
             deal.save(update_fields=['extracted_text'])
 
-        # 3. Graceful vectorization attempts
-        try:
-            embed_service = EmbeddingService()
-            success = embed_service.vectorize_document(doc)
-            if not success:
-                logger.warning("Competitor vectorization returned False.")
-        except Exception as embed_err:
-            logger.warning(f"Graceful vectorization failure (Inference VM is likely offline): {str(embed_err)}")
-
-        # 4. Resolve competitor CINs, call Venture Intelligence, and store competitor profiles asynchronously.
+        # 3. Resolve competitor CINs, call Venture Intelligence, and embed the saved
+        # competitor document asynchronously in that order.
         competitors = []
         try:
             from .services.competitor_intelligence import (
@@ -1237,6 +1228,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 "deal_id": str(deal.id),
                 "competitors": competitors,
                 "limit": 10,
+                "document_id": str(doc.id),
             },
             queue='high_priority'
         )
@@ -1245,7 +1237,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         return Response({
             "status": "queued",
             "task_id": task.id,
-            "message": "Competitor context saved. VI enrichment queued in Celery.",
+            "message": "Competitor context saved. CIN resolution, VI fetch, and embedding queued in Celery.",
             "document": DealDocumentSerializer(doc).data,
         })
 

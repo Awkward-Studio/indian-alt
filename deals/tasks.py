@@ -1764,11 +1764,11 @@ def _format_competitor_items_report(competitors: list[dict], *, title: str) -> s
     lines = [f"# {title}", ""]
     for index, competitor in enumerate(competitors, start=1):
         name = competitor.get("name") or competitor.get("company_name") or "Unknown company"
-        cin = competitor.get("cin") or ""
         notes = competitor.get("notes") or competitor.get("nature_of_competition") or competitor.get("core_business") or ""
+        region = competitor.get("country_or_region") or competitor.get("region") or competitor.get("country") or ""
         lines.append(f"## {index}. {name}")
-        if cin:
-            lines.append(f"- CIN: {cin}")
+        if region:
+            lines.append(f"- Region: {region}")
         if notes:
             lines.append(f"- Notes: {notes}")
         lines.append("")
@@ -1778,8 +1778,10 @@ def _format_competitor_items_report(competitors: list[dict], *, title: str) -> s
 @shared_task(queue='high_priority')
 def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
-    Asynchronously executes Claude web search with custom timeout and optimized CIN prompt.
+    Asynchronously executes Claude web search for competitor discovery only.
     Does not fall back to pre-trained static knowledge; runs strictly on live web tools.
+    CIN resolution and Venture Intelligence enrichment are intentionally deferred
+    to the selected-competitor save flow.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -1826,14 +1828,15 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             f"  \"competitors\": [\n"
             f"    {{\n"
             f"      \"company_name\": \"Exact company or brand name\",\n"
-            f"      \"cin\": \"21-character Indian CIN if found, otherwise blank\",\n"
             f"      \"core_business\": \"Short phrase only\",\n"
-            f"      \"nature_of_competition\": \"Short phrase only\"\n"
+            f"      \"nature_of_competition\": \"Short phrase only\",\n"
+            f"      \"country_or_region\": \"Primary country or region, if relevant\"\n"
             f"    }}\n"
             f"  ]\n"
             f"}}\n"
-            f"{count_instruction} Prefer companies with VI/MCA-compatible Indian CINs for Indian entities. "
-            f"For non-Indian competitors, leave cin blank and include the country or region in nature_of_competition. "
+            f"{count_instruction} Do not search for or return Corporate Identity Numbers, CINs, MCA identifiers, "
+            f"registry numbers, tax identifiers, or Venture Intelligence identifiers. "
+            f"Focus only on accurate competitor discovery and concise rationale. "
             f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
         )
 
@@ -1859,7 +1862,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         except json.JSONDecodeError:
             parsed = {}
 
-        raw_competitors = competitor_names_from_payload(parsed or response_text, limit=10)
+        raw_competitors = competitor_names_from_payload(parsed or response_text, limit=10, include_cin=False)
         competitors = []
         seen_keys = set(existing_keys)
         for competitor in raw_competitors:
@@ -1873,7 +1876,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         report = _format_competitor_items_report(competitors, title=report_title)
         return {
             "response": report or response_text,
-            "competitors": competitors,
+            "competitors": [{**competitor, "cin": ""} for competitor in competitors],
         }
             
     except Exception as e:
@@ -1882,16 +1885,73 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
 
 
 @shared_task(queue='high_priority')
-def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limit: int = 10) -> dict:
+def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limit: int = 10, document_id: str | None = None) -> dict:
     """
-    Enrich selected competitors with Venture Intelligence data in the Celery worker.
+    Enrich selected competitors in ordered phases:
+    1. Resolve CINs for selected companies.
+    2. Fetch and store VI profiles using those CINs.
+    3. Embed the saved competitor document after enrichment completes.
     """
     try:
-        from deals.models import Deal
+        from deals.models import Deal, DealDocument, VentureIntelligenceCompanyProfile
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
         from deals.services.competitor_intelligence import enrich_competitors_for_deal
+        from deals.services.venture_intelligence import VentureIntelligenceService
 
         deal = Deal.objects.get(id=deal_id)
         vi_enrichment = enrich_competitors_for_deal(deal, competitors or [], limit=limit)
+        embedding_result = {
+            "status": "skipped",
+            "document_id": document_id or "",
+            "vi_profiles_indexed": 0,
+            "vi_profile_errors": [],
+        }
+
+        vi_profile_errors = []
+        vi_service = VentureIntelligenceService()
+        for item in vi_enrichment.get("enriched", []):
+            profile_id = item.get("profile_id")
+            if not profile_id:
+                continue
+            try:
+                profile = VentureIntelligenceCompanyProfile.objects.get(id=profile_id)
+                vi_service.index_profile_for_rag(profile, deal=deal)
+                embedding_result["vi_profiles_indexed"] += 1
+            except Exception as profile_embed_err:
+                logger.warning("Competitor VI profile embedding failed for profile %s: %s", profile_id, profile_embed_err)
+                vi_profile_errors.append({
+                    "profile_id": profile_id,
+                    "name": item.get("name", ""),
+                    "error": str(profile_embed_err),
+                })
+        embedding_result["vi_profile_errors"] = vi_profile_errors
+
+        if document_id:
+            try:
+                doc = DealDocument.objects.get(id=document_id, deal=deal)
+                success = EmbeddingService().vectorize_document(doc)
+                embedding_result = {
+                    "status": "success" if success else "failed",
+                    "document_id": str(doc.id),
+                    "vi_profiles_indexed": embedding_result["vi_profiles_indexed"],
+                    "vi_profile_errors": vi_profile_errors,
+                }
+                if not success:
+                    logger.warning("Competitor document vectorization returned False for document %s.", doc.id)
+            except Exception as embed_err:
+                logger.warning("Competitor document embedding failed after VI enrichment: %s", embed_err)
+                embedding_result = {
+                    "status": "failed",
+                    "document_id": document_id,
+                    "vi_profiles_indexed": embedding_result["vi_profiles_indexed"],
+                    "vi_profile_errors": vi_profile_errors,
+                    "error": str(embed_err),
+                }
+
+        vi_enrichment["steps"] = {
+            **(vi_enrichment.get("steps") or {}),
+            "embedding": embedding_result,
+        }
         return {
             "status": "SUCCESS",
             "vi_enrichment": vi_enrichment,

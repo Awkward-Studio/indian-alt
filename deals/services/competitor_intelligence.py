@@ -6,7 +6,7 @@ from typing import Any
 
 from decouple import config
 from deals.models import Deal, VentureIntelligenceCompanyProfile, VentureIntelligenceCompanyRelation, VentureIntelligenceFinancialStatement, VentureIntelligenceRelationType
-from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.venture_intelligence import VentureIntelligenceService, is_valid_cin, normalize_cin
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +128,11 @@ def _notes_from_item(item: Any) -> str:
     return "\n".join(parts)
 
 
-def competitor_names_from_payload(payload: Any, *, limit: int = 10) -> list[dict[str, str]]:
+def competitor_names_from_payload(payload: Any, *, limit: int = 10, include_cin: bool = True) -> list[dict[str, str]]:
     if isinstance(payload, str):
         parsed = _extract_json_object(payload)
         if parsed:
-            return competitor_names_from_payload(parsed, limit=limit)
+            return competitor_names_from_payload(parsed, limit=limit, include_cin=include_cin)
         return competitor_names_from_text(payload, limit=limit)
 
     items = []
@@ -153,7 +153,7 @@ def competitor_names_from_payload(payload: Any, *, limit: int = 10) -> list[dict
             continue
         seen.add(key)
         cin = ""
-        if isinstance(item, dict):
+        if include_cin and isinstance(item, dict):
             cin = str(item.get("cin") or item.get("resolved_cin") or "").strip()
         results.append({"name": name, "notes": _notes_from_item(item), "cin": cin})
         if len(results) >= limit:
@@ -228,15 +228,7 @@ def format_competitor_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
-    if is_competitor_demo_mode():
-        return enrich_demo_competitors_for_deal(deal, competitors, limit=limit)
-
-    vi_service = VentureIntelligenceService()
-    enriched = []
-    failed = []
-    skipped = []
-    target_key = (deal.title or "").strip().casefold()
+def _existing_competitor_relations(deal: Deal):
     existing_relations = VentureIntelligenceCompanyRelation.objects.filter(
         deal=deal,
         relation_type=VentureIntelligenceRelationType.COMPETITOR,
@@ -251,17 +243,81 @@ def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *
         for relation in existing_relations
         if relation.company_profile.cin
     }
+    return existing_by_name, existing_by_cin
+
+
+def resolve_competitor_cins_for_deal(deal: Deal, competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
+    vi_service = VentureIntelligenceService()
+    resolved = []
+    failed = []
+    skipped = []
+    target_key = (deal.title or "").strip().casefold()
+    existing_by_name, existing_by_cin = _existing_competitor_relations(deal)
 
     for item in competitors[:limit]:
-        name = _clean_company_name(item.get("name"))
-        cin = str(item.get("cin") or "").strip().upper()
+        name = _clean_company_name(item.get("name") if isinstance(item, dict) else "")
+        supplied_cin = normalize_cin(item.get("cin") if isinstance(item, dict) else "")
         if not name:
             continue
         if target_key and name.casefold() == target_key:
             failed.append({"name": name, "error": "Skipped target company name."})
             continue
-        existing = existing_by_cin.get(cin) if cin else None
+
+        existing = existing_by_cin.get(supplied_cin) if supplied_cin else None
         existing = existing or existing_by_name.get(name.casefold())
+        if existing:
+            skipped.append({
+                "name": existing.company_profile.name or name,
+                "cin": existing.company_profile.cin or supplied_cin,
+                "profile_id": str(existing.company_profile.id),
+                "reason": "Already fetched for this deal.",
+            })
+            continue
+
+        try:
+            if supplied_cin and is_valid_cin(supplied_cin):
+                resolution = vi_service.resolve_company_identity(company_name=name, cin=supplied_cin)
+            else:
+                resolution = vi_service.resolve_company_identity(company_name=name, cin=None)
+            resolved_cin = normalize_cin(resolution.get("cin"))
+            if not resolution.get("is_valid") or not is_valid_cin(resolved_cin):
+                failed.append({
+                    "name": name,
+                    "error": resolution.get("error") or "Could not resolve a valid CIN.",
+                    "resolution": resolution,
+                })
+                continue
+            resolved.append({
+                "name": name,
+                "cin": resolved_cin,
+                "entity_name": resolution.get("entity_name") or name,
+                "confidence": resolution.get("confidence"),
+                "source": resolution.get("source") or "",
+                "notes": item.get("notes") or "",
+                "resolution": resolution,
+            })
+        except Exception as exc:
+            logger.warning("Failed to resolve CIN for competitor '%s' on deal %s: %s", name, deal.id, exc)
+            failed.append({"name": name, "error": str(exc)})
+
+    return {"resolved": resolved, "failed": failed, "skipped": skipped}
+
+
+def fetch_competitor_vi_profiles_for_deal(deal: Deal, resolved_competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
+    vi_service = VentureIntelligenceService()
+    enriched = []
+    failed = []
+    skipped = []
+    existing_by_name, existing_by_cin = _existing_competitor_relations(deal)
+
+    for item in resolved_competitors[:limit]:
+        name = _clean_company_name(item.get("name"))
+        cin = normalize_cin(item.get("cin"))
+        if not name or not is_valid_cin(cin):
+            failed.append({"name": name or "Unknown", "cin": cin, "error": "Missing valid resolved CIN."})
+            continue
+
+        existing = existing_by_cin.get(cin) or existing_by_name.get(name.casefold())
         if existing:
             skipped.append({
                 "name": existing.company_profile.name or name,
@@ -272,28 +328,13 @@ def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *
             continue
 
         try:
-            try:
-                profile = vi_service.enrich_deal(
-                    deal_id=deal.id,
-                    company_name=name,
-                    cin=cin or None,
-                    relation_type=VentureIntelligenceRelationType.COMPETITOR,
-                )
-            except Exception as cin_exc:
-                if not cin:
-                    raise
-                logger.warning(
-                    "VI rejected supplied CIN %s for competitor '%s'; retrying name-based CIN resolution: %s",
-                    cin,
-                    name,
-                    cin_exc,
-                )
-                profile = vi_service.enrich_deal(
-                    deal_id=deal.id,
-                    company_name=name,
-                    cin=None,
-                    relation_type=VentureIntelligenceRelationType.COMPETITOR,
-                )
+            profile = vi_service.enrich_deal(
+                deal_id=deal.id,
+                company_name=item.get("entity_name") or name,
+                cin=cin,
+                relation_type=VentureIntelligenceRelationType.COMPETITOR,
+                index_for_rag=False,
+            )
             relation = VentureIntelligenceCompanyRelation.objects.filter(
                 deal=deal,
                 company_profile=profile,
@@ -304,14 +345,31 @@ def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *
                 relation.save(update_fields=["notes"])
             enriched.append({
                 "name": profile.name or name,
-                "cin": profile.cin or "",
+                "cin": profile.cin or cin,
                 "profile_id": str(profile.id),
             })
         except Exception as exc:
-            logger.warning("Failed to enrich competitor '%s' for deal %s: %s", name, deal.id, exc)
-            failed.append({"name": name, "error": str(exc)})
+            logger.warning("Failed to fetch VI profile for competitor '%s' (%s) on deal %s: %s", name, cin, deal.id, exc)
+            failed.append({"name": name, "cin": cin, "error": str(exc)})
 
     return {"enriched": enriched, "failed": failed, "skipped": skipped}
+
+
+def enrich_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
+    if is_competitor_demo_mode():
+        return enrich_demo_competitors_for_deal(deal, competitors, limit=limit)
+
+    cin_resolution = resolve_competitor_cins_for_deal(deal, competitors, limit=limit)
+    vi_fetch = fetch_competitor_vi_profiles_for_deal(deal, cin_resolution["resolved"], limit=limit)
+    return {
+        "enriched": vi_fetch["enriched"],
+        "failed": [*cin_resolution["failed"], *vi_fetch["failed"]],
+        "skipped": [*cin_resolution["skipped"], *vi_fetch["skipped"]],
+        "steps": {
+            "cin_resolution": cin_resolution,
+            "vi_fetch": vi_fetch,
+        },
+    }
 
 
 def enrich_demo_competitors_for_deal(deal: Deal, competitors: list[dict[str, str]], *, limit: int = 10) -> dict[str, list[dict[str, str]]]:
@@ -321,9 +379,11 @@ def enrich_demo_competitors_for_deal(deal: Deal, competitors: list[dict[str, str
 
     for item in competitors[:limit]:
         name = _clean_company_name(item.get("name"))
-        cin = str(item.get("cin") or "").strip().upper()
-        if not name or not cin:
-            failed.append({"name": name or "Unknown", "error": "Demo competitor requires a valid CIN hint."})
+        cin = normalize_cin(item.get("cin"))
+        if not cin:
+            cin = normalize_cin(VentureIntelligenceService().resolve_company_identity(company_name=name).get("cin"))
+        if not name or not is_valid_cin(cin):
+            failed.append({"name": name or "Unknown", "error": "Demo competitor requires a valid company name or CIN."})
             continue
 
         existing = VentureIntelligenceCompanyRelation.objects.filter(

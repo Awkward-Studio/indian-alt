@@ -524,7 +524,7 @@ class VentureIntelligenceService:
             raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
 
     @transaction.atomic
-    def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target'):
+    def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target', index_for_rag=True):
         """
         Queries VI (resolving CIN via AI web search if necessary) and saves profile and financials in the DB.
         """
@@ -830,10 +830,11 @@ class VentureIntelligenceService:
             deal.save(update_fields=["industry", "sector", "city", "company_details"])
 
         # 9. Index for RAG
-        try:
-            self.index_profile_for_rag(vi_profile, deal=deal)
-        except Exception as e:
-            logger.error(f"Error indexing VI profile for RAG: {e}", exc_info=True)
+        if index_for_rag:
+            try:
+                self.index_profile_for_rag(vi_profile, deal=deal)
+            except Exception as e:
+                logger.error(f"Error indexing VI profile for RAG: {e}", exc_info=True)
 
         return vi_profile
 

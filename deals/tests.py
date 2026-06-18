@@ -31,8 +31,52 @@ from deals.services.deal_flow import DealFlowService
 from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
 from deals.services.bulk_sync_resolution import folder_aliases, resolve_existing_deal, synthesis_canonical_title
-from deals.tasks import analyze_additional_documents_async, analyze_selection_async, process_single_document_async
+from deals.tasks import (
+    analyze_additional_documents_async,
+    analyze_selection_async,
+    fetch_competitors_async_task,
+    process_single_document_async,
+)
 from deals.services.venture_intelligence import VentureIntelligenceService
+
+
+class CompetitorSearchPipelineTests(TestCase):
+    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
+    def test_initial_competitor_search_defers_cin_resolution(self, mock_provider):
+        deal = Deal.objects.create(
+            title="Acme Commerce",
+            sector="Consumer",
+            industry="Ecommerce",
+            city="Bengaluru",
+            country="India",
+            deal_summary="Online commerce platform.",
+        )
+        provider = mock_provider.return_value
+        provider.execute_standard.return_value = {
+            "response": json.dumps({
+                "competitors": [
+                    {
+                        "company_name": "Peer Commerce",
+                        "core_business": "Online marketplace",
+                        "nature_of_competition": "Direct category peer",
+                        "country_or_region": "India",
+                    }
+                ]
+            })
+        }
+
+        result = fetch_competitors_async_task(str(deal.id))
+
+        prompt = provider.execute_standard.call_args.args[0]["prompt"]
+        self.assertNotIn('"cin"', prompt.lower())
+        self.assertNotIn("Prefer companies with VI/MCA-compatible Indian CINs", prompt)
+        self.assertIn("Do not search for or return Corporate Identity Numbers", prompt)
+        self.assertEqual(result["competitors"], [{
+            "name": "Peer Commerce",
+            "notes": "Core Business: Online marketplace\nNature Of Competition: Direct category peer",
+            "cin": "",
+        }])
+        self.assertNotIn("CIN:", result["response"])
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -1549,5 +1593,3 @@ class VentureIntelligenceViewTests(TestCase):
             format="json"
         )
         self.assertEqual(response.status_code, 401)
-
-

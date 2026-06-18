@@ -260,8 +260,9 @@ class GraphAPIService:
         """
         if token is None:
             token = self.get_access_token()
+        url = endpoint if endpoint.startswith('http') else f"{self.graph_endpoint}{endpoint}"
         res = requests.request(
-            method, f"{self.graph_endpoint}{endpoint}",
+            method, url,
             headers={'Authorization': f'Bearer {token}'}, params=params, timeout=30
         )
         if not res.ok:
@@ -359,7 +360,18 @@ class GraphAPIService:
         """List children of a specific item by drive ID and item ID."""
         token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
-        return self._make_request('GET', f"/drives/{drive_id}/items/{item_id}/children", token, params)
+        endpoint = f"/drives/{drive_id}/items/{item_id}/children"
+
+        data = self._make_request('GET', endpoint, token, params)
+        all_values = data.get('value', [])
+
+        next_link = data.get('@odata.nextLink')
+        while next_link:
+            data = self._make_request('GET', next_link, token)
+            all_values.extend(data.get('value', []))
+            next_link = data.get('@odata.nextLink')
+
+        return {'value': all_values}
 
     def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL, max_depth: int = 5) -> List[Dict[str, Any]]:
         """
@@ -533,4 +545,3 @@ class GraphAPIService:
         token = self.get_access_token(user_email, require_delegated=True)
         encoded = self._encode_sharing_url(sharing_url)
         return self._make_request('GET', f"/shares/{encoded}/driveItem", token)
-
