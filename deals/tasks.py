@@ -1923,7 +1923,7 @@ def _company_news_cards(research: dict) -> list[dict]:
                 })
 
     if cards:
-        return cards[:3]
+        return cards[:5]
 
     category_map = [
         ("red_flags", "red_flag", "red"),
@@ -1958,7 +1958,7 @@ def _company_news_cards(research: dict) -> list[dict]:
                 "source": source,
                 "url": url,
             })
-            if len(cards) >= 3:
+            if len(cards) >= 5:
                 return cards
     return cards
 
@@ -1977,7 +1977,7 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "Do not run broad category-by-category research.\n\n"
             f"Context: {deal.title}; sector={deal.sector or 'N/A'}; industry={deal.industry or 'N/A'}; "
             f"location={deal.city or 'N/A'}, {deal.country or 'N/A'}.\n\n"
-            "Prioritize only the biggest 1-3 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
+            "Prioritize only the biggest 1-5 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
             "major awards/partnerships, or other material red/green flags.\n\n"
             "Return exactly one JSON object and no markdown. Use this shape:\n"
             "{\n"
@@ -1988,7 +1988,7 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "  ],\n"
             "  \"sources\": [{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}]\n"
             "}\n"
-            "Return at most 3 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
+            "Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
             "Every card must be based on a source URL. Do not invent facts."
         )
 

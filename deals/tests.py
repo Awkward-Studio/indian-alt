@@ -101,7 +101,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("founder", prompt)
         self.assertIn("awards", prompt)
         self.assertIn("red/green flags", prompt)
-        self.assertIn("at most 3 news_cards", prompt)
+        self.assertIn("at most 5 news_cards", prompt)
         self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_search_uses"], 1)
         self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 1200)
 
