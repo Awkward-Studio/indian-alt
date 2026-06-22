@@ -34,6 +34,7 @@ from deals.services.folder_analysis import FolderAnalysisService
 from deals.services.bulk_sync_resolution import folder_aliases, resolve_existing_deal, synthesis_canonical_title
 from deals.tasks import (
     analyze_additional_documents_async,
+    fetch_company_news_async_task,
     analyze_selection_async,
     fetch_competitors_async_task,
     process_single_document_async,
@@ -42,6 +43,78 @@ from deals.services.venture_intelligence import VentureIntelligenceService
 
 
 class CompetitorSearchPipelineTests(TestCase):
+    @patch("deals.tasks.EmbeddingService")
+    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
+    def test_company_news_search_persists_dated_memo_document(self, mock_provider, mock_embedding_service):
+        deal = Deal.objects.create(
+            title="Acme Commerce",
+            sector="Consumer",
+            industry="Ecommerce",
+            city="Bengaluru",
+            country="India",
+            deal_summary="Online commerce platform.",
+        )
+        provider = mock_provider.return_value
+        provider.execute_standard.return_value = {
+            "response": json.dumps({
+                "overview": "Acme has recent public-domain diligence news.",
+                "executive_summary": "Acme has recent public-domain diligence news.",
+                "news_cards": [{
+                    "title": "Acme raised growth capital",
+                    "date": "2026-01-15",
+                    "summary": "Acme announced a new funding round.",
+                    "category": "funding",
+                    "sentiment": "green",
+                    "source": "Example News",
+                    "url": "https://example.com/acme-funding",
+                }],
+                "funding": [],
+                "litigation": [],
+                "patents": [],
+                "founders": [],
+                "awards": [],
+                "red_flags": [],
+                "green_flags": [{
+                    "title": "Acme won an award",
+                    "date": "2026-02-01",
+                    "summary": "Acme received industry recognition.",
+                    "source": "Example Awards",
+                    "url": "https://example.com/acme-award",
+                }],
+                "other": [],
+                "sources": [{
+                    "title": "Funding report",
+                    "publisher": "Example News",
+                    "date": "2026-01-15",
+                    "url": "https://example.com/acme-funding",
+                }],
+            })
+        }
+        mock_embedding_service.return_value.vectorize_document.return_value = True
+
+        first = fetch_company_news_async_task(str(deal.id))
+        second = fetch_company_news_async_task(str(deal.id))
+
+        prompt = provider.execute_standard.call_args.args[0]["prompt"].lower()
+        self.assertIn("web search", prompt)
+        self.assertIn("funding", prompt)
+        self.assertIn("litigation", prompt)
+        self.assertIn("founder", prompt)
+        self.assertIn("awards", prompt)
+        self.assertIn("red/green flags", prompt)
+        self.assertIn("at most 5 news_cards", prompt)
+        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_search_uses"], 1)
+        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 1200)
+
+        docs = DealDocument.objects.filter(deal=deal, title__startswith="Public Domain News Research").order_by("created_at")
+        self.assertEqual(docs.count(), 2)
+        self.assertEqual(docs.first().document_type, "Memo")
+        self.assertIn("Acme raised growth capital", docs.first().normalized_text)
+        self.assertEqual(mock_embedding_service.return_value.vectorize_document.call_count, 2)
+        self.assertEqual(first["counts"]["green_flags"], 1)
+        self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
+        self.assertEqual(second["document"]["title"], docs.last().title)
+
     @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
     def test_initial_competitor_search_defers_cin_resolution(self, mock_provider):
         deal = Deal.objects.create(

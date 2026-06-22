@@ -108,6 +108,8 @@ class DocumentProcessorService:
             "quality_flags": data.get("quality_flags") if isinstance(data.get("quality_flags"), list) else [],
             "render_metadata": data.get("render_metadata") if isinstance(data.get("render_metadata"), dict) else {},
         }
+        if isinstance(data.get("structured_data"), dict):
+            result["structured_data"] = data["structured_data"]
         if data.get("error"):
             result["error"] = data["error"]
         return result
