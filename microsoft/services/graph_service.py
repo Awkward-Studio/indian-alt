@@ -373,7 +373,7 @@ class GraphAPIService:
 
         return {'value': all_values}
 
-    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL, max_depth: int = 5) -> List[Dict[str, Any]]:
+    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL, max_depth: Optional[int] = 5) -> List[Dict[str, Any]]:
         """
         Efficiently fetch all files inside a folder tree using a queue-based traversal.
         Limits depth to prevent infinite loops or timeouts on massive structures.
@@ -387,15 +387,20 @@ class GraphAPIService:
         while queue:
             current_id, depth, path_prefix = queue.pop(0)
             
-            if depth > max_depth:
+            if max_depth is not None and depth > max_depth:
                 continue
                 
             try:
                 # Use a single API call per folder level
                 endpoint = f"/drives/{drive_id}/items/{current_id}/children"
-                params = {'$top': 999, '$select': 'id,name,folder,file,size'}
+                params = {'$top': 999, '$select': 'id,name,folder,file,size,webUrl'}
                 data = self._make_request('GET', endpoint, token, params)
                 items = data.get('value', [])
+                next_link = data.get('@odata.nextLink')
+                while next_link:
+                    data = self._make_request('GET', next_link, token)
+                    items.extend(data.get('value', []))
+                    next_link = data.get('@odata.nextLink')
                 
                 for item in items:
                     item['driveId'] = drive_id
