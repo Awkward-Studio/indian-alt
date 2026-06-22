@@ -1248,6 +1248,67 @@ Rules:
         })
 
     @action(detail=True, methods=['post'])
+    def fetch_company_news(self, request, pk=None):
+        """
+        Queues Claude web-search public-domain company news research and persists
+        each completed run as a dated memo document.
+        """
+        deal = self.get_object()
+
+        if request.data.get("sync"):
+            try:
+                from .tasks import fetch_company_news_async_task
+                result = fetch_company_news_async_task(str(deal.id))
+                if result.get("error"):
+                    return Response({"status": "FAILURE", "error": result["error"]}, status=500)
+                return Response({
+                    "status": "SUCCESS",
+                    **result,
+                    "message": "Company news research completed and saved.",
+                })
+            except Exception as e:
+                logger.error(f"Failed to run synchronous company news research for deal {deal.id}: {str(e)}", exc_info=True)
+                return Response({"error": f"Failed to run company news research: {str(e)}"}, status=500)
+
+        try:
+            from .tasks import fetch_company_news_async_task
+            task = fetch_company_news_async_task.apply_async(
+                kwargs={"deal_id": str(deal.id)},
+                queue='high_priority',
+            )
+            return Response({
+                "status": "queued",
+                "task_id": task.id,
+                "message": "Company news research background task successfully initialized.",
+            })
+        except Exception as e:
+            logger.error(f"Failed to trigger async company news task for deal {deal.id}: {str(e)}", exc_info=True)
+            return Response({"error": f"Failed to initialize company news research: {str(e)}"}, status=500)
+
+    @action(detail=True, methods=['get'], url_path='fetch_company_news_status/(?P<task_id>[^/.]+)')
+    def fetch_company_news_status(self, request, pk=None, task_id=None):
+        """
+        Polls the execution status of the company news research background task.
+        """
+        from celery.result import AsyncResult
+        res = AsyncResult(task_id)
+        if res.status == 'SUCCESS':
+            data = res.result or {}
+            if "error" in data:
+                return Response({"status": "FAILURE", "error": data["error"]}, status=200)
+            return Response({
+                "status": "SUCCESS",
+                **data,
+            })
+        elif res.status == 'FAILURE':
+            return Response({
+                "status": "FAILURE",
+                "error": str(res.info or "Background company news research failed unexpectedly."),
+            }, status=500)
+
+        return Response({"status": res.status})
+
+    @action(detail=True, methods=['post'])
     def save_competitors(self, request, pk=None):
         """
         Queues selected competitors for the ordered CIN -> VI -> embedding pipeline.
