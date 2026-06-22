@@ -36,12 +36,33 @@ TRAILING_DEAL_WORDS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 VI_DEMO_MODE_ENV = "VI_COMPETITOR_DEMO_MODE"
-DEMO_CIN_BY_NAME = {
-    "amazon": "U74999KA2012PTC066462",
-    "meesho": "U72900KA2015PTC082263",
-    "fashnear": "U72900KA2015PTC082263",
-    "myntra": "U72200KA2007PTC041799",
-    "nykaa": "U74900MH2012PTC230136",
+
+
+DEMO_COMPANY_CIN_ALIASES = {
+    "noise": "U32309HR2016PTC999001",
+    "go noise": "U32309HR2016PTC999001",
+    "nexxbase marketing": "U32309HR2016PTC999001",
+    "fire-boltt": "U32300MH2015PTC999003",
+    "fire boltt": "U32300MH2015PTC999003",
+    "boltt games": "U32300MH2015PTC999003",
+    "boult": "U52399DL2017PTC999002",
+    "boult audio": "U52399DL2017PTC999002",
+    "sony india": "U74140DL1994PTC062212",
+    "sony": "U74140DL1994PTC062212",
+    "jbl": "U72200KA2009FTC050700",
+    "jbl harman samsung": "U72200KA2009FTC050700",
+    "harman": "U72200KA2009FTC050700",
+    "harman india": "U72200KA2009FTC050700",
+    "samsung": "U31900DL1995PTC071387",
+    "samsung india": "U31900DL1995PTC071387",
+    "apple": "U30007KA1996PTC019630",
+    "apple india": "U30007KA1996PTC019630",
+    "realme": "U32309HR2018FTC075268",
+    "realme techlife": "U32309HR2018FTC075268",
+    "zebronics": "U30007TN1997PTC038536",
+    "zebronics india": "U30007TN1997PTC038536",
+    "skullcandy": "U32309KA2012FTC999011",
+    "skullcandy india": "U32309KA2012FTC999011",
 }
 
 
@@ -54,6 +75,25 @@ def is_vi_demo_mode():
 
 def normalize_cin(value):
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def normalize_demo_company_key(value):
+    text = re.sub(r"\s*[\(\[].*?[\)\]]\s*", " ", str(value or "").casefold())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def demo_cin_for_company_name(company_name):
+    for candidate in company_name_candidates(company_name):
+        key = normalize_demo_company_key(candidate)
+        if key in DEMO_COMPANY_CIN_ALIASES:
+            return DEMO_COMPANY_CIN_ALIASES[key]
+
+    compact_key = normalize_demo_company_key(company_name)
+    for alias, cin in DEMO_COMPANY_CIN_ALIASES.items():
+        if alias in compact_key:
+            return cin
+    return ""
 
 
 def is_valid_cin(value):
@@ -86,39 +126,86 @@ def company_name_candidates(company_name):
             unique_candidates.append(normalized)
     return unique_candidates
 
-
-def demo_cin_for_company(company_name=None, cin=None):
-    supplied = normalize_cin(cin)
-    if supplied:
-        return supplied
-
-    name = str(company_name or "").casefold()
-    for key, value in DEMO_CIN_BY_NAME.items():
-        if key in name:
-            return value
-
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-    activity_code = 10000 + (int(digest[:8], 16) % 90000)
-    suffix = int(digest[8:16], 16) % 1000000
-    return f"U{activity_code:05d}KA2015PTC{suffix:06d}"
-
-
 def demo_company_details(company_name=None, cin=None, entity_name=None):
-    resolved_cin = demo_cin_for_company(company_name=company_name or entity_name, cin=cin)
-    display_name = company_name or entity_name or f"Demo VI Company {resolved_cin}"
-    registered_name = display_name
-    if resolved_cin == "U74999KA2012PTC066462":
-        display_name = "Amazon India"
-        registered_name = "Amazon Seller Services Pvt Ltd"
-    elif resolved_cin == "U72900KA2015PTC082263":
-        display_name = "Meesho"
-        registered_name = "Fashnear Technologies Pvt Ltd"
-    elif resolved_cin == "U72200KA2007PTC041799":
-        display_name = "Myntra"
-        registered_name = "Myntra Designs Pvt Ltd"
-    elif resolved_cin == "U74900MH2012PTC230136":
-        display_name = "Nykaa"
-        registered_name = "Nykaa E-Retail Pvt Ltd"
+    resolved_cin = normalize_cin(cin) or demo_cin_for_company_name(company_name) or demo_cin_for_company_name(entity_name)
+    if not is_valid_cin(resolved_cin):
+        raise ValueError("VI demo data is only available after a valid CIN is resolved by web search or supplied manually.")
+
+    def demo_profile(
+        name,
+        registered_name,
+        sector,
+        city,
+        state,
+        *,
+        website="https://example.com",
+        region="India",
+        year_founded="2015",
+        total_funding="Demo VI funding profile",
+        description=None,
+    ):
+        return {
+            "name": name,
+            "registered_name": registered_name,
+            "website": website,
+            "sector": sector,
+            "city": {"name": city, "state": state, "region": region, "country": "India"},
+            "year_founded": year_founded,
+            "total_funding": total_funding,
+            "description": description or f"{name} demo VI company profile.",
+        }
+
+    demo_profiles = {
+        "U74999KA2012PTC066462": demo_profile("Amazon India", "Amazon Seller Services Pvt Ltd", "E-Commerce", "Bengaluru", "Karnataka", website="https://www.amazon.in", year_founded="2012", total_funding="Strategic parent-funded expansion", description="Marketplace, logistics, seller services, and digital commerce infrastructure in India."),
+        "U72900KA2015PTC082263": demo_profile("Meesho", "Fashnear Technologies Pvt Ltd", "Social Commerce", "Bengaluru", "Karnataka", website="https://www.meesho.com", total_funding="USD 1.1B+", description="Value-led horizontal marketplace focused on mass-market online commerce."),
+        "U72200KA2007PTC041799": demo_profile("Myntra", "Myntra Designs Pvt Ltd", "Fashion E-Commerce", "Bengaluru", "Karnataka", website="https://www.myntra.com", year_founded="2007", total_funding="Acquired by Flipkart", description="Online fashion and lifestyle marketplace with brand-led assortment."),
+        "U74900MH2012PTC230136": demo_profile("Nykaa", "Nykaa E-Retail Pvt Ltd", "Beauty E-Commerce", "Mumbai", "Maharashtra", website="https://www.nykaa.com", year_founded="2012", total_funding="Public market listed group", description="Beauty, personal care, and fashion commerce platform with owned brands and stores."),
+        "U51109KA2007PTC041957": demo_profile("Flipkart", "Flipkart Internet Pvt Ltd", "E-Commerce", "Bengaluru", "Karnataka", website="https://www.flipkart.com", year_founded="2007", total_funding="USD 12B+ strategic and growth capital", description="Horizontal e-commerce marketplace with logistics, payments, and private-label ecosystem."),
+        "U52100PN2010PTC136340": demo_profile("FirstCry", "Brainbees Solutions Pvt Ltd", "Baby & Kids Commerce", "Pune", "Maharashtra", website="https://www.firstcry.com", year_founded="2010", total_funding="USD 700M+", description="Omnichannel baby, kids, and parenting products platform."),
+        "L33100DL2008PLC178355": demo_profile("Lenskart", "Lenskart Solutions Limited", "Eyewear Retail", "Gurugram", "Haryana", website="https://www.lenskart.com", year_founded="2010", total_funding="USD 1.6B+", description="Omnichannel eyewear platform with owned manufacturing, stores, and online sales."),
+        "U33100DL2008PTC178355": demo_profile("Lenskart", "Lenskart Solutions Pvt Ltd", "Eyewear Retail", "Gurugram", "Haryana", website="https://www.lenskart.com", year_founded="2010", total_funding="USD 1.6B+", description="Omnichannel eyewear platform with owned manufacturing, stores, and online sales."),
+        "U52300MH2013PLC249758": demo_profile("boAt", "Imagine Marketing Limited", "Consumer Electronics", "Mumbai", "Maharashtra", website="https://www.boat-lifestyle.com", year_founded="2013", total_funding="USD 170M+", description="Digital-first consumer electronics brand focused on audio, wearables, and accessories."),
+        "U74999DL2016PTC306016": demo_profile("Mamaearth", "Honasa Consumer Pvt Ltd", "Beauty & Personal Care", "Gurugram", "Haryana", website="https://mamaearth.in", year_founded="2016", total_funding="Public market listed group", description="Digital-first beauty and personal care house of brands."),
+        "U74999MH2011PTC221234": demo_profile("Purplle", "Manash Lifestyle Pvt Ltd", "Beauty E-Commerce", "Mumbai", "Maharashtra", website="https://www.purplle.com", year_founded="2011", total_funding="USD 400M+", description="Beauty commerce marketplace with private-label brands and value-focused assortment."),
+        "U32309HR2016PTC999001": demo_profile("Noise", "Nexxbase Marketing Pvt Ltd", "Wearables & Audio", "Gurugram", "Haryana", website="https://www.gonoise.com", year_founded="2014", total_funding="Bootstrapped / strategic growth", description="Wearables, smartwatches, and audio accessories brand competing directly with boAt across earwear and smart devices."),
+        "U52399DL2017PTC999002": demo_profile("Boult Audio", "Boult Audio Pvt Ltd", "Audio Devices", "New Delhi", "Delhi", website="https://www.boultaudio.com", year_founded="2017", total_funding="Demo growth profile", description="Affordable TWS earbuds, headphones, and speakers brand competing in budget-to-mid-range audio."),
+        "U32300MH2015PTC999003": demo_profile("Fire-Boltt", "Boltt Games Pvt Ltd", "Wearables", "Mumbai", "Maharashtra", website="https://www.fireboltt.com", year_founded="2015", total_funding="Demo growth profile", description="Smartwatch and wearable devices brand competing in mass-premium consumer electronics."),
+        "U74140DL1994PTC062212": demo_profile("Sony India", "Sony India Pvt Ltd", "Premium Consumer Electronics", "New Delhi", "Delhi", website="https://www.sony.co.in", year_founded="1994", total_funding="Strategic parent-funded operations", description="Premium consumer audio and electronics company competing in headphones, speakers, and premium audio devices."),
+        "U72200KA2009FTC050700": demo_profile("JBL India", "Harman International India Pvt Ltd", "Premium Audio", "Bengaluru", "Karnataka", website="https://in.jbl.com", year_founded="2009", total_funding="Samsung/Harman strategic backing", description="Premium portable speakers, earphones, and headphones brand competing across Indian audio categories."),
+        "U31900DL1995PTC071387": demo_profile("Samsung India", "Samsung India Electronics Pvt Ltd", "Consumer Electronics", "Gurugram", "Haryana", website="https://www.samsung.com/in", year_founded="1995", total_funding="Strategic parent-funded operations", description="Consumer electronics company competing through Galaxy Buds, smartwatches, phones, and retail distribution."),
+        "U30007KA1996PTC019630": demo_profile("Apple India", "Apple India Pvt Ltd", "Premium Consumer Electronics", "Bengaluru", "Karnataka", website="https://www.apple.com/in", year_founded="1996", total_funding="Strategic parent-funded operations", description="Premium consumer electronics company competing through AirPods, Apple Watch, and aspirational ecosystem positioning."),
+        "U32309HR2018FTC075268": demo_profile("Realme India", "Realme Mobile Telecommunications India Pvt Ltd", "Mobile Accessories & Wearables", "Gurugram", "Haryana", website="https://www.realme.com/in", year_founded="2018", total_funding="Strategic parent-funded operations", description="Smartphone-adjacent brand competing in affordable TWS earbuds, smartwatches, and mobile accessories."),
+        "U30007TN1997PTC038536": demo_profile("Zebronics", "Zebronics India Pvt Ltd", "Consumer Electronics", "Chennai", "Tamil Nadu", website="https://zebronics.com", year_founded="1997", total_funding="Demo operating profile", description="Budget consumer electronics, audio, and peripherals brand competing in speakers, headphones, and accessories."),
+        "U32309KA2012FTC999011": demo_profile("Skullcandy India", "Skullcandy India Pvt Ltd", "Lifestyle Audio", "Bengaluru", "Karnataka", website="https://www.skullcandy.in", year_founded="2012", total_funding="Demo operating profile", description="Youth-focused headphones, earbuds, and audio accessories brand competing in lifestyle audio."),
+        "U31909TG2015PTC999004": demo_profile("Mivi", "Mivi Technologies Pvt Ltd", "Audio Devices", "Hyderabad", "Telangana", website="https://www.mivi.in", year_founded="2015", total_funding="Demo growth profile", description="India-focused audio electronics brand with domestic manufacturing positioning."),
+        "U32109DL2010PTC999005": demo_profile("Portronics", "Portronics Digital Pvt Ltd", "Consumer Electronics", "New Delhi", "Delhi", website="https://www.portronics.com", year_founded="2010", total_funding="Demo operating profile", description="Consumer electronics accessories brand across audio, charging, peripherals, and gadgets."),
+        "U52100TG2014PTC999007": demo_profile("pTron", "Palred Electronics Pvt Ltd", "Audio Devices", "Hyderabad", "Telangana", website="https://ptron.in", year_founded="2014", total_funding="Demo operating profile", description="Value-focused mobile accessories and audio brand competing in online marketplaces."),
+        "U32309MH2019PTC999008": demo_profile("Hammer", "Hammer Lifestyle Pvt Ltd", "Wearables & Audio", "Panipat", "Haryana", website="https://hammeronline.in", year_founded="2019", total_funding="Demo growth profile", description="Audio, smartwatch, and grooming accessories brand targeting value-conscious consumers."),
+        "U72900KA2018PTC999009": demo_profile("Wings", "Brandscale Innovations Pvt Ltd", "Gaming Audio", "Bengaluru", "Karnataka", website="https://www.wingslifestyle.in", year_founded="2018", total_funding="Demo growth profile", description="Gaming and lifestyle audio brand focused on earbuds, headphones, and accessories."),
+        "U52609KA2016PTC999010": demo_profile("Crossbeats", "SellBrite Digital LLP", "Wearables & Audio", "Bengaluru", "Karnataka", website="https://crossbeats.com", year_founded="2016", total_funding="Demo operating profile", description="Smartwatch and audio brand competing in direct-to-consumer electronics."),
+    }
+    profile = demo_profiles.get(resolved_cin)
+    if not profile:
+        raise ValueError(f"Venture Intelligence data is not available for CIN {resolved_cin}.")
+
+    display_name = profile["name"]
+    registered_name = profile["registered_name"]
+    if resolved_cin == "U52300MH2013PLC249758":
+        peer_cins = [
+            "U32309HR2016PTC999001",
+            "U32300MH2015PTC999003",
+            "U52399DL2017PTC999002",
+            "U74140DL1994PTC062212",
+            "U72200KA2009FTC050700",
+            "U31900DL1995PTC071387",
+            "U30007KA1996PTC019630",
+            "U32309HR2018FTC075268",
+            "U30007TN1997PTC038536",
+            "U32309KA2012FTC999011",
+        ]
+    else:
+        peer_cins = [demo_cin for demo_cin, item in demo_profiles.items() if item["name"] != display_name][:10]
+    peer_profiles = [(demo_cin, demo_profiles[demo_cin]) for demo_cin in peer_cins if demo_cin in demo_profiles]
 
     return {
         "success": True,
@@ -127,27 +214,33 @@ def demo_company_details(company_name=None, cin=None, entity_name=None):
                 "cin": resolved_cin,
                 "name": display_name,
                 "registered_name": registered_name,
-                "website": "https://example.com",
+                "website": profile["website"],
                 "industry": "Consumer Internet",
-                "sector": "E-Commerce",
-                "email": "demo@example.com",
-                "year_founded": "2015",
-                "city": {"name": "Bengaluru", "state": "Karnataka", "region": "South", "country": "India"},
-                "total_funding": "Demo VI funding profile",
+                "sector": profile["sector"],
+                "email": f"demo@{display_name.lower().replace(' ', '')}.example",
+                "year_founded": profile["year_founded"],
+                "city": profile["city"],
+                "total_funding": profile["total_funding"],
                 "management_info": [
-                    {"name": "Demo CEO", "designation": "CEO", "belongs_to_firm_name": display_name}
+                    {"name": f"{display_name} Demo CEO", "designation": "CEO", "belongs_to_firm_name": display_name},
+                    {"name": f"{display_name} Demo CFO", "designation": "CFO", "belongs_to_firm_name": display_name},
                 ],
                 "board_info": [
-                    {"name": "Demo Director", "designation": "Director", "belongs_to_firm_name": display_name}
+                    {"name": f"{display_name} Demo Director", "designation": "Director", "belongs_to_firm_name": display_name}
                 ],
             },
             "cfs_profile": {
                 "full_name": registered_name,
-                "business_description": f"Demo VI profile for {display_name}, used for workflow recording.",
-                "incorp_year": 2015,
+                "business_description": profile["description"],
+                "incorp_year": int(profile["year_founded"]),
                 "company_status": "Active",
                 "address": "Demo Business Park",
                 "pincode": "560001",
+                "epfo_data": [
+                    {"qrtr": "2023-Q4", "employees": 1800},
+                    {"qrtr": "2024-Q4", "employees": 2300},
+                    {"qrtr": "2025-Q4", "employees": 2850},
+                ],
             },
             "profit_loss": [
                 {"fy": "FY22", "fin_type": "Standalone", "revenue": "850", "ebitda": "68", "pat": "29.8"},
@@ -160,7 +253,72 @@ def demo_company_details(company_name=None, cin=None, entity_name=None):
             "cash_flow": [
                 {"fy": "FY24", "fin_type": "Standalone", "operating_cash": "74"},
             ],
-            "similar_cos": [],
+            "private_equity": {
+                "pe_investments": [
+                    {
+                        "round": "Series C",
+                        "deal_date": "2022-08-15",
+                        "amount": "USD 75M",
+                        "amount_inr": "INR 600 Cr",
+                        "investors": ["Demo Growth Partners", "India Digital Fund"],
+                        "exit_status": "Active",
+                        "company_valuation_post_money": "USD 650M",
+                        "revenue_multiple_post_money": "5.8x",
+                        "is_vc": "Yes",
+                    },
+                    {
+                        "round": "Series D",
+                        "deal_date": "2024-03-20",
+                        "amount": "USD 120M",
+                        "amount_inr": "INR 1,000 Cr",
+                        "investors": ["Sovereign Demo Capital", "Demo Growth Partners"],
+                        "exit_status": "Active",
+                        "company_valuation_post_money": "USD 1.1B",
+                        "revenue_multiple_post_money": "6.9x",
+                        "is_vc": "Yes",
+                    },
+                ],
+                "angel_investments": [
+                    {"date": "2016-05-10", "investors": ["Demo Angel Network"], "is_exited": False},
+                ],
+                "pe_exits": [
+                    {
+                        "deal_type": "Secondary",
+                        "date": "2025-01-15",
+                        "exit_investors": ["Early Demo Ventures"],
+                        "amount": "USD 35M",
+                        "valuation": "USD 1.2B",
+                        "revenue_multiple": "6.5x",
+                    },
+                ],
+            },
+            "merger_acquisition": [
+                {
+                    "company": "Demo Commerce Enablement Pvt Ltd",
+                    "date": "2023-11-01",
+                    "amount": "USD 18M",
+                    "acquirer": display_name,
+                    "company_valuation": "USD 18M",
+                    "revenue_multiple": "2.4x",
+                    "is_minority_deal": False,
+                }
+            ],
+            "similar_cos": [
+                {
+                    "name": peer["name"],
+                    "cin": demo_cin,
+                    "sector": peer["sector"],
+                    "total_funding": peer["total_funding"],
+                    "city": peer["city"]["name"],
+                    "latest_investment": {
+                        "round": "Growth",
+                        "date": "2024-09-30",
+                        "amount": "USD 80M",
+                        "investors": ["Demo Growth Partners"],
+                    },
+                }
+                for demo_cin, peer in peer_profiles
+            ],
         },
     }
 
@@ -274,18 +432,6 @@ class VentureIntelligenceService:
         """
         Uses Anthropic's Claude with native web search to resolve ranked MCA CIN candidates.
         """
-        if is_vi_demo_mode():
-            cin = demo_cin_for_company(company_name=company_name)
-            return [{
-                "cin": cin,
-                "entity_name": company_name,
-                "confidence": 1.0,
-                "source": "demo_mode",
-                "raw": {"demo_mode": True},
-                "is_valid": True,
-                "rationale": "Demo mode CIN resolution",
-            }]
-
         ai_service = AIProcessorService()
         # Force using Anthropic to leverage native web search tool
         ai_service.model_provider = "anthropic"
@@ -349,25 +495,6 @@ class VentureIntelligenceService:
         2. Use Anthropic web search to resolve the MCA CIN.
         3. Fall back to VI direct company-name lookup only if CIN resolution fails.
         """
-        if is_vi_demo_mode():
-            resolved_cin = demo_cin_for_company(company_name=company_name, cin=cin)
-            return {
-                "cin": resolved_cin,
-                "entity_name": company_name or "Demo VI Company",
-                "confidence": 1.0,
-                "source": "demo_mode",
-                "is_valid": True,
-                "cin_candidates": [{
-                    "cin": resolved_cin,
-                    "entity_name": company_name or "Demo VI Company",
-                    "confidence": 1.0,
-                    "source": "demo_mode",
-                    "is_valid": True,
-                    "rationale": "Demo mode CIN resolution",
-                }],
-                "vi_data": demo_company_details(company_name=company_name, cin=resolved_cin),
-            }
-
         if cin:
             normalized = normalize_cin(cin)
             is_valid = is_valid_cin(normalized)
@@ -398,6 +525,26 @@ class VentureIntelligenceService:
                 "is_valid": False,
                 "vi_data": None,
             }
+
+        if is_vi_demo_mode():
+            demo_cin = demo_cin_for_company_name(company_name)
+            if demo_cin:
+                return {
+                    "cin": demo_cin,
+                    "entity_name": company_name,
+                    "confidence": 1.0,
+                    "source": "vi_demo_name_alias",
+                    "is_valid": True,
+                    "cin_candidates": [{
+                        "cin": demo_cin,
+                        "entity_name": company_name,
+                        "confidence": 1.0,
+                        "source": "vi_demo_name_alias",
+                        "is_valid": True,
+                        "rationale": "Matched local VI demo competitor alias.",
+                    }],
+                    "vi_data": None,
+                }
 
         candidates = company_name_candidates(company_name)
         for lookup_name in candidates:
@@ -834,8 +981,9 @@ class VentureIntelligenceService:
             deal.company_details = vi_profile.registered_name or deal.company_details
             deal.save(update_fields=["industry", "sector", "city", "company_details"])
 
-        # 9. Index for RAG
-        if index_for_rag:
+        # 9. Index for RAG. Demo VI mode is used for client walkthroughs; keep enrichment
+        # synchronous and fast instead of waiting on the embedding service.
+        if index_for_rag and not is_vi_demo_mode():
             try:
                 self.index_profile_for_rag(vi_profile, deal=deal)
             except Exception as e:

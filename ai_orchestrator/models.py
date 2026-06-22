@@ -282,6 +282,7 @@ class DocumentChunk(models.Model):
             ('deal_summary', 'Deal Summary'),
             ('document', 'Deal Document Artifact'),
             ('analysis_document', 'Folder Analysis Document Artifact'),
+            ('meeting_note', 'Meeting Note'),
             ('ai_thinking', 'AI Reasoning Logic'),
             ('ai_ambiguities', 'AI Identified Ambiguities'),
             ('extracted_source', 'Raw Extracted Text'),

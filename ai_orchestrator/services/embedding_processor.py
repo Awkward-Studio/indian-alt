@@ -34,7 +34,7 @@ class EmbeddingService:
     Supports pgvector for Postgres and keyword-fallback for SQLite.
     """
 
-    RETRIEVAL_SOURCE_TYPES = ("document", "analysis_document", "deal_summary", "extracted_source")
+    RETRIEVAL_SOURCE_TYPES = ("document", "analysis_document", "deal_summary", "extracted_source", "meeting_note")
 
     def __init__(self):
         self.provider = EmbeddingProviderService()
@@ -508,6 +508,75 @@ class EmbeddingService:
             deal.is_indexed = True
             deal.save(update_fields=['is_indexed'])
         return bool(created_count)
+
+    def vectorize_meeting_note(self, note) -> bool:
+        """Vectorizes meeting notes once their deal links have been saved."""
+        text_parts = [
+            f"Title: {note.title}" if note.title else "",
+            f"Meeting Date: {note.meeting_at.isoformat()}" if note.meeting_at else "",
+            f"Location: {note.location}" if note.location else "",
+            f"Attendees: {note.attendees}" if note.attendees else "",
+            f"Summary: {note.summary}" if note.summary else "",
+            f"Notes: {note.body}" if note.body else "",
+            f"Decisions: {note.decisions}" if note.decisions else "",
+            f"Action Items: {note.action_items}" if note.action_items else "",
+        ]
+        text = "\n".join(part for part in text_parts if part).strip()
+
+        DocumentChunk.objects.filter(source_type='meeting_note', source_id=str(note.id)).delete()
+
+        if not text or len(text) < 10:
+            note.is_indexed = False
+            note.chunk_count = 0
+            note.embedding_error = 'Meeting note text is too short to index.'
+            note.save(update_fields=['is_indexed', 'chunk_count', 'embedding_error', 'updated_at'])
+            return False
+
+        deals = list(note.deals.all())
+        targets = deals or [None]
+        created_count = 0
+        metadata = {
+            "title": note.title,
+            "source": note.source,
+            "source_email_id": str(note.source_email_id) if note.source_email_id else None,
+            "meeting_note_id": str(note.id),
+            "meeting_at": note.meeting_at.isoformat() if note.meeting_at else None,
+            "location": note.location,
+            "attendees": note.attendees,
+            "chunk_kind": "normalized_text",
+        }
+        for deal in targets:
+            target_metadata = dict(metadata)
+            if deal is not None:
+                target_metadata.update({"deal_id": str(deal.id), "deal_title": deal.title})
+            created_count += self.chunk_and_embed(
+                text=text,
+                deal=deal,
+                source_type='meeting_note',
+                source_id=str(note.id),
+                metadata=target_metadata,
+                replace_existing=False,
+            )
+
+        embedded_count = DocumentChunk.objects.filter(
+            source_type='meeting_note',
+            source_id=str(note.id),
+            embedding__isnull=False,
+        ).count()
+        note.is_indexed = embedded_count > 0
+        note.chunk_count = embedded_count
+        if embedded_count:
+            note.embedding_error = None
+        elif created_count:
+            note.embedding_error = 'Meeting note was saved, but embeddings were not created. Check the embedding service.'
+        else:
+            note.embedding_error = 'No meeting note chunks were created.'
+        note.save(update_fields=['is_indexed', 'chunk_count', 'embedding_error', 'updated_at'])
+
+        for deal in deals:
+            self.refresh_deal_profile(deal)
+
+        return bool(embedded_count)
 
     def vectorize_document(self, doc: DealDocument) -> bool:
         """Vectorizes a specific deal document artifact."""

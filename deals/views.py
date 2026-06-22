@@ -1181,7 +1181,6 @@ Rules:
 
         if request.data.get("sync"):
             try:
-                from .services.competitor_intelligence import annotate_existing_competitors
                 from .tasks import fetch_competitors_async_task
                 result = fetch_competitors_async_task(
                     str(deal.id),
@@ -1190,6 +1189,7 @@ Rules:
                 )
                 if result.get("error"):
                     return Response({"status": "FAILURE", "error": result["error"]}, status=500)
+                from .services.competitor_intelligence import annotate_existing_competitors
                 competitors = annotate_existing_competitors(deal, result.get("competitors", []))
                 return Response({
                     "status": "SUCCESS",
@@ -1325,7 +1325,7 @@ Rules:
 
 
 from rest_framework.views import APIView
-from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.venture_intelligence import VentureIntelligenceService, is_vi_demo_mode
 from deals.serializers import VentureIntelligenceCompanyProfileSerializer
 from deals.models import VentureIntelligenceCompanyProfile
 
@@ -1420,6 +1420,14 @@ class DealEnrichView(APIView):
                 "message": f"Queued {relation_type} Venture Intelligence enrichment.",
             })
 
+        if is_vi_demo_mode() and not cin and relation_type == "target":
+            existing_target = deal.vi_relations.filter(
+                relation_type="target",
+                company_profile__cin__isnull=False,
+            ).select_related("company_profile").first()
+            if existing_target and existing_target.company_profile.cin:
+                cin = existing_target.company_profile.cin
+
         vi_service = VentureIntelligenceService()
         try:
             profile = vi_service.enrich_deal(
@@ -1434,6 +1442,9 @@ class DealEnrichView(APIView):
                 "message": f"Successfully enriched deal with {relation_type} company profile.",
                 "profile": serializer.data
             })
+        except ValueError as e:
+            logger.info(f"VI data unavailable for Deal {deal.id}: {e}")
+            return Response({"error": str(e), "message": str(e)}, status=404)
         except Exception as e:
             logger.error(f"Enrichment failed for Deal {deal.id}: {e}", exc_info=True)
             return Response({"error": f"Enrichment failed: {str(e)}"}, status=500)

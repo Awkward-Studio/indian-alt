@@ -1,14 +1,22 @@
 from rest_framework import viewsets, filters
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema_view, extend_schema
 from core.mixins import ErrorHandlingMixin
-from .models import Meeting, MeetingContact, MeetingProfile
+from .models import Meeting, MeetingContact, MeetingNote, MeetingProfile
 from .serializers import (
     MeetingSerializer,
     MeetingContactSerializer,
+    MeetingNoteSerializer,
     MeetingProfileSerializer
 )
+
+
+class MeetingNotePagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 @extend_schema_view(
@@ -56,6 +64,53 @@ class MeetingViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = ['created_at']
     ordering = ['-created_at']
     filterset_fields = ['followup_completed']
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List all meeting notes",
+        description="Retrieve meeting notes with optional filtering.",
+        tags=["Meeting Notes"],
+    ),
+    create=extend_schema(
+        summary="Create a meeting note",
+        description="Create a meeting note, link it to deals, and index it for semantic retrieval.",
+        tags=["Meeting Notes"],
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve a meeting note",
+        description="Get detailed information about a specific meeting note.",
+        tags=["Meeting Notes"],
+    ),
+    update=extend_schema(
+        summary="Update a meeting note",
+        description="Update a meeting note and refresh its semantic index.",
+        tags=["Meeting Notes"],
+    ),
+    partial_update=extend_schema(
+        summary="Partially update a meeting note",
+        description="Update selected meeting note fields and refresh its semantic index.",
+        tags=["Meeting Notes"],
+    ),
+    destroy=extend_schema(
+        summary="Delete a meeting note",
+        description="Delete a meeting note.",
+        tags=["Meeting Notes"],
+    ),
+)
+class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
+    queryset = MeetingNote.objects.select_related(
+        'source_email',
+        'created_by',
+    ).prefetch_related('deals').all()
+    serializer_class = MeetingNoteSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = MeetingNotePagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['title', 'body', 'summary', 'attendees', 'action_items', 'decisions', 'location']
+    ordering_fields = ['meeting_at', 'created_at', 'updated_at']
+    ordering = ['-meeting_at', '-created_at']
+    filterset_fields = ['source', 'is_indexed', 'deals']
 
 
 @extend_schema_view(

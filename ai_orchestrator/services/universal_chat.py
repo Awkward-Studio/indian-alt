@@ -2,10 +2,14 @@ import json
 import logging
 import os
 import re
-import resource
 import sys
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 from django.db import connection
 from django.db.models import Count, Q
@@ -162,7 +166,7 @@ class UniversalChatService:
                         break
         except Exception:
             vmrss_kb = None
-        maxrss_kb = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss or 0)
+        maxrss_kb = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss or 0) if resource else None
         details = " ".join(f"{key}={value}" for key, value in extra.items())
         print(f"[chunk-trace] {label} vmrss_kb={vmrss_kb} maxrss_kb={maxrss_kb} {details}", file=sys.stderr, flush=True)
 
@@ -258,6 +262,18 @@ class UniversalChatService:
                 "claims": metadata.get("claims") or [],
                 "source_map": metadata.get("source_map") or {},
                 "citation_label": metadata.get("citation_label") or metadata.get("filename") or metadata.get("title") or metadata.get("company_name"),
+            }
+        elif chunk.source_type == "meeting_note":
+            artifact = {
+                "document_name": metadata.get("title") or "Meeting Note",
+                "document_type": "Meeting Note",
+                "document_summary": metadata.get("summary") or "",
+                "metrics": [],
+                "tables_summary": [],
+                "risks": [],
+                "claims": [],
+                "source_map": {},
+                "citation_label": metadata.get("title") or "Meeting Note",
             }
 
         compact = self._compact_document_metadata(artifact or {}, fallback_metadata=metadata)
@@ -2843,6 +2859,8 @@ class UniversalChatService:
                 score += 24.0 if single_deal_depth_first else 20.0
             elif source_type == "analysis_document":
                 score += 24.0 if single_deal_depth_first else 15.0
+            elif source_type == "meeting_note":
+                score += 22.0 if single_deal_depth_first else 18.0
 
             score += self._chunk_evidence_prior(chunk_kind, source_type=source_type, evidence_preference=plan.get("evidence_preference"))
             synthesis_rank = getattr(chunk, "_synthesis_document_rank", None)
@@ -2878,7 +2896,7 @@ class UniversalChatService:
                     "summary": self._truncate_for_prompt(document_metadata.get("document_summary") or "", 900),
                     "context": self._truncate_for_prompt(
                         json.dumps({
-                            "deal": chunk.deal.title,
+                            "deal": chunk.deal.title if chunk.deal else "",
                             "source_type": chunk.source_type,
                             "source_id": chunk.source_id,
                             "chunk_kind": (chunk.metadata or {}).get("chunk_kind"),
@@ -2950,7 +2968,7 @@ class UniversalChatService:
             "selected_chunk_details": [
                 {
                     "deal_id": str(item["chunk"].deal_id),
-                    "deal_title": str(item["chunk"].deal.title or ""),
+                    "deal_title": str(item["chunk"].deal.title or "") if item["chunk"].deal else "",
                     "source_title": (
                         (item["chunk"].metadata or {}).get("title")
                         or (item["chunk"].metadata or {}).get("filename")
@@ -2963,7 +2981,7 @@ class UniversalChatService:
                 for item in selected
             ],
             "selected_sources": [
-                f"{item['chunk'].deal.title}|{((item['chunk'].metadata or {}).get('title') or (item['chunk'].metadata or {}).get('filename') or item['chunk'].source_type)}"
+                f"{item['chunk'].deal.title if item['chunk'].deal else 'Unlinked'}|{((item['chunk'].metadata or {}).get('title') or (item['chunk'].metadata or {}).get('filename') or item['chunk'].source_type)}"
                 for item in selected
             ],
         }
@@ -3012,7 +3030,7 @@ class UniversalChatService:
             ordered_blocks.extend([summary_block, content_block, metrics_block, tables_block, risks_block])
 
         parts = [
-            f"Deal: {chunk.deal.title or ''}",
+            f"Deal: {chunk.deal.title or ''}" if chunk.deal else "",
             f"Source Title: {source_title}",
             f"Source Type: {source_type}",
             f"Chunk Kind: {chunk_kind}",
@@ -3518,7 +3536,7 @@ class UniversalChatService:
         metadata = chunk.metadata or {}
         return {
             "chunk_id": str(chunk.id),
-            "deal": chunk.deal.title,
+            "deal": chunk.deal.title if chunk.deal else "",
             "deal_id": str(chunk.deal_id),
             "source_type": chunk.source_type,
             "source_id": chunk.source_id,

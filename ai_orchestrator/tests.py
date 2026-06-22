@@ -1615,7 +1615,7 @@ class AnthropicIntegrationTests(TestCase):
         self.assertEqual(built["model"], "claude-3-7-sonnet-latest")
         self.assertEqual(built["system"], "Be concise")
         self.assertEqual(built["messages"][0]["content"], "Search the web for ACME Corp.")
-        self.assertEqual(built["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built["tools"][0]["type"], "web_search_20250305")
         # Claude 3.7 should enforce temperature=1.0 and enable thinking
         self.assertEqual(built["temperature"], 1.0)
         self.assertEqual(built["thinking"]["type"], "enabled")
@@ -1711,7 +1711,7 @@ class AnthropicIntegrationTests(TestCase):
         }
         built_haiku_search = service._build_anthropic_payload(payload_haiku_search, stream=False)
         self.assertEqual(built_haiku_search["model"], service.search_model)
-        self.assertEqual(built_haiku_search["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built_haiku_search["tools"][0]["type"], "web_search_20250305")
         self.assertEqual(built_haiku_search["tools"][0]["name"], "web_search")
 
         # Test standard haiku model WITHOUT search intent (should NOT be upgraded and should NOT have tools)
@@ -1733,8 +1733,17 @@ class AnthropicIntegrationTests(TestCase):
             "options": {"max_tokens": 4096, "temperature": 0.5}
         }
         built_sonnet_search = service._build_anthropic_payload(payload_sonnet_search, stream=False)
-        self.assertEqual(built_sonnet_search["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(built_sonnet_search["tools"][0]["type"], "web_search_20250305")
         self.assertEqual(built_sonnet_search["tools"][0]["name"], "web_search")
+
+        payload_dynamic_search = {
+            "model": "claude-sonnet-4-6",
+            "prompt": "Search the web for competitors.",
+            "system": "Be concise",
+            "options": {"max_tokens": 4096, "temperature": 0.5, "enable_dynamic_web_search": True}
+        }
+        built_dynamic_search = service._build_anthropic_payload(payload_dynamic_search, stream=False)
+        self.assertEqual(built_dynamic_search["tools"][0]["type"], "web_search_20260209")
 
         # Test sonnet model WITHOUT search intent (should NOT have tools/web search)
         payload_sonnet_standard = {

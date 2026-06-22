@@ -19,7 +19,8 @@ from deals.models import (
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
-    VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany
+    VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany,
+    VentureIntelligenceRelationType
 )
 from deals.serializers import DealDetailSerializer, DealSerializer
 from contacts.serializers import ContactSerializer
@@ -77,6 +78,9 @@ class CompetitorSearchPipelineTests(TestCase):
             "cin": "",
         }])
         self.assertNotIn("CIN:", result["response"])
+        payload = provider.execute_standard.call_args.args[0]
+        self.assertEqual(payload["options"]["web_search_tool_type"], "web_search_20250305")
+        self.assertEqual(payload["options"]["max_search_uses"], 3)
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -1179,6 +1183,73 @@ class VentureIntelligenceServiceTests(TestCase):
         res = self.service.resolve_cin_via_ai("Flipkart")
         self.assertEqual(res["cin"], "U74999KA2012PTC066107")
         self.assertEqual(res["entity_name"], "Flipkart Private Limited")
+
+    @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
+    def test_demo_mode_does_not_mock_cin_web_search(self, mock_process_content):
+        mock_process_content.return_value = {
+            "response": '{"cin": "U99999DL2008PTC000001", "entity_name": "Searched Lenskart Entity", "confidence": 0.91}'
+        }
+
+        with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
+            res = self.service.resolve_cin_via_ai("Lenskart")
+
+        self.assertEqual(res["cin"], "U99999DL2008PTC000001")
+        self.assertEqual(res["entity_name"], "Searched Lenskart Entity")
+        self.assertEqual(res["source"], "anthropic_web_search")
+        mock_process_content.assert_called_once()
+
+    def test_demo_vi_data_requires_known_cin(self):
+        with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
+            with self.assertRaises(ValueError) as ctx:
+                self.service.fetch_company_details(cin="U99999DL2008PTC000001")
+
+        self.assertIn("not available", str(ctx.exception).lower())
+
+    def test_demo_mode_resolves_competitor_name_alias_without_live_cin_search(self):
+        with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
+            resolution = self.service.resolve_company_identity(company_name="JBL (Harman / Samsung)")
+            data = self.service.fetch_company_details_from_resolution(resolution)[0]
+
+        profile = data["results"]["profile"]
+        self.assertEqual(resolution["source"], "vi_demo_name_alias")
+        self.assertEqual(profile["cin"], "U72200KA2009FTC050700")
+        self.assertEqual(profile["name"], "JBL India")
+
+    def test_demo_mode_enriches_selected_boat_competitors(self):
+        competitors = [
+            "Noise (Go Noise)",
+            "Fire-Boltt",
+            "Boult Audio",
+            "Sony India",
+            "JBL (Harman / Samsung)",
+            "Samsung India",
+            "Apple India",
+            "Realme (TechLife)",
+            "Zebronics",
+            "Skullcandy",
+        ]
+
+        with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
+            for competitor in competitors:
+                self.service.enrich_deal(
+                    deal_id=self.deal.id,
+                    company_name=competitor,
+                    relation_type=VentureIntelligenceRelationType.COMPETITOR,
+                )
+
+        relations = VentureIntelligenceCompanyRelation.objects.filter(
+            deal=self.deal,
+            relation_type=VentureIntelligenceRelationType.COMPETITOR,
+        ).select_related("company_profile")
+        stored_names = {relation.company_profile.name for relation in relations}
+        stored_cins = {relation.company_profile.cin for relation in relations}
+
+        self.assertEqual(relations.count(), 10)
+        self.assertIn("Noise", stored_names)
+        self.assertIn("JBL India", stored_names)
+        self.assertIn("Skullcandy India", stored_names)
+        self.assertIn("U32309HR2016PTC999001", stored_cins)
+        self.assertIn("U72200KA2009FTC050700", stored_cins)
 
     @patch("deals.services.venture_intelligence.requests.post")
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")

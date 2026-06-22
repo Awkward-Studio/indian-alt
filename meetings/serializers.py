@@ -1,8 +1,10 @@
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
-from .models import Meeting, MeetingContact, MeetingProfile
+from django.db import transaction
+from .models import Meeting, MeetingContact, MeetingNote, MeetingProfile
 from contacts.serializers import ContactListSerializer
 from accounts.serializers import ProfileListSerializer
+from deals.serializers import DealListSerializer
 
 
 def get_contact_queryset():
@@ -15,6 +17,12 @@ def get_profile_queryset():
     """Lazy import to avoid circular dependencies."""
     from accounts.models import Profile
     return Profile.objects.all()
+
+
+def get_deal_queryset():
+    """Lazy import to avoid circular dependencies."""
+    from deals.models import Deal
+    return Deal.objects.all()
 
 
 class MeetingContactSerializer(serializers.ModelSerializer):
@@ -99,3 +107,69 @@ class MeetingSerializer(serializers.ModelSerializer):
             return instance
         except Exception as e:
             raise ValidationError({'error': f'Failed to update meeting: {str(e)}'})
+
+
+class MeetingNoteSerializer(serializers.ModelSerializer):
+    deals = DealListSerializer(many=True, read_only=True)
+    deal_ids = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=get_deal_queryset(),
+        write_only=True,
+        required=False,
+        source='deals',
+    )
+
+    class Meta:
+        model = MeetingNote
+        fields = '__all__'
+        read_only_fields = (
+            'id',
+            'created_at',
+            'updated_at',
+            'is_indexed',
+            'chunk_count',
+            'embedding_error',
+        )
+
+    def _vectorize(self, note):
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
+
+        if not EmbeddingService().vectorize_meeting_note(note):
+            note.refresh_from_db(fields=['embedding_error'])
+            raise ValidationError({
+                'embedding_error': note.embedding_error or 'Meeting note was saved, but embeddings were not created.'
+            })
+
+    def create(self, validated_data):
+        try:
+            with transaction.atomic():
+                deals = validated_data.pop('deals', [])
+                note = MeetingNote.objects.create(**validated_data)
+                note.deals.set(deals)
+                self._vectorize(note)
+                note.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error'])
+                return note
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'error': f'Failed to create meeting note: {str(e)}'})
+
+    def update(self, instance, validated_data):
+        try:
+            with transaction.atomic():
+                deals = validated_data.pop('deals', None)
+
+                for attr, value in validated_data.items():
+                    setattr(instance, attr, value)
+                instance.save()
+
+                if deals is not None:
+                    instance.deals.set(deals)
+
+                self._vectorize(instance)
+                instance.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error'])
+                return instance
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'error': f'Failed to update meeting note: {str(e)}'})

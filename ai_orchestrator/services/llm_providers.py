@@ -518,10 +518,14 @@ class AnthropicProviderService:
             
             # Attach the native web search tool for search-capable models
             if "haiku" not in model.lower():
-                max_search_uses = (payload.get("options") or {}).get("max_search_uses", 2)
+                options = payload.get("options") or {}
+                max_search_uses = options.get("max_search_uses", 2)
+                web_search_tool_type = options.get("web_search_tool_type") or "web_search_20250305"
+                if options.get("enable_dynamic_web_search"):
+                    web_search_tool_type = "web_search_20260209"
                 tools = [
                     {
-                        "type": "web_search_20260209",
+                        "type": web_search_tool_type,
                         "name": "web_search",
                         "max_uses": max_search_uses,
                     }

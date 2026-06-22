@@ -1823,6 +1823,9 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
             f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n"
             f"- Existing candidates to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
+            f"Prioritize speed. This pass is ONLY for identifying competitor names and short rationales. "
+            f"Do not search MCA records, do not resolve CINs, and do not validate legal entities in this pass. "
+            f"CIN resolution and Venture Intelligence availability checks happen later only for competitors selected by the user.\n"
             f"Return exactly one JSON object and no markdown. Use this shape:\n"
             f"{{\n"
             f"  \"competitors\": [\n"
@@ -1847,14 +1850,15 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 1800,
+                "max_tokens": 1000,
                 "temperature": 0.1,
-                "max_search_uses": 2
+                "max_search_uses": 3,
+                "web_search_tool_type": "web_search_20250305",
             }
         }
         
         logger.info("Triggering active web search competitor research...")
-        result = service.execute_standard(payload, timeout=600)
+        result = service.execute_standard(payload, timeout=45)
         response_text = result.get("response") or ""
         from .services.competitor_intelligence import competitor_names_from_payload
         try:
@@ -1874,6 +1878,12 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
 
         report_title = "Additional Competitor Search" if instruction else "Competitor Search Results"
         report = _format_competitor_items_report(competitors, title=report_title)
+        if not competitors:
+            return {
+                "error": "Live web search completed but returned no parseable competitors. Try a more specific company name or sector.",
+                "response": response_text,
+                "competitors": [],
+            }
         return {
             "response": report or response_text,
             "competitors": [{**competitor, "cin": ""} for competitor in competitors],
@@ -1947,7 +1957,18 @@ def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin
     Enrich a deal target or competitor VI profile in the Celery worker.
     """
     try:
+        from deals.models import Deal
         from deals.services.venture_intelligence import VentureIntelligenceService
+        from deals.services.venture_intelligence import is_vi_demo_mode
+
+        if is_vi_demo_mode() and not cin and relation_type == "target":
+            deal = Deal.objects.filter(id=deal_id).first()
+            existing_target = deal.vi_relations.filter(
+                relation_type="target",
+                company_profile__cin__isnull=False,
+            ).select_related("company_profile").first() if deal else None
+            if existing_target and existing_target.company_profile.cin:
+                cin = existing_target.company_profile.cin
 
         profile = VentureIntelligenceService().enrich_deal(
             deal_id=deal_id,
