@@ -1923,7 +1923,7 @@ def _company_news_cards(research: dict) -> list[dict]:
                 })
 
     if cards:
-        return cards[:6]
+        return cards[:3]
 
     category_map = [
         ("red_flags", "red_flag", "red"),
@@ -1958,7 +1958,7 @@ def _company_news_cards(research: dict) -> list[dict]:
                 "source": source,
                 "url": url,
             })
-            if len(cards) >= 6:
+            if len(cards) >= 3:
                 return cards
     return cards
 
@@ -1973,26 +1973,23 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
         deal = Deal.objects.get(id=deal_id)
         generated_at = timezone.now()
         prompt = (
-            "Use a concise web search to find the most important public-domain news and diligence signals "
-            f"about this company and its promoters/founders: {deal.title}. Keep the search small and high precision.\n\n"
-            "Target company context:\n"
-            f"- Company: {deal.title}\n"
-            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
-            f"- Location: {deal.city or 'N/A'}, {deal.state or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Deal summary: {(deal.deal_summary or deal.company_details or 'N/A')[:900]}\n\n"
-            "Prioritize only the biggest items: funding/fundraise, litigation/regulatory red flags, founder/promoter background, "
-            "awards/partnerships/green flags, patents/IP only if material. Do not exhaustively search every category.\n\n"
+            f"Use web search once for '{deal.title}' and return a compact public-domain news snapshot. "
+            "Do not run broad category-by-category research.\n\n"
+            f"Context: {deal.title}; sector={deal.sector or 'N/A'}; industry={deal.industry or 'N/A'}; "
+            f"location={deal.city or 'N/A'}, {deal.country or 'N/A'}.\n\n"
+            "Prioritize only the biggest 1-3 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
+            "major awards/partnerships, or other material red/green flags.\n\n"
             "Return exactly one JSON object and no markdown. Use this shape:\n"
             "{\n"
-            "  \"overview\": \"2-3 sentence base summary of the public-domain signal\",\n"
+            "  \"overview\": \"2 sentence base summary of the public-domain signal\",\n"
             "  \"executive_summary\": \"same as overview\",\n"
             "  \"news_cards\": [\n"
-            "    {\"title\": \"...\", \"summary\": \"2 short sentences max\", \"category\": \"funding|litigation|founder|award|ip|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}\n"
+            "    {\"title\": \"...\", \"summary\": \"one short sentence\", \"category\": \"funding|litigation|founder|award|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}\n"
             "  ],\n"
             "  \"sources\": [{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}]\n"
             "}\n"
-            "Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
-            "Every card must be based on a source. Do not invent facts."
+            "Return at most 3 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
+            "Every card must be based on a source URL. Do not invent facts."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -2002,11 +1999,11 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "system": "You are a careful investment diligence researcher. Use web search and cite public-domain sources.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 2200,
+                "max_tokens": 1200,
                 "temperature": 0.1,
-                "max_search_uses": 2,
+                "max_search_uses": 1,
             },
-        }, timeout=600)
+        }, timeout=180)
 
         response_text = result.get("response") or ""
         research = _extract_json_object_from_text(response_text)
