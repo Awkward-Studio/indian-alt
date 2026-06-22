@@ -1836,6 +1836,15 @@ def _format_company_news_markdown(research: dict, *, company_name: str, generate
     if executive_summary:
         lines.extend(["## Executive Summary", "", str(executive_summary).strip(), ""])
 
+    news_cards = _company_news_list(research.get("news_cards"))
+    if news_cards:
+        lines.extend(["## News Cards", ""])
+        for item in news_cards:
+            text = _company_news_item_text(item)
+            if text:
+                lines.append(f"- {text}")
+        lines.append("")
+
     category_labels = [
         ("funding", "Funding / Fundraise"),
         ("litigation", "Litigation / Regulatory"),
@@ -1880,6 +1889,12 @@ def _format_company_news_markdown(research: dict, *, company_name: str, generate
 
 def _company_news_preview_items(research: dict) -> list[str]:
     preview = []
+    for item in _company_news_list(research.get("news_cards")):
+        text = _company_news_item_text(item)
+        if text:
+            preview.append(text)
+        if len(preview) >= 5:
+            return preview
     for key in ("red_flags", "green_flags", "funding", "litigation", "other"):
         for item in _company_news_list(research.get(key)):
             text = _company_news_item_text(item)
@@ -1888,6 +1903,64 @@ def _company_news_preview_items(research: dict) -> list[str]:
             if len(preview) >= 5:
                 return preview
     return preview
+
+
+def _company_news_cards(research: dict) -> list[dict]:
+    cards = []
+    for item in _company_news_list(research.get("news_cards")):
+        if isinstance(item, dict):
+            title = item.get("title") or item.get("headline")
+            summary = item.get("summary") or item.get("detail") or item.get("description")
+            if title or summary:
+                cards.append({
+                    "title": title or "Public-domain finding",
+                    "summary": summary or "",
+                    "category": item.get("category") or "news",
+                    "sentiment": item.get("sentiment") or item.get("flag") or "neutral",
+                    "date": item.get("date") or item.get("published_at") or "",
+                    "source": item.get("source") or item.get("publisher") or "",
+                    "url": item.get("url") or item.get("link") or item.get("source_url") or "",
+                })
+
+    if cards:
+        return cards[:6]
+
+    category_map = [
+        ("red_flags", "red_flag", "red"),
+        ("litigation", "litigation", "red"),
+        ("green_flags", "green_flag", "green"),
+        ("awards", "award", "green"),
+        ("funding", "funding", "neutral"),
+        ("patents", "ip", "neutral"),
+        ("founders", "founder", "neutral"),
+        ("other", "news", "neutral"),
+    ]
+    for key, category, sentiment in category_map:
+        for item in _company_news_list(research.get(key)):
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("headline") or "Public-domain finding"
+                summary = item.get("summary") or item.get("detail") or item.get("description") or ""
+                source = item.get("source") or item.get("publisher") or ""
+                url = item.get("url") or item.get("link") or item.get("source_url") or ""
+                date = item.get("date") or item.get("published_at") or ""
+            else:
+                title = str(item)[:120]
+                summary = str(item)
+                source = ""
+                url = ""
+                date = ""
+            cards.append({
+                "title": title,
+                "summary": summary,
+                "category": category,
+                "sentiment": sentiment,
+                "date": date,
+                "source": source,
+                "url": url,
+            })
+            if len(cards) >= 6:
+                return cards
+    return cards
 
 
 @shared_task(queue='high_priority')
@@ -1900,35 +1973,26 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
         deal = Deal.objects.get(id=deal_id)
         generated_at = timezone.now()
         prompt = (
-            "Use web search to find the biggest public-domain diligence news and public records "
-            f"about this company and its promoters/founders: {deal.title}.\n\n"
+            "Use a concise web search to find the most important public-domain news and diligence signals "
+            f"about this company and its promoters/founders: {deal.title}. Keep the search small and high precision.\n\n"
             "Target company context:\n"
             f"- Company: {deal.title}\n"
             f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
             f"- Location: {deal.city or 'N/A'}, {deal.state or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Deal summary: {(deal.deal_summary or deal.company_details or 'N/A')[:1500]}\n\n"
-            "Research categories to cover:\n"
-            "- fundraise, previous fundraises, investors, valuation, debt, exits, acquisitions\n"
-            "- litigation, regulatory action, insolvency, tax disputes, criminal/civil cases, sanctions\n"
-            "- patents, IP, technology filings, product approvals\n"
-            "- founder/promoter/CEO background, prior ventures, resignation/removal, integrity issues\n"
-            "- awards, certifications, major customer wins, partnerships, green flags\n"
-            "- any other public red flags or green flags material to an investment decision\n\n"
+            f"- Deal summary: {(deal.deal_summary or deal.company_details or 'N/A')[:900]}\n\n"
+            "Prioritize only the biggest items: funding/fundraise, litigation/regulatory red flags, founder/promoter background, "
+            "awards/partnerships/green flags, patents/IP only if material. Do not exhaustively search every category.\n\n"
             "Return exactly one JSON object and no markdown. Use this shape:\n"
             "{\n"
-            "  \"executive_summary\": \"3-5 sentence source-grounded summary\",\n"
-            "  \"funding\": [{\"title\": \"...\", \"date\": \"YYYY-MM-DD or unknown\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"litigation\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"patents\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"founders\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"awards\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"red_flags\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"green_flags\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
-            "  \"other\": [{\"title\": \"...\", \"date\": \"...\", \"summary\": \"...\", \"source\": \"...\", \"url\": \"...\"}],\n"
+            "  \"overview\": \"2-3 sentence base summary of the public-domain signal\",\n"
+            "  \"executive_summary\": \"same as overview\",\n"
+            "  \"news_cards\": [\n"
+            "    {\"title\": \"...\", \"summary\": \"2 short sentences max\", \"category\": \"funding|litigation|founder|award|ip|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}\n"
+            "  ],\n"
             "  \"sources\": [{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}]\n"
             "}\n"
-            "If a category has no reliable public-domain result, return an empty array for that category. "
-            "Every non-empty finding must include a source and URL when available. Do not invent facts."
+            "Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
+            "Every card must be based on a source. Do not invent facts."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -1938,9 +2002,9 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "system": "You are a careful investment diligence researcher. Use web search and cite public-domain sources.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 4500,
+                "max_tokens": 2200,
                 "temperature": 0.1,
-                "max_search_uses": 6,
+                "max_search_uses": 2,
             },
         }, timeout=600)
 
@@ -1948,7 +2012,9 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
         research = _extract_json_object_from_text(response_text)
         if not research:
             research = {
+                "overview": response_text[:700],
                 "executive_summary": response_text[:1800],
+                "news_cards": [],
                 "funding": [],
                 "litigation": [],
                 "patents": [],
@@ -1959,6 +2025,11 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
                 "other": [],
                 "sources": [],
             }
+
+        if not research.get("executive_summary") and research.get("overview"):
+            research["executive_summary"] = research.get("overview")
+        news_cards = _company_news_cards(research)
+        research["news_cards"] = news_cards
 
         markdown_report = _format_company_news_markdown(
             research,
@@ -2018,10 +2089,12 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
         return {
             "response": markdown_report,
             "research": research,
+            "overview": research.get("overview") or research.get("executive_summary") or "",
+            "news_cards": news_cards,
             "preview_items": _company_news_preview_items(research),
             "counts": {
-                "red_flags": len(_company_news_list(research.get("red_flags"))) + len(_company_news_list(research.get("litigation"))),
-                "green_flags": len(_company_news_list(research.get("green_flags"))) + len(_company_news_list(research.get("awards"))),
+                "red_flags": len([card for card in news_cards if str(card.get("sentiment")).lower() == "red"]),
+                "green_flags": len([card for card in news_cards if str(card.get("sentiment")).lower() == "green"]),
                 "sources": len(_company_news_list(research.get("sources"))),
             },
             "document": {

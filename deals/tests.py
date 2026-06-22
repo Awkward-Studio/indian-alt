@@ -56,14 +56,18 @@ class CompetitorSearchPipelineTests(TestCase):
         provider = mock_provider.return_value
         provider.execute_standard.return_value = {
             "response": json.dumps({
+                "overview": "Acme has recent public-domain diligence news.",
                 "executive_summary": "Acme has recent public-domain diligence news.",
-                "funding": [{
+                "news_cards": [{
                     "title": "Acme raised growth capital",
                     "date": "2026-01-15",
                     "summary": "Acme announced a new funding round.",
+                    "category": "funding",
+                    "sentiment": "green",
                     "source": "Example News",
                     "url": "https://example.com/acme-funding",
                 }],
+                "funding": [],
                 "litigation": [],
                 "patents": [],
                 "founders": [],
@@ -99,6 +103,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("awards", prompt)
         self.assertIn("red flags", prompt)
         self.assertIn("green flags", prompt)
+        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_search_uses"], 2)
 
         docs = DealDocument.objects.filter(deal=deal, title__startswith="Public Domain News Research").order_by("created_at")
         self.assertEqual(docs.count(), 2)
@@ -106,6 +111,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("Acme raised growth capital", docs.first().normalized_text)
         self.assertEqual(mock_embedding_service.return_value.vectorize_document.call_count, 2)
         self.assertEqual(first["counts"]["green_flags"], 1)
+        self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
         self.assertEqual(second["document"]["title"], docs.last().title)
 
     @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
