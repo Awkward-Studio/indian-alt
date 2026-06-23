@@ -167,7 +167,12 @@ class DealChatView(APIView):
             if not conversation:
                 conversation = AIConversation.objects.create(
                     user=request.user,
-                    title=f"Chat: {deal.title}"
+                    title=f"Chat: {deal.title}",
+                    metadata={
+                        "kind": "deal_chat",
+                        "deal_id": str(deal.id),
+                        "deal_title": deal.title,
+                    }
                 )
 
             # Save the user message to DB immediately (fixes Bug 1)
@@ -177,6 +182,9 @@ class DealChatView(APIView):
             if not isinstance(conversation.metadata, dict):
                 conversation.metadata = {}
             conversation.metadata['model_provider'] = model_provider
+            conversation.metadata['kind'] = 'deal_chat'
+            conversation.metadata['deal_id'] = str(deal.id)
+            conversation.metadata['deal_title'] = deal.title
             conversation.save(update_fields=['metadata'])
 
             task_info: Dict[str, Any] = {}
