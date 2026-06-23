@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from typing import List, Dict, Any, Optional
 from django.db import connection
 from django.db.models import Count
@@ -41,6 +42,7 @@ class EmbeddingService:
         self.reranker = RerankerProviderService()
         self.model_name = AIRuntimeService.get_embedding_model()
         self.reranker_model = AIRuntimeService.get_reranker_model()
+        self._last_embedding_error = ""
         self.chunk_size = 1000
         self.chunk_overlap = 150
         self.is_sqlite = connection.vendor == 'sqlite'
@@ -54,12 +56,19 @@ class EmbeddingService:
 
     def _get_embedding(self, text: str) -> Optional[List[float]]:
         if self.is_sqlite: return None # Skip embedding calls if on SQLite to save latency
-        try:
-            val = self.provider.embed(model=self.model_name, text=text, timeout=30)
-            return val if val else None
-        except Exception as e:
-            logger.error(f"Error generating embedding: {str(e)}")
-            return None
+        self._last_embedding_error = ""
+        for attempt in range(2):
+            try:
+                val = self.provider.embed(model=self.model_name, text=text, timeout=30)
+                if val:
+                    return val
+                self._last_embedding_error = "Embedding provider returned an empty vector."
+            except Exception as e:
+                self._last_embedding_error = str(e)
+                logger.warning("Error generating embedding on attempt %s: %s", attempt + 1, self._last_embedding_error)
+            if attempt == 0:
+                time.sleep(0.5)
+        return None
 
     @staticmethod
     def _normalize_query_text(query: str) -> str:
@@ -568,7 +577,8 @@ class EmbeddingService:
         if embedded_count:
             note.embedding_error = None
         elif created_count:
-            note.embedding_error = 'Meeting note was saved, but embeddings were not created. Check the embedding service.'
+            detail = self._last_embedding_error or 'Check the embedding service.'
+            note.embedding_error = f'Meeting note was saved, but embeddings were not created. {detail}'
         else:
             note.embedding_error = 'No meeting note chunks were created.'
         note.save(update_fields=['is_indexed', 'chunk_count', 'embedding_error', 'updated_at'])

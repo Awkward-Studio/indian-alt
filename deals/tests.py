@@ -1258,7 +1258,7 @@ class VentureIntelligenceServiceTests(TestCase):
         self.assertEqual(res["entity_name"], "Flipkart Private Limited")
 
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
-    def test_demo_mode_does_not_mock_cin_web_search(self, mock_process_content):
+    def test_vi_demo_flag_does_not_mock_cin_web_search(self, mock_process_content):
         mock_process_content.return_value = {
             "response": '{"cin": "U99999DL2008PTC000001", "entity_name": "Searched Lenskart Entity", "confidence": 0.91}'
         }
@@ -1271,58 +1271,34 @@ class VentureIntelligenceServiceTests(TestCase):
         self.assertEqual(res["source"], "anthropic_web_search")
         mock_process_content.assert_called_once()
 
-    def test_demo_vi_data_requires_known_cin(self):
+    @patch("deals.services.venture_intelligence.requests.post")
+    def test_vi_demo_flag_still_uses_vi_http_lookup(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"success": True, "results": {"profile": {"name": "Live VI Result"}}}
+        mock_post.return_value = mock_response
+
         with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
-            with self.assertRaises(ValueError) as ctx:
-                self.service.fetch_company_details(cin="U99999DL2008PTC000001")
+            data = self.service.fetch_company_details(cin="U99999DL2008PTC000001")
 
-        self.assertIn("not available", str(ctx.exception).lower())
+        self.assertEqual(data["results"]["profile"]["name"], "Live VI Result")
+        mock_post.assert_called_once()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"], {"cin": "U99999DL2008PTC000001"})
 
-    def test_demo_mode_resolves_competitor_name_alias_without_live_cin_search(self):
+    @patch("deals.services.venture_intelligence.requests.post")
+    @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
+    def test_vi_demo_flag_does_not_resolve_name_aliases(self, mock_process_content, mock_post):
+        mock_process_content.return_value = {"response": "{}"}
+        mock_post.side_effect = ValueError("VI unavailable")
+
         with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
             resolution = self.service.resolve_company_identity(company_name="JBL (Harman / Samsung)")
-            data = self.service.fetch_company_details_from_resolution(resolution)[0]
 
-        profile = data["results"]["profile"]
-        self.assertEqual(resolution["source"], "vi_demo_name_alias")
-        self.assertEqual(profile["cin"], "U72200KA2009FTC050700")
-        self.assertEqual(profile["name"], "JBL India")
-
-    def test_demo_mode_enriches_selected_boat_competitors(self):
-        competitors = [
-            "Noise (Go Noise)",
-            "Fire-Boltt",
-            "Boult Audio",
-            "Sony India",
-            "JBL (Harman / Samsung)",
-            "Samsung India",
-            "Apple India",
-            "Realme (TechLife)",
-            "Zebronics",
-            "Skullcandy",
-        ]
-
-        with patch.dict("os.environ", {"VI_COMPETITOR_DEMO_MODE": "1"}):
-            for competitor in competitors:
-                self.service.enrich_deal(
-                    deal_id=self.deal.id,
-                    company_name=competitor,
-                    relation_type=VentureIntelligenceRelationType.COMPETITOR,
-                )
-
-        relations = VentureIntelligenceCompanyRelation.objects.filter(
-            deal=self.deal,
-            relation_type=VentureIntelligenceRelationType.COMPETITOR,
-        ).select_related("company_profile")
-        stored_names = {relation.company_profile.name for relation in relations}
-        stored_cins = {relation.company_profile.cin for relation in relations}
-
-        self.assertEqual(relations.count(), 10)
-        self.assertIn("Noise", stored_names)
-        self.assertIn("JBL India", stored_names)
-        self.assertIn("Skullcandy India", stored_names)
-        self.assertIn("U32309HR2016PTC999001", stored_cins)
-        self.assertIn("U72200KA2009FTC050700", stored_cins)
+        self.assertEqual(resolution["source"], "unresolved")
+        self.assertFalse(resolution["is_valid"])
+        self.assertEqual(resolution["cin"], "")
+        self.assertTrue(mock_post.called)
 
     @patch("deals.services.venture_intelligence.requests.post")
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")

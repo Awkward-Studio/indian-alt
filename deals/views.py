@@ -1386,7 +1386,7 @@ Rules:
 
 
 from rest_framework.views import APIView
-from deals.services.venture_intelligence import VentureIntelligenceService, is_vi_demo_mode
+from deals.services.venture_intelligence import VentureIntelligenceService
 from deals.serializers import VentureIntelligenceCompanyProfileSerializer
 from deals.models import VentureIntelligenceCompanyProfile
 
@@ -1480,14 +1480,6 @@ class DealEnrichView(APIView):
                 "task_id": task.id,
                 "message": f"Queued {relation_type} Venture Intelligence enrichment.",
             })
-
-        if is_vi_demo_mode() and not cin and relation_type == "target":
-            existing_target = deal.vi_relations.filter(
-                relation_type="target",
-                company_profile__cin__isnull=False,
-            ).select_related("company_profile").first()
-            if existing_target and existing_target.company_profile.cin:
-                cin = existing_target.company_profile.cin
 
         vi_service = VentureIntelligenceService()
         try:

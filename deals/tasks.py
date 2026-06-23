@@ -2291,18 +2291,7 @@ def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin
     Enrich a deal target or competitor VI profile in the Celery worker.
     """
     try:
-        from deals.models import Deal
         from deals.services.venture_intelligence import VentureIntelligenceService
-        from deals.services.venture_intelligence import is_vi_demo_mode
-
-        if is_vi_demo_mode() and not cin and relation_type == "target":
-            deal = Deal.objects.filter(id=deal_id).first()
-            existing_target = deal.vi_relations.filter(
-                relation_type="target",
-                company_profile__cin__isnull=False,
-            ).select_related("company_profile").first() if deal else None
-            if existing_target and existing_target.company_profile.cin:
-                cin = existing_target.company_profile.cin
 
         profile = VentureIntelligenceService().enrich_deal(
             deal_id=deal_id,
