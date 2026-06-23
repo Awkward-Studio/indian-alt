@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db import transaction
 from .graph_service import GraphAPIService
+from .granola_meeting_ingestion import GranolaMeetingEmailIngestionService
 from ..models import EmailAccount, Email
 from contacts.models import Contact
 
@@ -284,10 +285,10 @@ class EmailReaderService:
                     
                     # Process each message
                     for message_data in messages:
+                        graph_id = message_data.get('id')
                         try:
                             with transaction.atomic():
                                 # Check if email already exists
-                                graph_id = message_data.get('id')
                                 if not graph_id:
                                     logger.warning("Message missing ID, skipping")
                                     continue
@@ -333,6 +334,15 @@ class EmailReaderService:
                                 
                                 result['count'] += 1
                                 total_fetched += 1
+
+                            try:
+                                GranolaMeetingEmailIngestionService.process_email(email)
+                            except Exception as granola_err:
+                                logger.exception(
+                                    "Granola meeting ingestion failed for email %s: %s",
+                                    email.id,
+                                    granola_err,
+                                )
                                 
                         except Exception as e:
                             error_msg = f"Error processing message {graph_id}: {str(e)}"
