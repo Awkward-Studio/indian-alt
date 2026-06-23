@@ -1694,6 +1694,9 @@ class AnthropicIntegrationTests(TestCase):
             source_metadata = audit_log.source_metadata or {}
             self.assertEqual(source_metadata.get("gate_mode"), "privacy_bypass")
             self.assertEqual(source_metadata.get("deals_considered"), 1)
+            _, process_kwargs = mock_processor_instance.process_content.call_args
+            self.assertIn("deal_visual", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("comparison_matrix", process_kwargs["metadata"]["prompt_template_override"])
             
             # Verify correct mock execution
             self.assertEqual(res["status"], "success")
@@ -1914,5 +1917,4 @@ class VentureIntelligenceSyncTests(TestCase):
         # Test dry-run behavior
         dry_run_count = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True)
         self.assertEqual(dry_run_count, 1)
-
 
