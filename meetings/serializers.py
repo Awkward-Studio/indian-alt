@@ -130,6 +130,17 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
             'chunk_count',
             'embedding_error',
         )
+        extra_kwargs = {
+            'body': {'required': False, 'allow_blank': True},
+            'summary': {'required': False, 'allow_blank': True},
+        }
+
+    def validate(self, attrs):
+        body = attrs.get('body', getattr(self.instance, 'body', '') if self.instance else '')
+        summary = attrs.get('summary', getattr(self.instance, 'summary', '') if self.instance else '')
+        if not str(body or '').strip() and not str(summary or '').strip():
+            raise ValidationError({'body': 'Provide either a transcript or a summary.'})
+        return attrs
 
     def _vectorize(self, note):
         from ai_orchestrator.services.embedding_processor import EmbeddingService

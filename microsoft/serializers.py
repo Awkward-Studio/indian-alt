@@ -70,7 +70,7 @@ class EmailListSerializer(serializers.ModelSerializer):
             'from_email', 'to_emails', 'cc_emails', 'bcc_emails',
             'body_text', 'body_html', 'date_received', 'date_sent', 
             'importance', 'is_read', 'has_attachments', 'body_preview', 
-            'attachments', 'created_at', 'is_processed', 'deal_id', 'deal_title'
+            'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id', 'deal_title'
         )
         read_only_fields = ('id', 'created_at')
 

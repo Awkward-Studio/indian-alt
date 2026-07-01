@@ -109,7 +109,7 @@ class Command(BaseCommand):
                 if result['success']:
                     self.stdout.write(
                         self.style.SUCCESS(
-                            f"✓ Successfully fetched {result['count']} emails "
+                            f"OK Successfully fetched {result['count']} emails "
                             f"({result['new_count']} new, {result['updated_count']} updated)"
                         )
                     )
@@ -121,7 +121,7 @@ class Command(BaseCommand):
                         )
                 else:
                     self.stdout.write(
-                        self.style.ERROR(f"✗ Failed to fetch emails: {result['errors']}")
+                        self.style.ERROR(f"ERROR Failed to fetch emails: {result['errors']}")
                     )
             
             else:
@@ -157,7 +157,7 @@ class Command(BaseCommand):
                 
                 self.stdout.write(
                     self.style.SUCCESS(
-                        f"✓ Completed: {results['successful_accounts']} successful, "
+                        f"OK Completed: {results['successful_accounts']} successful, "
                         f"{results['failed_accounts']} failed"
                     )
                 )
@@ -169,14 +169,14 @@ class Command(BaseCommand):
                 for account_email, account_result in results['account_results'].items():
                     if account_result['success']:
                         self.stdout.write(
-                            f"  ✓ {account_email}: {account_result['count']} emails "
+                            f"  OK {account_email}: {account_result['count']} emails "
                             f"({account_result['new_count']} new, "
                             f"{account_result['updated_count']} updated)"
                         )
                     else:
                         self.stdout.write(
                             self.style.ERROR(
-                                f"  ✗ {account_email}: Failed - {account_result.get('errors', [])}"
+                                f"  ERROR {account_email}: Failed - {account_result.get('errors', [])}"
                             )
                         )
         

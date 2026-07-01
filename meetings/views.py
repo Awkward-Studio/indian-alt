@@ -1,6 +1,9 @@
 from rest_framework import viewsets, filters
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema_view, extend_schema
 from core.mixins import ErrorHandlingMixin
@@ -111,6 +114,23 @@ class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = ['meeting_at', 'created_at', 'updated_at']
     ordering = ['-meeting_at', '-created_at']
     filterset_fields = ['source', 'is_indexed', 'deals']
+
+    @extend_schema(
+        summary="Re-index a meeting note",
+        description="Retry chunking and embedding for an existing meeting note without changing the saved note text.",
+        tags=["Meeting Notes"],
+        responses={200: MeetingNoteSerializer},
+    )
+    @action(detail=True, methods=['post'])
+    def reindex(self, request, pk=None):
+        note = self.get_object()
+
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
+
+        EmbeddingService().vectorize_meeting_note(note)
+        note.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error', 'updated_at'])
+        response_status = status.HTTP_200_OK if note.is_indexed else status.HTTP_202_ACCEPTED
+        return Response(self.get_serializer(note).data, status=response_status)
 
 
 @extend_schema_view(

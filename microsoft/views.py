@@ -29,8 +29,9 @@ from .services.email_reader import EmailReaderService
 from .services.graph_service import GraphAPIService, DMS_USER_EMAIL, DMS_DRIVE_ID
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
-from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.runtime import AIRuntimeService
+from deals.models import Deal
+from .services.granola_meeting_ingestion import GranolaMeetingEmailIngestionService
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,57 @@ class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
         if self.action == 'list':
             return EmailListSerializer
         return EmailSerializer
+
+    @extend_schema(
+        summary="Attach an email to a deal",
+        description="Manually associate an existing email with a deal and index the email for deal retrieval when text is available.",
+        tags=["Emails"],
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'deal_id': {'type': 'string'},
+                },
+                'required': ['deal_id'],
+            }
+        },
+        responses={200: EmailListSerializer},
+    )
+    @action(detail=True, methods=['post'])
+    def attach_deal(self, request, pk=None):
+        """Convert an email into an embedded meeting note and link it to a deal."""
+        email = self.get_object()
+        deal_id = request.data.get('deal_id')
+        if not deal_id:
+            return Response(
+                {'error': 'Validation failed', 'details': {'deal_id': ['This field is required.']}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deal = Deal.objects.filter(id=deal_id).first()
+        if not deal:
+            return Response(
+                {'error': 'Deal not found', 'details': f'No deal found for id {deal_id}'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            GranolaMeetingEmailIngestionService.process_email_for_deal(email, deal)
+        except Exception as exc:
+            logger.exception("Failed to attach email %s to deal %s via meeting-note pipeline: %s", email.id, deal.id, exc)
+            return Response(
+                {
+                    'error': 'Failed to attach email',
+                    'details': str(exc),
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email.refresh_from_db()
+
+        serializer = EmailListSerializer(email, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_200_OK)
     
     @extend_schema(
         summary="Analyze an email with AI",

@@ -26,11 +26,12 @@ class GranolaMeetingPayload:
 
 class GranolaMeetingEmailIngestionService:
     """
-    Converts Granola meeting-note emails into deal-linked MeetingNote records.
+    Converts meeting-note emails into deal-linked MeetingNote records.
 
-    The routing rule is intentionally strict: a Granola email is processed only
-    when the subject is exactly a deal title, or a deal_name= value in the
-    subject/body exactly matches an existing deal title.
+    The routing rule is intentionally strict: an email is processed only when
+    the subject is exactly a deal title, or a deal_name= value in the
+    subject/body exactly matches an existing deal title, and the body includes
+    a summary plus transcript/notes section.
     """
 
     DEAL_NAME_RE = re.compile(
@@ -50,6 +51,10 @@ class GranolaMeetingEmailIngestionService:
 
     @classmethod
     def process_email(cls, email) -> Optional[MeetingNote]:
+        existing_note = MeetingNote.objects.filter(source_email=email).first()
+        if existing_note:
+            return existing_note
+
         payload = cls.extract_payload(email)
         if payload is None:
             return None
@@ -74,41 +79,88 @@ class GranolaMeetingEmailIngestionService:
             )
             note.deals.set([payload.deal])
 
-        try:
             from ai_orchestrator.services.embedding_processor import EmbeddingService
 
-            EmbeddingService().vectorize_meeting_note(note)
-        except Exception as exc:
-            logger.exception("Failed to vectorize Granola meeting note %s: %s", note.id, exc)
-            note.embedding_error = str(exc)
-            note.save(update_fields=["embedding_error", "updated_at"])
+            try:
+                EmbeddingService().vectorize_meeting_note(note)
+            except Exception as exc:
+                logger.exception("Failed to vectorize Granola meeting note %s: %s", note.id, exc)
+                note.embedding_error = str(exc)
+                note.save(update_fields=["embedding_error", "updated_at"])
 
-        update_fields = []
-        if email.deal_id != payload.deal.id:
-            email.deal = payload.deal
-            update_fields.append("deal")
-        if not email.is_processed:
-            email.is_processed = True
-            update_fields.append("is_processed")
-        if email.processing_status != "completed":
-            email.processing_status = "completed"
-            update_fields.append("processing_status")
-        if email.extracted_text != payload.transcript:
-            email.extracted_text = payload.transcript
-            update_fields.append("extracted_text")
-        if email.processed_at is None:
-            email.processed_at = timezone.now()
-            update_fields.append("processed_at")
-        if update_fields:
-            email.save(update_fields=update_fields)
+            update_fields = []
+            if email.deal_id != payload.deal.id:
+                email.deal = payload.deal
+                update_fields.append("deal")
+            if not email.is_processed:
+                email.is_processed = True
+                update_fields.append("is_processed")
+            if email.processing_status != "completed":
+                email.processing_status = "completed"
+                update_fields.append("processing_status")
+            if email.extracted_text != payload.transcript:
+                email.extracted_text = payload.transcript
+                update_fields.append("extracted_text")
+            if email.processed_at is None:
+                email.processed_at = timezone.now()
+                update_fields.append("processed_at")
+            if update_fields:
+                email.save(update_fields=update_fields)
+
+        return note
+
+    @classmethod
+    def process_email_for_deal(cls, email, deal: Deal) -> MeetingNote:
+        """
+        Manually convert an email into a deal-linked meeting note.
+
+        This bypasses automatic deal-name routing, but it does not bypass the
+        meeting-note embedding requirement. If embeddings are not created, the
+        note/email link is not committed.
+        """
+        body = cls._email_text(email)
+        summary = cls._extract_section(body, "summary") or (email.body_preview or "")
+        transcript = cls._extract_section(body, "transcript") or cls._extract_section(body, "notes") or body
+        transcript = transcript.strip()
+        if not transcript and not summary.strip():
+            raise ValueError("Email has no meeting-note text to attach.")
+
+        meeting_at = cls._extract_meeting_datetime(body) or email.date_sent or email.date_received or timezone.now()
+        if timezone.is_naive(meeting_at):
+            meeting_at = timezone.make_aware(meeting_at, timezone.get_current_timezone())
+
+        title = (email.subject or "").strip() or f"Meeting note - {deal.title}"
+
+        with transaction.atomic():
+            note, _ = MeetingNote.objects.update_or_create(
+                source_email=email,
+                defaults={
+                    "title": title[:255],
+                    "body": transcript,
+                    "summary": summary.strip(),
+                    "meeting_at": meeting_at,
+                    "source": MeetingNoteSource.EMAIL,
+                    "metadata": {
+                        "source": "manual_email_attach",
+                        "email_graph_id": email.graph_id,
+                        "email_subject": email.subject,
+                        "email_from": email.from_email,
+                        "deal_name_source": "manual",
+                    },
+                },
+            )
+            note.deals.set([deal])
+
+            from ai_orchestrator.services.embedding_processor import EmbeddingService
+
+            if not EmbeddingService().vectorize_meeting_note(note):
+                note.refresh_from_db(fields=["embedding_error"])
+                raise ValueError(note.embedding_error or "Meeting note embeddings were not created.")
 
         return note
 
     @classmethod
     def extract_payload(cls, email) -> Optional[GranolaMeetingPayload]:
-        if not cls._is_granola_email(email):
-            return None
-
         subject = email.subject or ""
         body = cls._email_text(email)
         deal, deal_name_source = cls._resolve_deal(subject, body)
