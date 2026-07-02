@@ -144,6 +144,28 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertEqual(note.summary, "This should be saved even though the sender is not Granola.")
         self.assertEqual(list(note.deals.all()), [self.deal])
 
+    def test_recognizes_meeting_note_email_without_resolved_deal(self):
+        email = self._email(
+            subject="Granola meeting notes",
+            body=(
+                "Summary:\n"
+                "Discussion covered customer demand.\n\n"
+                "Notes:\n"
+                "The team reviewed expansion plans."
+            ),
+        )
+
+        self.assertTrue(GranolaMeetingEmailIngestionService.is_meeting_note_email(email))
+
+    def test_does_not_recognize_regular_email_as_meeting_note(self):
+        email = self._email(
+            subject="Acme Health follow-up",
+            body="Please see the attached update from the company.",
+            from_email="banker@example.com",
+        )
+
+        self.assertFalse(GranolaMeetingEmailIngestionService.is_meeting_note_email(email))
+
 
 class EmailAttachDealAPITests(TestCase):
     def setUp(self):
@@ -197,3 +219,26 @@ class EmailAttachDealAPITests(TestCase):
         self.assertFalse(self.email.is_processed)
         self.assertFalse(self.email.is_indexed)
         self.assertEqual(MeetingNote.objects.filter(source_email=self.email).count(), 0)
+
+    def test_email_list_exposes_meeting_note_flag(self):
+        meeting_email = Email.objects.create(
+            email_account=self.account,
+            graph_id="graph-meeting-list",
+            subject="Granola meeting notes",
+            from_email="notes@granola.ai",
+            body_text=(
+                "Summary:\n"
+                "Management discussed growth.\n\n"
+                "Transcript:\n"
+                "Speaker A: Revenue grew."
+            ),
+            date_received=timezone.now(),
+        )
+
+        response = self.client.get("/api/microsoft/emails/emails/")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        flags = {str(row["id"]): row["is_meeting_note_email"] for row in rows}
+        self.assertTrue(flags[str(meeting_email.id)])
+        self.assertFalse(flags[str(self.email.id)])

@@ -3,6 +3,7 @@ Serializers for email and OneDrive models.
 """
 from rest_framework import serializers
 from .models import EmailAccount, Email
+from .services.granola_meeting_ingestion import GranolaMeetingEmailIngestionService
 
 
 class EmailAccountSerializer(serializers.ModelSerializer):
@@ -44,6 +45,10 @@ class EmailSerializer(serializers.ModelSerializer):
         source='email_account.email',
         read_only=True
     )
+    is_meeting_note_email = serializers.SerializerMethodField()
+
+    def get_is_meeting_note_email(self, obj):
+        return GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
     
     class Meta:
         model = Email
@@ -62,6 +67,10 @@ class EmailListSerializer(serializers.ModelSerializer):
         read_only=True
     )
     deal_title = serializers.CharField(source='deal.title', read_only=True)
+    is_meeting_note_email = serializers.SerializerMethodField()
+
+    def get_is_meeting_note_email(self, obj):
+        return GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
     
     class Meta:
         model = Email
@@ -70,7 +79,8 @@ class EmailListSerializer(serializers.ModelSerializer):
             'from_email', 'to_emails', 'cc_emails', 'bcc_emails',
             'body_text', 'body_html', 'date_received', 'date_sent', 
             'importance', 'is_read', 'has_attachments', 'body_preview', 
-            'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id', 'deal_title'
+            'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id',
+            'deal_title', 'is_meeting_note_email'
         )
         read_only_fields = ('id', 'created_at')
 

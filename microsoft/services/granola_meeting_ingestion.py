@@ -190,6 +190,25 @@ class GranolaMeetingEmailIngestionService:
         )
 
     @classmethod
+    def is_meeting_note_email(cls, email) -> bool:
+        """
+        Return whether an email has the shape of a meeting-note email.
+
+        This intentionally does not require a resolvable deal. The emails UI
+        uses this to decide whether manual deal attachment should be offered.
+        """
+        body = cls._email_text(email)
+        has_notes_body = bool(
+            cls._extract_section(body, "summary")
+            and (cls._extract_section(body, "transcript") or cls._extract_section(body, "notes"))
+        )
+        if has_notes_body:
+            return True
+
+        subject = (email.subject or "").casefold()
+        return cls.GRANOLA_MARKER in subject and bool(cls._extract_section(body, "notes") or cls._extract_section(body, "transcript"))
+
+    @classmethod
     def _is_granola_email(cls, email) -> bool:
         sender = (email.from_email or "").lower()
         metadata = email.graph_metadata if isinstance(email.graph_metadata, dict) else {}
