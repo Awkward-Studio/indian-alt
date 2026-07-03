@@ -36,13 +36,60 @@ from deals.tasks import (
     analyze_additional_documents_async,
     fetch_company_news_async_task,
     analyze_selection_async,
+    enrich_competitors_vi_async_task,
     fetch_competitors_async_task,
     process_single_document_async,
 )
+from deals.services.competitor_intelligence import competitor_names_from_payload
+from deals.services.screener import ScreenerCompanyService
 from deals.services.venture_intelligence import VentureIntelligenceService
 
 
 class CompetitorSearchPipelineTests(TestCase):
+    def test_screener_parser_selects_current_peer_by_ticker_not_first_peer(self):
+        html = """
+        <html>
+          <head><title>Honasa Consumer Ltd - Screener</title></head>
+          <body>
+            <h1>Honasa Consumer Ltd</h1>
+            <ul id="top-ratios">
+              <li><span class="name">Market Cap</span><span class="number">15,192.44</span></li>
+            </ul>
+            <section id="profit-loss">
+              <table>
+                <tr><th></th><th>Mar 2026</th></tr>
+                <tr><td>Sales</td><td>2,392</td></tr>
+                <tr><td>Operating Profit</td><td>236</td></tr>
+              </table>
+            </section>
+          </body>
+        </html>
+        """
+        peers = [
+            {
+                "company": "Godrej Consumer",
+                "url": "/company/GODREJCP/consolidated/",
+                "mar_cap_rs_cr": 106775.23,
+            },
+            {
+                "company": "Honasa Consumer",
+                "url": "/company/HONASA/consolidated/",
+                "mar_cap_rs_cr": 15192.44,
+            },
+        ]
+
+        snapshot = ScreenerCompanyService().parse_screener_html(
+            html,
+            url="https://www.screener.in/company/HONASA/consolidated/",
+            fallback_ticker="HONASA",
+            endpoint_peers=peers,
+        )
+
+        self.assertEqual(snapshot["market_cap"], 15192.44)
+        self.assertEqual(snapshot["trading_comps"]["ev"], 15192.44)
+        self.assertEqual(snapshot["trading_comps"]["equity_value"], 15192.44)
+        self.assertAlmostEqual(snapshot["trading_comps"]["ev_sales"], 15192.44 / 2392.0)
+
     @patch("deals.tasks.EmbeddingService")
     @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
     def test_company_news_search_persists_dated_memo_document(self, mock_provider, mock_embedding_service):
@@ -104,7 +151,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("red/green flags", prompt)
         self.assertIn("at most 5 news_cards", prompt)
         self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_search_uses"], 1)
-        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 1200)
+        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 4000)
 
         docs = DealDocument.objects.filter(deal=deal, title__startswith="Public Domain News Research").order_by("created_at")
         self.assertEqual(docs.count(), 2)
@@ -116,7 +163,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(second["document"]["title"], docs.last().title)
 
     @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
-    def test_initial_competitor_search_defers_cin_resolution(self, mock_provider):
+    def test_initial_competitor_search_classifies_public_and_private_candidates(self, mock_provider):
         deal = Deal.objects.create(
             title="Acme Commerce",
             sector="Consumer",
@@ -134,6 +181,12 @@ class CompetitorSearchPipelineTests(TestCase):
                         "core_business": "Online marketplace",
                         "nature_of_competition": "Direct category peer",
                         "country_or_region": "India",
+                        "company_type": "listed_public",
+                        "classification_confidence": 0.9,
+                        "exchange": "NSE",
+                        "ticker": "PEER",
+                        "screener_url": "https://www.screener.in/company/PEER/",
+                        "classification_source": "Listed on NSE",
                     }
                 ]
             })
@@ -142,18 +195,212 @@ class CompetitorSearchPipelineTests(TestCase):
         result = fetch_competitors_async_task(str(deal.id))
 
         prompt = provider.execute_standard.call_args.args[0]["prompt"]
-        self.assertNotIn('"cin"', prompt.lower())
         self.assertNotIn("Prefer companies with VI/MCA-compatible Indian CINs", prompt)
-        self.assertIn("Do not search for or return Corporate Identity Numbers", prompt)
-        self.assertEqual(result["competitors"], [{
-            "name": "Peer Commerce",
-            "notes": "Core Business: Online marketplace\nNature Of Competition: Direct category peer",
-            "cin": "",
-        }])
+        self.assertIn('"company_type"', prompt)
+        self.assertIn('"ticker"', prompt)
+        self.assertIn("Screener", prompt)
+        self.assertEqual(result["competitors"][0]["name"], "Peer Commerce")
+        self.assertEqual(result["competitors"][0]["company_type"], "listed_public")
+        self.assertEqual(result["competitors"][0]["ticker"], "PEER")
+        self.assertEqual(result["competitors"][0]["exchange"], "NSE")
         self.assertNotIn("CIN:", result["response"])
         payload = provider.execute_standard.call_args.args[0]
         self.assertEqual(payload["options"]["web_search_tool_type"], "web_search_20250305")
         self.assertEqual(payload["options"]["max_search_uses"], 3)
+        self.assertEqual(payload["options"]["max_tokens"], 2200)
+
+    def test_competitor_parser_accepts_nested_grouped_public_private_payloads(self):
+        payload = {
+            "data": {
+                "public_competitors": [
+                    {
+                        "competitor_name": "Titan Company",
+                        "listing_status": "publicly listed",
+                        "stock_symbol": "TITAN",
+                        "stock_exchange": "NSE",
+                        "competition_rationale": "Jewellery and watches peer",
+                    }
+                ],
+                "private_competitors": [
+                    {
+                        "peer_name": "Wakefit",
+                        "public_private_status": "privately held",
+                        "why_competitor": "Consumer brand peer",
+                    }
+                ],
+            }
+        }
+
+        competitors = competitor_names_from_payload(payload, limit=10, include_cin=False)
+
+        self.assertEqual([item["name"] for item in competitors], ["Titan Company", "Wakefit"])
+        self.assertEqual(competitors[0]["company_type"], "listed_public")
+        self.assertEqual(competitors[0]["ticker"], "TITAN")
+        self.assertEqual(competitors[0]["exchange"], "NSE")
+        self.assertEqual(competitors[1]["company_type"], "private")
+
+    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
+    def test_initial_competitor_search_parses_nested_grouped_response(self, mock_provider):
+        deal = Deal.objects.create(
+            title="Acme Commerce",
+            sector="Consumer",
+            industry="Ecommerce",
+            city="Bengaluru",
+            country="India",
+            deal_summary="Online commerce platform.",
+        )
+        provider = mock_provider.return_value
+        provider.execute_standard.return_value = {
+            "response": json.dumps({
+                "data": {
+                    "public_competitors": [{
+                        "competitor_name": "Listed Peer",
+                        "listing_status": "public company",
+                        "stock_symbol": "LISTED",
+                        "exchange": "NSE",
+                    }],
+                    "private_competitors": [{
+                        "peer_name": "Private Peer",
+                        "public_private_status": "private company",
+                    }],
+                }
+            })
+        }
+
+        result = fetch_competitors_async_task(str(deal.id))
+
+        self.assertNotIn("error", result)
+        self.assertEqual([item["name"] for item in result["competitors"]], ["Listed Peer", "Private Peer"])
+        self.assertEqual(result["competitors"][0]["company_type"], "listed_public")
+        self.assertEqual(result["competitors"][1]["company_type"], "private")
+
+    @patch("deals.tasks.EmbeddingService")
+    @patch("deals.services.screener.EmbeddingService")
+    def test_public_competitor_routes_to_screener_profile(self, mock_embedding_service, mock_task_embedding_service):
+        deal = Deal.objects.create(
+            title="Acme Commerce",
+            sector="Consumer",
+            industry="Ecommerce",
+            city="Bengaluru",
+            country="India",
+        )
+        mock_task_embedding_service.return_value.is_embedding_available.return_value = True
+        mock_embedding_service.return_value.chunk_and_embed.return_value = True
+
+        with patch(
+            "deals.services.screener.ScreenerCompanyService.fetch_screener_direct_snapshot",
+            return_value={
+                "is_listed": True,
+                "company_name": "Peer Commerce Ltd",
+                "registered_name": "Peer Commerce Limited",
+                "ticker": "PEER",
+                "exchange": "NSE",
+                "screener_url": "https://www.screener.in/company/PEER/",
+                "industry": "Retail",
+                "sector": "E-Commerce",
+                "market_cap": 1111.25,
+                "current_price": 100.0,
+                "stock_pe": 25.0,
+                "trading_comps": {
+                    "date": "2026-07-01",
+                    "company": "Peer Commerce Ltd",
+                    "investor": "Listed",
+                    "fy": "FY24",
+                    "equity_value": 1111.25,
+                    "ev": None,
+                    "sales": 500.0,
+                    "ev_sales": None,
+                    "ebitda": 80.0,
+                    "ev_ebitda": None,
+                    "source": "Screener direct",
+                },
+                "profit_loss": [{"fy": "FY24", "sales": 500.0, "operating_profit": 80.0, "net_profit": 50.0}],
+                "balance_sheet": [{"fy": "FY24", "total_assets": 900.0, "borrowings": 100.0}],
+                "cash_flow": [{"fy": "FY24", "cash_from_operations": 70.0, "net_cash_flow": 20.0}],
+                "quarterly_financials": [{"fy": "Mar 2024", "sales": 120.0, "net_profit": 12.0}],
+                "summary": "Screener public-market profile parsed directly for Peer Commerce Ltd.",
+                "sources": [{"title": "Screener", "url": "https://www.screener.in/company/PEER/"}],
+            },
+        ):
+            result = enrich_competitors_vi_async_task(
+                str(deal.id),
+                competitors=[{
+                    "name": "Peer Commerce",
+                    "company_type": "listed_public",
+                    "exchange": "NSE",
+                    "ticker": "PEER",
+                    "notes": "Public ecommerce peer",
+                }],
+            )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        enrichment = result["vi_enrichment"]
+        self.assertEqual(enrichment["steps"]["screener_fetch"]["enriched"][0]["ticker"], "PEER")
+        self.assertEqual(enrichment["steps"]["vi_fetch"]["enriched"], [])
+        profile = VentureIntelligenceCompanyProfile.objects.get(ticker="PEER")
+        self.assertEqual(profile.data_source, "screener")
+        self.assertEqual(profile.company_type, "listed_public")
+        self.assertEqual(profile.market_cap, "1111.25")
+        pl = profile.financial_statements.get(statement_type="profit_loss", fy="FY24")
+        self.assertEqual(pl.fin_type, "Consolidated")
+        self.assertEqual(pl.data["revenue"], 500.0)
+        self.assertEqual(pl.data["ebitda"], 80.0)
+        self.assertEqual(pl.data["pat"], 50.0)
+        self.assertEqual(pl.data["equity_value"], 1111.25)
+        self.assertEqual(pl.data["ev"], 1111.25)
+        self.assertEqual(pl.data["sales"], 500.0)
+        self.assertEqual(pl.data["ev_sales"], 2.2225)
+        self.assertEqual(pl.data["ev_ebitda"], 13.890625)
+        self.assertEqual(profile.public_market_snapshot["trading_comps"]["investor"], "Listed")
+        self.assertEqual(profile.public_market_snapshot["trading_comps"]["equity_value"], 1111.25)
+        self.assertEqual(profile.public_market_snapshot["trading_comps"]["ev"], 1111.25)
+        self.assertEqual(profile.financial_statements.filter(statement_type="balance_sheet").count(), 1)
+        self.assertEqual(profile.financial_statements.filter(statement_type="cash_flow").count(), 1)
+        self.assertEqual(profile.financial_statements.filter(statement_type="screener_quarterly").count(), 1)
+        self.assertEqual(mock_embedding_service.return_value.chunk_and_embed.call_count, 1)
+
+    @patch("deals.tasks.EmbeddingService")
+    @patch("deals.services.screener.ScreenerCompanyService.fetch_screener_direct_snapshot")
+    def test_competitor_enrichment_skips_embedding_when_provider_unavailable(self, mock_snapshot, mock_task_embedding_service):
+        deal = Deal.objects.create(
+            title="Acme Commerce",
+            sector="Consumer",
+            industry="Ecommerce",
+            city="Bengaluru",
+            country="India",
+        )
+        mock_task_embedding_service.return_value.is_embedding_available.return_value = False
+        mock_task_embedding_service.return_value._last_embedding_error = "connection refused"
+        mock_snapshot.return_value = {
+            "is_listed": True,
+            "company_name": "Peer Commerce Ltd",
+            "ticker": "PEER",
+            "exchange": "NSE",
+            "market_cap": 1111.25,
+            "trading_comps": {
+                "company": "Peer Commerce Ltd",
+                "fy": "FY24",
+                "equity_value": 1111.25,
+                "sales": 500.0,
+                "ebitda": 80.0,
+            },
+            "profit_loss": [{"fy": "FY24", "sales": 500.0, "operating_profit": 80.0}],
+        }
+
+        result = enrich_competitors_vi_async_task(
+            str(deal.id),
+            competitors=[{
+                "name": "Peer Commerce",
+                "company_type": "listed_public",
+                "exchange": "NSE",
+                "ticker": "PEER",
+            }],
+        )
+
+        self.assertEqual(result["status"], "SUCCESS")
+        embedding = result["vi_enrichment"]["steps"]["embedding"]
+        self.assertEqual(embedding["status"], "skipped_unavailable")
+        self.assertEqual(embedding["reason"], "connection refused")
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -1634,6 +1881,49 @@ class VentureIntelligenceServiceTests(TestCase):
         self.assertIn("Kalyan Krishnamurthy", all_chunks_text)
         self.assertIn("Sachin Bansal", all_chunks_text)
 
+    def test_enrich_deal_with_raw_data(self):
+        # Construct raw_data to mimic what's returned by preview endpoint / vi_data
+        raw_data = {
+            "success": True,
+            "results": {
+                "profile": {
+                    "cin": "U74999KA2012PTC066107",
+                    "name": "Flipkart",
+                    "registered_name": "Flipkart Private Limited",
+                    "website": "https://flipkart.com",
+                    "industry": "Retail",
+                    "sector": "E-Commerce",
+                    "email": "contact@flipkart.com",
+                    "year_founded": "2007",
+                    "city": {"name": "Bengaluru", "state": "Karnataka", "region": "South", "country": "India"},
+                    "total_funding": "3000",
+                },
+                "profit_loss": [
+                    {"fy": "FY23", "fin_type": "Consolidated", "revenue": "10000"}
+                ]
+            },
+            "resolution": {
+                "cin": "U74999KA2012PTC066107",
+                "entity_name": "Flipkart Private Limited",
+                "confidence": 1.0,
+                "source": "pre_resolved",
+                "is_valid": True,
+            }
+        }
+
+        # Call enrich_deal with raw_data. This should NOT perform any HTTP or AI resolution calls.
+        # If it tries, it will fail because we have not mocked requests.post/AIProcessorService here.
+        profile = self.service.enrich_deal(deal_id=self.deal.id, raw_data=raw_data)
+
+        self.assertEqual(profile.cin, "U74999KA2012PTC066107")
+        self.assertEqual(profile.name, "Flipkart")
+        self.assertEqual(profile.industry, "Retail")
+        self.assertEqual(profile.sector, "E-Commerce")
+
+        # Verify database structures were created
+        self.assertEqual(VentureIntelligenceCompanyProfile.objects.count(), 1)
+        self.assertEqual(VentureIntelligenceFinancialStatement.objects.count(), 1)
+        self.assertEqual(VentureIntelligenceCompanyRelation.objects.count(), 1)
 
 
 class VentureIntelligenceViewTests(TestCase):

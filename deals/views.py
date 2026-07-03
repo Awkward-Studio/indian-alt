@@ -1255,10 +1255,17 @@ Rules:
         """
         deal = self.get_object()
 
+        instruction = request.data.get("instruction", "")
+        existing_news = request.data.get("existing_news", [])
+
         if request.data.get("sync"):
             try:
                 from .tasks import fetch_company_news_async_task
-                result = fetch_company_news_async_task(str(deal.id))
+                result = fetch_company_news_async_task(
+                    deal_id=str(deal.id),
+                    instruction=instruction,
+                    existing_news=existing_news
+                )
                 if result.get("error"):
                     return Response({"status": "FAILURE", "error": result["error"]}, status=500)
                 return Response({
@@ -1273,7 +1280,11 @@ Rules:
         try:
             from .tasks import fetch_company_news_async_task
             task = fetch_company_news_async_task.apply_async(
-                kwargs={"deal_id": str(deal.id)},
+                kwargs={
+                    "deal_id": str(deal.id),
+                    "instruction": instruction,
+                    "existing_news": existing_news,
+                },
                 queue='high_priority',
             )
             return Response({
@@ -1354,7 +1365,7 @@ Rules:
         return Response({
             "status": "queued",
             "task_id": task.id,
-            "message": "Competitor CIN resolution, VI fetch, and VI profile embedding queued in Celery.",
+            "message": "Selected competitors queued: private companies use CIN/VI, listed public companies use Screener, then profiles are embedded.",
         })
 
     @action(detail=True, methods=['get'], url_path='competitor_vi_status/(?P<task_id>[^/.]+)')
@@ -1374,6 +1385,7 @@ Rules:
             return Response({
                 "status": "SUCCESS",
                 "vi_enrichment": data.get("vi_enrichment") or {"enriched": [], "failed": [], "skipped": []},
+                "enrichment": data.get("enrichment") or data.get("vi_enrichment") or {"enriched": [], "failed": [], "skipped": []},
             })
         if res.status == 'FAILURE':
             return Response({
@@ -1457,6 +1469,7 @@ class DealEnrichView(APIView):
         company_name = request.data.get("company_name")
         cin = request.data.get("cin")
         relation_type = request.data.get("relation_type", "target")
+        raw_data = request.data.get("raw_data")
         
         if relation_type not in ["target", "competitor"]:
             return Response({"error": "Invalid relation_type. Must be 'target' or 'competitor'"}, status=400)
@@ -1472,6 +1485,7 @@ class DealEnrichView(APIView):
                     "company_name": company_name,
                     "cin": cin,
                     "relation_type": relation_type,
+                    "raw_data": raw_data,
                 },
                 queue='high_priority'
             )
@@ -1487,7 +1501,8 @@ class DealEnrichView(APIView):
                 deal_id=deal.id,
                 company_name=company_name,
                 cin=cin,
-                relation_type=relation_type
+                relation_type=relation_type,
+                raw_data=raw_data,
             )
             serializer = VentureIntelligenceCompanyProfileSerializer(profile)
             return Response({

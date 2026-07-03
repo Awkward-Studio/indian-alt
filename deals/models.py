@@ -217,6 +217,12 @@ class Deal(models.Model):
         null=True,
         help_text='Deal-specific analysis directive appended to the AI personality for full rewrites and analysis runs.'
     )
+    competitor_candidates = models.JSONField(
+        default=list,
+        blank=True,
+        null=True,
+        help_text='Array of competitor candidate objects found by AI research'
+    )
 
     class Meta:
         db_table = 'deal'
@@ -694,6 +700,16 @@ class VentureIntelligenceCompanyProfile(models.Model):
     shp_non_promoter = models.FloatField(null=True, blank=True)
     is_xbrl = models.BooleanField(null=True, blank=True)
 
+    # Public-market enrichment fields. These are populated by Screener-backed
+    # research for listed competitors while preserving the existing relation UI.
+    data_source = models.CharField(max_length=40, default='venture_intelligence', db_index=True)
+    company_type = models.CharField(max_length=40, default='private', db_index=True)
+    exchange = models.CharField(max_length=40, null=True, blank=True)
+    ticker = models.CharField(max_length=40, null=True, blank=True, db_index=True)
+    screener_url = models.URLField(max_length=500, null=True, blank=True)
+    market_cap = models.TextField(null=True, blank=True)
+    public_market_snapshot = models.JSONField(default=dict, blank=True)
+
     raw_profile_json = models.JSONField(default=dict, blank=True, help_text="Full raw JSON response from VI")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -903,6 +919,8 @@ class VentureIntelligenceStatementType(models.TextChoices):
     PROFIT_LOSS = 'profit_loss', 'Profit & Loss'
     BALANCE_SHEET = 'balance_sheet', 'Balance Sheet'
     CASH_FLOW = 'cash_flow', 'Cash Flow'
+    SCREENER_ANNUAL = 'screener_annual', 'Screener Annual'
+    SCREENER_QUARTERLY = 'screener_quarterly', 'Screener Quarterly'
 
 
 class VentureIntelligenceFinancialStatement(models.Model):
@@ -913,7 +931,7 @@ class VentureIntelligenceFinancialStatement(models.Model):
         related_name='financial_statements'
     )
     statement_type = models.CharField(
-        max_length=20,
+        max_length=40,
         choices=VentureIntelligenceStatementType.choices
     )
     fy = models.CharField(max_length=20, db_index=True)  # e.g., "FY23", "2023"
@@ -963,4 +981,3 @@ class VentureIntelligenceCompanyRelation(models.Model):
 
     def __str__(self):
         return f"{self.deal.title} -> {self.company_profile.name} ({self.relation_type})"
-

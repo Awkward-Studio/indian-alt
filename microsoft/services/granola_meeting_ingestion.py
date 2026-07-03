@@ -28,10 +28,9 @@ class GranolaMeetingEmailIngestionService:
     """
     Converts meeting-note emails into deal-linked MeetingNote records.
 
-    The routing rule is intentionally strict: an email is processed only when
-    the subject is exactly a deal title, or a deal_name= value in the
-    subject/body exactly matches an existing deal title, and the body includes
-    a summary plus transcript/notes section.
+    The routing rule uses exact deal-title matching first, then a high-confidence
+    fuzzy title match, and the body must include a summary plus transcript/notes
+    section.
     """
 
     DEAL_NAME_RE = re.compile(
@@ -48,6 +47,27 @@ class GranolaMeetingEmailIngestionService:
     )
 
     GRANOLA_MARKER = "granola"
+    FUZZY_DEAL_MATCH_THRESHOLD = 0.88
+    DEAL_TITLE_STOPWORDS = {
+        "advisors",
+        "deal",
+        "growth",
+        "india",
+        "intequant",
+        "investment",
+        "limited",
+        "ltd",
+        "notes",
+        "opportunity",
+        "private",
+        "project",
+        "projects",
+        "pvt",
+        "round",
+        "series",
+        "store",
+        "test",
+    }
 
     @classmethod
     def process_email(cls, email) -> Optional[MeetingNote]:
@@ -81,12 +101,22 @@ class GranolaMeetingEmailIngestionService:
 
             from ai_orchestrator.services.embedding_processor import EmbeddingService
 
-            try:
-                EmbeddingService().vectorize_meeting_note(note)
-            except Exception as exc:
-                logger.exception("Failed to vectorize Granola meeting note %s: %s", note.id, exc)
-                note.embedding_error = str(exc)
-                note.save(update_fields=["embedding_error", "updated_at"])
+            embedding_service = EmbeddingService()
+            if embedding_service.is_embedding_available(timeout=1):
+                try:
+                    embedding_service.vectorize_meeting_note(note)
+                except Exception as exc:
+                    logger.exception("Failed to vectorize Granola meeting note %s: %s", note.id, exc)
+                    note.embedding_error = str(exc)
+                    note.save(update_fields=["embedding_error", "updated_at"])
+            else:
+                note.is_indexed = False
+                note.chunk_count = 0
+                note.embedding_error = (
+                    "Meeting note saved and linked, but embeddings were skipped because "
+                    f"the embedding service is unavailable. {embedding_service._last_embedding_error}"
+                ).strip()
+                note.save(update_fields=["is_indexed", "chunk_count", "embedding_error", "updated_at"])
 
             update_fields = []
             if email.deal_id != payload.deal.id:
@@ -153,9 +183,19 @@ class GranolaMeetingEmailIngestionService:
 
             from ai_orchestrator.services.embedding_processor import EmbeddingService
 
-            if not EmbeddingService().vectorize_meeting_note(note):
-                note.refresh_from_db(fields=["embedding_error"])
-                raise ValueError(note.embedding_error or "Meeting note embeddings were not created.")
+            embedding_service = EmbeddingService()
+            if embedding_service.is_embedding_available(timeout=1):
+                if not embedding_service.vectorize_meeting_note(note):
+                    note.refresh_from_db(fields=["embedding_error"])
+                    raise ValueError(note.embedding_error or "Meeting note embeddings were not created.")
+            else:
+                note.is_indexed = False
+                note.chunk_count = 0
+                note.embedding_error = (
+                    "Meeting note saved and linked, but embeddings were skipped because "
+                    f"the embedding service is unavailable. {embedding_service._last_embedding_error}"
+                ).strip()
+                note.save(update_fields=["is_indexed", "chunk_count", "embedding_error", "updated_at"])
 
         return note
 
@@ -220,13 +260,19 @@ class GranolaMeetingEmailIngestionService:
         deal_name = cls._extract_deal_name(subject) or cls._extract_deal_name(body)
         if deal_name:
             deal = cls._deal_by_exact_title(deal_name)
-            return deal, "deal_name" if deal else ""
+            if deal:
+                return deal, "deal_name"
+            deal, score = cls._deal_by_fuzzy_title(deal_name)
+            return deal, f"deal_name_fuzzy:{score:.2f}" if deal else ""
 
         subject_name = cls._normalize_subject(subject)
         if not subject_name:
             return None, ""
         deal = cls._deal_by_exact_title(subject_name)
-        return deal, "subject" if deal else ""
+        if deal:
+            return deal, "subject"
+        deal, score = cls._deal_by_fuzzy_title(subject_name)
+        return deal, f"subject_fuzzy:{score:.2f}" if deal else ""
 
     @classmethod
     def _extract_deal_name(cls, text: str) -> str:
@@ -238,14 +284,63 @@ class GranolaMeetingEmailIngestionService:
     @staticmethod
     def _deal_by_exact_title(name: str) -> Optional[Deal]:
         normalized = GranolaMeetingEmailIngestionService._normalize_match_text(name)
-        for deal in Deal.objects.exclude(title__isnull=True).exclude(title=""):
+        for deal in Deal.objects.exclude(title__isnull=True).exclude(title="").order_by("title", "id"):
             if GranolaMeetingEmailIngestionService._normalize_match_text(deal.title) == normalized:
                 return deal
         return None
 
+    @classmethod
+    def _deal_by_fuzzy_title(cls, name: str) -> tuple[Optional[Deal], float]:
+        best_deal = None
+        best_score = 0.0
+        for deal in Deal.objects.exclude(title__isnull=True).exclude(title="").order_by("title", "id"):
+            score = cls._title_match_score(name, deal.title)
+            if score > best_score:
+                best_deal = deal
+                best_score = score
+        if best_deal and best_score >= cls.FUZZY_DEAL_MATCH_THRESHOLD:
+            return best_deal, best_score
+        return None, best_score
+
+    @classmethod
+    def _title_match_score(cls, alias: str, title: str) -> float:
+        alias_norm = cls._normalize_match_text(alias)
+        title_norm = cls._normalize_match_text(title)
+        if not alias_norm or not title_norm:
+            return 0.0
+        if alias_norm == title_norm:
+            return 1.0
+
+        alias_tokens = cls._match_tokens(alias)
+        title_tokens = cls._match_tokens(title)
+        if not alias_tokens or not title_tokens:
+            return 0.0
+
+        overlap = alias_tokens & title_tokens
+        if not overlap:
+            return 0.0
+
+        title_containment = len(overlap) / len(title_tokens)
+        if title_containment == 1.0:
+            return 0.95
+
+        precision = len(overlap) / len(alias_tokens)
+        recall = len(overlap) / len(title_tokens)
+        jaccard = len(overlap) / len(alias_tokens | title_tokens)
+        return max((precision + recall) / 2, jaccard)
+
+    @classmethod
+    def _match_tokens(cls, value: str) -> set[str]:
+        return {
+            token
+            for token in cls._normalize_match_text(value).split()
+            if len(token) >= 3 and token not in cls.DEAL_TITLE_STOPWORDS
+        }
+
     @staticmethod
     def _normalize_match_text(value: str) -> str:
-        value = re.sub(r"\s+", " ", str(value or "")).strip()
+        value = re.sub(r"[^a-zA-Z0-9]+", " ", str(value or ""))
+        value = re.sub(r"\s+", " ", value).strip()
         return value.casefold()
 
     @classmethod
