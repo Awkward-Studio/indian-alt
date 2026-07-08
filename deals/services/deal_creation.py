@@ -254,15 +254,32 @@ class DealCreationService:
             bank_data = source_relationships.get("bank")
             if isinstance(bank_data, dict) and bank_data.get("name") and (overwrite or not deal.bank):
                 from banks.models import Bank
-                bank_name = bank_data["name"]
-                bank, _ = Bank.objects.get_or_create(
-                    name__iexact=bank_name,
-                    defaults={
-                        'name': bank_name,
-                        'website_domain': bank_data.get("website_domain"),
-                        'description': bank_data.get("description")
-                    }
-                )
+                bank_name = str(bank_data["name"]).strip()
+                bank_domain = (bank_data.get("website_domain") or "").strip() or None
+                bank_description = (bank_data.get("description") or "").strip() or None
+
+                bank = None
+                if bank_domain:
+                    bank = Bank.objects.filter(website_domain__iexact=bank_domain).order_by("created_at", "id").first()
+                if not bank:
+                    bank = Bank.objects.filter(name__iexact=bank_name).order_by("created_at", "id").first()
+                if not bank:
+                    bank = Bank.objects.create(
+                        name=bank_name,
+                        website_domain=bank_domain,
+                        description=bank_description,
+                    )
+                else:
+                    bank_updates = []
+                    if bank_domain and not bank.website_domain:
+                        bank.website_domain = bank_domain
+                        bank_updates.append("website_domain")
+                    if bank_description and not bank.description:
+                        bank.description = bank_description
+                        bank_updates.append("description")
+                    if bank_updates:
+                        bank.save(update_fields=bank_updates)
+
                 if deal.bank != bank:
                     deal.bank = bank
                     changed_fields.append('bank')
