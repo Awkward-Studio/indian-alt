@@ -23,29 +23,39 @@ class DocumentArtifactService:
     DEFAULT_EVIDENCE_KEYS = {
         "document_name": "",
         "document_type": "Other",
+        "document_type_suggestion": {},
         "document_summary": "",
         "claims": [],
         "metrics": [],
+        "numeric_evidence": [],
+        "table_definitions": [],
         "tables_summary": [],
         "contacts_found": [],
         "risks": [],
         "open_questions": [],
+        "diligence_gaps": [],
         "citations": [],
         "reasoning": "",
         "quality_flags": [],
         "normalized_text": "",
         "source_map": {},
+        "source_metadata": {},
+        "spreadsheet_profile": {},
     }
     REQUIRED_ARTIFACT_KEYS = (
         "document_name",
         "document_type",
+        "document_type_suggestion",
         "document_summary",
         "claims",
         "metrics",
+        "numeric_evidence",
+        "table_definitions",
         "tables_summary",
         "contacts_found",
         "risks",
         "open_questions",
+        "diligence_gaps",
         "citations",
         "quality_flags",
         "normalized_text",
@@ -100,7 +110,12 @@ class DocumentArtifactService:
                     source_type="cleaning",
                     metadata={"chat_template_kwargs": {"enable_thinking": False}}
                 )
-                cleaned_text = norm_res.get('parsed_json', {}).get('normalized_text') or norm_res.get('response') or raw_text
+                cleaned_text = (
+                    norm_res.get("normalized_text")
+                    or norm_res.get("parsed_json", {}).get("normalized_text")
+                    or norm_res.get("response")
+                    or raw_text
+                )
             except:
                 cleaned_text = raw_text
         else:
@@ -132,7 +147,12 @@ class DocumentArtifactService:
                     completed_count += 1
                     try:
                         clean_res = future.result()
-                        part_text = clean_res.get('parsed_json', {}).get('normalized_text') or clean_res.get('response') or segments[idx]
+                        part_text = (
+                            clean_res.get("normalized_text")
+                            or clean_res.get("parsed_json", {}).get("normalized_text")
+                            or clean_res.get("response")
+                            or segments[idx]
+                        )
                         cleaned_parts[idx] = part_text
                         if completed_count % 5 == 0 or completed_count == len(segments):
                             logger.info(f"  [{file_name}] Normalization Progress: {completed_count}/{len(segments)} chunks complete.")
@@ -181,7 +201,7 @@ class DocumentArtifactService:
         document.normalized_text = normalized_artifact.get("normalized_text") or document.extracted_text
         document.evidence_json = normalized_artifact
         document.source_map_json = normalized_artifact.get("source_map") or {}
-        document.table_json = normalized_artifact.get("tables_summary") or []
+        document.table_json = normalized_artifact.get("table_definitions") or normalized_artifact.get("tables_summary") or []
         document.key_metrics_json = normalized_artifact.get("metrics") or []
         document.reasoning = normalized_artifact.get("reasoning") or ""
         document.save(
@@ -209,7 +229,7 @@ class DocumentArtifactService:
         analysis_document.normalized_text = normalized_artifact.get("normalized_text") or analysis_document.raw_extracted_text
         analysis_document.evidence_json = normalized_artifact
         analysis_document.source_map_json = normalized_artifact.get("source_map") or {}
-        analysis_document.table_json = normalized_artifact.get("tables_summary") or []
+        analysis_document.table_json = normalized_artifact.get("table_definitions") or normalized_artifact.get("tables_summary") or []
         analysis_document.key_metrics_json = normalized_artifact.get("metrics") or []
         analysis_document.reasoning = normalized_artifact.get("reasoning") or ""
         analysis_document.save(
@@ -404,7 +424,7 @@ class DocumentArtifactService:
                 }
             )
 
-        for table in artifact.get("tables_summary") or []:
+        for table in artifact.get("table_definitions") or artifact.get("tables_summary") or []:
             serialized = cls._serialize_component(table, max_chars=table_excerpt_chars)
             if not serialized:
                 continue
@@ -486,6 +506,10 @@ class DocumentArtifactService:
                     normalized[key] = value.strip() if isinstance(value, str) else normalized.get(key, default_value)
                 else:
                     normalized[key] = value if value is not None else normalized.get(key, default_value)
+        if not normalized.get("table_definitions") and normalized.get("tables_summary"):
+            normalized["table_definitions"] = deepcopy(normalized["tables_summary"])
+        if not normalized.get("tables_summary") and normalized.get("table_definitions"):
+            normalized["tables_summary"] = deepcopy(normalized["table_definitions"])
         normalized["quality_flags"] = cls._normalize_string_list(normalized.get("quality_flags"))
         normalized["citations"] = cls._normalize_string_list(normalized.get("citations"))
         normalized["document_name"] = normalized.get("document_name") or fallback.get("document_name") or ""
@@ -512,18 +536,29 @@ class DocumentArtifactService:
         return {
             "document_name": file_name,
             "document_type": document_type,
+            "document_type_suggestion": {
+                "label": "Other",
+                "display_label": document_type or "Other",
+                "confidence": "Low",
+                "rationale": "Fallback artifact generated without model evidence extraction.",
+            },
             "document_summary": excerpt[:500],
             "claims": [],
             "metrics": [],
+            "numeric_evidence": [],
+            "table_definitions": [],
             "tables_summary": [],
             "contacts_found": [],
             "risks": [],
             "open_questions": [],
+            "diligence_gaps": [],
             "citations": [file_name] if file_name else [],
             "reasoning": "",
             "quality_flags": ["fallback_artifact"],
             "normalized_text": excerpt,
             "source_map": cls._default_source_map(file_name, extraction_mode, excerpt),
+            "source_metadata": {},
+            "spreadsheet_profile": {},
         }
 
     @staticmethod

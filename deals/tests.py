@@ -1055,6 +1055,40 @@ class DealStatusSyncTests(TestCase):
         self.assertIn("claim", kinds)
         self.assertIn("risk", kinds)
 
+    def test_document_artifact_service_maps_phase2_table_definitions(self):
+        artifact = DocumentArtifactService.artifact_from_file_record({
+            "file_name": "Model.xlsx",
+            "document_type": "Financial Model",
+            "document_artifact": {
+                "document_name": "Model.xlsx",
+                "document_type": "Financial Model",
+                "document_type_suggestion": {
+                    "label": "Financial Model",
+                    "display_label": "Financial Model",
+                    "confidence": "High",
+                    "rationale": "Workbook with financial tabs",
+                },
+                "document_summary": "Financial model summary",
+                "claims": [],
+                "metrics": [],
+                "numeric_evidence": [],
+                "table_definitions": [{"title": "P&L", "range": "A1:D10"}],
+                "contacts_found": [],
+                "risks": [],
+                "open_questions": [],
+                "diligence_gaps": [],
+                "citations": ["Model.xlsx"],
+                "quality_flags": [],
+                "normalized_text": "Revenue and EBITDA by year.",
+                "source_map": {"document_name": "Model.xlsx"},
+            },
+        })
+
+        self.assertEqual(artifact["table_definitions"], [{"title": "P&L", "range": "A1:D10"}])
+        self.assertEqual(artifact["tables_summary"], [{"title": "P&L", "range": "A1:D10"}])
+        chunks = DocumentArtifactService.build_embedding_chunks(artifact)
+        self.assertIn("table_summary", [chunk["metadata"]["chunk_kind"] for chunk in chunks])
+
     def test_vectorize_document_creates_multiple_chunk_families(self):
         deal = Deal.objects.create(title="Chunked Deal")
         doc = DealDocument.objects.create(
