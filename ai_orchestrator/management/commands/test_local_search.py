@@ -71,7 +71,7 @@ class Command(BaseCommand):
             "system": "You are a helpful investment analyst assistant. Synthesize the provided web search context.",
             "prompt": augmented_prompt,
             "options": {
-                "temperature": 0.1
+                "temperature": 0.0
             }
         }
 

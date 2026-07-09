@@ -2037,7 +2037,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 4000,
-                "temperature": 0.1,
+                "temperature": 0.0,
             },
         }, timeout=180)
 
@@ -2253,7 +2253,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 2200,
-                "temperature": 0.1,
+                "temperature": 0.0,
             }
         }
         
