@@ -1,6 +1,7 @@
 import json
 import time
 from django.core.management.base import BaseCommand
+from django.conf import settings
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from ai_orchestrator.services.llm_providers import VLLMProviderService
 
@@ -17,14 +18,14 @@ class Command(BaseCommand):
         parser.add_argument(
             "--lm-url",
             type=str,
-            help="Override local LM Studio or VLLM base URL (default: http://localhost:1234/v1)",
-            default="http://localhost:1234/v1"
+            help="Override local LM Studio or VLLM base URL",
+            default=getattr(settings, "LM_STUDIO_BASE_URL", "") or getattr(settings, "VLLM_BASE_URL", "http://localhost:1234/v1")
         )
         parser.add_argument(
             "--search-url",
             type=str,
-            help="Override local SearXNG base URL (default: http://localhost:8081)",
-            default="http://localhost:8081"
+            help="Override local SearXNG base URL",
+            default=getattr(settings, "SEARXNG_BASE_URL", "http://localhost:8081")
         )
 
     def handle(self, *args, **options):
