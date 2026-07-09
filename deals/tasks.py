@@ -2252,13 +2252,11 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research based on the provided search context.",
             "prompt": augmented_prompt,
             "options": {
-                "max_tokens": 2200,
                 "temperature": 0.0,
             }
         }
-        
         logger.info("Triggering active web search competitor research via SearXNG and Local AI...")
-        result = service.execute_standard(payload, timeout=45)
+        result = service.execute_standard(payload, timeout=600)
         response_text = result.get("response") or ""
         from .services.competitor_intelligence import competitor_names_from_payload
         try:
@@ -2280,7 +2278,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         report = _format_competitor_items_report(competitors, title=report_title)
         if not competitors:
             return {
-                "error": "Live web search completed but returned no parseable competitors. Try a more specific company name or sector.",
+                "message": "Live web search completed but returned no parseable competitors. Try a more specific company name or sector.",
                 "response": response_text,
                 "competitors": [],
             }

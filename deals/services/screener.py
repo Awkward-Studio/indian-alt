@@ -503,20 +503,27 @@ class ScreenerCompanyService:
             "  \"sector\": \"Sector\"\n"
             "}"
         )
-        service = AnthropicProviderService()
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+        search_query = f"{company_name} {ticker} screener.in profile"
+        search_context = SearXNGProviderService().search(search_query)
+
+        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
+
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        service = VLLMProviderService()
+        available_models = service.get_available_models()
+        model_name = available_models[0] if available_models else "local-model"
+
         result = service.execute_standard(
             {
-                "model": "default",
-                "system": "You find official Screener company URLs. Return only valid JSON.",
-                "prompt": prompt,
+                "model": model_name,
+                "system": "You find official Screener company URLs based on web search context. Return only valid JSON.",
+                "prompt": augmented_prompt,
                 "options": {
-                    "max_tokens": 800,
                     "temperature": 0.0,
-                    "max_search_uses": 3,
-                    "web_search_tool_type": "web_search_20250305",
                 },
             },
-            timeout=60,
+            timeout=600,
         )
         payload = _extract_json_object(result.get("response") or "")
         payload["raw_response"] = result.get("response") or ""

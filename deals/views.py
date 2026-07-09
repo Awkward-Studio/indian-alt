@@ -1188,14 +1188,14 @@ Rules:
                     existing_competitors=existing_competitors,
                 )
                 if result.get("error"):
-                    return Response({"status": "FAILURE", "error": result["error"]}, status=500)
+                    return Response({"status": "FAILURE", "error": result["error"]}, status=400)
                 from .services.competitor_intelligence import annotate_existing_competitors
                 competitors = annotate_existing_competitors(deal, result.get("competitors", []))
                 return Response({
-                    "status": "SUCCESS",
+                    "status": "SUCCESS" if competitors else "WARNING",
                     "response": result.get("response", ""),
                     "competitors": competitors,
-                    "message": "Competitor research completed.",
+                    "message": result.get("message", "Competitor research completed."),
                 })
             except Exception as e:
                 logger.error(f"Failed to run synchronous competitors search for deal {deal.id}: {str(e)}", exc_info=True)

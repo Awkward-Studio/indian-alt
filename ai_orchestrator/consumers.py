@@ -12,22 +12,31 @@ class AIStreamConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.audit_log_id = self.scope['url_route']['kwargs']['audit_log_id']
         self.room_group_name = f'ai_stream_{self.audit_log_id}'
+        self.joined_group = False
 
-        # Join room group
-        await self.channel_layer.group_add(
-            self.room_group_name,
-            self.channel_name
-        )
+        try:
+            await self.channel_layer.group_add(
+                self.room_group_name,
+                self.channel_name
+            )
+            self.joined_group = True
+        except Exception as exc:
+            logger.warning("AI stream websocket unavailable for %s: %s", self.audit_log_id, exc)
+            await self.close(code=1013)
+            return
 
         await self.accept()
         logger.info(f"WebSocket connected: {self.room_group_name}")
 
     async def disconnect(self, close_code):
-        # Leave room group
-        await self.channel_layer.group_discard(
-            self.room_group_name,
-            self.channel_name
-        )
+        if getattr(self, "joined_group", False):
+            try:
+                await self.channel_layer.group_discard(
+                    self.room_group_name,
+                    self.channel_name
+                )
+            except Exception as exc:
+                logger.warning("AI stream websocket cleanup failed for %s: %s", self.audit_log_id, exc)
         logger.info(f"WebSocket disconnected: {self.room_group_name}")
 
     # Receive message from room group
@@ -55,22 +64,31 @@ class AIAuditLogConsumer(AsyncWebsocketConsumer):
     """
     async def connect(self):
         self.room_group_name = 'audit_logs_general'
+        self.joined_group = False
 
-        # Join room group
-        await self.channel_layer.group_add(
-            self.room_group_name,
-            self.channel_name
-        )
+        try:
+            await self.channel_layer.group_add(
+                self.room_group_name,
+                self.channel_name
+            )
+            self.joined_group = True
+        except Exception as exc:
+            logger.warning("Global audit ledger websocket unavailable: %s", exc)
+            await self.close(code=1013)
+            return
 
         await self.accept()
         logger.info(f"WebSocket connected: {self.room_group_name}")
 
     async def disconnect(self, close_code):
-        # Leave room group
-        await self.channel_layer.group_discard(
-            self.room_group_name,
-            self.channel_name
-        )
+        if getattr(self, "joined_group", False):
+            try:
+                await self.channel_layer.group_discard(
+                    self.room_group_name,
+                    self.channel_name
+                )
+            except Exception as exc:
+                logger.warning("Global audit ledger websocket cleanup failed: %s", exc)
         logger.info(f"WebSocket disconnected: {self.room_group_name}")
 
     async def ai_message(self, event):
