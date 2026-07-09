@@ -3,7 +3,8 @@ import re
 import time
 from typing import List, Dict, Any, Optional
 from django.db import connection
-from django.db.models import Count
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
+from django.db.models import Count, F
 from django.utils import timezone
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from ..models import DealRetrievalProfile, DocumentChunk
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 class EmbeddingService:
     """
     Service for chunking text, generating embeddings, and semantic retrieval.
-    Supports pgvector for Postgres and keyword-fallback for SQLite.
+    Requires PostgreSQL with pgvector for retrieval.
     """
 
     RETRIEVAL_SOURCE_TYPES = ("document", "analysis_document", "deal_summary", "extracted_source", "meeting_note")
@@ -46,6 +47,8 @@ class EmbeddingService:
         self.chunk_size = 1000
         self.chunk_overlap = 150
         self.is_sqlite = connection.vendor == 'sqlite'
+        if connection.vendor != 'postgresql':
+            raise RuntimeError("EmbeddingService requires PostgreSQL with pgvector; SQLite retrieval is no longer supported.")
         
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
@@ -55,7 +58,6 @@ class EmbeddingService:
         )
 
     def _get_embedding(self, text: str) -> Optional[List[float]]:
-        if self.is_sqlite: return None # Skip embedding calls if on SQLite to save latency
         self._last_embedding_error = ""
         timeout = getattr(self.provider, "timeout", 30)
         for attempt in range(2):
@@ -72,8 +74,6 @@ class EmbeddingService:
         return None
 
     def is_embedding_available(self, *, timeout: int = 5) -> bool:
-        if self.is_sqlite:
-            return False
         if not self.model_name:
             self._last_embedding_error = "Embedding model is not configured."
             return False
@@ -107,6 +107,62 @@ class EmbeddingService:
             DocumentChunk.objects.exclude(content="")
             .exclude(embedding__isnull=True)
             .filter(source_type__in=self.RETRIEVAL_SOURCE_TYPES)
+        )
+
+    def _chunk_context_header(
+        self,
+        *,
+        deal: Deal | None,
+        source_type: str,
+        source_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        metadata = metadata or {}
+        source_title = (
+            metadata.get("title")
+            or metadata.get("filename")
+            or metadata.get("company_name")
+            or metadata.get("document_name")
+            or ""
+        )
+        document_type = metadata.get("document_type") or metadata.get("doc_type") or metadata.get("type") or ""
+        chunk_kind = metadata.get("chunk_kind") or ""
+        parts = [
+            f"Deal: {deal.title}" if deal and deal.title else "",
+            f"Source Title: {source_title}" if source_title else "",
+            f"Source Type: {source_type}" if source_type else "",
+            f"Source ID: {source_id}" if source_id else "",
+            f"Document Type: {document_type}" if document_type else "",
+            f"Chunk Kind: {chunk_kind}" if chunk_kind else "",
+        ]
+        return " | ".join(part for part in parts if part)
+
+    def _contextual_chunk_text(
+        self,
+        *,
+        content: str,
+        deal: Deal | None,
+        source_type: str,
+        source_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        header = self._chunk_context_header(
+            deal=deal,
+            source_type=source_type,
+            source_id=source_id,
+            metadata=metadata,
+        )
+        content = str(content or "").strip()
+        if header and content:
+            return f"{header}\n\nContent: {content}"
+        return content or header
+
+    def _refresh_search_vectors(self, chunks: list[DocumentChunk]) -> None:
+        chunk_ids = [chunk.id for chunk in chunks if getattr(chunk, "id", None)]
+        if not chunk_ids:
+            return
+        DocumentChunk.objects.filter(id__in=chunk_ids).update(
+            search_vector=SearchVector("search_text", config="english")
         )
 
     @staticmethod
@@ -297,7 +353,7 @@ class EmbeddingService:
             DealRetrievalProfile.objects.filter(deal=deal).delete()
             return False
 
-        embedding = self._get_embedding(profile_text) if not self.is_sqlite else None
+        embedding = self._get_embedding(profile_text)
         profile, _ = DealRetrievalProfile.objects.update_or_create(
             deal=deal,
             defaults={
@@ -341,17 +397,25 @@ class EmbeddingService:
         chunks = self.text_splitter.split_text(text)
         created_chunks = []
         for i, chunk_text in enumerate(chunks):
-            embedding = self._get_embedding(chunk_text) if not self.is_sqlite else None
-            if not self.is_sqlite and not embedding:
-                continue
             chunk_metadata = metadata.copy() if metadata else {}
             chunk_metadata.update({"chunk_index": i, "total_chunks": len(chunks)})
+            search_text = self._contextual_chunk_text(
+                content=chunk_text,
+                deal=deal,
+                source_type=source_type,
+                source_id=source_id,
+                metadata=chunk_metadata,
+            )
+            embedding = self._get_embedding(search_text)
+            if not embedding:
+                continue
             doc_chunk = DocumentChunk(
                 deal=deal,
                 audit_log=audit_log,
                 source_type=source_type,
                 source_id=source_id,
                 content=chunk_text,
+                search_text=search_text,
                 embedding=embedding,
                 embedding_model=self.model_name,
                 embedding_dimensions=self._embedding_dimensions(embedding),
@@ -361,6 +425,7 @@ class EmbeddingService:
             created_chunks.append(doc_chunk)
         if created_chunks:
             DocumentChunk.objects.bulk_create(created_chunks)
+            self._refresh_search_vectors(created_chunks)
             return len(created_chunks)
         return 0
 
@@ -380,11 +445,18 @@ class EmbeddingService:
         total_chunks = len(split_texts)
         created: list[DocumentChunk] = []
         for i, chunk_text in enumerate(split_texts):
-            embedding = self._get_embedding(chunk_text) if not self.is_sqlite else None
-            if not self.is_sqlite and not embedding:
-                continue
             chunk_metadata = dict(base_metadata)
             chunk_metadata.update({"chunk_index": i, "total_chunks": total_chunks})
+            search_text = self._contextual_chunk_text(
+                content=chunk_text,
+                deal=deal,
+                source_type=source_type,
+                source_id=source_id,
+                metadata=chunk_metadata,
+            )
+            embedding = self._get_embedding(search_text)
+            if not embedding:
+                continue
             created.append(
                 DocumentChunk(
                     deal=deal,
@@ -392,6 +464,7 @@ class EmbeddingService:
                     source_type=source_type,
                     source_id=source_id,
                     content=chunk_text,
+                    search_text=search_text,
                     embedding=embedding,
                     embedding_model=self.model_name,
                     embedding_dimensions=self._embedding_dimensions(embedding),
@@ -649,6 +722,7 @@ class EmbeddingService:
 
         if created_chunks:
             DocumentChunk.objects.bulk_create(created_chunks)
+            self._refresh_search_vectors(created_chunks)
         created_count = len(created_chunks)
         if created_count:
             doc.is_indexed = True
@@ -703,6 +777,7 @@ class EmbeddingService:
 
         if created_chunks:
             DocumentChunk.objects.bulk_create(created_chunks)
+            self._refresh_search_vectors(created_chunks)
         created_count = len(created_chunks)
         if created_count:
             doc.is_indexed = True
@@ -718,71 +793,97 @@ class EmbeddingService:
         return bool(created_count)
 
     def search_similar_chunks(self, query: str, deal: Deal, limit: int = 5) -> List[DocumentChunk]:
-        """Hybrid Search: Vector for Postgres, Ranked Keyword for SQLite."""
+        """Hybrid dense vector + PostgreSQL full-text search for one deal."""
         normalized_query = self._normalize_query_text(query)
-        if self.is_sqlite:
-            from django.db.models import Q
-            words = [w.lower() for w in normalized_query.split() if len(w) >= 3]
-            if not words: return []
-
-            queryset = self._retrievable_chunk_queryset().filter(deal=deal)
-            important_terms = [w for w in words if any(x in w.upper() for x in ['CM', 'ARR', 'INR', 'CR'])]
-            q_obj = Q()
-            if important_terms:
-                for term in important_terms:
-                    q_obj |= Q(content__icontains=term)
-            else:
-                for word in words[:5]:
-                    q_obj |= Q(content__icontains=word)
-            candidates = list(queryset.filter(q_obj)[: self._candidate_fetch_limit(limit)])
-            return self._rerank_chunks(candidates, normalized_query, limit)
-        
-        from pgvector.django import CosineDistance
-        query_embedding = self._get_embedding(normalized_query)
-        if not query_embedding: return []
-        candidates = list(
-            self._retrievable_chunk_queryset()
-            .filter(deal=deal)
-            .annotate(distance=CosineDistance('embedding', query_embedding))
-            .order_by('distance')[: self._candidate_fetch_limit(limit)]
+        if not normalized_query:
+            return []
+        candidates = self._hybrid_chunk_candidates(
+            normalized_query,
+            limit=limit,
+            deal_ids=[str(deal.id)],
         )
         return self._rerank_chunks(candidates, normalized_query, limit)
 
     def search_global_chunks(self, query: str, limit: int = 10, deal_ids: Optional[List[str]] = None, source_ids: Optional[List[str]] = None) -> List[DocumentChunk]:
-        """Global search across all deals with term priority for SQLite."""
+        """Global hybrid dense vector + PostgreSQL full-text search across deals."""
         normalized_query = self._normalize_query_text(query)
-        if self.is_sqlite:
-            from django.db.models import Q
-            words = [w.lower() for w in normalized_query.split() if len(w) >= 3]
-            if not words: return []
-            
-            important_terms = [w for w in words if any(x in w.upper() for x in ['CM', 'ARR', 'INR', 'CR'])]
-            q_obj = Q()
-            if important_terms:
-                for term in important_terms: q_obj |= Q(content__icontains=term)
-            else:
-                for word in words[:5]: q_obj |= Q(content__icontains=word)
-            queryset = self._retrievable_chunk_queryset().filter(q_obj)
-            if deal_ids:
-                queryset = queryset.filter(deal_id__in=deal_ids)
-            if source_ids:
-                queryset = queryset.filter(source_id__in=source_ids)
-            candidates = list(queryset[: self._candidate_fetch_limit(limit)])
-            return self._rerank_chunks(candidates, normalized_query, limit)
+        if not normalized_query:
+            return []
+        candidates = self._hybrid_chunk_candidates(
+            normalized_query,
+            limit=limit,
+            deal_ids=deal_ids,
+            source_ids=source_ids,
+        )
+        return self._rerank_chunks(candidates, normalized_query, limit)
 
+    def _hybrid_chunk_candidates(
+        self,
+        normalized_query: str,
+        *,
+        limit: int,
+        deal_ids: Optional[List[str]] = None,
+        source_ids: Optional[List[str]] = None,
+    ) -> List[DocumentChunk]:
         from pgvector.django import CosineDistance
-        query_embedding = self._get_embedding(normalized_query)
-        if not query_embedding: return []
+
+        fetch_limit = self._candidate_fetch_limit(limit)
         queryset = self._retrievable_chunk_queryset()
         if deal_ids:
             queryset = queryset.filter(deal_id__in=deal_ids)
         if source_ids:
             queryset = queryset.filter(source_id__in=source_ids)
-        candidates = list(
-            queryset.annotate(distance=CosineDistance('embedding', query_embedding))
-            .order_by('distance')[: self._candidate_fetch_limit(limit)]
+
+        dense_candidates: list[DocumentChunk] = []
+        query_embedding = self._get_embedding(normalized_query)
+        if query_embedding:
+            dense_candidates = list(
+                queryset.annotate(distance=CosineDistance('embedding', query_embedding))
+                .order_by('distance')[:fetch_limit]
+            )
+
+        search_query = SearchQuery(normalized_query, config="english", search_type="websearch")
+        sparse_candidates = list(
+            queryset
+            .annotate(search_rank=SearchRank(F("search_vector"), search_query))
+            .filter(search_vector=search_query)
+            .order_by("-search_rank")[:fetch_limit]
         )
-        return self._rerank_chunks(candidates, normalized_query, limit)
+
+        return self._rrf_merge_chunks(dense_candidates, sparse_candidates, limit=fetch_limit)
+
+    @staticmethod
+    def _rrf_merge_chunks(
+        dense_chunks: list[DocumentChunk],
+        sparse_chunks: list[DocumentChunk],
+        *,
+        limit: int,
+        k: int = 60,
+    ) -> list[DocumentChunk]:
+        scored: dict[str, dict[str, Any]] = {}
+
+        def add_ranked(chunks: list[DocumentChunk], source: str) -> None:
+            for rank, chunk in enumerate(chunks, start=1):
+                chunk_id = str(chunk.id)
+                item = scored.setdefault(chunk_id, {"chunk": chunk, "score": 0.0, "sources": set()})
+                item["score"] += 1.0 / (k + rank)
+                item["sources"].add(source)
+                if source == "dense" and hasattr(chunk, "distance"):
+                    setattr(item["chunk"], "distance", getattr(chunk, "distance"))
+                if source == "sparse" and hasattr(chunk, "search_rank"):
+                    setattr(item["chunk"], "search_rank", getattr(chunk, "search_rank"))
+
+        add_ranked(dense_chunks, "dense")
+        add_ranked(sparse_chunks, "sparse")
+
+        ordered = sorted(scored.values(), key=lambda item: item["score"], reverse=True)
+        merged: list[DocumentChunk] = []
+        for item in ordered[:limit]:
+            chunk = item["chunk"]
+            setattr(chunk, "retrieval_rrf_score", round(item["score"], 6))
+            setattr(chunk, "retrieval_sources", sorted(item["sources"]))
+            merged.append(chunk)
+        return merged
 
     def search_deal_profiles(self, query: str, *, limit: int = 10, filters: Optional[Dict[str, Any]] = None) -> List[Deal]:
         filters = filters or {}
@@ -796,19 +897,6 @@ class EmbeddingService:
             value = filters.get(field)
             if value:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})
-
-        if self.is_sqlite:
-            words = [word for word in normalized_query.split() if len(word) >= 3]
-            if not words:
-                return list(queryset.order_by("-created_at")[:limit])
-            q = None
-            from django.db.models import Q
-            for word in words[:6]:
-                clause = Q(retrieval_profile__profile_text__icontains=word) | Q(title__icontains=word) | Q(deal_summary__icontains=word)
-                q = clause if q is None else q | clause
-            if q is None:
-                return list(queryset.order_by("-created_at")[:limit])
-            return list(queryset.filter(q).distinct()[:limit])
 
         from pgvector.django import CosineDistance
         query_embedding = self._get_embedding(normalized_query)

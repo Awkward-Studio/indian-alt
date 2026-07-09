@@ -2956,6 +2956,15 @@ class UniversalChatService:
             "scored_chunk_count": len(scored_items),
             "selected_chunk_count": len(selected),
             "selected_chunk_count_by_deal": dict(per_deal_counts),
+            "selected_chunk_retrieval_sources": {
+                "dense": sum(1 for item in selected if "dense" in getattr(item["chunk"], "retrieval_sources", [])),
+                "sparse": sum(1 for item in selected if "sparse" in getattr(item["chunk"], "retrieval_sources", [])),
+                "hybrid": sum(
+                    1
+                    for item in selected
+                    if {"dense", "sparse"}.issubset(set(getattr(item["chunk"], "retrieval_sources", [])))
+                ),
+            },
             "effective_chunks_per_deal": max_per_deal,
             "max_total_chunks": max_total,
             "dropped_by_per_deal_cap": dropped_by_per_deal_cap,
@@ -2976,6 +2985,9 @@ class UniversalChatService:
                     ),
                     "source_type": item["chunk"].source_type,
                     "chunk_index": (item["chunk"].metadata or {}).get("chunk_index"),
+                    "retrieval_sources": getattr(item["chunk"], "retrieval_sources", []),
+                    "retrieval_rrf_score": getattr(item["chunk"], "retrieval_rrf_score", None),
+                    "search_rank": getattr(item["chunk"], "search_rank", None),
                     "score": item["score"],
                 }
                 for item in selected

@@ -45,6 +45,25 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         self.assertEqual(report, "# FINANCE COMPARISON\n\nConcrete markdown body")
 
 
+class RetrievalFusionTests(SimpleTestCase):
+    def test_rrf_merge_marks_dense_sparse_and_hybrid_sources(self):
+        dense_only = DocumentChunk(id="00000000-0000-0000-0000-000000000001", content="dense")
+        hybrid_dense = DocumentChunk(id="00000000-0000-0000-0000-000000000002", content="hybrid")
+        sparse_only = DocumentChunk(id="00000000-0000-0000-0000-000000000003", content="sparse")
+        hybrid_sparse = DocumentChunk(id=hybrid_dense.id, content="hybrid")
+
+        merged = EmbeddingService._rrf_merge_chunks(
+            [dense_only, hybrid_dense],
+            [sparse_only, hybrid_sparse],
+            limit=3,
+        )
+
+        merged_by_id = {str(chunk.id): chunk for chunk in merged}
+        hybrid = merged_by_id[str(hybrid_dense.id)]
+        self.assertEqual(hybrid.retrieval_sources, ["dense", "sparse"])
+        self.assertGreater(hybrid.retrieval_rrf_score, merged_by_id[str(dense_only.id)].retrieval_rrf_score)
+
+
 class PromptSeedTests(TestCase):
     def test_seeded_deal_synthesis_owns_internal_ic_structure(self):
         call_command("seed_ai_prompts", verbosity=0)
@@ -1650,6 +1669,9 @@ class AnthropicIntegrationTests(TestCase):
         self.assertEqual(res["gate_mode"], "privacy_bypass")
         self.assertIn("ACME Corporation", res["context_data"])
         self.assertEqual(res["deals_considered"], 1)
+        self.assertEqual(res["retrieved_chunk_count"], 0)
+        self.assertEqual(res["selected_chunk_count"], 0)
+        self.assertEqual(res["selected_sources"], [])
 
     def test_rag_bypass_deal_chat(self):
         from ai_orchestrator.services.universal_chat import UniversalChatService
@@ -1667,6 +1689,9 @@ class AnthropicIntegrationTests(TestCase):
         self.assertFalse(res["used_query_builder"])
         self.assertEqual(res["gate_mode"], "privacy_bypass")
         self.assertIn("ACME Corporation", res["context_data"])
+        self.assertEqual(res["retrieved_chunk_count"], 0)
+        self.assertEqual(res["selected_chunk_count"], 0)
+        self.assertEqual(res["selected_sources"], [])
 
     def test_deal_chat_privacy_bypass_includes_basic_deal_name(self):
         from ai_orchestrator.tasks import generate_chat_response_async

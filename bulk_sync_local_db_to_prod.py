@@ -16,7 +16,7 @@ django.setup()
 
 from django.conf import settings
 from django.db import connections, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 
 from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
 from api_requests.models import Request
@@ -140,7 +140,16 @@ def parse_args():
         "--output-prune-file",
         help="Save production prune candidates to a JSON file instead of deleting them directly.",
     )
+    parser.add_argument(
+        "--skip-subset-counts",
+        action="store_true",
+        help="Skip startup counts for all deal subsets. Useful when you only want the selected subset to start immediately.",
+    )
     return parser.parse_args()
+
+
+def log_step(message: str):
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
 def database_url_from_railway_cli(project_dir: str = ".") -> str | None:
@@ -440,26 +449,31 @@ def prompt_prune_selection(candidates: list[dict], interactive: bool) -> list[di
 
 
 def apply_deal_subset(queryset, subset: str):
+    def with_activity_flags(base_queryset):
+        return base_queryset.alias(
+            has_analysis=Exists(
+                DealAnalysis.objects.using(SOURCE_DB).filter(deal_id=OuterRef("pk"))
+            ),
+            has_document=Exists(
+                DealDocument.objects.using(SOURCE_DB).filter(deal_id=OuterRef("pk"))
+            ),
+            has_chunk=Exists(
+                DocumentChunk.objects.using(SOURCE_DB).filter(deal_id=OuterRef("pk"))
+            ),
+        )
+
     if subset == "all":
         return queryset
     if subset == "analyzed":
-        return queryset.filter(
-            Q(analyses__isnull=False)
-            | Q(documents__isnull=False)
-            | Q(chunks__isnull=False)
-        ).distinct()
+        return with_activity_flags(queryset).filter(
+            Q(has_analysis=True) | Q(has_document=True) | Q(has_chunk=True)
+        )
     if subset == "source-backed":
         return queryset.exclude(source_onedrive_id__isnull=True).exclude(source_onedrive_id="")
     if subset == "source-backed-analyzed":
-        return (
-            queryset.exclude(source_onedrive_id__isnull=True)
-            .exclude(source_onedrive_id="")
-            .filter(
-                Q(analyses__isnull=False)
-                | Q(documents__isnull=False)
-                | Q(chunks__isnull=False)
-            )
-            .distinct()
+        source_queryset = queryset.exclude(source_onedrive_id__isnull=True).exclude(source_onedrive_id="")
+        return with_activity_flags(source_queryset).filter(
+            Q(has_analysis=True) | Q(has_document=True) | Q(has_chunk=True)
         )
     raise RuntimeError(f"Unknown deal subset: {subset}")
 
@@ -483,13 +497,31 @@ def iter_target_deals(identifiers: Iterable[str] | None, subset: str = "all"):
     return matched
 
 
-def deal_subset_counts() -> dict[str, int]:
+def count_with_log(label: str, queryset) -> int:
+    log_step(f"[COUNT] {label}: starting")
+    started_at = time.time()
+    value = queryset.count()
+    log_step(f"[COUNT] {label}: {value} elapsed={round(time.time() - started_at, 2)}s")
+    return value
+
+
+def deal_subset_counts(verbose: bool = False) -> dict[str, int]:
     queryset = Deal.objects.using(SOURCE_DB).all()
+    if not verbose:
+        return {
+            "all": queryset.count(),
+            "analyzed": apply_deal_subset(queryset, "analyzed").count(),
+            "source-backed": apply_deal_subset(queryset, "source-backed").count(),
+            "source-backed-analyzed": apply_deal_subset(queryset, "source-backed-analyzed").count(),
+        }
     return {
-        "all": queryset.count(),
-        "analyzed": apply_deal_subset(queryset, "analyzed").count(),
-        "source-backed": apply_deal_subset(queryset, "source-backed").count(),
-        "source-backed-analyzed": apply_deal_subset(queryset, "source-backed-analyzed").count(),
+        "all": count_with_log("all deals", queryset),
+        "analyzed": count_with_log("analyzed deals", apply_deal_subset(queryset, "analyzed")),
+        "source-backed": count_with_log("source-backed deals", apply_deal_subset(queryset, "source-backed")),
+        "source-backed-analyzed": count_with_log(
+            "source-backed analyzed deals",
+            apply_deal_subset(queryset, "source-backed-analyzed"),
+        ),
     }
 
 
@@ -511,7 +543,7 @@ def hydrate_local_deal_batch(batch: list[Deal]) -> list[Deal]:
         Deal.objects.using(SOURCE_DB)
         .filter(id__in=deal_ids)
         .select_related("request", "bank", "primary_contact")
-        .prefetch_related("analyses", "phase_logs", "documents", "chunks", "additional_contacts", "responsibility")
+        .prefetch_related("additional_contacts", "responsibility")
     )
     hydrated_by_id = {deal.id: deal for deal in queryset}
     return [hydrated_by_id[deal_id] for deal_id in deal_ids if deal_id in hydrated_by_id]
@@ -1110,9 +1142,10 @@ def upsert_deal(
 
 
 def replace_deal_analyses(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
-    analyses = list(local_deal.analyses.using(SOURCE_DB).all().order_by("version", "created_at"))
     if dry_run:
-        return len(analyses)
+        return local_deal.analyses.using(SOURCE_DB).count()
+
+    analyses = list(local_deal.analyses.using(SOURCE_DB).all().order_by("version", "created_at"))
 
     DealAnalysis.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not analyses:
@@ -1138,9 +1171,10 @@ def replace_deal_analyses(local_deal: Deal, prod_deal: Deal, dry_run: bool = Fal
 
 
 def replace_phase_logs(local_deal: Deal, prod_deal: Deal, dry_run: bool = False):
-    phase_logs = list(local_deal.phase_logs.using(SOURCE_DB).all().order_by("changed_at"))
     if dry_run:
-        return len(phase_logs)
+        return local_deal.phase_logs.using(SOURCE_DB).count()
+
+    phase_logs = list(local_deal.phase_logs.using(SOURCE_DB).all().order_by("changed_at"))
 
     DealPhaseLog.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not phase_logs:
@@ -1171,13 +1205,19 @@ def replace_deal_documents(
     verbose: bool = False,
     progress_interval: int = 250,
 ):
-    documents = list(local_deal.documents.using(SOURCE_DB).all().order_by("created_at"))
     if dry_run:
         if verbose:
+            documents = list(
+                local_deal.documents.using(SOURCE_DB)
+                .only("id", "title", "document_type")
+                .order_by("created_at")
+            )
             for index, document in enumerate(documents, start=1):
                 print(f"[DOCUMENT-DRY-RUN {index}/{len(documents)}] {local_deal.title}: {document.title or document.id}", flush=True)
-        return len(documents)
+            return len(documents)
+        return local_deal.documents.using(SOURCE_DB).count()
 
+    documents = list(local_deal.documents.using(SOURCE_DB).all().order_by("created_at"))
     print(f"[DOCUMENTS] {local_deal.title}: replacing {len(documents)} documents", flush=True)
     DealDocument.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not documents:
@@ -1234,17 +1274,23 @@ def replace_deal_chunks(
     verbose: bool = False,
     progress_interval: int = 250,
 ):
-    chunks = list(local_deal.chunks.using(SOURCE_DB).all().order_by("created_at"))
     if dry_run:
         if verbose:
+            chunks = list(
+                local_deal.chunks.using(SOURCE_DB)
+                .only("id", "source_type", "source_id", "embedding_dimensions")
+                .order_by("created_at")
+            )
             for index, chunk in enumerate(chunks, start=1):
                 print(
                     f"[CHUNK-DRY-RUN {index}/{len(chunks)}] {local_deal.title}: "
                     f"source={chunk.source_type}:{chunk.source_id or 'N/A'}",
                     flush=True,
                 )
-        return len(chunks)
+            return len(chunks)
+        return local_deal.chunks.using(SOURCE_DB).count()
 
+    chunks = list(local_deal.chunks.using(SOURCE_DB).all().order_by("created_at"))
     print(f"[CHUNKS] {local_deal.title}: replacing {len(chunks)} chunks", flush=True)
     DocumentChunk.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
     if not chunks:
@@ -1862,6 +1908,13 @@ def prune_production_deals(
 
 def run():
     args = parse_args()
+    log_step("Starting local-to-production sync script")
+    log_step(
+        "Options: "
+        f"dry_run={args.dry_run} deal_subset={args.deal_subset} "
+        f"deals_filter={len(args.deals or [])} skip_reference_data={args.skip_reference_data} "
+        f"reference_data_only={args.reference_data_only} only_missing_deals={args.only_missing_deals}"
+    )
     if args.prune_production_data and args.deals:
         raise RuntimeError(
             "--prune-production-data cannot be combined with --deals because it would delete "
@@ -1892,8 +1945,11 @@ def run():
 
     prod_database_url = args.prod_database_url
     if not prod_database_url and args.railway_cli:
+        log_step("Loading production DATABASE_URL from Railway CLI")
         prod_database_url = database_url_from_railway_cli(args.railway_project_dir)
+    log_step("Configuring production database connection")
     configure_target_database(prod_database_url, ssl_require=args.prod_db_ssl_require)
+    log_step("Checking migration parity between local and production")
     compare_schema_state()
 
     source_vendor = connections[SOURCE_DB].vendor
@@ -1901,61 +1957,73 @@ def run():
     if target_vendor != "postgresql":
         raise RuntimeError(f"Target DB vendor must be postgresql, got {target_vendor}.")
 
+    log_step("Checking pgvector on production database")
     vector_info = ensure_pgvector(TARGET_DB)
-    print(">>> LOCAL TO PROD DB SYNC")
-    print(f"Source DB vendor: {source_vendor}")
-    print(
+    log_step(">>> LOCAL TO PROD DB SYNC")
+    log_step(f"Source DB vendor: {source_vendor}")
+    log_step(
         f"Target DB: {vector_info['database']} as {vector_info['user']} "
         f"(pgvector {vector_info['vector_version']})"
     )
     print("-" * 72)
 
-    subset_counts = deal_subset_counts()
-    print(
-        "Local deal subset counts: "
-        + ", ".join(f"{key}={value}" for key, value in subset_counts.items()),
-        flush=True,
-    )
-    print(f"Selected deal subset: {args.deal_subset}", flush=True)
+    if args.skip_subset_counts:
+        log_step("Skipping local deal subset counts")
+    else:
+        subset_counts = deal_subset_counts(verbose=True)
+        log_step(
+            "Local deal subset counts: "
+            + ", ".join(f"{key}={value}" for key, value in subset_counts.items())
+        )
+    log_step(f"Selected deal subset: {args.deal_subset}")
 
+    log_step("Selecting local deals for sync")
+    t0 = time.time()
     deals = iter_target_deals(args.deals, subset=args.deal_subset)
+    log_step(f"Selected local deals: {len(deals)} elapsed={round(time.time() - t0, 2)}s")
     if not deals:
-        print("No matching deals found in local DB.")
+        log_step("No matching deals found in local DB.")
         return
 
+    log_step("Checking selected deals for duplicate local titles")
+    t0 = time.time()
     deals, title_collisions = dedupe_local_deals_by_title(deals)
+    log_step(
+        f"Duplicate title check complete: selected_after_collapse={len(deals)} "
+        f"collisions={len(title_collisions)} elapsed={round(time.time() - t0, 2)}s"
+    )
     if title_collisions:
-        print(f"Collapsed duplicate local deal titles: {len(title_collisions)}")
+        log_step(f"Collapsed duplicate local deal titles: {len(title_collisions)}")
         for collision in title_collisions:
             winner = collision["winner"]
             dropped = collision["dropped"]
             dropped_labels = ", ".join(str(item.id) for item in dropped)
-            print(
+            log_step(
                 f"[TITLE-DUPE] kept={winner.title or winner.id} winner_id={winner.id} "
                 f"dropped_ids=[{dropped_labels}]"
             )
 
     skipped_existing = 0
     if args.only_missing_deals:
-        print("Resolving missing deals against production...")
+        log_step("Resolving missing deals against production")
         t0 = time.time()
         deals, skipped_existing = filter_missing_deals(deals)
         t1 = time.time()
         if not deals:
-            print("No missing deals to sync. Production already has all selected deals.")
+            log_step("No missing deals to sync. Production already has all selected deals.")
             return
-        print(f"Missing-deal resolution completed in {round(t1 - t0, 2)}s")
+        log_step(f"Missing-deal resolution completed in {round(t1 - t0, 2)}s")
 
-    print(f"Deals selected: {len(deals)}")
+    log_step(f"Deals selected: {len(deals)}")
     if args.only_missing_deals:
-        print(f"Skipped existing production deals: {skipped_existing}")
+        log_step(f"Skipped existing production deals: {skipped_existing}")
     if args.dry_run:
-        print("Mode: DRY RUN")
+        log_step("Mode: DRY RUN")
     print("-" * 72)
 
     reference_data = {"bank_map": {}, "contact_map": {}, "banks": 0, "contacts": 0, "local_banks": 0, "local_contacts": 0}
     if args.skip_reference_data:
-        print("Skipping reference data writes: loading existing production bank/contact maps.", flush=True)
+        log_step("Skipping reference data writes: loading existing production bank/contact maps")
         t0 = time.time()
         reference_data = load_existing_reference_maps(
             verbose=args.verbose_sync,
@@ -1963,15 +2031,14 @@ def run():
             batch_size=args.reference_batch_size,
         )
         t1 = time.time()
-        print(
+        log_step(
             f"[REFERENCE-MAP] banks={reference_data['banks']}/{reference_data['local_banks']} "
             f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
             f"elapsed={round(t1 - t0, 2)}s",
-            flush=True,
         )
         print("-" * 72)
     else:
-        print("Syncing reference data: banks and bankers/contacts...")
+        log_step("Syncing reference data: banks and bankers/contacts")
         t0 = time.time()
         reference_data = sync_reference_data(
             dry_run=args.dry_run,
@@ -1980,7 +2047,7 @@ def run():
             batch_size=args.reference_batch_size,
         )
         t1 = time.time()
-        print(
+        log_step(
             f"[REFERENCE] banks={reference_data['banks']}/{reference_data['local_banks']} "
             f"contacts={reference_data['contacts']}/{reference_data['local_contacts']} "
             f"elapsed={round(t1 - t0, 2)}s"
@@ -2029,12 +2096,14 @@ def run():
     processed = 0
     errors = 0
     deal_batch_size = max(1, int(args.deal_batch_size))
+    log_step(f"Starting deal sync loop: total={len(deals)} batch_size={deal_batch_size}")
     for batch_index, local_deal_batch in enumerate(deal_batches(deals, deal_batch_size), start=1):
+        batch_t0 = time.time()
+        log_step(f"[DEAL-BATCH] {batch_index}: hydrating size={len(local_deal_batch)}")
         hydrated_batch = hydrate_local_deal_batch(local_deal_batch)
-        print(
+        log_step(
             f"[DEAL-BATCH] {batch_index}: size={len(hydrated_batch)} "
             f"batch_size={deal_batch_size} first={hydrated_batch[0].title if hydrated_batch else 'N/A'}",
-            flush=True,
         )
         for local_deal in hydrated_batch:
             try:
@@ -2048,7 +2117,7 @@ def run():
                     prompt_child_overwrite_enabled=args.prompt_child_overwrite,
                 )
                 processed += 1
-                print(
+                log_step(
                     f"[OK] {result['deal']}: analyses={result['analyses']} "
                     f"phase_logs={result['phase_logs']} documents={result['documents']} "
                     f"analysis_documents={result['analysis_documents']} chunks={result['chunks']} "
@@ -2056,7 +2125,11 @@ def run():
                 )
             except Exception as exc:
                 errors += 1
-                print(f"[ERROR] {local_deal.title or local_deal.id}: {exc}")
+                log_step(f"[ERROR] {local_deal.title or local_deal.id}: {exc}")
+        log_step(
+            f"[DEAL-BATCH] {batch_index}: completed processed={processed} errors={errors} "
+            f"elapsed={round(time.time() - batch_t0, 2)}s"
+        )
 
     if args.prune_production_data:
         prune_candidates = prune_production_deals(
@@ -2078,7 +2151,7 @@ def run():
             )
 
     print("-" * 72)
-    print(f"Complete. Processed={processed} Errors={errors}")
+    log_step(f"Complete. Processed={processed} Errors={errors}")
 
 
 if __name__ == "__main__":

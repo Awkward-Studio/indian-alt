@@ -1,8 +1,10 @@
 import uuid
 from django.db import models
 from django.contrib.auth.models import User
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.utils.translation import gettext_lazy as _
-from pgvector.django import VectorField
+from pgvector.django import HnswIndex, VectorField
 
 class AIPersonality(models.Model):
     """
@@ -292,6 +294,8 @@ class DocumentChunk(models.Model):
     
     # Content & Vector
     content = models.TextField()
+    search_text = models.TextField(blank=True, default="")
+    search_vector = SearchVectorField(null=True, blank=True)
     # Qwen/Qwen3-Embedding-0.6B returns 1024 dimensions.
     embedding = VectorField(dimensions=1024, null=True, blank=True)
     embedding_model = models.CharField(max_length=200, blank=True, default="")
@@ -309,7 +313,14 @@ class DocumentChunk(models.Model):
         indexes = [
             models.Index(fields=['deal', 'source_type']),
             models.Index(fields=['audit_log', 'source_type']),
-            # Vector search index is usually created via SQL, but pgvector supports it
+            GinIndex(fields=['search_vector'], name='docchunk_search_vector_gin'),
+            HnswIndex(
+                name='docchunk_embedding_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
         ]
 
     def __str__(self):
@@ -341,6 +352,13 @@ class DealRetrievalProfile(models.Model):
         indexes = [
             models.Index(fields=['deal']),
             models.Index(fields=['embedding_model']),
+            HnswIndex(
+                name='dealprofile_embedding_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
         ]
 
     def __str__(self):
@@ -364,4 +382,3 @@ class AISystemSetting(models.Model):
 
     def __str__(self):
         return f"{self.key}: {self.value}"
-

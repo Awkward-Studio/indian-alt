@@ -21,6 +21,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.postgres',
     
     # Third party
     'rest_framework',
@@ -282,7 +283,8 @@ DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 # Database Configuration
 # 
 # Railway-friendly setup:
-# - Local: Uses SQLite by default (no DATABASE_URL needed)
+# - Local: Uses PostgreSQL/pgvector. DATABASE_URL defaults to the local
+#   docker-compose database if it is not provided.
 # - Railway: Automatically uses PostgreSQL when DATABASE_URL is provided
 # 
 # To use PostgreSQL locally:
@@ -291,43 +293,30 @@ DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 #   3. Set DATABASE_URL in .env: postgresql://user:password@localhost:5432/dbname
 #
 # Railway automatically provides DATABASE_URL when you add a PostgreSQL service.
-DATABASE_URL = config('DATABASE_URL', default='')
+DATABASE_URL = config(
+    'DATABASE_URL',
+    default='postgresql://postgres:postgres@localhost:5432/indian_alt',
+)
 
-if DATABASE_URL:
-    # Use PostgreSQL (Railway or local if DATABASE_URL is set)
-    parsed_config = dj_database_url.parse(
-        DATABASE_URL,
-        conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
-        # Railway Postgres requires SSL, but allow override for local dev
-        ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
-    )
-    
-    # Add connection options for Railway Postgres
-    if 'OPTIONS' not in parsed_config:
-        parsed_config['OPTIONS'] = {}
-    
-    # Ensure proper SSL settings for Railway
-    if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
-        parsed_config['OPTIONS']['sslmode'] = 'require'
-    
-    DATABASES = {
-        'default': parsed_config,
-        'production': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
-        }
-    }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
-        },
-        'production': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
-        }
-    }
+parsed_config = dj_database_url.parse(
+    DATABASE_URL,
+    conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
+    # Railway Postgres requires SSL, but allow override for local dev.
+    ssl_require=config('DB_SSL_REQUIRE', default=False, cast=bool),
+)
+
+if parsed_config.get('ENGINE') != 'django.db.backends.postgresql':
+    raise RuntimeError('PostgreSQL with pgvector is required. Set DATABASE_URL to a PostgreSQL database.')
+
+if 'OPTIONS' not in parsed_config:
+    parsed_config['OPTIONS'] = {}
+
+if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
+    parsed_config['OPTIONS']['sslmode'] = 'require'
+
+DATABASES = {
+    'default': parsed_config,
+}
 
 # Venture Intelligence API
 VENTURE_INTELLIGENCE_API_KEY = config('VENTURE_INTELLIGENCE_API_KEY', default='')

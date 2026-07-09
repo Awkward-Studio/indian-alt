@@ -2023,16 +2023,21 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             f"Every card must be based on a source URL. Do not invent facts."
         )
 
-        from ai_orchestrator.services.llm_providers import AnthropicProviderService
-        service = AnthropicProviderService()
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+        search_query = instruction if instruction else f"{deal.title} public news latest"
+        search_context = SearXNGProviderService().search(search_query)
+
+        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
+
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        service = VLLMProviderService()
         result = service.execute_standard({
-            "model": "default",
-            "system": "You are a careful investment diligence researcher. Use web search and cite public-domain sources.",
-            "prompt": prompt,
+            "model": "local-model",
+            "system": "You are a careful investment diligence researcher. Cite public-domain sources from the provided context.",
+            "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 4000,
                 "temperature": 0.1,
-                "max_search_uses": 1,
             },
         }, timeout=180)
 
@@ -2234,21 +2239,25 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
         )
 
-        from ai_orchestrator.services.llm_providers import AnthropicProviderService
-        service = AnthropicProviderService()
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+        search_query = instruction if instruction else f"{deal.title} top competitors or similar companies india"
+        search_context = SearXNGProviderService().search(search_query)
+
+        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
+
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        service = VLLMProviderService()
         payload = {
-            "model": "default",
-            "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
-            "prompt": prompt,
+            "model": "local-model",
+            "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research based on the provided search context.",
+            "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 2200,
                 "temperature": 0.1,
-                "max_search_uses": 3,
-                "web_search_tool_type": "web_search_20250305",
             }
         }
         
-        logger.info("Triggering active web search competitor research...")
+        logger.info("Triggering active web search competitor research via SearXNG and Local AI...")
         result = service.execute_standard(payload, timeout=45)
         response_text = result.get("response") or ""
         from .services.competitor_intelligence import competitor_names_from_payload
