@@ -1,5 +1,5 @@
 services:
-  # 1. Primary Text Model (35B) - VLLM Text
+  # H100 profile: text, vision, embeddings, and reranking share one 80GB GPU.
   vllm-text:
     image: vllm/vllm-openai:latest
     container_name: vllm-text
@@ -14,7 +14,7 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - --model
-      - ${VLLM_TEXT_MODEL:-Qwen/Qwen3.6-27B-FP8}
+      - ${VLLM_TEXT_MODEL:-Qwen/Qwen3.6-35B-A3B}
       - --host
       - 0.0.0.0
       - --port
@@ -22,15 +22,15 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --gpu-memory-utilization
-      - "0.60" # Allocates ~48GB (60% of 80GB)
+      - ${VLLM_TEXT_GPU_MEMORY_UTILIZATION:-0.55}
       - --max-model-len
-      - "32768"
+      - ${VLLM_TEXT_MAX_MODEL_LEN:-32768}
       - --max-num-seqs
-      - "64"
+      - ${VLLM_TEXT_MAX_NUM_SEQS:-16}
       - --enable-chunked-prefill
       - --trust-remote-code
 
-  # 2. Vision Model (9B) - VLLM Vision
+  # Vision/OCR model. Keep room for the TEI GPU services.
   vllm-vision:
     image: vllm/vllm-openai:latest
     container_name: vllm-vision
@@ -53,9 +53,9 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --gpu-memory-utilization
-      - "0.30" # Increased from 0.20 to allow for KV cache blocks
+      - ${VLLM_VISION_GPU_MEMORY_UTILIZATION:-0.22}
       - --max-model-len
-      - "8192" # Vision models are token-heavy; keep this reasonable
+      - ${VLLM_VISION_MAX_MODEL_LEN:-8192}
       - --trust-remote-code
 
 
@@ -78,7 +78,7 @@ services:
       - --port
       - "80"
       - --max-batch-tokens
-      - "16384"
+      - ${EMBEDDING_MAX_BATCH_TOKENS:-8192}
       - --auto-truncate
 
   # 4. TEI Reranker
@@ -100,7 +100,7 @@ services:
       - --port
       - "80"
       - --max-batch-tokens
-      - "16384"
+      - ${RERANKER_MAX_BATCH_TOKENS:-4096}
       - --auto-truncate
 
   # 5. Docproc (PDF split/merge/GLM-4V Router)
@@ -121,7 +121,7 @@ services:
       uvicorn main:app
       --host 0.0.0.0
       --port 8100
-      --workers 12
+      --workers ${DOCPROC_WORKERS:-2}
       --h11-max-incomplete-event-size 524288000
       --timeout-keep-alive 600
       --timeout-graceful-shutdown 600
