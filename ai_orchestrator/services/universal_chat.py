@@ -3752,6 +3752,7 @@ class UniversalChatService:
         context_data: str,
         history_context: str = "",
         include_prompt: bool = False,
+        max_tokens: int | None = None,
     ) -> Dict[str, Any]:
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template") or ""
         prompt_metadata = {
@@ -3777,7 +3778,7 @@ class UniversalChatService:
             "system": system_instructions,
             "stream": False,
             "options": {
-                "max_tokens": 8192,
+                "max_tokens": max(1, int(max_tokens or 8192)),
                 "temperature": 0.1,
             },
         }

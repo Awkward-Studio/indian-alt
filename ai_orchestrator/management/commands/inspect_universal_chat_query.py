@@ -54,6 +54,11 @@ class Command(BaseCommand):
             help="Print the rendered analysis prompt when --run-analysis is enabled.",
         )
         parser.add_argument(
+            "--analysis-max-tokens",
+            type=int,
+            help="Limit answer-generation output tokens for this diagnostic run.",
+        )
+        parser.add_argument(
             "--skip-rerank",
             action="store_true",
             help="Disable reranker calls for this inspection run (useful when debugging OOM or endpoint limits).",
@@ -295,6 +300,7 @@ class Command(BaseCommand):
         conversation_id: str,
         run_analysis: bool,
         include_analysis_prompt: bool,
+        analysis_max_tokens: int | None,
         stop_after: str,
         diagnose_live: bool,
         compact_output: bool,
@@ -447,6 +453,7 @@ class Command(BaseCommand):
                     context_data=context_preview,
                     history_context="",
                     include_prompt=include_analysis_prompt,
+                    max_tokens=analysis_max_tokens,
                 )
                 analysis_record = self._stage_record(
                     "analysis",
@@ -543,6 +550,7 @@ class Command(BaseCommand):
         show_context = bool(options.get("show_context"))
         run_analysis = bool(options.get("run_analysis"))
         show_analysis_prompt = bool(options.get("show_analysis_prompt"))
+        analysis_max_tokens = options.get("analysis_max_tokens")
         skip_rerank = bool(options.get("skip_rerank"))
         light_mode = bool(options.get("light"))
         legacy_budgets = bool(options.get("legacy_budgets"))
@@ -573,6 +581,7 @@ class Command(BaseCommand):
             conversation_id=conversation_id,
             run_analysis=run_analysis,
             include_analysis_prompt=show_analysis_prompt,
+            analysis_max_tokens=analysis_max_tokens,
             stop_after=stop_after,
             diagnose_live=diagnose_live,
             compact_output=compact_output,

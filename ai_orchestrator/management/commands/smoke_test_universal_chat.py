@@ -1,3 +1,5 @@
+from io import StringIO
+
 from django.conf import settings
 from django.core.management import BaseCommand, call_command
 
@@ -16,6 +18,7 @@ class Command(BaseCommand):
         parser.add_argument("--reranker-model", help="Reranker model ID.")
         parser.add_argument("--skip-rerank", action="store_true", help="Skip the reranker endpoint.")
         parser.add_argument("--no-analysis", action="store_true", help="Stop after planner and retrieval instead of generating an answer.")
+        parser.add_argument("--analysis-max-tokens", type=int, default=512, help="Maximum answer tokens for the smoke test.")
 
     def handle(self, *args, **options):
         overrides = {
@@ -39,17 +42,21 @@ class Command(BaseCommand):
                 "Running universal-chat smoke test "
                 f"against {settings.VLLM_BASE_URL} with model {settings.VLLM_TEXT_MODEL}."
             )
+            captured_output = StringIO()
             call_command(
                 "inspect_universal_chat_query",
                 options["query"],
                 light=True,
                 run_analysis=not options["no_analysis"],
+                stop_after="analysis" if not options["no_analysis"] else "context",
+                analysis_max_tokens=options["analysis_max_tokens"],
                 compact_output=True,
                 diagnose_live=True,
                 skip_rerank=options["skip_rerank"],
-                stdout=self.stdout,
+                stdout=captured_output,
                 stderr=self.stderr,
             )
+            self.stdout.write(captured_output.getvalue())
         finally:
             for name, value in original_values.items():
                 setattr(settings, name, value)
