@@ -77,6 +77,9 @@ class VLLMProviderService:
         self.vision_url = getattr(settings, "VLLM_VISION_URL", self.base_url).rstrip("/")
         self.embedding_url = getattr(settings, "VLLM_EMBEDDING_URL", self.base_url).rstrip("/")
         self.api_key = getattr(settings, "VLLM_API_KEY", "")
+        self.connect_timeout = float(getattr(settings, "VLLM_CONNECT_TIMEOUT", 2.0) or 2.0)
+        self.read_timeout = int(getattr(settings, "VLLM_READ_TIMEOUT", 600) or 600)
+        self.stream_timeout = int(getattr(settings, "VLLM_STREAM_TIMEOUT", 600) or 600)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -132,12 +135,16 @@ class VLLMProviderService:
             headers=self._headers(),
             json=body,
             stream=True,
-            timeout=(1.0, 300.0),
+            timeout=(self.connect_timeout, self.stream_timeout),
         )
         response.raise_for_status()
 
+        current_event = ""
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line or raw_line.startswith(":"):
+                continue
+            if raw_line.startswith("event: "):
+                current_event = raw_line[7:].strip()
                 continue
             if raw_line.startswith("data: "):
                 raw_line = raw_line[6:]
@@ -150,6 +157,15 @@ class VLLMProviderService:
                 logger.warning("Skipping malformed vLLM stream chunk: %s", raw_line)
                 continue
 
+            if current_event == "error" or chunk.get("error"):
+                error_payload = chunk.get("error") or chunk
+                if isinstance(error_payload, dict):
+                    message = error_payload.get("message") or error_payload.get("detail") or json.dumps(error_payload)
+                else:
+                    message = str(error_payload)
+                raise RuntimeError(f"vLLM stream error: {message}")
+            current_event = ""
+
             choice = (chunk.get("choices") or [{}])[0]
             delta = choice.get("delta") or {}
             text = delta.get("content") or ""
@@ -159,11 +175,12 @@ class VLLMProviderService:
 
     def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
         body = self._build_chat_body(payload, stream=False)
+        effective_timeout = int(timeout or self.read_timeout)
         response = requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
-            timeout=(1.0, timeout),
+            timeout=(self.connect_timeout, effective_timeout),
         )
         try:
             response.raise_for_status()
@@ -193,7 +210,7 @@ class VLLMProviderService:
             f"{url}/embeddings",
             headers=self._headers(),
             json={"model": model, "input": text},
-            timeout=(1.0, timeout),
+            timeout=(self.connect_timeout, timeout),
         )
         response.raise_for_status()
         data = response.json()
@@ -224,6 +241,7 @@ class VLLMProviderService:
             content = user_prompt
 
         messages.append({"role": "user", "content": content})
+        self._apply_no_think_marker(messages, payload)
 
         body: dict[str, Any] = {
             "model": model,
@@ -234,6 +252,8 @@ class VLLMProviderService:
 
         if payload.get("chat_template_kwargs"):
             body["chat_template_kwargs"] = payload["chat_template_kwargs"]
+            if payload["chat_template_kwargs"].get("enable_thinking") is False:
+                body["thinking"] = False
 
         response_format = payload.get("response_format")
         if response_format:
@@ -250,6 +270,40 @@ class VLLMProviderService:
             body["max_tokens"] = max_tokens
 
         return body
+
+    def _apply_no_think_marker(self, messages: list[dict[str, Any]], payload: dict) -> None:
+        chat_template_kwargs = payload.get("chat_template_kwargs") or {}
+        if chat_template_kwargs.get("enable_thinking") is not False:
+            return
+
+        model = str(payload.get("model") or "").lower()
+        if "qwen" not in model:
+            return
+
+        marker = "/no_think"
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str) and marker in content:
+                return
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and marker in str(item.get("text") or ""):
+                        return
+
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{content.rstrip()}\n\n{marker}".strip()
+                return
+            if isinstance(content, list):
+                for item in reversed(content):
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        item["text"] = f"{str(item.get('text') or '').rstrip()}\n\n{marker}".strip()
+                        return
+                content.append({"type": "text", "text": marker})
+                return
 
     @staticmethod
     def _coerce_image_url(image: str) -> str:

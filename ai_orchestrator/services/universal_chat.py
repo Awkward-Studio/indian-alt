@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple
 
@@ -11,6 +12,7 @@ try:
 except ImportError:
     resource = None
 
+from django.conf import settings
 from django.db import connection
 from django.db.models import Count, Q
 
@@ -50,6 +52,130 @@ EVIDENCE_PREFERENCES = {"summary", "metrics", "risks", "mixed", "documents", "ti
 RESULT_SHAPES = {"single_deal", "named_set", "shortlist", "cross_pipeline"}
 SELECTION_MODES = {"depth_first", "balanced", "breadth_first"}
 STATS_MODES = {"none", "count", "group", "aggregate"}
+
+QUERY_PLANNER_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "universal_chat_query_plan",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "query_type": {"type": "string", "enum": sorted(QUERY_TYPES)},
+                "result_shape": {"type": "string", "enum": sorted(RESULT_SHAPES)},
+                "selection_mode": {"type": "string", "enum": sorted(SELECTION_MODES)},
+                "hard_filters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": ["string", "null"]},
+                        "industry": {"type": ["string", "null"]},
+                        "sector": {"type": ["string", "null"]},
+                        "city": {"type": ["string", "null"]},
+                        "priority": {"type": ["string", "null"]},
+                        "current_phase": {"type": ["string", "null"]},
+                        "is_female_led": {"type": ["boolean", "null"]},
+                        "management_meeting": {"type": ["boolean", "null"]},
+                    },
+                    "required": [
+                        "title",
+                        "industry",
+                        "sector",
+                        "city",
+                        "priority",
+                        "current_phase",
+                        "is_female_led",
+                        "management_meeting",
+                    ],
+                    "additionalProperties": False,
+                },
+                "named_entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": sorted(ENTITY_TYPES)},
+                            "text": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["type", "text", "confidence"],
+                        "additionalProperties": False,
+                    },
+                },
+                "exact_terms": {"type": "array", "items": {"type": "string"}},
+                "semantic_queries": {"type": "array", "items": {"type": "string"}},
+                "soft_constraints": {"type": "array", "items": {"type": "string"}},
+                "metric_terms": {"type": "array", "items": {"type": "string"}},
+                "evidence_preference": {"type": "string", "enum": sorted(EVIDENCE_PREFERENCES)},
+                "needs_stats": {"type": "boolean"},
+                "stats_mode": {"type": "string", "enum": sorted(STATS_MODES)},
+                "deal_limit": {"type": "integer", "minimum": 1, "maximum": HARD_MAX_DEAL_LIMIT},
+                "chunks_per_deal": {"type": "integer", "minimum": 0, "maximum": HARD_MAX_CHUNKS_PER_DEAL},
+                "global_chunk_limit": {"type": "integer", "minimum": 0, "maximum": HARD_MAX_GLOBAL_CHUNKS},
+            },
+            "required": [
+                "query_type",
+                "result_shape",
+                "selection_mode",
+                "hard_filters",
+                "named_entities",
+                "exact_terms",
+                "semantic_queries",
+                "soft_constraints",
+                "metric_terms",
+                "evidence_preference",
+                "needs_stats",
+                "stats_mode",
+                "deal_limit",
+                "chunks_per_deal",
+                "global_chunk_limit",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+DEAL_HELPER_RERANK_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "deal_helper_rerank",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {"type": "integer", "minimum": 0},
+                            "relevance_score": {"type": "number", "minimum": 0, "maximum": 100},
+                            "suggested": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                            "compare_to_active_deal": {"type": "string"},
+                        },
+                        "required": [
+                            "index",
+                            "relevance_score",
+                            "suggested",
+                            "reason",
+                            "compare_to_active_deal",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["results"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+def _looks_like_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 METRIC_TOKENS = {
     "arr", "mrr", "revenue", "ebitda", "cm1", "cm2", "gross margin",
@@ -211,7 +337,7 @@ class UniversalChatService:
             return self._document_cache[cache_key]
 
         artifact: Dict[str, Any] | None = None
-        if chunk.source_type == "document" and chunk.source_id:
+        if chunk.source_type == "document" and chunk.source_id and _looks_like_uuid(chunk.source_id):
             doc = (
                 DealDocument.objects
                 .only("id", "title", "document_type", "evidence_json", "source_map_json", "table_json", "key_metrics_json")
@@ -231,7 +357,7 @@ class UniversalChatService:
                     "source_map": stored.get("source_map") or doc.source_map_json or {},
                     "citation_label": stored.get("citation_label") or doc.title,
                 }
-        elif chunk.source_type == "analysis_document" and chunk.source_id:
+        elif chunk.source_type == "analysis_document" and chunk.source_id and _looks_like_uuid(chunk.source_id):
             doc = (
                 FolderAnalysisDocument.objects
                 .only("id", "file_name", "document_type", "evidence_json", "source_map_json", "table_json", "key_metrics_json")
@@ -282,7 +408,11 @@ class UniversalChatService:
 
     def process_intent_and_build_metadata(self, user_message: str, conversation_id: str, history_context: str, audit_log_id: str) -> dict:
         from ..models import AIConversation
-        conversation = AIConversation.objects.filter(id=conversation_id).first()
+        conversation = (
+            AIConversation.objects.filter(id=conversation_id).first()
+            if _looks_like_uuid(conversation_id)
+            else None
+        )
         model_provider = conversation.metadata.get('model_provider', 'vllm') if conversation else 'vllm'
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
 
@@ -425,7 +555,11 @@ class UniversalChatService:
         deal = Deal.objects.get(id=deal_id)
 
         from ..models import AIConversation
-        conversation = AIConversation.objects.filter(id=conversation_id).first()
+        conversation = (
+            AIConversation.objects.filter(id=conversation_id).first()
+            if _looks_like_uuid(conversation_id)
+            else None
+        )
         model_provider = conversation.metadata.get('model_provider', 'vllm') if conversation else 'vllm'
 
         if model_provider == 'anthropic':
@@ -853,7 +987,8 @@ class UniversalChatService:
                 personality_name="default",
                 skill_name=None,
                 metadata={
-                    "response_format": {"type": "json_object"},
+                    "response_format": DEAL_HELPER_RERANK_RESPONSE_FORMAT,
+                    "chat_template_kwargs": {"enable_thinking": False},
                     "temperature": 0.0,
                     "max_tokens": 1800,
                 },
@@ -1612,19 +1747,21 @@ class UniversalChatService:
             "model": AIRuntimeService.get_planner_model(),
             "prompt": planner_prompt,
             "system": "Return exactly one valid JSON object. Do not include markdown, comments, prose, or thinking.",
-            "response_format": {"type": "json_object"},
+            "response_format": QUERY_PLANNER_RESPONSE_FORMAT,
+            "chat_template_kwargs": {"enable_thinking": False},
             "options": {
-                "max_tokens": 1800,
+                "max_tokens": 8192,
                 "temperature": 0.0,
             },
         }
+        planner_timeout = int(getattr(settings, "VLLM_PLANNER_TIMEOUT", 600) or 600)
         try:
-            data = self.ai_service.provider.execute_standard(payload, timeout=180)
+            data = self.ai_service.provider.execute_standard(payload, timeout=planner_timeout)
         except Exception:
             # Some OpenAI-compatible servers reject response_format. Retry with
             # prompt-only JSON enforcement before falling back to heuristics.
             payload.pop("response_format", None)
-            data = self.ai_service.provider.execute_standard(payload, timeout=180)
+            data = self.ai_service.provider.execute_standard(payload, timeout=planner_timeout)
         raw_response = (data.get("response") or "").strip()
         parsed = self._parse_planner_response(raw_response)
         if not isinstance(parsed, dict):
@@ -1694,7 +1831,7 @@ class UniversalChatService:
             stats_mode = "count" if query_type == "stats" else "none"
 
         named_entities = self._normalize_named_entities(plan.get("named_entities"))
-        if not named_entities:
+        if not named_entities and query_type != "stats":
             named_entities = self._normalize_string_entities(self._normalize_string_list(plan.get("exact_terms")))
         unique_named_deal_terms = []
         for entity in named_entities:
@@ -1748,6 +1885,33 @@ class UniversalChatService:
             if value not in [None, "", "null", "None"]:
                 normalized["hard_filters"][field] = value
 
+        self._align_sector_industry_filter_intent(normalized["hard_filters"], user_message)
+        self._demote_thematic_named_deals(normalized, user_message)
+
+        if normalized["stats_mode"] == "none" and self._looks_like_evidence_retrieval_request(user_message):
+            normalized["evidence_preference"] = "documents"
+
+        if normalized["stats_mode"] != "none":
+            filter_terms = {
+                str(value).strip().lower()
+                for value in normalized["hard_filters"].values()
+                if isinstance(value, str) and str(value).strip()
+            }
+            if filter_terms:
+                normalized["named_entities"] = [
+                    entity
+                    for entity in normalized["named_entities"]
+                    if not (
+                        entity.get("type") == "deal"
+                        and str(entity.get("text") or "").strip().lower() in filter_terms
+                    )
+                ]
+                unique_named_deal_terms = [
+                    str(entity.get("text") or "").strip().lower()
+                    for entity in normalized["named_entities"]
+                    if entity.get("type") == "deal" and str(entity.get("text") or "").strip()
+                ]
+
         if not normalized["semantic_queries"]:
             normalized["semantic_queries"] = [user_message]
         if not normalized["metric_terms"]:
@@ -1787,10 +1951,93 @@ class UniversalChatService:
             )
         if normalized["stats_mode"] != "none":
             normalized["needs_stats"] = True
+            if not normalized["named_entities"]:
+                normalized["chunks_per_deal"] = 0
+                normalized["global_chunk_limit"] = 0
         normalized["global_chunk_limit"] = self._cap(int(normalized["global_chunk_limit"] or 0), HARD_MAX_GLOBAL_CHUNKS)
         normalized["deal_limit"] = self._cap(int(normalized["deal_limit"] or 0), HARD_MAX_DEAL_LIMIT)
         normalized["chunks_per_deal"] = self._cap(int(normalized["chunks_per_deal"] or 0), HARD_MAX_CHUNKS_PER_DEAL)
         return normalized
+
+    def _align_sector_industry_filter_intent(self, hard_filters: Dict[str, Any], user_message: str) -> None:
+        user_message_lower = str(user_message or "").lower()
+        industry_value = str(hard_filters.get("industry") or "").strip()
+        sector_value = str(hard_filters.get("sector") or "").strip()
+
+        if industry_value and not sector_value and self._filter_value_has_field_word(user_message_lower, industry_value, "sector"):
+            hard_filters["sector"] = industry_value
+            hard_filters.pop("industry", None)
+            return
+
+        if sector_value and not industry_value and self._filter_value_has_field_word(user_message_lower, sector_value, "industry"):
+            hard_filters["industry"] = sector_value
+            hard_filters.pop("sector", None)
+
+    @staticmethod
+    def _filter_value_has_field_word(user_message_lower: str, value: str, field_word: str) -> bool:
+        value_lower = str(value or "").strip().lower()
+        if not value_lower:
+            return False
+        value_pattern = re.escape(value_lower)
+        field_pattern = re.escape(field_word.lower())
+        return bool(
+            re.search(rf"\b{value_pattern}\b\s+\b{field_pattern}\b", user_message_lower)
+            or re.search(rf"\b{field_pattern}\b\s+(?:of|is|in|=|:)?\s*\b{value_pattern}\b", user_message_lower)
+        )
+
+    def _demote_thematic_named_deals(self, normalized: Dict[str, Any], user_message: str) -> None:
+        if normalized["stats_mode"] != "none":
+            return
+
+        user_message_lower = str(user_message or "").lower()
+        if not re.search(r"\b(find|search|show|list|identify|surface)\b", user_message_lower):
+            return
+        if not re.search(r"\b(deals|companies|targets|opportunities)\b", user_message_lower):
+            return
+
+        named_entities = normalized.get("named_entities") or []
+        retained = []
+        demoted_terms = []
+        for entity in named_entities:
+            if entity.get("type") != "deal":
+                retained.append(entity)
+                continue
+            text = str(entity.get("text") or "").strip()
+            text_lower = text.lower()
+            is_thematic_phrase = (
+                re.search(r"\b(deals|companies|targets|opportunities)\b", text_lower)
+                or " with " in text_lower
+                or " evidence" in text_lower
+            )
+            if is_thematic_phrase:
+                demoted_terms.append(text)
+            else:
+                retained.append(entity)
+
+        if not demoted_terms:
+            return
+
+        normalized["named_entities"] = retained
+        normalized["exact_terms"] = [
+            item for item in normalized.get("exact_terms", [])
+            if str(item or "").strip().lower() not in {term.lower() for term in demoted_terms}
+        ]
+        normalized["query_type"] = "pipeline_search"
+        normalized["result_shape"] = "shortlist"
+        normalized["selection_mode"] = "balanced"
+        normalized["deal_limit"] = max(int(normalized.get("deal_limit") or 0), 8)
+        normalized["chunks_per_deal"] = max(int(normalized.get("chunks_per_deal") or 0), 4)
+        normalized["global_chunk_limit"] = max(int(normalized.get("global_chunk_limit") or 0), 24)
+        if demoted_terms:
+            existing_queries = [str(item) for item in normalized.get("semantic_queries", []) if str(item).strip()]
+            normalized["semantic_queries"] = existing_queries or demoted_terms
+
+    @staticmethod
+    def _looks_like_evidence_retrieval_request(user_message: str) -> bool:
+        lowered = str(user_message or "").lower()
+        return bool(
+            re.search(r"\b(chunks?|retriev(?:e|ed|al)|supporting chunks?|evidence|source documents?|documents?)\b", lowered)
+        )
 
     def _heuristic_plan(self, user_message: str) -> Dict[str, Any]:
         planner_settings = self._stage_settings("query_planner")
