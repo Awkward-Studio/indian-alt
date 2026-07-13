@@ -223,6 +223,15 @@ class VLLMProviderService:
         else:
             content = user_prompt
 
+        template_kwargs = payload.get("chat_template_kwargs") or {}
+        thinking_disabled = template_kwargs.get("enable_thinking") is False
+        # Qwen templates recognize /no_think. Keep the marker at the end of the
+        # user turn so prompt caching still benefits from the stable prefix.
+        if thinking_disabled and "qwen" in str(model or "").lower():
+            if isinstance(content, str):
+                content = f"{content.rstrip()}\n\n/no_think"
+            elif isinstance(content, list):
+                content.append({"type": "text", "text": "/no_think"})
         messages.append({"role": "user", "content": content})
 
         body: dict[str, Any] = {
@@ -232,8 +241,8 @@ class VLLMProviderService:
             "temperature": ((payload.get("options") or {}).get("temperature", 0.1)),
         }
 
-        if payload.get("chat_template_kwargs"):
-            body["chat_template_kwargs"] = payload["chat_template_kwargs"]
+        if template_kwargs:
+            body["chat_template_kwargs"] = template_kwargs
 
         response_format = payload.get("response_format")
         if response_format:
@@ -491,7 +500,6 @@ class AnthropicProviderService:
         
         # Determine options
         max_tokens = (payload.get("options") or {}).get("max_tokens") or 8192
-        temperature = (payload.get("options") or {}).get("temperature") or 0.1
 
         prompt_lower = user_prompt.lower()
         search_keywords = [
@@ -549,15 +557,14 @@ class AnthropicProviderService:
         if tools:
             anthropic_payload["tools"] = tools
 
-        # Handle thinking budget and temperature constraints for Claude 3.7
+        # Claude 3.7 extended thinking requires temperature=1. Newer Claude
+        # models reject explicit sampling parameters, so use their API default.
         if "claude-3-7" in model:
             anthropic_payload["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": min(2048, max_tokens - 1000) if max_tokens > 2000 else 1024
             }
             anthropic_payload["temperature"] = 1.0
-        else:
-            anthropic_payload["temperature"] = temperature
 
         return anthropic_payload
 

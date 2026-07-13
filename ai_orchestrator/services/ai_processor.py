@@ -142,6 +142,13 @@ class AIProcessorService:
             if "max_tokens" in metadata:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
 
+        # Qwen's vLLM chat template otherwise emits its internal reasoning before
+        # the answer. Callers can explicitly opt back in for a task that needs it.
+        if model_provider != "anthropic":
+            template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+            template_kwargs.setdefault("enable_thinking", False)
+            payload["chat_template_kwargs"] = template_kwargs
+
         # PHASE 3: EXECUTION (Delegated to Provider + Parser)
         if stream:
             return self._stream_response(payload, audit_log)
