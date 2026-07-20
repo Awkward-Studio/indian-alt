@@ -631,6 +631,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         else:
             deal.deal_summary = report
             deal.save(update_fields=['deal_summary'])
+            from work_items.services import sync_deal_suggestions
+            sync_deal_suggestions(deal, None)
 
         deal.refresh_from_db()
         return Response({

@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'banks',
     'contacts',
     'deals',
+    'work_items',
     'meetings',
     'api_requests',
     'microsoft',

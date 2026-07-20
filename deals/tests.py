@@ -7,7 +7,7 @@ import requests
 
 from django.core.management import call_command
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from django.urls import reverse
@@ -43,6 +43,68 @@ from deals.tasks import (
 from deals.services.competitor_intelligence import competitor_names_from_payload
 from deals.services.screener import ScreenerCompanyService
 from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.analysis_next_steps import inspect_analysis_next_steps
+
+
+class AnalysisNextStepsInspectionTests(SimpleTestCase):
+    def test_extracts_section_and_canonical_task_tables(self):
+        report = r"""
+## Key Financials
+| Next steps / further diligence / red flags | Details |
+| :--- | :--- |
+| **Financial Validation** | Request audited statements.<br>Validate revenue. |
+
+## Next Steps
+| Serial Number | Tasks / Next Step | Task Owner | Task assigned to | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | Request audited statements. | Analyst | Deal Team | Pending |
+"""
+
+        result = inspect_analysis_next_steps(report)
+
+        self.assertEqual(result["summary"]["section_tables"], 1)
+        self.assertEqual(result["summary"]["canonical_task_tables"], 1)
+        self.assertEqual(result["summary"]["task_candidates"], 2)
+        section_task, canonical_task = result["tasks"]
+        self.assertEqual(section_task["source_section"], "Key Financials")
+        self.assertEqual(section_task["category"], "Financial Validation")
+        self.assertEqual(section_task["task"], "Request audited statements.\nValidate revenue.")
+        self.assertIn("assignee", section_task["missing_fields"])
+        self.assertEqual(canonical_task["owner"], "Analyst")
+        self.assertEqual(canonical_task["assignee"], "Deal Team")
+        self.assertEqual(canonical_task["status"], "Pending")
+        self.assertEqual(canonical_task["missing_fields"], ["priority", "due_date"])
+
+    def test_extracts_action_table_and_ignores_analysis_table(self):
+        report = """
+## Transaction
+| Item | Action | Priority |
+| --- | --- | --- |
+| Valuation Basis | Understand the valuation rationale. | High |
+
+| Metric | Value |
+| --- | --- |
+| Revenue | INR 10 Cr |
+"""
+
+        result = inspect_analysis_next_steps(report)
+
+        self.assertEqual(result["summary"]["action_tables"], 1)
+        self.assertEqual(len(result["tables"]), 1)
+        self.assertEqual(result["tasks"][0]["task"], "Understand the valuation rationale.")
+        self.assertEqual(result["tasks"][0]["priority"], "High")
+
+    def test_preserves_escaped_pipes_inside_cells(self):
+        report = r"""
+## Next Steps
+| Task | Owner | Status |
+| --- | --- | --- |
+| Compare base \| downside cases | Analyst | Pending |
+"""
+
+        task = inspect_analysis_next_steps(report)["tasks"][0]
+
+        self.assertEqual(task["task"], "Compare base | downside cases")
 
 
 class CompetitorSearchPipelineTests(TestCase):
