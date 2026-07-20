@@ -492,17 +492,7 @@ class UniversalChatService:
             diagnostics=chunk_diagnostics,
         )
 
-        if plan.get("needs_stats") and self._stage_enabled("stats_block"):
-            context_data += "\n\n[PIPELINE STATS]\n" + json.dumps({
-                "total_deals": Deal.objects.count(),
-                "female_led_count": Deal.objects.filter(is_female_led=True).count(),
-                "by_industry": list(
-                    Deal.objects.values("industry").annotate(count=Count("id")).order_by("-count")[:10]
-                ),
-            }, default=str)
-            max_context_chars = int(self._stage_settings("context_assembly").get("max_context_chars", 60000) or 60000)
-            if len(context_data) > max_context_chars:
-                context_data = context_data[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
+        context_data = self._append_pipeline_stats_context(context_data, plan)
 
         return {
             "history_context": history_context,
@@ -1753,6 +1743,7 @@ class UniversalChatService:
                 "max_tokens": 8192,
                 "temperature": 0.0,
             },
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         planner_timeout = int(getattr(settings, "VLLM_PLANNER_TIMEOUT", 600) or 600)
         try:
@@ -2123,14 +2114,32 @@ class UniversalChatService:
         return normalized[:10]
 
     def _infer_named_deal_from_query_if_needed(self, queryset, plan: Dict[str, Any]) -> None:
-        if self._extract_named_deal_terms(plan):
-            return
         if (plan.get("stats_mode") or "none") != "none":
             return
         if plan.get("result_shape") in {"cross_pipeline", "shortlist"} and plan.get("query_type") == "stats":
             return
 
         user_query = str(plan.get("user_query") or "").strip()
+        explicit_titles = self._explicit_deal_titles_in_query(queryset, user_query)
+        existing_terms = self._extract_named_deal_terms(plan)
+        merged_terms = list(dict.fromkeys([*existing_terms, *explicit_titles]))
+        if len(merged_terms) >= 2:
+            plan["named_entities"] = [
+                {"type": "deal", "text": title, "confidence": 0.99}
+                for title in merged_terms[:10]
+            ]
+            plan["exact_terms"] = merged_terms[:10]
+            plan["result_shape"] = "named_set"
+            plan["selection_mode"] = "balanced"
+            plan["deal_limit"] = len(merged_terms)
+            plan["chunks_per_deal"] = max(int(plan.get("chunks_per_deal") or 0), 6)
+            plan["global_chunk_limit"] = max(
+                int(plan.get("global_chunk_limit") or 0),
+                min(int(self._stage_settings("context_assembly").get("max_total_chunks") or 80), len(merged_terms) * 8),
+            )
+            return
+        if existing_terms:
+            return
         if not self._looks_like_single_deal_question(user_query):
             return
 
@@ -2149,6 +2158,66 @@ class UniversalChatService:
             int(plan.get("global_chunk_limit") or 0),
             min(int(self._stage_settings("context_assembly").get("max_total_chunks") or 80), 24),
         )
+
+    def _explicit_deal_titles_in_query(self, queryset, user_query: str) -> List[str]:
+        """Resolve literal deal titles before relying on planner entity extraction."""
+        normalized_query = re.sub(r"[^a-z0-9]+", " ", user_query.lower()).strip()
+        if not normalized_query:
+            return []
+
+        matches: List[tuple[int, str]] = []
+        seen_normalized: set[str] = set()
+        titles = queryset.exclude(title__isnull=True).exclude(title="").values_list("title", flat=True).distinct()
+        for raw_title in titles.iterator(chunk_size=500):
+            title = str(raw_title or "").strip()
+            normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+            if len(normalized_title) < 4 or normalized_title in seen_normalized:
+                continue
+            start = normalized_query.find(normalized_title)
+            if start < 0:
+                continue
+            seen_normalized.add(normalized_title)
+            matches.append((start, title))
+
+        return [title for _, title in sorted(matches, key=lambda item: (item[0], -len(item[1])))[:10]]
+
+    def _pipeline_stats_context(self) -> Dict[str, Any]:
+        phase_rows = list(
+            Deal.objects.values("current_phase").annotate(count=Count("id")).order_by("-count", "current_phase")
+        )
+        by_current_phase = [
+            {"current_phase": row["current_phase"] or "Unspecified", "count": row["count"]}
+            for row in phase_rows
+        ]
+        total_deals = sum(row["count"] for row in phase_rows)
+        passed_deals = sum(
+            row["count"] for row in phase_rows
+            if str(row["current_phase"] or "").strip().lower() == "passed"
+        )
+        sourced_deals = sum(
+            row["count"] for row in phase_rows
+            if str(row["current_phase"] or "").strip().lower().startswith("1: deal sourced")
+        )
+        return {
+            "total_deals": total_deals,
+            "non_passed_deals": total_deals - passed_deals,
+            "passed_deals": passed_deals,
+            "deal_sourced_phase_count": sourced_deals,
+            "female_led_count": Deal.objects.filter(is_female_led=True).count(),
+            "by_current_phase": by_current_phase,
+            "by_industry": list(
+                Deal.objects.values("industry").annotate(count=Count("id")).order_by("-count")[:10]
+            ),
+        }
+
+    def _append_pipeline_stats_context(self, context_data: str, plan: Dict[str, Any]) -> str:
+        if not (plan.get("needs_stats") and self._stage_enabled("stats_block")):
+            return context_data
+        context_data += "\n\n[PIPELINE STATS]\n" + json.dumps(self._pipeline_stats_context(), default=str)
+        max_context_chars = int(self._stage_settings("context_assembly").get("max_context_chars", 60000) or 60000)
+        if len(context_data) > max_context_chars:
+            return context_data[:max_context_chars] + "\n\n... [TRUNCATED DUE TO CONTEXT LIMITS] ..."
+        return context_data
 
     def _looks_like_single_deal_question(self, user_query: str) -> bool:
         lowered = user_query.lower()
@@ -4011,6 +4080,7 @@ class UniversalChatService:
         context_data: str,
         history_context: str = "",
         include_prompt: bool = False,
+        max_tokens: int | None = None,
     ) -> Dict[str, Any]:
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template") or ""
         prompt_metadata = {
@@ -4035,8 +4105,9 @@ class UniversalChatService:
             "prompt": rendered_prompt,
             "system": system_instructions,
             "stream": False,
+            "chat_template_kwargs": {"enable_thinking": False},
             "options": {
-                "max_tokens": 8192,
+                "max_tokens": max(1, int(max_tokens or 8192)),
                 "temperature": 0.1,
             },
         }
@@ -4063,6 +4134,7 @@ class UniversalChatService:
         serialized_deals = [self._serialize_deal(deal) for deal in deals]
         serialized_chunks = [self._serialize_chunk(item) for item in chunks]
         context_preview, context_diagnostics = self._format_context_data(plan, serialized_deals, serialized_chunks, diagnostics=chunk_diagnostics)
+        context_preview = self._append_pipeline_stats_context(context_preview, plan)
         analysis_input_summary = self._build_analysis_input_summary(
             deals=serialized_deals,
             chunks=serialized_chunks,

@@ -8,7 +8,7 @@ from .services.ai_processor import AIProcessorService
 from .services.universal_chat import UniversalChatService
 from .services.runtime import AIRuntimeService
 
-from .services.realtime import broadcast_audit_log_update
+from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         audit_log.celery_task_id = self.request.id
         audit_log.status = 'PROCESSING'
         audit_log.save(update_fields=['celery_task_id', 'status'])
+        broadcast_audit_log_update(audit_log)
 
         # Update triggering user message with audit_log_id
         user_msg = AIMessage.objects.filter(
@@ -363,6 +364,9 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         full_text = ""
         full_thinking = ""
         last_save_time = time.time()
+        last_stream_broadcast = 0.0
+        pending_response_delta = ""
+        pending_thinking_delta = ""
 
         # Call the AI service with stream=True
         for chunk_str in ai_service.process_content(
@@ -375,8 +379,25 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         ):
             try:
                 chunk = json.loads(chunk_str)
-                full_text += chunk.get("response", "")
-                full_thinking += chunk.get("thinking", "")
+                response_delta = chunk.get("response", "")
+                thinking_delta = chunk.get("thinking", "")
+                full_text += response_delta
+                full_thinking += thinking_delta
+                pending_response_delta += response_delta
+                pending_thinking_delta += thinking_delta
+                now = time.time()
+                # vLLM can emit token-sized chunks faster than React can paint.
+                # Batch them briefly so the browser sees a smooth stream instead
+                # of hundreds of synchronous websocket state updates.
+                if now - last_stream_broadcast >= 0.2:
+                    broadcast_ai_stream_delta(
+                        audit_log,
+                        response_delta=pending_response_delta,
+                        thinking_delta=pending_thinking_delta,
+                    )
+                    pending_response_delta = ""
+                    pending_thinking_delta = ""
+                    last_stream_broadcast = now
                 
                 # Throttle DB updates to once per second to avoid lock contention
                 if time.time() - last_save_time > 1.0:
@@ -387,12 +408,18 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
+        broadcast_ai_stream_delta(
+            audit_log,
+            response_delta=pending_response_delta,
+            thinking_delta=pending_thinking_delta,
+        )
         full_text, full_thinking = _split_leaked_thinking(full_text, full_thinking)
 
         # Check if the stream layer already marked this as failed (fixes Bug 3 and Bug 9)
         audit_log.refresh_from_db(fields=['status', 'error_message'])
         if audit_log.status == 'FAILED':
             logger.warning(f"Stream failed for Conv {conversation_id}: {audit_log.error_message}")
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             return {"status": "error", "error": audit_log.error_message or "Stream failed"}
 
         if full_text:
@@ -410,6 +437,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             audit_log.status = 'COMPLETED'
             audit_log.is_success = True
             audit_log.save(update_fields=['raw_response', 'raw_thinking', 'status', 'is_success'])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
             logger.info(f"Background chat response generated for Conv: {conversation_id}")
             return {"status": "success", "message_length": len(full_text)}
@@ -417,6 +445,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             audit_log.status = 'FAILED'
             audit_log.error_message = "AI returned an empty response."
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             return {"status": "error", "error": "Empty response"}
 
     except Exception as e:
@@ -425,6 +454,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             audit_log.status = 'FAILED'
             audit_log.error_message = str(e)
             audit_log.save()
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         raise e
 
 

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from deals.models import Deal, DealDocument, DealRelationshipContext
 from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill, DocumentChunk
 from ai_orchestrator.services.ai_processor import AIProcessorService
+from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.parsers import ResponseParserService
@@ -43,6 +44,19 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         })
 
         self.assertEqual(report, "# FINANCE COMPARISON\n\nConcrete markdown body")
+
+    def test_vllm_qwen_no_think_mode_is_sent_in_template_and_user_turn(self):
+        body = VLLMProviderService()._build_chat_body(
+            {
+                "model": "Qwen/Qwen3.6-35B-A3B-FP8",
+                "prompt": "Summarize the deal.",
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            stream=False,
+        )
+
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertTrue(body["messages"][-1]["content"].endswith("/no_think"))
 
 
 class RetrievalFusionTests(SimpleTestCase):
@@ -985,6 +999,40 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(resolved, [precise])
         search_deal_profiles.assert_not_called()
 
+    def test_explicit_comparison_titles_override_missing_planner_entities(self):
+        Deal.objects.create(title="Arman Financial Services", sector="Financial Services")
+        Deal.objects.create(title="Light MFI", sector="Financial Services")
+        plan = {
+            "query_type": "comparison",
+            "stats_mode": "none",
+            "result_shape": "cross_pipeline",
+            "named_entities": [],
+            "exact_terms": [],
+            "deal_limit": 8,
+            "chunks_per_deal": 2,
+            "global_chunk_limit": 8,
+            "user_query": "Compare Arman Financial Services and Light MFI on financial quality.",
+        }
+
+        self.service._infer_named_deal_from_query_if_needed(Deal.objects.all(), plan)
+
+        self.assertEqual(plan["result_shape"], "named_set")
+        self.assertEqual(plan["deal_limit"], 2)
+        self.assertEqual(plan["exact_terms"], ["Arman Financial Services", "Light MFI"])
+
+    def test_pipeline_stats_context_includes_current_phase_breakdown(self):
+        Deal.objects.create(title="Sourced", current_phase="1: Deal Sourced")
+        Deal.objects.create(title="Passed", current_phase="Passed")
+        Deal.objects.create(title="Review", current_phase="3: IC Review")
+
+        stats = self.service._pipeline_stats_context()
+
+        self.assertEqual(stats["total_deals"], 3)
+        self.assertEqual(stats["passed_deals"], 1)
+        self.assertEqual(stats["non_passed_deals"], 2)
+        self.assertEqual(stats["deal_sourced_phase_count"], 1)
+        self.assertIn({"current_phase": "Passed", "count": 1}, stats["by_current_phase"])
+
     def test_tokenize_keywords_strips_generic_query_words(self):
         keywords = self.service._tokenize_keywords(
             "Which consumer or wellness deals mention a funding ask and strong repeat customer behavior?"
@@ -1648,6 +1696,19 @@ class AnthropicIntegrationTests(TestCase):
         # Claude 3.7 should enforce temperature=1.0 and enable thinking
         self.assertEqual(built["temperature"], 1.0)
         self.assertEqual(built["thinking"]["type"], "enabled")
+
+    def test_modern_anthropic_models_omit_deprecated_temperature(self):
+        from ai_orchestrator.services.llm_providers import AnthropicProviderService
+        built = AnthropicProviderService()._build_anthropic_payload(
+            {
+                "model": "claude-sonnet-4-6",
+                "prompt": "Summarize this.",
+                "options": {"max_tokens": 1024, "temperature": 0.1},
+            },
+            stream=False,
+        )
+
+        self.assertNotIn("temperature", built)
 
     @patch("ai_orchestrator.services.universal_chat.Deal.objects.only")
     def test_rag_bypass_universal_chat(self, mock_deal_only):

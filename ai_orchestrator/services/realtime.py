@@ -65,6 +65,28 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
     )
 
 
+def broadcast_ai_stream_delta(log, *, response_delta: str = "", thinking_delta: str = "") -> None:
+    """Send a lightweight incremental chat update without serializing the audit log."""
+    if not log or not (response_delta or thinking_delta):
+        return
+    channel_layer = get_channel_layer()
+    if not channel_layer:
+        return
+
+    async_to_sync(channel_layer.group_send)(
+        f"ai_stream_{str(log.id)}",
+        {
+            "type": "ai_message",
+            "event_type": "delta",
+            "audit_log_id": str(log.id),
+            "response_delta": response_delta,
+            "thinking_delta": thinking_delta,
+            "status": "processing",
+            "done": False,
+        },
+    )
+
+
 def log_worker_event(log, message: str, *, status: str = None, event_type: str = "snapshot", done: bool = False) -> None:
     """
     Appends a message to the AIAuditLog.worker_logs list and broadcasts the update.
