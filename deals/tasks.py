@@ -1781,6 +1781,11 @@ def _format_competitor_items_report(competitors: list[dict], *, title: str) -> s
             lines.append(f"- Region: {region}")
         if notes:
             lines.append(f"- Notes: {notes}")
+        evidence_urls = competitor.get("evidence_urls") or []
+        if evidence_urls:
+            lines.append("- Sources:")
+            for url in evidence_urls[:3]:
+                lines.append(f"  - {url}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -2165,10 +2170,9 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
 @shared_task(queue='high_priority')
 def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
-    Asynchronously executes Claude web search for competitor discovery only.
-    Does not fall back to pre-trained static knowledge; runs strictly on live web tools.
-    CIN resolution and Venture Intelligence enrichment are intentionally deferred
-    to the selected-competitor save flow.
+    Execute one public and one private aggregated SearXNG search, enrich evidence
+    from selected pages, and extract grounded competitors with the local model.
+    CIN/VI enrichment remains deferred until the user selects candidates.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -2182,89 +2186,18 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             for item in existing_competitors
             if _competitor_result_key(item) not in {"name:", "cin:"}
         }
-        existing_names = [
-            str(item.get("name") or item.get("company_name") or "").strip()
-            for item in existing_competitors
-            if isinstance(item, dict) and str(item.get("name") or item.get("company_name") or "").strip()
-        ][:30]
+        from .services.competitor_web_research import CompetitorWebResearchService
 
-        search_directive = (
-            f"Follow this user instruction exactly: {instruction}\n"
-            f"Use web search to find additional competitor candidates that satisfy the instruction. "
-            f"This can include regional peers, direct named companies, or companies outside India."
-        ) if instruction else (
-            f"Run a concise web search to identify the top 10 competitors or peer companies for '{deal.title}'."
+        research = CompetitorWebResearchService().research(
+            company_name=deal.title,
+            sector=deal.sector or "",
+            industry=deal.industry or "",
+            location=", ".join(value for value in [deal.city, deal.country] if value),
+            business_summary=deal.deal_summary or "",
+            instruction=instruction,
+            existing_competitors=existing_competitors,
         )
-        count_instruction = (
-            "Return up to 8 net-new companies unless the user asked for a specific named company."
-            if instruction
-            else "List exactly 10 companies."
-        )
-
-        prompt = (
-            f"You are a sophisticated investment research assistant.\n"
-            f"{search_directive}\n"
-            f"Context details of the target company:\n"
-            f"- Target Company: {deal.title}\n"
-            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
-            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n"
-            f"- Existing candidates to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
-            f"Prioritize speed. This pass is ONLY for identifying competitor names and short rationales. "
-            f"Also classify every competitor as either a listed public company or a private/unlisted company using obvious public-market evidence. "
-            f"Do not search MCA records and do not perform detailed financial extraction in this pass. "
-            f"CIN resolution, Venture Intelligence checks, and Screener financial extraction happen later only for competitors selected by the user.\n"
-            f"Return exactly one JSON object and no markdown. Use this shape:\n"
-            f"{{\n"
-            f"  \"competitors\": [\n"
-            f"    {{\n"
-            f"      \"company_name\": \"Exact company or brand name\",\n"
-            f"      \"core_business\": \"Short phrase only\",\n"
-            f"      \"nature_of_competition\": \"Short phrase only\",\n"
-            f"      \"country_or_region\": \"Primary country or region, if relevant\",\n"
-            f"      \"company_type\": \"listed_public | private\",\n"
-            f"      \"classification_confidence\": 0.85,\n"
-            f"      \"exchange\": \"NSE/BSE or blank\",\n"
-            f"      \"ticker\": \"Listed ticker/symbol or blank\",\n"
-            f"      \"screener_url\": \"Screener URL if confidently known, else blank\",\n"
-            f"      \"classification_source\": \"Short reason for public/private classification\"\n"
-            f"    }}\n"
-            f"  ]\n"
-            f"}}\n"
-            f"{count_instruction} Do not search for or return MCA identifiers, tax identifiers, or Venture Intelligence identifiers. "
-            f"Return a CIN only if it is already obvious from a trusted search result; otherwise leave it blank. "
-            f"If listing status is uncertain, choose the most likely route and set classification_confidence below 0.6 with the uncertainty in classification_source. "
-            f"Focus only on accurate competitor discovery and concise rationale. "
-            f"Keep every text field short so the full JSON response fits in the answer. "
-            f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
-        )
-
-        from ai_orchestrator.services.search_provider import SearXNGProviderService
-        search_query = instruction if instruction else f"{deal.title} top competitors or similar companies india"
-        search_context = SearXNGProviderService().search(search_query)
-
-        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
-
-        from ai_orchestrator.services.llm_providers import VLLMProviderService
-        service = VLLMProviderService()
-        payload = {
-            "model": "local-model",
-            "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research based on the provided search context.",
-            "prompt": augmented_prompt,
-            "options": {
-                "temperature": 0.0,
-            }
-        }
-        logger.info("Triggering active web search competitor research via SearXNG and Local AI...")
-        result = service.execute_standard(payload, timeout=600)
-        response_text = result.get("response") or ""
-        from .services.competitor_intelligence import competitor_names_from_payload
-        try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError:
-            parsed = {}
-
-        raw_competitors = competitor_names_from_payload(parsed or response_text, limit=10, include_cin=False)
+        raw_competitors = research.get("competitors", [])
         competitors = []
         seen_keys = set(existing_keys)
         for competitor in raw_competitors:
@@ -2278,13 +2211,15 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         report = _format_competitor_items_report(competitors, title=report_title)
         if not competitors:
             return {
-                "message": "Live web search completed but returned no parseable competitors. Try a more specific company name or sector.",
-                "response": response_text,
+                "message": research.get("message", "Live web search returned no grounded competitors."),
+                "response": research.get("response", ""),
                 "competitors": [],
+                "diagnostics": research.get("diagnostics", {}),
             }
         return {
-            "response": report or response_text,
+            "response": report or research.get("response", ""),
             "competitors": competitors,
+            "diagnostics": research.get("diagnostics", {}),
         }
             
     except Exception as e:

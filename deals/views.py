@@ -1193,11 +1193,20 @@ Rules:
                     return Response({"status": "FAILURE", "error": result["error"]}, status=400)
                 from .services.competitor_intelligence import annotate_existing_competitors
                 competitors = annotate_existing_competitors(deal, result.get("competitors", []))
+                if not competitors:
+                    return Response({
+                        "status": "FAILURE",
+                        "error": result.get("message", "Live web search returned no grounded competitors."),
+                        "response": result.get("response", ""),
+                        "competitors": [],
+                        "diagnostics": result.get("diagnostics", {}),
+                    })
                 return Response({
-                    "status": "SUCCESS" if competitors else "WARNING",
+                    "status": "SUCCESS",
                     "response": result.get("response", ""),
                     "competitors": competitors,
                     "message": result.get("message", "Competitor research completed."),
+                    "diagnostics": result.get("diagnostics", {}),
                 })
             except Exception as e:
                 logger.error(f"Failed to run synchronous competitors search for deal {deal.id}: {str(e)}", exc_info=True)
@@ -1234,10 +1243,21 @@ Rules:
             if "error" in data:
                 return Response({"status": "FAILURE", "error": data["error"]}, status=200)
             from .services.competitor_intelligence import annotate_existing_competitors
+            competitors = annotate_existing_competitors(self.get_object(), data.get("competitors", []))
+            if not competitors:
+                return Response({
+                    "status": "FAILURE",
+                    "error": data.get("message", "Live web search returned no grounded competitors."),
+                    "response": data.get("response", ""),
+                    "competitors": [],
+                    "diagnostics": data.get("diagnostics", {}),
+                })
             return Response({
                 "status": "SUCCESS",
                 "response": data.get("response", ""),
-                "competitors": annotate_existing_competitors(self.get_object(), data.get("competitors", [])),
+                "competitors": competitors,
+                "message": data.get("message", "Competitor research completed."),
+                "diagnostics": data.get("diagnostics", {}),
             })
         elif res.status == 'FAILURE':
             return Response({
