@@ -57,9 +57,10 @@ class EmbeddingService:
     def _get_embedding(self, text: str) -> Optional[List[float]]:
         if self.is_sqlite: return None # Skip embedding calls if on SQLite to save latency
         self._last_embedding_error = ""
+        timeout = getattr(self.provider, "timeout", 30)
         for attempt in range(2):
             try:
-                val = self.provider.embed(model=self.model_name, text=text, timeout=30)
+                val = self.provider.embed(model=self.model_name, text=text, timeout=timeout)
                 if val:
                     return val
                 self._last_embedding_error = "Embedding provider returned an empty vector."
@@ -69,6 +70,24 @@ class EmbeddingService:
             if attempt == 0:
                 time.sleep(0.5)
         return None
+
+    def is_embedding_available(self, *, timeout: int = 5) -> bool:
+        if self.is_sqlite:
+            return False
+        if not self.model_name:
+            self._last_embedding_error = "Embedding model is not configured."
+            return False
+        try:
+            embedding = self.provider.embed(model=self.model_name, text="embedding health check", timeout=timeout)
+            if embedding:
+                self._last_embedding_error = ""
+                return True
+            self._last_embedding_error = "Embedding provider returned an empty vector."
+            return False
+        except Exception as exc:
+            self._last_embedding_error = str(exc)
+            logger.warning("Embedding provider unavailable; skipping embedding step: %s", self._last_embedding_error)
+            return False
 
     @staticmethod
     def _normalize_query_text(query: str) -> str:
@@ -323,6 +342,8 @@ class EmbeddingService:
         created_chunks = []
         for i, chunk_text in enumerate(chunks):
             embedding = self._get_embedding(chunk_text) if not self.is_sqlite else None
+            if not self.is_sqlite and not embedding:
+                continue
             chunk_metadata = metadata.copy() if metadata else {}
             chunk_metadata.update({"chunk_index": i, "total_chunks": len(chunks)})
             doc_chunk = DocumentChunk(
@@ -360,6 +381,8 @@ class EmbeddingService:
         created: list[DocumentChunk] = []
         for i, chunk_text in enumerate(split_texts):
             embedding = self._get_embedding(chunk_text) if not self.is_sqlite else None
+            if not self.is_sqlite and not embedding:
+                continue
             chunk_metadata = dict(base_metadata)
             chunk_metadata.update({"chunk_index": i, "total_chunks": total_chunks})
             created.append(

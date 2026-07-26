@@ -368,11 +368,18 @@ class DealDetailSerializer(DealSerializer):
     phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     file_tree = serializers.SerializerMethodField()
     vi_relations = VentureIntelligenceCompanyRelationSerializer(many=True, read_only=True)
+    competitor_candidates = serializers.SerializerMethodField()
 
     def get_file_tree(self, obj):
         from .services.folder_analysis import FolderAnalysisService
 
         return FolderAnalysisService.get_persisted_file_tree_for_deal(obj)
+    
+    def get_competitor_candidates(self, obj):
+        if not obj.competitor_candidates:
+            return []
+        from .services.competitor_intelligence import annotate_existing_competitors
+        return annotate_existing_competitors(obj, obj.competitor_candidates)
     
     class Meta:
         model = Deal
@@ -387,7 +394,7 @@ class DealDetailSerializer(DealSerializer):
             'generated_documents', 'analysis_prompt',
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
-            'file_tree', 'vi_relations',
+            'file_tree', 'vi_relations', 'competitor_candidates',
         )
         read_only_fields = ('id',)
 

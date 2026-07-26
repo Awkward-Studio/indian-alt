@@ -1753,6 +1753,10 @@ def _competitor_result_key(item: dict) -> str:
     cin = str((item or {}).get("cin") or "").strip().upper()
     if cin:
         return f"cin:{cin}"
+    ticker = str((item or {}).get("ticker") or "").strip().upper()
+    exchange = str((item or {}).get("exchange") or "").strip().upper()
+    if ticker:
+        return f"ticker:{exchange}:{ticker}"
     name = str((item or {}).get("name") or (item or {}).get("company_name") or "").strip().casefold()
     return f"name:{name}"
 
@@ -1766,7 +1770,13 @@ def _format_competitor_items_report(competitors: list[dict], *, title: str) -> s
         name = competitor.get("name") or competitor.get("company_name") or "Unknown company"
         notes = competitor.get("notes") or competitor.get("nature_of_competition") or competitor.get("core_business") or ""
         region = competitor.get("country_or_region") or competitor.get("region") or competitor.get("country") or ""
+        company_type = competitor.get("company_type") or "unknown"
+        ticker = competitor.get("ticker") or ""
+        exchange = competitor.get("exchange") or ""
         lines.append(f"## {index}. {name}")
+        lines.append(f"- Company Type: {company_type}")
+        if ticker or exchange:
+            lines.append(f"- Public Market ID: {exchange or 'N/A'} / {ticker or 'N/A'}")
         if region:
             lines.append(f"- Region: {region}")
         if notes:
@@ -1964,7 +1974,7 @@ def _company_news_cards(research: dict) -> list[dict]:
 
 
 @shared_task(queue='high_priority')
-def fetch_company_news_async_task(deal_id: str) -> dict:
+def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_news: list[dict] | None = None) -> dict:
     """
     Runs Claude native web search for public-domain company/promoter news,
     persists each run as a dated memo document, and vectorizes it for retrieval.
@@ -1972,24 +1982,45 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
     try:
         deal = Deal.objects.get(id=deal_id)
         generated_at = timezone.now()
-        prompt = (
+        instruction = str(instruction or "").strip()
+        existing_news = existing_news or []
+
+        search_directive = (
+            f"Follow this user instruction exactly: {instruction}\n"
+            f"Use web search to find additional news articles or findings that satisfy the instruction and append/merge them with any existing findings. "
+            f"Do not duplicate existing findings."
+        ) if instruction else (
             f"Use web search once for '{deal.title}' and return a compact public-domain news snapshot. "
-            "Do not run broad category-by-category research.\n\n"
-            f"Context: {deal.title}; sector={deal.sector or 'N/A'}; industry={deal.industry or 'N/A'}; "
-            f"location={deal.city or 'N/A'}, {deal.country or 'N/A'}.\n\n"
-            "Prioritize only the biggest 1-5 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
-            "major awards/partnerships, or other material red/green flags.\n\n"
-            "Return exactly one JSON object and no markdown. Use this shape:\n"
-            "{\n"
-            "  \"overview\": \"2 sentence base summary of the public-domain signal\",\n"
-            "  \"executive_summary\": \"same as overview\",\n"
-            "  \"news_cards\": [\n"
-            "    {\"title\": \"...\", \"summary\": \"one short sentence\", \"category\": \"funding|litigation|founder|award|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}\n"
-            "  ],\n"
-            "  \"sources\": [{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}]\n"
-            "}\n"
-            "Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
-            "Every card must be based on a source URL. Do not invent facts."
+            f"Do not run broad category-by-category research."
+        )
+
+        existing_names = [
+            str(item.get("title") or "").strip()
+            for item in existing_news
+            if isinstance(item, dict) and str(item.get("title") or "").strip()
+        ][:30]
+
+        prompt = (
+            f"You are a sophisticated investment research assistant.\n"
+            f"{search_directive}\n\n"
+            f"Context details of the target company:\n"
+            f"- Target Company: {deal.title}\n"
+            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
+            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
+            f"- Existing findings to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
+            f"Prioritize only the biggest 1-5 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
+            f"major awards/partnerships, or other material red/green flags.\n\n"
+            f"Return exactly one JSON object and no markdown. Use this shape:\n"
+            f"{{\n"
+            f"  \"overview\": \"2 sentence base summary of the public-domain signal\",\n"
+            f"  \"executive_summary\": \"same as overview\",\n"
+            f"  \"news_cards\": [\n"
+            f"    {{\"title\": \"...\", \"summary\": \"one short sentence\", \"category\": \"funding|litigation|founder|award|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}}\n"
+            f"  ],\n"
+            f"  \"sources\": [{{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}}]\n"
+            f"}}\n"
+            f"Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
+            f"Every card must be based on a source URL. Do not invent facts."
         )
 
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
@@ -1999,7 +2030,7 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "system": "You are a careful investment diligence researcher. Use web search and cite public-domain sources.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 1200,
+                "max_tokens": 4000,
                 "temperature": 0.1,
                 "max_search_uses": 1,
             },
@@ -2026,6 +2057,17 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
         if not research.get("executive_summary") and research.get("overview"):
             research["executive_summary"] = research.get("overview")
         news_cards = _company_news_cards(research)
+        
+        # Merge new findings with existing ones, avoiding duplicates
+        if existing_news:
+            seen_titles = {str(item.get("title") or "").strip().lower() for item in existing_news if isinstance(item, dict)}
+            merged_cards = list(existing_news)
+            for card in news_cards:
+                title_key = str(card.get("title") or "").strip().lower()
+                if title_key and title_key not in seen_titles:
+                    merged_cards.append(card)
+            news_cards = merged_cards[:10]  # Cap at 10 total items if refined
+
         research["news_cards"] = news_cards
 
         markdown_report = _format_company_news_markdown(
@@ -2033,7 +2075,13 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             company_name=deal.title or "Company",
             generated_at=generated_at,
         )
-        title = f"Public Domain News Research - {deal.title or 'Company'} - {generated_at.strftime('%Y-%m-%d %H:%M')}"
+        source_map = {
+            "source": "anthropic_web_search",
+            "generated_at": generated_at.isoformat(),
+            "overview": research.get("overview") or research.get("executive_summary") or "",
+            "news_cards": news_cards,
+        }
+        title = f"Public Domain News Research - {generated_at.date().isoformat()}"
 
         doc = DealDocument.objects.create(
             deal=deal,
@@ -2042,7 +2090,7 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             extracted_text=markdown_report,
             normalized_text=markdown_report,
             evidence_json={},
-            source_map_json={"source": "anthropic_web_search", "generated_at": generated_at.isoformat()},
+            source_map_json=source_map,
             reasoning="Public-domain company news research generated by Claude native web search.",
             is_indexed=False,
             is_ai_analyzed=False,
@@ -2072,7 +2120,7 @@ def fetch_company_news_async_task(deal_id: str) -> dict:
             "reasoning": "Claude native web-search research; verify material findings against primary sources during diligence.",
             "quality_flags": ["public_domain_news_research"],
             "normalized_text": markdown_report,
-            "source_map": {"source": "anthropic_web_search", "generated_at": generated_at.isoformat()},
+            "source_map": source_map,
         }
         DocumentArtifactService.persist_artifact(doc, artifact)
 
@@ -2158,8 +2206,9 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n"
             f"- Existing candidates to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
             f"Prioritize speed. This pass is ONLY for identifying competitor names and short rationales. "
-            f"Do not search MCA records, do not resolve CINs, and do not validate legal entities in this pass. "
-            f"CIN resolution and Venture Intelligence availability checks happen later only for competitors selected by the user.\n"
+            f"Also classify every competitor as either a listed public company or a private/unlisted company using obvious public-market evidence. "
+            f"Do not search MCA records and do not perform detailed financial extraction in this pass. "
+            f"CIN resolution, Venture Intelligence checks, and Screener financial extraction happen later only for competitors selected by the user.\n"
             f"Return exactly one JSON object and no markdown. Use this shape:\n"
             f"{{\n"
             f"  \"competitors\": [\n"
@@ -2167,13 +2216,21 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             f"      \"company_name\": \"Exact company or brand name\",\n"
             f"      \"core_business\": \"Short phrase only\",\n"
             f"      \"nature_of_competition\": \"Short phrase only\",\n"
-            f"      \"country_or_region\": \"Primary country or region, if relevant\"\n"
+            f"      \"country_or_region\": \"Primary country or region, if relevant\",\n"
+            f"      \"company_type\": \"listed_public | private\",\n"
+            f"      \"classification_confidence\": 0.85,\n"
+            f"      \"exchange\": \"NSE/BSE or blank\",\n"
+            f"      \"ticker\": \"Listed ticker/symbol or blank\",\n"
+            f"      \"screener_url\": \"Screener URL if confidently known, else blank\",\n"
+            f"      \"classification_source\": \"Short reason for public/private classification\"\n"
             f"    }}\n"
             f"  ]\n"
             f"}}\n"
-            f"{count_instruction} Do not search for or return Corporate Identity Numbers, CINs, MCA identifiers, "
-            f"registry numbers, tax identifiers, or Venture Intelligence identifiers. "
+            f"{count_instruction} Do not search for or return MCA identifiers, tax identifiers, or Venture Intelligence identifiers. "
+            f"Return a CIN only if it is already obvious from a trusted search result; otherwise leave it blank. "
+            f"If listing status is uncertain, choose the most likely route and set classification_confidence below 0.6 with the uncertainty in classification_source. "
             f"Focus only on accurate competitor discovery and concise rationale. "
+            f"Keep every text field short so the full JSON response fits in the answer. "
             f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
         )
 
@@ -2184,7 +2241,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
             "prompt": prompt,
             "options": {
-                "max_tokens": 1000,
+                "max_tokens": 2200,
                 "temperature": 0.1,
                 "max_search_uses": 3,
                 "web_search_tool_type": "web_search_20250305",
@@ -2220,7 +2277,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             }
         return {
             "response": report or response_text,
-            "competitors": [{**competitor, "cin": ""} for competitor in competitors],
+            "competitors": competitors,
         }
             
     except Exception as e:
@@ -2239,6 +2296,7 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
     try:
         from deals.models import Deal, VentureIntelligenceCompanyProfile
         from deals.services.competitor_intelligence import enrich_competitors_for_deal
+        from deals.services.screener import ScreenerCompanyService
         from deals.services.venture_intelligence import VentureIntelligenceService
 
         deal = Deal.objects.get(id=deal_id)
@@ -2246,21 +2304,41 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
         embedding_result = {
             "status": "skipped",
             "vi_profiles_indexed": 0,
+            "screener_profiles_indexed": 0,
             "vi_profile_errors": [],
         }
 
         vi_profile_errors = []
         vi_service = VentureIntelligenceService()
+        screener_service = ScreenerCompanyService()
+        embed_service = EmbeddingService()
+        if not embed_service.is_embedding_available(timeout=5):
+            embedding_result["status"] = "skipped_unavailable"
+            embedding_result["reason"] = embed_service._last_embedding_error or "Embedding provider unavailable."
+            vi_enrichment["steps"] = {
+                **(vi_enrichment.get("steps") or {}),
+                "embedding": embedding_result,
+            }
+            return {
+                "status": "SUCCESS",
+                "vi_enrichment": vi_enrichment,
+                "enrichment": vi_enrichment,
+            }
+
         for item in vi_enrichment.get("enriched", []):
             profile_id = item.get("profile_id")
             if not profile_id:
                 continue
             try:
                 profile = VentureIntelligenceCompanyProfile.objects.get(id=profile_id)
-                vi_service.index_profile_for_rag(profile, deal=deal)
-                embedding_result["vi_profiles_indexed"] += 1
+                if item.get("source_route") == "public_screener" or getattr(profile, "data_source", "") == "screener":
+                    screener_service.index_profile_for_rag(profile, deal=deal)
+                    embedding_result["screener_profiles_indexed"] += 1
+                else:
+                    vi_service.index_profile_for_rag(profile, deal=deal)
+                    embedding_result["vi_profiles_indexed"] += 1
             except Exception as profile_embed_err:
-                logger.warning("Competitor VI profile embedding failed for profile %s: %s", profile_id, profile_embed_err)
+                logger.warning("Competitor profile embedding failed for profile %s: %s", profile_id, profile_embed_err)
                 vi_profile_errors.append({
                     "profile_id": profile_id,
                     "name": item.get("name", ""),
@@ -2276,6 +2354,7 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
         return {
             "status": "SUCCESS",
             "vi_enrichment": vi_enrichment,
+            "enrichment": vi_enrichment,
         }
     except Exception as e:
         logger.error(f"Async competitor VI enrichment failed: {str(e)}")
@@ -2286,7 +2365,7 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
 
 
 @shared_task(queue='high_priority')
-def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin: str | None = None, relation_type: str = "target") -> dict:
+def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin: str | None = None, relation_type: str = "target", raw_data: dict | None = None) -> dict:
     """
     Enrich a deal target or competitor VI profile in the Celery worker.
     """
@@ -2298,6 +2377,7 @@ def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin
             company_name=company_name,
             cin=cin,
             relation_type=relation_type,
+            raw_data=raw_data,
         )
         return {
             "status": "SUCCESS",

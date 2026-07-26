@@ -259,6 +259,12 @@ VLLM_EMBEDDING_MODEL = config('VLLM_EMBEDDING_MODEL', default='')
 EMBEDDING_BASE_URL = config('EMBEDDING_BASE_URL', default=VLLM_EMBEDDING_URL).rstrip('/')
 EMBEDDING_API_KEY = config('EMBEDDING_API_KEY', default=VLLM_API_KEY)
 EMBEDDING_MODEL = config('EMBEDDING_MODEL', default=VLLM_EMBEDDING_MODEL)
+
+# Demo/local meeting signal analysis. LM Studio exposes an OpenAI-compatible
+# endpoint at http://localhost:1234/v1 by default.
+LM_STUDIO_BASE_URL = config('LM_STUDIO_BASE_URL', default='http://localhost:1234/v1')
+LM_STUDIO_MODEL = config('LM_STUDIO_MODEL', default='local-model')
+LM_STUDIO_API_KEY = config('LM_STUDIO_API_KEY', default='lm-studio')
 EMBEDDING_TIMEOUT = config('EMBEDDING_TIMEOUT', default=30, cast=int)
 RERANKER_BASE_URL = config('RERANKER_BASE_URL', default='').rstrip('/')
 RERANKER_API_KEY = config('RERANKER_API_KEY', default='')
@@ -326,4 +332,3 @@ else:
 # Venture Intelligence API
 VENTURE_INTELLIGENCE_API_KEY = config('VENTURE_INTELLIGENCE_API_KEY', default='')
 VENTURE_INTELLIGENCE_BASE_URL = config('VENTURE_INTELLIGENCE_BASE_URL', default='https://api-hub.ventureintelligence.com')
-

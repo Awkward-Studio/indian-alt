@@ -627,7 +627,14 @@ class AnthropicProviderService:
                 json=body,
                 timeout=timeout,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                detail = (response.text or "").strip()
+                if len(detail) > 1000:
+                    detail = f"{detail[:1000]}..."
+                logger.error("Anthropic API Error: %s - %s", response.status_code, detail)
+                raise requests.HTTPError(f"{exc}. Response body: {detail}", response=response) from exc
             data = response.json()
 
             if data.get("stop_reason") != "pause_turn":
@@ -657,4 +664,3 @@ class AnthropicProviderService:
             "usage": data.get("usage") or {},
             "raw": data,
         }
-

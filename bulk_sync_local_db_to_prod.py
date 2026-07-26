@@ -39,6 +39,17 @@ def parse_args():
         help="Optional deal titles or UUIDs to sync. Defaults to all deals.",
     )
     parser.add_argument(
+        "--deal-subset",
+        choices=["all", "analyzed", "source-backed", "source-backed-analyzed"],
+        default="all",
+        help=(
+            "Limit which local deals are synced. "
+            "'analyzed' means a deal has analyses, documents, or chunks. "
+            "'source-backed' means a deal has a OneDrive source folder. "
+            "'source-backed-analyzed' requires both."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be synced without writing to the production DB.",
@@ -428,8 +439,34 @@ def prompt_prune_selection(candidates: list[dict], interactive: bool) -> list[di
         return selected
 
 
-def iter_target_deals(identifiers: Iterable[str] | None):
+def apply_deal_subset(queryset, subset: str):
+    if subset == "all":
+        return queryset
+    if subset == "analyzed":
+        return queryset.filter(
+            Q(analyses__isnull=False)
+            | Q(documents__isnull=False)
+            | Q(chunks__isnull=False)
+        ).distinct()
+    if subset == "source-backed":
+        return queryset.exclude(source_onedrive_id__isnull=True).exclude(source_onedrive_id="")
+    if subset == "source-backed-analyzed":
+        return (
+            queryset.exclude(source_onedrive_id__isnull=True)
+            .exclude(source_onedrive_id="")
+            .filter(
+                Q(analyses__isnull=False)
+                | Q(documents__isnull=False)
+                | Q(chunks__isnull=False)
+            )
+            .distinct()
+        )
+    raise RuntimeError(f"Unknown deal subset: {subset}")
+
+
+def iter_target_deals(identifiers: Iterable[str] | None, subset: str = "all"):
     queryset = Deal.objects.using(SOURCE_DB).all().order_by("title", "created_at")
+    queryset = apply_deal_subset(queryset, subset)
     identifiers = [normalize_text(value) for value in identifiers or [] if normalize_text(value)]
     if not identifiers:
         return list(queryset)
@@ -444,6 +481,16 @@ def iter_target_deals(identifiers: Iterable[str] | None):
             seen_ids.add(str(deal.id))
             matched.append(deal)
     return matched
+
+
+def deal_subset_counts() -> dict[str, int]:
+    queryset = Deal.objects.using(SOURCE_DB).all()
+    return {
+        "all": queryset.count(),
+        "analyzed": apply_deal_subset(queryset, "analyzed").count(),
+        "source-backed": apply_deal_subset(queryset, "source-backed").count(),
+        "source-backed-analyzed": apply_deal_subset(queryset, "source-backed-analyzed").count(),
+    }
 
 
 def deal_batches(deals: list[Deal], batch_size: int):
@@ -1825,6 +1872,11 @@ def run():
             "--prune-production-data cannot be combined with --only-missing-deals. "
             "Disable pruning while resuming partial runs."
         )
+    if args.prune_production_data and args.deal_subset != "all":
+        raise RuntimeError(
+            "--prune-production-data cannot be combined with --deal-subset because it would delete "
+            "production deals outside the selected subset. Run a full sync or omit pruning."
+        )
     if args.reference_data_only and args.deals:
         raise RuntimeError(
             "--reference-data-only cannot be combined with --deals. It always syncs the full local bank/contact set."
@@ -1858,7 +1910,15 @@ def run():
     )
     print("-" * 72)
 
-    deals = iter_target_deals(args.deals)
+    subset_counts = deal_subset_counts()
+    print(
+        "Local deal subset counts: "
+        + ", ".join(f"{key}={value}" for key, value in subset_counts.items()),
+        flush=True,
+    )
+    print(f"Selected deal subset: {args.deal_subset}", flush=True)
+
+    deals = iter_target_deals(args.deals, subset=args.deal_subset)
     if not deals:
         print("No matching deals found in local DB.")
         return

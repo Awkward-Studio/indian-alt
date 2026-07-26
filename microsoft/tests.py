@@ -26,8 +26,9 @@ class GranolaMeetingEmailIngestionTests(TestCase):
             date_received=timezone.now(),
         )
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_processes_granola_email_when_subject_is_exact_deal_name(self, _vectorize):
+    def test_processes_granola_email_when_subject_is_exact_deal_name(self, _vectorize, _available):
         email = self._email(
             body=(
                 "Date: 2026-06-20\n\n"
@@ -51,8 +52,34 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertTrue(email.is_processed)
         self.assertEqual(email.processing_status, "completed")
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=False)
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note")
+    def test_processes_email_and_skips_embedding_when_provider_unavailable(self, vectorize, _available):
+        email = self._email(
+            body=(
+                "Date: 2026-06-20\n\n"
+                "Summary:\n"
+                "Management discussed growth and margins.\n\n"
+                "Transcript:\n"
+                "Speaker A: Revenue grew year over year."
+            )
+        )
+
+        note = GranolaMeetingEmailIngestionService.process_email(email)
+
+        self.assertIsNotNone(note)
+        self.assertEqual(list(note.deals.all()), [self.deal])
+        self.assertFalse(note.is_indexed)
+        self.assertEqual(note.chunk_count, 0)
+        self.assertIn("embeddings were skipped", note.embedding_error)
+        vectorize.assert_not_called()
+        email.refresh_from_db()
+        self.assertEqual(email.deal, self.deal)
+        self.assertTrue(email.is_processed)
+
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_processes_granola_email_when_deal_name_is_in_body(self, _vectorize):
+    def test_processes_granola_email_when_deal_name_is_in_body(self, _vectorize, _available):
         email = self._email(
             subject="Granola meeting notes",
             body=(
@@ -70,8 +97,34 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertEqual(note.summary, "This was a customer diligence call.")
         self.assertEqual(list(note.deals.all()), [self.deal])
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_repeat_ingest_keeps_existing_meeting_note_edits(self, vectorize):
+    def test_processes_meeting_email_when_subject_fuzzy_matches_deal(self, _vectorize, _available):
+        fuzzy_deal = Deal.objects.create(title="__test_store_Flipkart__")
+        email = self._email(
+            subject="Flipkart Test Deal",
+            body=(
+                "Date: 2026-06-24\n\n"
+                "Summary:\n"
+                "Management discussed marketplace growth.\n\n"
+                "Transcript:\n"
+                "Speaker A: Contribution margins improved."
+            ),
+        )
+
+        note = GranolaMeetingEmailIngestionService.process_email(email)
+
+        self.assertIsNotNone(note)
+        self.assertEqual(list(note.deals.all()), [fuzzy_deal])
+        self.assertEqual(note.metadata["deal_name_source"], "subject_fuzzy:0.95")
+        email.refresh_from_db()
+        self.assertEqual(email.deal, fuzzy_deal)
+        self.assertTrue(email.is_processed)
+        self.assertEqual(email.processing_status, "completed")
+
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
+    def test_repeat_ingest_keeps_existing_meeting_note_edits(self, vectorize, _available):
         email = self._email(
             subject="Granola meeting notes",
             body=(
@@ -109,9 +162,9 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertEqual(vectorize.call_count, 1)
 
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_skips_when_deal_name_is_not_exact(self, _vectorize):
+    def test_skips_when_subject_does_not_contain_deal_name(self, _vectorize):
         email = self._email(
-            subject="Acme Health follow-up",
+            subject="Market follow-up",
             body=(
                 "Summary:\n"
                 "This should not be saved.\n\n"
@@ -125,8 +178,9 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertIsNone(note)
         self.assertEqual(MeetingNote.objects.count(), 0)
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_processes_non_granola_sender_when_payload_matches(self, _vectorize):
+    def test_processes_non_granola_sender_when_payload_matches(self, _vectorize, _available):
         email = self._email(
             from_email="banker@example.com",
             body=(
@@ -143,6 +197,28 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertIsNotNone(note)
         self.assertEqual(note.summary, "This should be saved even though the sender is not Granola.")
         self.assertEqual(list(note.deals.all()), [self.deal])
+
+    def test_recognizes_meeting_note_email_without_resolved_deal(self):
+        email = self._email(
+            subject="Granola meeting notes",
+            body=(
+                "Summary:\n"
+                "Discussion covered customer demand.\n\n"
+                "Notes:\n"
+                "The team reviewed expansion plans."
+            ),
+        )
+
+        self.assertTrue(GranolaMeetingEmailIngestionService.is_meeting_note_email(email))
+
+    def test_does_not_recognize_regular_email_as_meeting_note(self):
+        email = self._email(
+            subject="Acme Health follow-up",
+            body="Please see the attached update from the company.",
+            from_email="banker@example.com",
+        )
+
+        self.assertFalse(GranolaMeetingEmailIngestionService.is_meeting_note_email(email))
 
 
 class EmailAttachDealAPITests(TestCase):
@@ -161,8 +237,9 @@ class EmailAttachDealAPITests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(user=user)
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
-    def test_attach_deal_creates_embedded_meeting_note_without_linking_email(self, vectorize_meeting_note):
+    def test_attach_deal_creates_embedded_meeting_note_without_linking_email(self, vectorize_meeting_note, _available):
         response = self.client.post(
             f"/api/microsoft/emails/emails/{self.email.id}/attach_deal/",
             {"deal_id": str(self.deal.id)},
@@ -183,8 +260,9 @@ class EmailAttachDealAPITests(TestCase):
         self.assertIsNone(response.data["deal_id"])
         self.assertIsNone(response.data.get("deal_title"))
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=False)
-    def test_attach_deal_does_not_link_email_when_meeting_note_embedding_fails(self, _vectorize_meeting_note):
+    def test_attach_deal_does_not_link_email_when_meeting_note_embedding_fails(self, _vectorize_meeting_note, _available):
         response = self.client.post(
             f"/api/microsoft/emails/emails/{self.email.id}/attach_deal/",
             {"deal_id": str(self.deal.id)},
@@ -197,3 +275,26 @@ class EmailAttachDealAPITests(TestCase):
         self.assertFalse(self.email.is_processed)
         self.assertFalse(self.email.is_indexed)
         self.assertEqual(MeetingNote.objects.filter(source_email=self.email).count(), 0)
+
+    def test_email_list_exposes_meeting_note_flag(self):
+        meeting_email = Email.objects.create(
+            email_account=self.account,
+            graph_id="graph-meeting-list",
+            subject="Granola meeting notes",
+            from_email="notes@granola.ai",
+            body_text=(
+                "Summary:\n"
+                "Management discussed growth.\n\n"
+                "Transcript:\n"
+                "Speaker A: Revenue grew."
+            ),
+            date_received=timezone.now(),
+        )
+
+        response = self.client.get("/api/microsoft/emails/emails/")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data["results"] if isinstance(response.data, dict) and "results" in response.data else response.data
+        flags = {str(row["id"]): row["is_meeting_note_email"] for row in rows}
+        self.assertTrue(flags[str(meeting_email.id)])
+        self.assertFalse(flags[str(self.email.id)])

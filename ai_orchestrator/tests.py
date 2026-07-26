@@ -46,23 +46,33 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
 
 
 class PromptSeedTests(TestCase):
-    def test_seeded_deal_synthesis_owns_client_analysis_structure(self):
+    def test_seeded_deal_synthesis_owns_internal_ic_structure(self):
         call_command("seed_ai_prompts", verbosity=0)
 
         personality = AIPersonality.objects.get(is_default=True)
         deal_synthesis = AISkill.objects.get(name="deal_synthesis")
+        document_evidence = AISkill.objects.get(name="document_evidence_extraction")
 
-        self.assertIn("Company Overview", deal_synthesis.prompt_template)
-        self.assertIn("Promoters and Their Background", deal_synthesis.prompt_template)
-        self.assertIn("Key Financial Highlights", deal_synthesis.prompt_template)
-        self.assertIn("DuPont analysis", deal_synthesis.prompt_template)
-        self.assertIn("Key Peers and Valuation Multiples", deal_synthesis.prompt_template)
+        self.assertIn("## Company Details", deal_synthesis.prompt_template)
+        self.assertIn("## Promoter and Management Details", deal_synthesis.prompt_template)
+        self.assertIn("## Industry Overview", deal_synthesis.prompt_template)
+        self.assertIn("## Transaction Details", deal_synthesis.prompt_template)
+        self.assertIn("## Key Financials", deal_synthesis.prompt_template)
+        self.assertIn("## Transaction / Trading Multiples", deal_synthesis.prompt_template)
+        self.assertIn("## Risk Factors", deal_synthesis.prompt_template)
+        self.assertIn("## Investment Rationale", deal_synthesis.prompt_template)
+        self.assertIn("## Exit Considerations", deal_synthesis.prompt_template)
+        self.assertIn("## Next Steps", deal_synthesis.prompt_template)
+        self.assertIn("source_relationships", deal_synthesis.prompt_template)
         self.assertIn("related_deal_context", deal_synthesis.prompt_template)
         self.assertIn("deal_specific_prompt", deal_synthesis.prompt_template)
         self.assertIn("markdown_document", deal_synthesis.prompt_template)
         self.assertIn("return only a Markdown document", deal_synthesis.prompt_template)
         self.assertIn("additional deal-level writing directive", deal_synthesis.prompt_template)
         self.assertIn("canonical_json", deal_synthesis.prompt_template)
+        self.assertIn("numeric_evidence", document_evidence.prompt_template)
+        self.assertIn("table_definitions", document_evidence.prompt_template)
+        self.assertIn("diligence_gaps", document_evidence.prompt_template)
         self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
         self.assertNotIn("## Company Overview", personality.system_instructions)
 
@@ -72,10 +82,10 @@ class PromptSeedTests(TestCase):
         directive_skill = AISkill.objects.get(name="deal_helper_directive_document")
 
         self.assertIn("Follow the analyst's directive", directive_skill.system_template)
-        self.assertIn("Do not force the canonical deal synthesis 7-section structure", directive_skill.system_template)
+        self.assertIn("Do not force the canonical internal IC note structure", directive_skill.system_template)
         self.assertIn("{{ directive }}", directive_skill.prompt_template)
         self.assertIn("{{ document_title }}", directive_skill.prompt_template)
-        self.assertIn("Do not use the canonical deal synthesis 7-section Markdown structure", directive_skill.prompt_template)
+        self.assertIn("canonical 10-section internal IC note structure", directive_skill.prompt_template)
 
 
 class DealHelperAnalysisRoutingTests(TestCase):
@@ -1917,4 +1927,3 @@ class VentureIntelligenceSyncTests(TestCase):
         # Test dry-run behavior
         dry_run_count = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True)
         self.assertEqual(dry_run_count, 1)
-

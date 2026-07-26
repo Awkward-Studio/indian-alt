@@ -7,6 +7,7 @@ from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema_view, extend_schema
 from core.mixins import ErrorHandlingMixin
+from deals.models import Deal
 from .models import Meeting, MeetingContact, MeetingNote, MeetingProfile
 from .serializers import (
     MeetingSerializer,
@@ -131,6 +132,57 @@ class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         note.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error', 'updated_at'])
         response_status = status.HTTP_200_OK if note.is_indexed else status.HTTP_202_ACCEPTED
         return Response(self.get_serializer(note).data, status=response_status)
+
+    @extend_schema(
+        summary="Analyze meeting notes into red and green deal signals",
+        description="Demo pipeline that summarizes a deal's meeting notes using a local LM Studio OpenAI-compatible model.",
+        tags=["Meeting Notes"],
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {'deal_id': {'type': 'string'}},
+                'required': ['deal_id'],
+            }
+        },
+        responses={200: dict},
+    )
+    @action(detail=False, methods=['post'])
+    def analyze_deal_signals(self, request):
+        deal_id = request.data.get('deal_id') or request.query_params.get('deal_id')
+        if not deal_id:
+            return Response(
+                {'error': 'Validation failed', 'details': {'deal_id': ['This field is required.']}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deal = Deal.objects.filter(id=deal_id).first()
+        if not deal:
+            return Response(
+                {'error': 'Deal not found', 'details': f'No deal found for id {deal_id}'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        notes = list(
+            MeetingNote.objects.filter(deals=deal)
+            .select_related('source_email')
+            .prefetch_related('deals')
+            .order_by('meeting_at', 'created_at')[:25]
+        )
+
+        try:
+            from .services.meeting_signal_analysis import MeetingSignalAnalysisService
+
+            result = MeetingSignalAnalysisService().analyze_deal(deal, notes)
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as exc:
+            return Response(
+                {
+                    'error': 'Meeting signal analysis failed',
+                    'details': str(exc),
+                    'provider': 'lm_studio',
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
 
 @extend_schema_view(

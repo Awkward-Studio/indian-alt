@@ -402,14 +402,24 @@ class VentureIntelligenceService:
             raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
 
     @transaction.atomic
-    def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target', index_for_rag=True):
+    def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target', index_for_rag=True, raw_data=None):
         """
         Queries VI (resolving CIN via AI web search if necessary) and saves profile and financials in the DB.
+        If raw_data is provided, uses it directly to save the profile/financials and bypasses fetching from VI API.
         """
         deal = Deal.objects.get(id=deal_id)
         
         # 1. Resolve identity and fetch full details using CIN whenever possible.
-        vi_data, resolution = self.fetch_resolved_company_details(company_name=company_name, cin=cin)
+        if raw_data:
+            vi_data = raw_data
+            resolution = raw_data.get("resolution") or {
+                "cin": cin or raw_data.get("resolved_cin") or raw_data.get("results", {}).get("profile", {}).get("cin"),
+                "entity_name": company_name or raw_data.get("resolved_name") or raw_data.get("results", {}).get("profile", {}).get("name"),
+                "source": "pre_resolved",
+                "is_valid": True,
+            }
+        else:
+            vi_data, resolution = self.fetch_resolved_company_details(company_name=company_name, cin=cin)
         resolved_cin = resolution.get("cin") or cin
         company_name = resolution.get("entity_name") or company_name
         results = vi_data.get("results", {})
@@ -432,6 +442,8 @@ class VentureIntelligenceService:
 
         # Create or update VentureIntelligenceCompanyProfile
         cin_val = profile_data.get("cin") or resolved_cin
+        listing_status = profile_data.get("listing_status") or cfs_profile_data.get("listing_status")
+        company_type = "listed_public" if str(listing_status or "").strip().lower() in {"listed", "public", "public listed"} or normalize_cin(cin_val).startswith("L") else "private"
         vi_profile, _ = VentureIntelligenceCompanyProfile.objects.update_or_create(
             cin=cin_val,
             defaults={
@@ -456,8 +468,10 @@ class VentureIntelligenceService:
                 
                 # New Profile & Status fields
                 "tags": profile_data.get("tags"),
-                "listing_status": profile_data.get("listing_status") or cfs_profile_data.get("listing_status"),
+                "listing_status": listing_status,
                 "additional_info": profile_data.get("additional_info"),
+                "data_source": "venture_intelligence",
+                "company_type": company_type,
                 
                 "short_name": cfs_profile_data.get("short_name"),
                 "previous_name": cfs_profile_data.get("previous_name"),
@@ -759,6 +773,16 @@ class VentureIntelligenceService:
             lines.append(f"- **LinkedIn**: {vi_profile.linkedin}")
         if vi_profile.listing_status:
             lines.append(f"- **Listing Status**: {vi_profile.listing_status}")
+        if getattr(vi_profile, "data_source", None):
+            lines.append(f"- **Data Source**: {vi_profile.data_source}")
+        if getattr(vi_profile, "company_type", None):
+            lines.append(f"- **Company Type**: {vi_profile.company_type}")
+        if getattr(vi_profile, "ticker", None) or getattr(vi_profile, "exchange", None):
+            lines.append(f"- **Ticker / Exchange**: {vi_profile.ticker or 'N/A'} / {vi_profile.exchange or 'N/A'}")
+        if getattr(vi_profile, "screener_url", None):
+            lines.append(f"- **Screener URL**: {vi_profile.screener_url}")
+        if getattr(vi_profile, "market_cap", None):
+            lines.append(f"- **Market Cap**: {vi_profile.market_cap}")
         if vi_profile.company_status:
             lines.append(f"- **Company Status**: {vi_profile.company_status}")
         if vi_profile.transacted_status:
