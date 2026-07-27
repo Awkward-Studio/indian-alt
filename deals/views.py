@@ -9,6 +9,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import F
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import Deal, DealDocument, DealPhaseLog
@@ -24,6 +25,28 @@ from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
+
+
+class DealOrderingFilter(filters.OrderingFilter):
+    """Keep undated deals after dated deals for either receipt-date direction."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+
+        expressions = []
+        for field in ordering:
+            if field.lstrip('-') == 'received_at':
+                expression = F('received_at')
+                expressions.append(
+                    expression.desc(nulls_last=True)
+                    if field.startswith('-')
+                    else expression.asc(nulls_last=True)
+                )
+            else:
+                expressions.append(field)
+        return queryset.order_by(*expressions)
 
 
 def serialize_vi_cin_candidates(resolution):
@@ -218,7 +241,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility', 'additional_contacts').all()
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, DealOrderingFilter]
     filterset_class = DealFilterSet
     search_fields = [
         'title', 'deal_summary', 'industry', 'sector', 'city', 'state',

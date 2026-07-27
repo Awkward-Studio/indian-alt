@@ -1,4 +1,5 @@
 from django.test import TestCase
+from datetime import date
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
@@ -89,3 +90,17 @@ class PassReasonApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         deal.refresh_from_db()
         self.assertEqual(deal.current_phase, "4: Initial Materials Review")
+
+    def test_receipt_date_descending_keeps_undated_deals_last(self):
+        Deal.objects.create(title="Undated", received_at=None)
+        newest = Deal.objects.create(title="Newest", received_at=date(2026, 1, 2))
+        older = Deal.objects.create(title="Older", received_at=date(2025, 1, 2))
+
+        response = self.client.get("/api/deals/", {"ordering": "-received_at"})
+
+        self.assertEqual(response.status_code, 200)
+        ids = [row["id"] for row in response.data["results"]]
+        self.assertLess(ids.index(str(newest.id)), ids.index(str(older.id)))
+        self.assertLess(ids.index(str(older.id)), ids.index(str(
+            Deal.objects.get(title="Undated").id
+        )))
