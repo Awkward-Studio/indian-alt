@@ -1,11 +1,14 @@
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import requests
 from django.conf import settings
 
+from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.services.realtime import broadcast_audit_log_update
 from deals.models import Deal
 from meetings.models import MeetingNote
 
@@ -37,16 +40,17 @@ class MeetingSignalAnalysisService:
             }
 
         prompt = self._build_prompt(deal, notes)
+        system_prompt = (
+            "You are an investment diligence analyst. Extract concrete red and green signals "
+            "from meeting notes. Use only the supplied notes. Return valid JSON only. "
+            "Do not think step by step. Do not include reasoning."
+        )
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are an investment diligence analyst. Extract concrete red and green signals "
-                        "from meeting notes. Use only the supplied notes. Return valid JSON only. "
-                        "Do not think step by step. Do not include reasoning."
-                    ),
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": f"/no_think\n{prompt}"},
             ],
@@ -61,6 +65,27 @@ class MeetingSignalAnalysisService:
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning": {"effort": "none"},
         }
+        started_at = time.monotonic()
+        audit_log = AIAuditLog.objects.create(
+            source_type="meeting_signal_analysis",
+            source_id=str(deal.id),
+            context_label=f"Cross-meeting signals: {deal.title}",
+            model_provider="lm_studio",
+            model_used=self.model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            raw_response="",
+            status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+                "meeting_note_ids": [str(note.id) for note in notes],
+                "notes_analyzed": len(notes),
+                "workflow": "cross_meeting_signal_analysis",
+            },
+        )
+        self._broadcast_audit(audit_log)
 
         last_error = None
         errors = []
@@ -81,26 +106,65 @@ class MeetingSignalAnalysisService:
                     )
                 parsed = self._parse_json(content)
                 parsed = self._normalize_result(parsed)
-                return {
+                result = {
                     "deal_id": str(deal.id),
                     "deal_title": deal.title,
                     "provider": "lm_studio",
                     "model": self.model,
                     "base_url": base_url,
+                    "audit_log_id": str(audit_log.id),
                     "notes_analyzed": len(notes),
                     **parsed,
                 }
+                audit_log.raw_response = content
+                audit_log.parsed_json = result
+                audit_log.request_duration_ms = round((time.monotonic() - started_at) * 1000)
+                audit_log.status = "COMPLETED"
+                audit_log.is_success = True
+                audit_log.error_message = ""
+                audit_log.source_metadata = {
+                    **(audit_log.source_metadata or {}),
+                    "base_url": base_url,
+                }
+                audit_log.save(
+                    update_fields=[
+                        "raw_response",
+                        "parsed_json",
+                        "request_duration_ms",
+                        "status",
+                        "is_success",
+                        "error_message",
+                        "source_metadata",
+                    ]
+                )
+                self._broadcast_audit(audit_log, done=True)
+                return result
             except Exception as exc:
                 last_error = exc
                 errors.append(f"{base_url}: {exc}")
                 logger.warning("LM Studio meeting signal analysis failed via %s: %s", base_url, exc)
 
-        raise RuntimeError(
+        error_message = (
             "LM Studio analysis failed. "
             f"Tried {len(self.base_urls)} URL(s). "
             f"Last error: {last_error}. "
             f"All errors: {' | '.join(errors)}"
         )
+        audit_log.status = "FAILED"
+        audit_log.is_success = False
+        audit_log.error_message = error_message
+        audit_log.request_duration_ms = round((time.monotonic() - started_at) * 1000)
+        audit_log.save(
+            update_fields=["status", "is_success", "error_message", "request_duration_ms"]
+        )
+        self._broadcast_audit(audit_log, done=True)
+        raise RuntimeError(error_message)
+
+    def _broadcast_audit(self, audit_log: AIAuditLog, *, done: bool = False) -> None:
+        try:
+            broadcast_audit_log_update(audit_log, done=done)
+        except Exception as exc:
+            logger.warning("Meeting signal audit broadcast failed: %s", exc)
 
     def _candidate_base_urls(self) -> list[str]:
         configured = getattr(settings, "LM_STUDIO_BASE_URL", "") or ""
