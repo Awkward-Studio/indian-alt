@@ -12,6 +12,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .runtime import AIRuntimeService
 from django.conf import settings
+from django.utils import timezone
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -276,6 +277,7 @@ class AIProcessorService:
             audit_log.raw_thinking = full_thinking
             audit_log.is_success = True
             audit_log.status = 'COMPLETED'
+            audit_log.completed_at = timezone.now()
             audit_log.request_duration_ms = duration_ms
             audit_log.tokens_used = estimated_tokens
             if collected_citations:
@@ -305,6 +307,7 @@ class AIProcessorService:
             logger.error(f"Streaming failed: {str(e)}")
             audit_log.is_success = False
             audit_log.status = 'FAILED'
+            audit_log.completed_at = timezone.now()
             audit_log.error_message = str(e)
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
@@ -398,6 +401,8 @@ class AIProcessorService:
             parsed_json = {"error": str(e)}
         finally:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
+            if audit_log.status in ['COMPLETED', 'FAILED']:
+                audit_log.completed_at = timezone.now()
             audit_log.save()
             broadcast_audit_log_update(
                 audit_log,

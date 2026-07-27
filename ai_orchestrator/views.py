@@ -7,6 +7,7 @@ from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -15,7 +16,10 @@ from rest_framework import status, viewsets
 from django.http import StreamingHttpResponse
 
 from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog, DocumentChunk
-from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
+from .serializers import (
+    AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer,
+    AISkillSerializer,
+)
 from .services.ai_processor import AIProcessorService
 from .services.chat_scope import ChatScopeValidationError, internal_citation, parse_chat_scope
 from .services.embedding_processor import EmbeddingService
@@ -28,6 +32,19 @@ from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGen
 from meetings.models import MeetingNote
 
 logger = logging.getLogger(__name__)
+
+
+def _is_ai_admin(user):
+    return bool(
+        user
+        and user.is_authenticated
+        and (
+            user.is_superuser
+            or user.is_staff
+            or getattr(getattr(user, "profile", None), "is_admin", False)
+        )
+    )
+
 
 class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -1154,6 +1171,11 @@ class AISettingsView(APIView):
         """
         Update settings for personalities, skills, or protocols.
         """
+        if not _is_ai_admin(request.user):
+            return Response(
+                {"error": "AI settings can only be changed by an administrator."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             from .models import AnalysisProtocol
             
@@ -1194,17 +1216,97 @@ class AISettingsView(APIView):
                     obj.save()
             elif target_type == 'skill':
                 if target_id == 'new':
-                    AISkill.objects.create(
-                        name=f"{updates.get('name', 'New Skill')} {rand_suffix()}",
-                        description=updates.get('description', ''),
-                        prompt_template=updates.get('prompt_template', '')
-                    )
-                elif action == 'delete':
-                    AISkill.objects.get(id=target_id).delete()
+                    requested_name = str(updates.get('name', 'New Skill')).strip()
+                    skill_name = requested_name
+                    if AISkill.objects.filter(name=skill_name).exists():
+                        skill_name = f"{requested_name} {rand_suffix()}"
+                    serializer = AISkillSerializer(data={
+                        "name": skill_name,
+                        "description": updates.get('description', ''),
+                        "system_template": updates.get('system_template', ''),
+                        "prompt_template": updates.get('prompt_template', ''),
+                        "input_schema": updates.get('input_schema', {}),
+                        "output_schema": updates.get('output_schema', {}),
+                        "skill_format": updates.get(
+                            'skill_format',
+                            AISkill.Format.NATIVE_PROMPT_V1,
+                        ),
+                        "is_industry_overview_eligible": bool(
+                            updates.get('is_industry_overview_eligible', False)
+                        ),
+                        "status": AISkill.Status.DRAFT,
+                    })
+                    if not serializer.is_valid():
+                        return Response(
+                            serializer.errors,
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    serializer.save(owner=request.user)
+                elif action == 'approve':
+                    obj = AISkill.objects.get(id=target_id)
+                    if not obj.prompt_template.strip():
+                        return Response(
+                            {"error": "A non-empty prompt template is required for approval."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    obj.status = AISkill.Status.APPROVED
+                    obj.approved_by = request.user
+                    obj.approved_at = timezone.now()
+                    obj.save(update_fields=[
+                        'status', 'approved_by', 'approved_at', 'updated_at',
+                    ])
+                elif action in {'retire', 'delete'}:
+                    obj = AISkill.objects.get(id=target_id)
+                    obj.status = AISkill.Status.RETIRED
+                    obj.is_industry_overview_eligible = False
+                    obj.save(update_fields=[
+                        'status', 'is_industry_overview_eligible', 'updated_at',
+                    ])
                 else:
                     obj = AISkill.objects.get(id=target_id)
-                    for k, v in updates.items(): setattr(obj, k, v)
-                    obj.save()
+                    editable_fields = {
+                        'name', 'description', 'system_template', 'prompt_template',
+                        'input_schema', 'output_schema', 'skill_format',
+                        'is_industry_overview_eligible',
+                    }
+                    unknown_fields = set(updates) - editable_fields
+                    if unknown_fields:
+                        return Response(
+                            {
+                                "error": "Unsupported skill fields: "
+                                + ", ".join(sorted(unknown_fields))
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    serializer = AISkillSerializer(
+                        obj,
+                        data=updates,
+                        partial=True,
+                    )
+                    if not serializer.is_valid():
+                        return Response(
+                            serializer.errors,
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    versioned_fields = {
+                        'system_template', 'prompt_template', 'input_schema',
+                        'output_schema', 'skill_format',
+                    }
+                    prompt_changed = any(
+                        field in serializer.validated_data
+                        and serializer.validated_data[field] != getattr(obj, field)
+                        for field in versioned_fields
+                    )
+                    saved = serializer.save()
+                    if prompt_changed:
+                        saved.version += 1
+                        saved.status = AISkill.Status.DRAFT
+                        saved.approved_by = None
+                        saved.approved_at = None
+                        saved.save(update_fields=[
+                            'version', 'status', 'approved_by', 'approved_at',
+                            'updated_at',
+                        ])
             elif target_type == 'protocol':
                 if target_id == 'new':
                     AnalysisProtocol.objects.create(
@@ -1262,8 +1364,183 @@ class AISettingsView(APIView):
 
 class AISkillsView(APIView):
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
+        skills = AISkill.objects.all().order_by('name')
+        if not _is_ai_admin(request.user):
+            skills = skills.filter(
+                status=AISkill.Status.APPROVED,
+                is_industry_overview_eligible=True,
+            )
+        elif request.query_params.get("industry_overview") == "true":
+            skills = skills.filter(is_industry_overview_eligible=True)
+        return Response({
+            "skills": AISkillSerializer(skills, many=True).data,
+            "compatibility": {
+                "format": AISkill.Format.CLAUDE_PROMPT_V1,
+                "kind": "prompt_only",
+                "allowed": [
+                    "name", "description", "system_template", "prompt_template",
+                    "input_schema", "output_schema",
+                ],
+                "forbidden": [
+                    "code", "scripts", "executables", "tool definitions",
+                    "network actions", "file actions",
+                ],
+            },
+        })
+
+    def post(self, request):
+        skill_id = request.data.get("skill_id")
+        deal_id = request.data.get("deal_id")
+        if not skill_id or not deal_id:
+            return Response(
+                {"error": "skill_id and deal_id are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            skills = AISkill.objects.all().order_by('name')
-            return Response([{"id": str(s.id), "name": s.name, "description": s.description, "prompt_template": s.prompt_template, "system_template": s.system_template} for s in skills])
-        except Exception as e: return Response({"error": str(e)}, status=500)
+            skill = AISkill.objects.filter(id=skill_id).first()
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "skill_id must be a valid UUID."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            not skill
+            or skill.status != AISkill.Status.APPROVED
+            or not skill.is_industry_overview_eligible
+        ):
+            return Response(
+                {"error": "The selected skill is not approved for Industry Overview."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            deal = Deal.objects.filter(id=deal_id).first()
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "deal_id must be a valid UUID."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not deal:
+            return Response(
+                {"error": "Deal not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            inputs = AIRuntimeService.validate_skill_inputs(
+                skill,
+                request.data.get("inputs", {}),
+            )
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        document_ids = request.data.get("source_document_ids", [])
+        if not isinstance(document_ids, list) or len(document_ids) > 20:
+            return Response(
+                {"error": "source_document_ids must be a list of at most 20 IDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            documents = list(
+                DealDocument.objects.filter(
+                    deal=deal,
+                    id__in=document_ids,
+                ).order_by('created_at')
+            )
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "source_document_ids must contain valid UUIDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(documents) != len(set(str(value) for value in document_ids)):
+            return Response(
+                {"error": "Every source document must belong to the selected deal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        source_metadata = {
+            "run_kind": "industry_skill",
+            "skill_version": skill.version,
+            "input_scope": {
+                "deal_id": str(deal.id),
+                "input_keys": sorted(inputs),
+                "source_document_ids": [str(document.id) for document in documents],
+            },
+            "sources": [
+                {
+                    "document_id": str(document.id),
+                    "title": document.title,
+                    "document_type": document.document_type,
+                }
+                for document in documents
+            ],
+        }
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="industry_skill",
+            source_id=str(deal.id),
+            context_label=f"Industry skill: {skill.name} — {deal.title}",
+            skill=skill,
+            status="PENDING",
+            is_success=False,
+            requested_by=request.user,
+            skill_version=skill.version,
+            source_metadata=source_metadata,
+        )
+        content = AIRuntimeService.build_industry_skill_context(
+            deal,
+            inputs,
+            documents,
+        )
+        try:
+            result = AIProcessorService().process_content(
+                content=content,
+                skill_name=skill.name,
+                metadata={
+                    "audit_log_id": str(audit_log.id),
+                    "_source_metadata": source_metadata,
+                    "context_label": audit_log.context_label,
+                },
+                source_id=str(deal.id),
+                source_type="industry_skill",
+            )
+        except Exception as exc:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(exc)
+            audit_log.completed_at = timezone.now()
+            audit_log.save(update_fields=[
+                'status', 'is_success', 'error_message', 'completed_at',
+            ])
+            return Response(
+                {
+                    "audit_log_id": str(audit_log.id),
+                    "status": "FAILED",
+                    "error": "Skill execution failed.",
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        audit_log.refresh_from_db()
+        response_status = (
+            status.HTTP_200_OK
+            if audit_log.status == "COMPLETED"
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        return Response(
+            {
+                "audit_log_id": str(audit_log.id),
+                "status": audit_log.status,
+                "skill_id": str(skill.id),
+                "skill_version": audit_log.skill_version,
+                "output": audit_log.raw_response,
+                "parsed_output": audit_log.parsed_json,
+                "sources": source_metadata["sources"],
+                "result": result,
+            },
+            status=response_status,
+        )
