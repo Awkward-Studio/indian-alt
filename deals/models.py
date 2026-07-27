@@ -107,6 +107,12 @@ class Deal(models.Model):
     )
     rejection_stage_id = models.IntegerField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True, null=True)
+    received_at = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Business date on which the fund received the deal.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     deal_summary = models.TextField(blank=True, null=True)
     funding_ask = models.TextField(blank=True, null=True)
@@ -226,7 +232,7 @@ class Deal(models.Model):
 
     class Meta:
         db_table = 'deal'
-        ordering = ['-created_at', 'title']
+        ordering = ['-received_at', '-created_at', 'title']
         verbose_name = 'Deal'
         verbose_name_plural = 'Deals'
         indexes = [

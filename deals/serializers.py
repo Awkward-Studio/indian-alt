@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.utils import timezone
 from .models import (
     Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
@@ -164,6 +165,7 @@ class DealGeneratedDocumentSerializer(serializers.ModelSerializer):
 
 
 class DealSerializer(serializers.ModelSerializer):
+    days_since_sourcing = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
@@ -189,6 +191,38 @@ class DealSerializer(serializers.ModelSerializer):
         queryset=Profile.objects.all(),
         required=False
     )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        status_supplied = self.instance is None or 'deal_status' in attrs or 'current_phase' in attrs
+        if not status_supplied:
+            return attrs
+
+        current_status = (
+            getattr(self.instance, 'current_phase', None)
+            or getattr(self.instance, 'deal_status', None)
+        )
+        target_status = attrs.get('current_phase') or attrs.get('deal_status') or current_status
+        transitioning_to_passed = target_status == 'Passed' and current_status != 'Passed'
+        if not transitioning_to_passed:
+            return attrs
+
+        effective_reason = (
+            attrs.get('reasons_for_passing')
+            or getattr(self.instance, 'reasons_for_passing', None)
+        )
+        normalized_reason = str(effective_reason or '').strip()
+        if not normalized_reason:
+            raise serializers.ValidationError({
+                'reasons_for_passing': 'A non-whitespace reason is required before passing a deal.'
+            })
+        attrs['reasons_for_passing'] = normalized_reason
+        return attrs
+
+    def get_days_since_sourcing(self, obj):
+        if not obj.received_at:
+            return None
+        return max((timezone.localdate() - obj.received_at).days, 0)
 
     def get_other_contact_details(self, obj):
         contacts = obj.additional_contacts.select_related('bank').all()
@@ -388,7 +422,7 @@ class DealDetailSerializer(DealSerializer):
             'primary_contact_name', 'primary_contact_details', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'current_phase', 'industry',
             'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
-            'ic_stage', 'city', 'country', 'created_at', 'deal_summary',
+            'ic_stage', 'city', 'country', 'received_at', 'days_since_sourcing', 'created_at', 'deal_summary',
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
             'legacy_investment_bank', 'other_contacts', 'other_contact_details', 'additional_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
             'generated_documents', 'analysis_prompt',
@@ -435,24 +469,29 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 
 class DealListSerializer(serializers.ModelSerializer):
+    days_since_sourcing = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
         read_only=True
     )
+
+    def get_days_since_sourcing(self, obj):
+        if not obj.received_at:
+            return None
+        return max((timezone.localdate() - obj.received_at).days, 0)
     
     class Meta:
         model = Deal
         fields = (
-            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase', 'created_at',
+            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
+            'received_at', 'days_since_sourcing', 'created_at',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'rejection_stage_id', 'rejection_reason'
+            'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
         )
-        read_only_fields = ('id', 'created_at')
-
-
+        read_only_fields = ('id', 'created_at', 'days_since_sourcing')
 
 

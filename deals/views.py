@@ -18,7 +18,7 @@ from .serializers import (
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
-from .services.deal_flow import DealFlowService
+from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
@@ -227,10 +227,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         'legacy_investment_bank', 'primary_contact__name'
     ]
     ordering_fields = [
-        'created_at', 'title', 'priority', 'deal_status',
+        'received_at', 'created_at', 'title', 'priority', 'deal_status',
         'sector', 'industry', 'fund', 'current_phase', 'city'
     ]
-    ordering = ['-created_at']
+    ordering = ['-received_at', '-created_at']
     @staticmethod
     def _parse_funding_ask(value):
         if value in (None, ''):
@@ -876,12 +876,15 @@ Rules:
         Transitions a deal to a new phase and logs the rationale.
         """
         deal = self.get_object()
-        result = DealFlowService.transition_phase(
-            deal=deal,
-            to_phase=request.data.get('to_phase'),
-            rationale=request.data.get('rationale'),
-            request_user=request.user
-        )
+        try:
+            result = DealFlowService.transition_phase(
+                deal=deal,
+                to_phase=request.data.get('to_phase'),
+                rationale=request.data.get('rationale'),
+                request_user=request.user
+            )
+        except DealFlowValidationError as exc:
+            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
 
     @action(detail=True, methods=['post'])
@@ -891,14 +894,17 @@ Rules:
         Accepts `active_stage`, `decisions_update` (dict), and optional `reason`.
         """
         deal = self.get_object()
-        result = DealFlowService.update_flow_state(
-            deal=deal,
-            active_stage=request.data.get('active_stage'),
-            decisions_update=request.data.get('decisions_update'),
-            reason=request.data.get('reason'),
-            rejection_stage_id=request.data.get('rejection_stage_id'),
-            request_user=request.user
-        )
+        try:
+            result = DealFlowService.update_flow_state(
+                deal=deal,
+                active_stage=request.data.get('active_stage'),
+                decisions_update=request.data.get('decisions_update'),
+                reason=request.data.get('reason'),
+                rejection_stage_id=request.data.get('rejection_stage_id'),
+                request_user=request.user
+            )
+        except DealFlowValidationError as exc:
+            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
 
     @action(detail=True, methods=['get'])
