@@ -1501,6 +1501,7 @@ class AISkillsView(APIView):
                 content=content,
                 skill_name=skill.name,
                 metadata={
+                    **inputs,
                     "audit_log_id": str(audit_log.id),
                     "_source_metadata": source_metadata,
                     "context_label": audit_log.context_label,

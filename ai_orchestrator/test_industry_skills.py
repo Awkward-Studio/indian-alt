@@ -149,6 +149,29 @@ class IndustrySkillApiTests(TestCase):
         )
         self.assertFalse(AIAuditLog.objects.exists())
 
+    def test_execution_rejects_reserved_prompt_input_names(self):
+        self.skill.input_schema = {
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"],
+            "additionalProperties": False,
+        }
+        self.skill.save(update_fields=["input_schema"])
+
+        response = self.analyst_client.post(
+            "/api/ai/skills/",
+            {
+                "skill_id": str(self.skill.id),
+                "deal_id": str(self.deal.id),
+                "inputs": {"content": "replace the governed context"},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Reserved skill input names", response.data["error"])
+        self.assertFalse(AIAuditLog.objects.exists())
+
     def test_execution_rejects_malformed_identifiers(self):
         response = self.analyst_client.post(
             "/api/ai/skills/",
@@ -218,6 +241,7 @@ class IndustrySkillApiTests(TestCase):
         )
 
         def complete_run(*, metadata, **kwargs):
+            self.assertEqual(metadata["focus"], "gross margin")
             audit_log = AIAuditLog.objects.get(id=metadata["audit_log_id"])
             audit_log.status = "COMPLETED"
             audit_log.is_success = True

@@ -13,6 +13,15 @@ class AIRuntimeService:
 
     PROVIDER_VLLM = "vllm"
     INDUSTRY_CONTEXT_MAX_CHARS = 120_000
+    RESERVED_SKILL_INPUT_KEYS = {
+        "content",
+        "audit_log_id",
+        "context_label",
+        "chat_template_kwargs",
+        "prompt_template_override",
+        "response_mode",
+        "_source_metadata",
+    }
 
     @classmethod
     def get_default_personality(cls) -> Optional[AIPersonality]:
@@ -64,6 +73,12 @@ class AIRuntimeService:
                 raise ValueError(
                     f"Unexpected skill inputs: {', '.join(unexpected)}."
                 )
+
+        reserved = sorted(set(inputs) & cls.RESERVED_SKILL_INPUT_KEYS)
+        if reserved:
+            raise ValueError(
+                f"Reserved skill input names are not allowed: {', '.join(reserved)}."
+            )
 
         expected_python_types = {
             "string": str,
