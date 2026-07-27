@@ -470,6 +470,9 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 class DealListSerializer(serializers.ModelSerializer):
     days_since_sourcing = serializers.SerializerMethodField()
+    has_analysis = serializers.BooleanField(read_only=True)
+    has_vi_data = serializers.BooleanField(read_only=True)
+    has_competitors = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
@@ -480,12 +483,18 @@ class DealListSerializer(serializers.ModelSerializer):
         if not obj.received_at:
             return None
         return max((timezone.localdate() - obj.received_at).days, 0)
+
+    def get_has_competitors(self, obj):
+        return bool(obj.competitor_candidates) or bool(
+            getattr(obj, 'has_vi_competitors', False)
+        ) or bool(getattr(obj, 'has_relationship_competitors', False))
     
     class Meta:
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
             'received_at', 'days_since_sourcing', 'created_at',
+            'has_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
@@ -493,5 +502,4 @@ class DealListSerializer(serializers.ModelSerializer):
             'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
         )
         read_only_fields = ('id', 'created_at', 'days_since_sourcing')
-
 

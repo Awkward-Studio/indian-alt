@@ -9,10 +9,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import F
+from django.db.models import Exists, F, OuterRef, Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
-from .models import Deal, DealDocument, DealPhaseLog
+from .models import (
+    Deal, DealAnalysis, DealDocument, DealPhaseLog, DealRelationshipContext,
+    VentureIntelligenceCompanyRelation,
+)
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer, 
     DealDocumentSerializer, DealPhaseLogSerializer, DealHeavyFieldsSerializer
@@ -78,13 +81,32 @@ class DealPagination(PageNumberPagination):
 class DealFilterSet(django_filters.FilterSet):
     sector = django_filters.CharFilter(lookup_expr='icontains')
     city = django_filters.CharFilter(lookup_expr='icontains')
+    has_analysis = django_filters.BooleanFilter(field_name='has_analysis')
+    has_vi_data = django_filters.BooleanFilter(field_name='has_vi_data')
+    has_competitors = django_filters.BooleanFilter(
+        method='filter_has_competitors'
+    )
+
+    def filter_has_competitors(self, queryset, name, value):
+        competitor_data = (
+            Q(has_vi_competitors=True)
+            | Q(has_relationship_competitors=True)
+            | (
+                Q(competitor_candidates__isnull=False)
+                & ~Q(competitor_candidates=[])
+            )
+        )
+        return queryset.filter(competitor_data) if value else queryset.exclude(
+            competitor_data
+        )
 
     class Meta:
         model = Deal
         fields = [
             'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'current_phase', 'sector', 'city', 'primary_contact'
+            'current_phase', 'sector', 'city', 'primary_contact',
+            'has_analysis', 'has_vi_data', 'has_competitors',
         ]
 
 
@@ -238,7 +260,32 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 )
 class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     # Use select_related to avoid N+1 queries on foreign keys
-    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility', 'additional_contacts').all()
+    queryset = Deal.objects.select_related(
+        'bank', 'primary_contact', 'request'
+    ).prefetch_related(
+        'responsibility', 'additional_contacts'
+    ).annotate(
+        has_analysis=Exists(
+            DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+        ),
+        has_vi_data=Exists(
+            VentureIntelligenceCompanyRelation.objects.filter(
+                deal_id=OuterRef('pk')
+            )
+        ),
+        has_vi_competitors=Exists(
+            VentureIntelligenceCompanyRelation.objects.filter(
+                deal_id=OuterRef('pk'),
+                relation_type='competitor',
+            )
+        ),
+        has_relationship_competitors=Exists(
+            DealRelationshipContext.objects.filter(
+                deal_id=OuterRef('pk'),
+                relationship_type='competitor',
+            )
+        ),
+    )
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, DealOrderingFilter]
@@ -251,7 +298,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ]
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
-        'sector', 'industry', 'fund', 'current_phase', 'city'
+        'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
+        'is_female_led', 'has_analysis', 'has_vi_data',
     ]
     ordering = ['-received_at', '-created_at']
     @staticmethod

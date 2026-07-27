@@ -103,7 +103,10 @@ class DealFlowService:
             deal.deal_status = active_stage
 
         # 3. Rejection tracking
-        if rejection_stage_id is not None:
+        if active_stage and active_stage != "Passed":
+            deal.rejection_stage_id = None
+            deal.rejection_reason = None
+        elif rejection_stage_id is not None:
             deal.rejection_stage_id = rejection_stage_id
             deal.rejection_reason = reason
 

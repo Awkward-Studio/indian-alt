@@ -4,7 +4,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import Profile
 from django.contrib.auth.models import User
-from deals.models import Deal, DealPhaseLog
+from deals.models import Deal, DealAnalysis, DealPhaseLog
 from deals.serializers import DealSerializer
 from deals.services.deal_flow import DealFlowService, DealFlowValidationError
 
@@ -91,6 +91,27 @@ class PassReasonApiTests(TestCase):
         deal.refresh_from_db()
         self.assertEqual(deal.current_phase, "4: Initial Materials Review")
 
+    def test_non_passed_status_clears_rejection_tracking(self):
+        deal = Deal.objects.create(
+            title="Reactivated",
+            current_phase="Passed",
+            deal_status="Passed",
+            rejection_stage_id=4,
+            rejection_reason="Weak financials",
+            reasons_for_passing="Weak financials",
+        )
+
+        response = self.client.post(
+            f"/api/deals/{deal.id}/update_flow_state/",
+            {"active_stage": "4: Initial Materials Review"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        deal.refresh_from_db()
+        self.assertIsNone(deal.rejection_stage_id)
+        self.assertIsNone(deal.rejection_reason)
+
     def test_receipt_date_descending_keeps_undated_deals_last(self):
         Deal.objects.create(title="Undated", received_at=None)
         newest = Deal.objects.create(title="Newest", received_at=date(2026, 1, 2))
@@ -104,3 +125,37 @@ class PassReasonApiTests(TestCase):
         self.assertLess(ids.index(str(older.id)), ids.index(str(
             Deal.objects.get(title="Undated").id
         )))
+
+    def test_deal_list_exposes_data_coverage_flags(self):
+        deal = Deal.objects.create(
+            title="Coverage",
+            competitor_candidates=[{"name": "Peer Co"}],
+        )
+        DealAnalysis.objects.create(deal=deal)
+
+        response = self.client.get("/api/deals/", {"search": "Coverage"})
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertTrue(row["has_analysis"])
+        self.assertFalse(row["has_vi_data"])
+        self.assertTrue(row["has_competitors"])
+
+    def test_deal_list_filters_data_coverage_flags(self):
+        covered = Deal.objects.create(
+            title="Covered",
+            competitor_candidates=[{"name": "Peer Co"}],
+        )
+        DealAnalysis.objects.create(deal=covered)
+        Deal.objects.create(title="Uncovered")
+
+        response = self.client.get(
+            "/api/deals/",
+            {"has_analysis": "true", "has_competitors": "true"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [row["title"] for row in response.data["results"]],
+            ["Covered"],
+        )
