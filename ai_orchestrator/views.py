@@ -1091,6 +1091,24 @@ class AIConnectionStatusView(APIView):
         return Response(status_data)
 
 
+class ForexRateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .services.forex_service import ForexService
+
+        quote = ForexService().get_quote()
+        return Response({
+            **quote.as_dict(),
+            "canonical_currency": "INR",
+            "supported_units": {
+                "crore": 10_000_000,
+                "million": 1_000_000,
+            },
+            "supported_display_currencies": ["INR", "USD"],
+        })
+
+
 class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
