@@ -70,6 +70,11 @@ auth_output.txt
 *.sqlite3-journal
 purge-preview.json
 
+# Local fund source workbooks (contain operational deal data)
+/1. Fund I.xlsx
+/2. Fund II.xlsx
+/3. Fund III.xlsx
+
 # IDE & OS
 .vscode/
 .idea/
