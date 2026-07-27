@@ -1478,6 +1478,106 @@ class DealStatusSyncTests(TestCase):
         self.assertTrue(DocumentArtifactService.artifact_complete(complete_doc))
         self.assertEqual(DocumentArtifactService.artifact_status(degraded_doc), DocumentArtifactService.STATUS_DEGRADED)
 
+    def test_document_artifact_service_exposes_partial_and_failed_terminal_states(self):
+        deal = Deal.objects.create(title="Artifact State Deal")
+        partial_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Preview.pdf",
+            extracted_text="Preview text",
+            normalized_text="Preview text",
+            transcription_status="partial",
+        )
+        failed_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Unreadable.pdf",
+            transcription_status="failed",
+            chunking_status="failed",
+        )
+
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(partial_doc),
+            DocumentArtifactService.STATUS_PARTIAL,
+        )
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(failed_doc),
+            DocumentArtifactService.STATUS_FAILED,
+        )
+        self.assertFalse(DocumentArtifactService.artifact_complete(partial_doc))
+        self.assertFalse(DocumentArtifactService.artifact_complete(failed_doc))
+
+    def test_document_artifact_service_normalizes_grounded_industry_evidence(self):
+        artifact = DocumentArtifactService.artifact_from_file_record({
+            "file_name": "Annual Report.pdf",
+            "document_type": "Memo",
+            "document_artifact": {
+                "normalized_text": "The market reached INR 1,250 Cr in FY26.",
+                "industry_overview": {
+                    "citations": [
+                        {
+                            "id": "market-page",
+                            "label": "Annual Report",
+                            "page": "42",
+                            "section": "Industry outlook",
+                            "passage": "The addressable market reached INR 1,250 Cr.",
+                        },
+                        {
+                            "id": "unsupported",
+                            "label": "Missing passage",
+                            "page": "43",
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "title": "Market expansion",
+                            "summary": "The report describes sustained category expansion.",
+                            "period": "FY26",
+                            "as_of_date": "2026-03-31",
+                            "source_ids": ["market-page"],
+                        },
+                        {
+                            "title": "Unsupported finding",
+                            "summary": "This citation does not resolve.",
+                            "source_ids": ["unsupported"],
+                        },
+                    ],
+                    "market_figures": [
+                        {
+                            "label": "Addressable market",
+                            "value": "1250",
+                            "unit": "INR Cr",
+                            "period": "FY26",
+                            "as_of_date": "2026-03-31",
+                            "calculation_method": "Reported directly.",
+                            "source_ids": ["market-page"],
+                        },
+                        {
+                            "label": "Unusable growth",
+                            "value": "not-a-number",
+                            "unit": "%",
+                            "period": "FY26",
+                            "as_of_date": "not-a-date",
+                            "calculation_method": "Unknown",
+                            "source_ids": ["market-page"],
+                        },
+                    ],
+                },
+            },
+        })
+
+        overview = artifact["industry_overview"]
+        self.assertEqual(len(overview["citations"]), 1)
+        self.assertEqual(len(overview["findings"]), 1)
+        self.assertEqual(len(overview["market_figures"]), 1)
+        self.assertEqual(overview["market_figures"][0]["value"], 1250.0)
+        self.assertEqual(overview["market_figures"][0]["source_ids"], ["market-page"])
+
+        chunk_kinds = {
+            chunk["metadata"]["chunk_kind"]
+            for chunk in DocumentArtifactService.build_embedding_chunks(artifact)
+        }
+        self.assertIn("industry_finding", chunk_kinds)
+        self.assertIn("industry_market_figure", chunk_kinds)
+
     def test_document_serializer_exposes_artifact_status(self):
         deal = Deal.objects.create(title="Serializer Deal")
         doc = DealDocument.objects.create(

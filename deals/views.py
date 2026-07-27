@@ -1203,6 +1203,8 @@ Rules:
                 doc_type = DocumentType.LEGAL
             elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
                 doc_type = DocumentType.PITCH_DECK
+            elif any(k in name_lower for k in ['annual report', 'industry report', 'market report', 'sector report']):
+                doc_type = DocumentType.MEMO
                 
             extraction = doc_processor.get_extraction_result(file_content, file_name)
             extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()

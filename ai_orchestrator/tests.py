@@ -106,6 +106,10 @@ class PromptSeedTests(TestCase):
         self.assertIn("numeric_evidence", document_evidence.prompt_template)
         self.assertIn("table_definitions", document_evidence.prompt_template)
         self.assertIn("diligence_gaps", document_evidence.prompt_template)
+        self.assertIn("industry_overview", document_evidence.prompt_template)
+        self.assertIn("market_figures", document_evidence.prompt_template)
+        self.assertIn("supporting passage", document_evidence.system_template)
+        self.assertIn("industry_overview", document_evidence.output_schema)
         self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
         self.assertNotIn("## Company Overview", personality.system_instructions)
 

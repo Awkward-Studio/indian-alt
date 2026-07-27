@@ -11,6 +11,7 @@ PHASE2_ARTIFACT_REQUIRED_KEYS = (
     "open_questions",
     "diligence_gaps",
     "citations",
+    "industry_overview",
 )
 
 PHASE2_ARTIFACT_KEYS = PHASE2_ARTIFACT_REQUIRED_KEYS + (
@@ -324,6 +325,8 @@ DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE = """### PHASE 2 DOCUMENT EVIDENCE OUTPUT CONT
 - Use the Phase 2 artifact field names expected by downstream Phase 3 synthesis.
 - `claims`, `risks`, `open_questions`, `diligence_gaps`, `citations`, and `quality_flags` must be arrays of strings.
 - `metrics`, `numeric_evidence`, `table_definitions`, `tables_summary`, and `contacts_found` must be arrays.
+- `industry_overview` must contain `findings`, `market_figures`, and `citations` arrays.
+- Every industry finding and market figure must reference one or more citation IDs. Each citation must identify a page/section and a supporting passage when available.
 - `normalized_text` must preserve material detail for downstream chunking."""
 
 DOCUMENT_EVIDENCE_PROMPT_TEMPLATE = """Analyze this single internal deal document and return a Phase 2 structured evidence artifact for downstream internal IC synthesis.
@@ -392,6 +395,37 @@ Return exactly one valid JSON object and nothing else:
   "open_questions": ["Questions created by missing or unclear information"],
   "diligence_gaps": ["Concrete diligence asks implied by this document"],
   "citations": ["Document/page/sheet/range references used"],
+  "industry_overview": {
+    "findings": [
+      {
+        "title": "Supported industry finding",
+        "summary": "What the report states without extrapolation",
+        "period": "Applicable period",
+        "as_of_date": "YYYY-MM-DD when stated, otherwise null",
+        "source_ids": ["industry-source-1"]
+      }
+    ],
+    "market_figures": [
+      {
+        "label": "Market size / growth / share measure",
+        "value": 0,
+        "unit": "INR Cr / % / x / etc",
+        "period": "Applicable period",
+        "as_of_date": "YYYY-MM-DD when stated, otherwise null",
+        "calculation_method": "Reported directly or the exact supported calculation",
+        "source_ids": ["industry-source-1"]
+      }
+    ],
+    "citations": [
+      {
+        "id": "industry-source-1",
+        "label": "Document and section label",
+        "page": "Page number or null",
+        "section": "Section heading or null",
+        "passage": "Short supporting passage from the supplied document"
+      }
+    ]
+  },
   "quality_flags": [],
   "normalized_text": "Cleaned normalized text preserving material details, numbers, tables, contacts, and citations",
   "source_map": {"document_name": "{{ document_name }}", "section": null, "page": null},
@@ -404,5 +438,7 @@ Rules:
 - Use only the supplied document.
 - Preserve all material numbers, table/range definitions, risks, claims, and diligence gaps.
 - Cite sheet/range/row/page/part locations when available.
+- Extract Industry Overview evidence from published reports, annual reports, market studies, and sector material only when it is explicitly supported in this document.
+- Do not calculate or infer a market figure unless `calculation_method` states the exact operation and all inputs are present in the supplied document.
+- Use empty Industry Overview arrays when the document contains no supported industry evidence.
 - Do not add web, public-market, or general industry facts."""
-

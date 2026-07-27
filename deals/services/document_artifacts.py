@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
+from datetime import date, datetime
 from typing import Any, Optional, TYPE_CHECKING
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -35,6 +37,11 @@ class DocumentArtifactService:
         "open_questions": [],
         "diligence_gaps": [],
         "citations": [],
+        "industry_overview": {
+            "findings": [],
+            "market_figures": [],
+            "citations": [],
+        },
         "reasoning": "",
         "quality_flags": [],
         "normalized_text": "",
@@ -57,12 +64,15 @@ class DocumentArtifactService:
         "open_questions",
         "diligence_gaps",
         "citations",
+        "industry_overview",
         "quality_flags",
         "normalized_text",
         "source_map",
     )
     STATUS_COMPLETE = "complete"
+    STATUS_PARTIAL = "partial"
     STATUS_DEGRADED = "degraded"
+    STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
 
     @classmethod
@@ -84,6 +94,7 @@ class DocumentArtifactService:
             document_type=document_type,
             extraction_mode=extraction_mode,
         )
+        fallback["source_metadata"] = deepcopy(source_metadata)
 
         if not raw_text:
             return fallback
@@ -262,7 +273,10 @@ class DocumentArtifactService:
             document_type=document.document_type,
             extraction_mode=document.extraction_mode,
             ai_service=ai_service,
-            source_metadata={"source_id": getattr(document, "id", None)},
+            source_metadata={
+                "source_id": getattr(document, "id", None),
+                "source_url": getattr(document, "file_url", None),
+            },
         )
         cls.persist_artifact(document, artifact)
         return cls.artifact_from_document(document)
@@ -466,10 +480,48 @@ class DocumentArtifactService:
                 }
             )
 
+        industry_overview = artifact.get("industry_overview") or {}
+        for finding in industry_overview.get("findings") or []:
+            serialized = cls._serialize_component(finding, max_chars=claim_excerpt_chars)
+            if not serialized:
+                continue
+            chunks.append(
+                {
+                    "text": serialized,
+                    "metadata": {
+                        **base_metadata,
+                        "chunk_kind": "industry_finding",
+                        "source_ids": finding.get("source_ids") if isinstance(finding, dict) else [],
+                    },
+                }
+            )
+
+        for figure in industry_overview.get("market_figures") or []:
+            serialized = cls._serialize_component(figure)
+            if not serialized:
+                continue
+            chunks.append(
+                {
+                    "text": serialized,
+                    "metadata": {
+                        **base_metadata,
+                        "chunk_kind": "industry_market_figure",
+                        "source_ids": figure.get("source_ids") if isinstance(figure, dict) else [],
+                    },
+                }
+            )
+
         return chunks
 
     @classmethod
     def artifact_status(cls, artifact_or_document: Any) -> str:
+        transcription_status = getattr(artifact_or_document, "transcription_status", None)
+        chunking_status = getattr(artifact_or_document, "chunking_status", None)
+        if transcription_status == "failed":
+            return cls.STATUS_FAILED
+        if transcription_status == "partial":
+            return cls.STATUS_PARTIAL
+
         artifact = cls._coerce_artifact(artifact_or_document)
         normalized_text = (artifact.get("normalized_text") or "").strip()
         if not normalized_text:
@@ -484,6 +536,8 @@ class DocumentArtifactService:
 
         source_map = artifact.get("source_map") or {}
         if not isinstance(source_map, dict) or not source_map.get("document_name"):
+            return cls.STATUS_DEGRADED
+        if chunking_status == "failed":
             return cls.STATUS_DEGRADED
 
         return cls.STATUS_COMPLETE
@@ -512,6 +566,9 @@ class DocumentArtifactService:
             normalized["tables_summary"] = deepcopy(normalized["table_definitions"])
         normalized["quality_flags"] = cls._normalize_string_list(normalized.get("quality_flags"))
         normalized["citations"] = cls._normalize_string_list(normalized.get("citations"))
+        normalized["industry_overview"] = cls._normalize_industry_overview(
+            normalized.get("industry_overview"),
+        )
         normalized["document_name"] = normalized.get("document_name") or fallback.get("document_name") or ""
         normalized["document_type"] = normalized.get("document_type") or fallback.get("document_type") or "Other"
         normalized["source_map"] = cls._normalize_source_map(
@@ -553,6 +610,11 @@ class DocumentArtifactService:
             "open_questions": [],
             "diligence_gaps": [],
             "citations": [file_name] if file_name else [],
+            "industry_overview": {
+                "findings": [],
+                "market_figures": [],
+                "citations": [],
+            },
             "reasoning": "",
             "quality_flags": ["fallback_artifact"],
             "normalized_text": excerpt,
@@ -594,6 +656,124 @@ class DocumentArtifactService:
         if not normalized.get("document_name"):
             normalized["document_name"] = fallback.get("document_name") if isinstance(fallback, dict) else ""
         return normalized
+
+    @classmethod
+    def _normalize_industry_overview(cls, value: Any) -> dict[str, list[dict[str, Any]]]:
+        overview = value if isinstance(value, dict) else {}
+        citations: list[dict[str, Any]] = []
+        citation_ids: set[str] = set()
+        for index, item in enumerate(overview.get("citations") or []):
+            if not isinstance(item, dict):
+                continue
+            citation_id = cls._clean_string(item.get("id")) or f"industry-source-{index + 1}"
+            label = cls._clean_string(item.get("label"))
+            page = cls._clean_string(item.get("page"))
+            section = cls._clean_string(item.get("section"))
+            passage = cls._clean_string(item.get("passage"))
+            if not label or (not page and not section) or not passage:
+                continue
+            citation_ids.add(citation_id)
+            citations.append(
+                {
+                    "id": citation_id,
+                    "label": label,
+                    "page": page,
+                    "section": section,
+                    "passage": passage,
+                }
+            )
+
+        findings: list[dict[str, Any]] = []
+        for item in overview.get("findings") or []:
+            if not isinstance(item, dict):
+                continue
+            title = cls._clean_string(item.get("title"))
+            summary = cls._clean_string(item.get("summary"))
+            source_ids = cls._valid_source_ids(item.get("source_ids"), citation_ids)
+            if not title or not summary or not source_ids:
+                continue
+            findings.append(
+                {
+                    "title": title,
+                    "summary": summary,
+                    "period": cls._clean_string(item.get("period")),
+                    "as_of_date": cls._clean_date(item.get("as_of_date")),
+                    "source_ids": source_ids,
+                }
+            )
+
+        market_figures: list[dict[str, Any]] = []
+        for item in overview.get("market_figures") or []:
+            if not isinstance(item, dict):
+                continue
+            label = cls._clean_string(item.get("label"))
+            unit = cls._clean_string(item.get("unit"))
+            period = cls._clean_string(item.get("period"))
+            calculation_method = cls._clean_string(item.get("calculation_method"))
+            as_of_date = cls._clean_date(item.get("as_of_date"))
+            source_ids = cls._valid_source_ids(item.get("source_ids"), citation_ids)
+            try:
+                numeric_value = float(item.get("value"))
+            except (TypeError, ValueError):
+                numeric_value = math.nan
+            if (
+                not label
+                or not unit
+                or not period
+                or not calculation_method
+                or not as_of_date
+                or not source_ids
+                or not math.isfinite(numeric_value)
+            ):
+                continue
+            market_figures.append(
+                {
+                    "label": label,
+                    "value": numeric_value,
+                    "unit": unit,
+                    "period": period,
+                    "as_of_date": as_of_date,
+                    "calculation_method": calculation_method,
+                    "source_ids": source_ids,
+                }
+            )
+
+        return {
+            "findings": findings,
+            "market_figures": market_figures,
+            "citations": citations,
+        }
+
+    @staticmethod
+    def _clean_string(value: Any) -> str | None:
+        if not isinstance(value, (str, int, float)):
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @staticmethod
+    def _clean_date(value: Any) -> str | None:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if not isinstance(value, str):
+            return None
+        try:
+            return date.fromisoformat(value.strip()).isoformat()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _valid_source_ids(value: Any, citation_ids: set[str]) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(
+            source_id.strip()
+            for source_id in value
+            if isinstance(source_id, str)
+            and source_id.strip() in citation_ids
+        ))
 
     @staticmethod
     def _serialize_component(value: Any, *, max_chars: int = 1200) -> str:
