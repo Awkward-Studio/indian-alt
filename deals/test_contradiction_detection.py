@@ -2,10 +2,15 @@ from datetime import datetime, timezone
 import json
 from unittest.mock import MagicMock
 
+from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
 
+from accounts.models import Profile
 from deals.models import (
     Deal,
+    DealContradiction,
     DealDocument,
     VentureIntelligenceCompanyProfile,
     VentureIntelligenceCompanyRelation,
@@ -348,3 +353,243 @@ class DiscrepancyClassifierTests(SimpleTestCase):
 
         self.assertEqual(result.classification, "insufficient_evidence")
         self.assertEqual(result.confidence, 0.0)
+
+
+class DealContradictionApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="analyst",
+            password="password",
+        )
+        self.profile = Profile.objects.create(
+            user=self.user,
+            name="Deal Analyst",
+            email="analyst@example.com",
+        )
+        self.other_user = User.objects.create_user(
+            username="other",
+            password="password",
+        )
+        Profile.objects.create(
+            user=self.other_user,
+            name="Other Analyst",
+            email="other@example.com",
+        )
+        self.deal = Deal.objects.create(
+            title="Acme",
+            funding_ask="50",
+            deal_summary="Canonical summary",
+        )
+        self.deal.responsibility.add(self.profile)
+        self.record = DealContradiction.objects.create(
+            deal=self.deal,
+            fingerprint="a" * 64,
+            subject="Acme",
+            metric="revenue",
+            period="FY2024",
+            unit="INR_crore",
+            classification="contradiction",
+            confidence=0.91,
+            materiality="high",
+            rationale="Same-period actual revenue differs.",
+            left_claim={
+                "value": 100,
+                "evidence": {
+                    "source_id": "deck",
+                    "source_label": "Deck",
+                    "passage": "Revenue was INR 100 Cr.",
+                },
+            },
+            right_claim={
+                "value": 120,
+                "evidence": {
+                    "source_id": "meeting",
+                    "source_label": "Founder call",
+                    "passage": "Revenue was INR 120 Cr.",
+                },
+            },
+        )
+        self.url = reverse("deal-contradictions", kwargs={"pk": self.deal.id})
+        self.client = APIClient()
+
+    def test_authenticated_user_can_list_evidence_linked_records(self):
+        self.client.force_authenticate(self.other_user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["id"], str(self.record.id))
+        self.assertEqual(
+            response.data[0]["left_claim"]["evidence"]["source_id"],
+            "deck",
+        )
+
+    def test_responsible_analyst_can_confirm_without_changing_deal(self):
+        self.client.force_authenticate(self.user)
+        original = {
+            "funding_ask": self.deal.funding_ask,
+            "deal_summary": self.deal.deal_summary,
+            "deal_status": self.deal.deal_status,
+        }
+
+        response = self.client.patch(
+            self.url,
+            {
+                "id": str(self.record.id),
+                "review_status": "CONFIRMED",
+                "analyst_comment": "Confirmed against audited FY24 accounts.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.record.refresh_from_db()
+        self.deal.refresh_from_db()
+        self.assertEqual(self.record.review_status, "CONFIRMED")
+        self.assertEqual(self.record.reviewed_by, self.profile)
+        self.assertIsNotNone(self.record.reviewed_at)
+        self.assertEqual(self.record.analyst_comment, "Confirmed against audited FY24 accounts.")
+        self.assertEqual(
+            {
+                "funding_ask": self.deal.funding_ask,
+                "deal_summary": self.deal.deal_summary,
+                "deal_status": self.deal.deal_status,
+            },
+            original,
+        )
+
+    def test_unassigned_non_admin_cannot_review(self):
+        self.client.force_authenticate(self.other_user)
+
+        response = self.client.patch(
+            self.url,
+            {
+                "id": str(self.record.id),
+                "review_status": "DISMISSED",
+                "analyst_comment": "Not comparable.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.review_status, "UNREVIEWED")
+
+    def test_completed_review_cannot_be_reversed(self):
+        self.record.review_status = "CONFIRMED"
+        self.record.reviewed_by = self.profile
+        self.record.save(update_fields=["review_status", "reviewed_by"])
+        self.client.force_authenticate(self.user)
+
+        response = self.client.patch(
+            self.url,
+            {
+                "id": str(self.record.id),
+                "review_status": "DISMISSED",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.record.refresh_from_db()
+        self.assertEqual(self.record.review_status, "CONFIRMED")
+
+    def test_invalid_filter_and_cross_deal_identifier_are_rejected(self):
+        self.client.force_authenticate(self.user)
+        other_deal = Deal.objects.create(title="Other")
+        other_record = DealContradiction.objects.create(
+            deal=other_deal,
+            fingerprint="b" * 64,
+            subject="Other",
+            metric="revenue",
+            classification="contradiction",
+            rationale="Evidence",
+            left_claim={},
+            right_claim={},
+        )
+
+        invalid_filter = self.client.get(self.url, {"status": "INVALID"})
+        cross_deal = self.client.patch(
+            self.url,
+            {
+                "id": str(other_record.id),
+                "review_status": "CONFIRMED",
+            },
+            format="json",
+        )
+
+        self.assertEqual(invalid_filter.status_code, 400)
+        self.assertEqual(cross_deal.status_code, 404)
+
+    def test_unauthenticated_requests_are_rejected(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 401)
+
+
+class DealContradictionPersistenceTests(TestCase):
+    def test_pipeline_persistence_is_idempotent_and_preserves_review(self):
+        deal = Deal.objects.create(title="Acme")
+        left = StructuredClaim(
+            subject="Acme",
+            metric="revenue",
+            value=100,
+            value_text="100",
+            unit="INR_crore",
+            period="FY2024",
+            evidence=ClaimEvidence(
+                source_type="deal_document",
+                source_id="deck",
+                source_label="Deck",
+                passage="Revenue: 100",
+            ),
+        )
+        right = StructuredClaim(
+            subject="Acme",
+            metric="revenue",
+            value=120,
+            value_text="120",
+            unit="INR_crore",
+            period="FY2024",
+            evidence=ClaimEvidence(
+                source_type="meeting_note",
+                source_id="call",
+                source_label="Call",
+                passage="Revenue: 120",
+            ),
+        )
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            "response": json.dumps(
+                {
+                    "classification": "contradiction",
+                    "confidence": 0.9,
+                    "rationale": "Same-period actuals differ.",
+                    "materiality": "high",
+                }
+            )
+        }
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test")
+        classification = classifier.classify(left, right)
+
+        first, created = classifier.persist_classification(
+            deal=deal,
+            left=left,
+            right=right,
+            classification=classification,
+        )
+        first.review_status = DealContradiction.ReviewStatus.CONFIRMED
+        first.save(update_fields=["review_status"])
+        second, created_again = classifier.persist_classification(
+            deal=deal,
+            left=left,
+            right=right,
+            classification=classification,
+        )
+
+        self.assertTrue(created)
+        self.assertFalse(created_again)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(second.review_status, DealContradiction.ReviewStatus.CONFIRMED)
+        self.assertEqual(DealContradiction.objects.count(), 1)

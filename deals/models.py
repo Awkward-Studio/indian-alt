@@ -374,6 +374,74 @@ class DealAnalysis(models.Model):
         return f"Analysis v{self.version} for {self.deal.title}"
 
 
+class DealContradiction(models.Model):
+    class ReviewStatus(models.TextChoices):
+        UNREVIEWED = "UNREVIEWED", "Unreviewed"
+        CONFIRMED = "CONFIRMED", "Confirmed"
+        DISMISSED = "DISMISSED", "Dismissed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name="contradictions",
+    )
+    fingerprint = models.CharField(max_length=64)
+    subject = models.TextField()
+    metric = models.CharField(max_length=80)
+    period = models.CharField(max_length=80, blank=True, default="")
+    unit = models.CharField(max_length=80, blank=True, default="")
+    classification = models.CharField(max_length=40, db_index=True)
+    confidence = models.FloatField(default=0)
+    materiality = models.CharField(max_length=20, default="unknown")
+    rationale = models.TextField()
+    left_claim = models.JSONField(default=dict)
+    right_claim = models.JSONField(default=dict)
+    classifier_version = models.CharField(max_length=40, default="1")
+    model_used = models.CharField(max_length=200, blank=True, default="")
+    audit_log = models.ForeignKey(
+        "ai_orchestrator.AIAuditLog",
+        on_delete=models.SET_NULL,
+        related_name="detected_contradictions",
+        null=True,
+        blank=True,
+    )
+    review_status = models.CharField(
+        max_length=20,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.UNREVIEWED,
+        db_index=True,
+    )
+    analyst_comment = models.TextField(blank=True, default="")
+    reviewed_by = models.ForeignKey(
+        "accounts.Profile",
+        on_delete=models.SET_NULL,
+        related_name="reviewed_contradictions",
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    detected_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "deal_contradiction"
+        ordering = ["-detected_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deal", "fingerprint"],
+                name="unique_deal_contradiction_fingerprint",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deal", "review_status"]),
+            models.Index(fields=["deal", "classification"]),
+        ]
+
+    def __str__(self):
+        return f"{self.deal}: {self.metric} ({self.classification})"
+
+
 class DealRelationshipContext(models.Model):
     class RelationshipType(models.TextChoices):
         COMPETITOR = 'competitor', 'Competitor'

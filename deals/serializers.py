@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.utils import timezone
 from .models import (
-    Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus,
+    Deal, DealContradiction, DealDocument, DealGeneratedDocument, DealPhaseLog,
+    InitialAnalysisStatus,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
@@ -19,6 +20,67 @@ class DealPhaseLogSerializer(serializers.ModelSerializer):
         model = DealPhaseLog
         fields = '__all__'
         read_only_fields = ('id', 'changed_at')
+
+
+class DealContradictionSerializer(serializers.ModelSerializer):
+    reviewed_by_name = serializers.CharField(
+        source="reviewed_by.name",
+        read_only=True,
+    )
+
+    def validate_review_status(self, value):
+        instance = self.instance
+        if instance is None:
+            raise serializers.ValidationError(
+                "Contradiction records can only be created by the detection pipeline."
+            )
+        current = instance.review_status
+        if current == DealContradiction.ReviewStatus.UNREVIEWED:
+            if value not in {
+                DealContradiction.ReviewStatus.CONFIRMED,
+                DealContradiction.ReviewStatus.DISMISSED,
+            }:
+                raise serializers.ValidationError(
+                    "Review status must transition to CONFIRMED or DISMISSED."
+                )
+        elif value != current:
+            raise serializers.ValidationError(
+                "A completed contradiction review cannot be changed to another status."
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        requested_status = validated_data.get("review_status")
+        if (
+            requested_status
+            and requested_status != instance.review_status
+        ):
+            request = self.context.get("request")
+            profile = getattr(getattr(request, "user", None), "profile", None)
+            if profile is None:
+                raise serializers.ValidationError(
+                    "The authenticated user does not have an analyst profile."
+                )
+            instance.reviewed_by = profile
+            instance.reviewed_at = timezone.now()
+        return super().update(instance, validated_data)
+
+    class Meta:
+        model = DealContradiction
+        fields = (
+            "id", "deal", "fingerprint", "subject", "metric", "period", "unit",
+            "classification", "confidence", "materiality", "rationale",
+            "left_claim", "right_claim", "classifier_version", "model_used",
+            "audit_log", "review_status", "analyst_comment", "reviewed_by",
+            "reviewed_by_name", "reviewed_at", "detected_at", "updated_at",
+        )
+        read_only_fields = (
+            "id", "deal", "fingerprint", "subject", "metric", "period", "unit",
+            "classification", "confidence", "materiality", "rationale",
+            "left_claim", "right_claim", "classifier_version", "model_used",
+            "audit_log", "reviewed_by", "reviewed_by_name", "reviewed_at",
+            "detected_at", "updated_at",
+        )
 
 
 class DealDocumentSerializer(serializers.ModelSerializer):
@@ -502,4 +564,3 @@ class DealListSerializer(serializers.ModelSerializer):
             'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
         )
         read_only_fields = ('id', 'created_at', 'days_since_sourcing')
-

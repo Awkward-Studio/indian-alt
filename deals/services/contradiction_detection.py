@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 from dataclasses import asdict, dataclass
@@ -759,6 +760,63 @@ class DiscrepancyClassifier:
             self.classify(comparison.left, comparison.right)
             for comparison in comparisons
         ]
+
+    @staticmethod
+    def persist_classification(
+        *,
+        deal: Any,
+        left: StructuredClaim,
+        right: StructuredClaim,
+        classification: DiscrepancyClassification,
+        audit_log: Any = None,
+    ):
+        from deals.models import DealContradiction
+
+        identity = {
+            "deal_id": str(deal.id),
+            "metric": left.metric,
+            "periods": sorted([left.period, right.period]),
+            "sources": sorted(
+                [
+                    f"{left.evidence.source_type}:{left.evidence.source_id}",
+                    f"{right.evidence.source_type}:{right.evidence.source_id}",
+                ]
+            ),
+            "values": sorted(
+                [
+                    f"{left.value}:{left.unit}",
+                    f"{right.value}:{right.unit}",
+                ]
+            ),
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        defaults = {
+            "subject": left.subject,
+            "metric": left.metric,
+            "period": left.period if left.period == right.period else "",
+            "unit": left.unit if left.unit == right.unit else "",
+            "classification": classification.classification,
+            "confidence": classification.confidence,
+            "materiality": classification.materiality,
+            "rationale": classification.rationale,
+            "left_claim": left.as_dict(),
+            "right_claim": right.as_dict(),
+            "classifier_version": classification.classifier_version,
+            "model_used": classification.model_used,
+            "audit_log": audit_log,
+        }
+        record, created = DealContradiction.objects.get_or_create(
+            deal=deal,
+            fingerprint=fingerprint,
+            defaults=defaults,
+        )
+        if not created and record.review_status == DealContradiction.ReviewStatus.UNREVIEWED:
+            for field, value in defaults.items():
+                setattr(record, field, value)
+            record.save(update_fields=[*defaults.keys(), "updated_at"])
+        return record, created
 
     def _deterministic_gate(
         self,

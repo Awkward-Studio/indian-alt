@@ -13,12 +13,14 @@ from django.db.models import Exists, F, OuterRef, Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
-    Deal, DealAnalysis, DealDocument, DealPhaseLog, DealRelationshipContext,
+    Deal, DealAnalysis, DealContradiction, DealDocument, DealPhaseLog,
+    DealRelationshipContext,
     VentureIntelligenceCompanyRelation,
 )
 from .serializers import (
-    DealSerializer, DealListSerializer, DealDetailSerializer, 
-    DealDocumentSerializer, DealPhaseLogSerializer, DealHeavyFieldsSerializer
+    DealSerializer, DealListSerializer, DealDetailSerializer,
+    DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
+    DealHeavyFieldsSerializer,
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
@@ -645,6 +647,74 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if self.action == 'heavy_fields':
             return DealHeavyFieldsSerializer
         return DealSerializer
+
+    def _can_review_contradictions(self, request, deal):
+        user = request.user
+        if user.is_superuser or user.is_staff:
+            return True
+        profile = getattr(user, "profile", None)
+        if profile is None or profile.is_disabled:
+            return False
+        return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @action(detail=True, methods=["get", "patch"])
+    def contradictions(self, request, pk=None):
+        deal = self.get_object()
+        queryset = deal.contradictions.select_related(
+            "reviewed_by",
+            "audit_log",
+        ).all()
+
+        if request.method == "GET":
+            review_status = request.query_params.get("status")
+            classification = request.query_params.get("classification")
+            if review_status:
+                valid_statuses = {
+                    choice
+                    for choice, _label in DealContradiction.ReviewStatus.choices
+                }
+                if review_status not in valid_statuses:
+                    return Response(
+                        {"error": "status must be UNREVIEWED, CONFIRMED, or DISMISSED."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                queryset = queryset.filter(review_status=review_status)
+            if classification:
+                queryset = queryset.filter(classification=classification)
+            return Response(
+                DealContradictionSerializer(
+                    queryset,
+                    many=True,
+                    context={"request": request},
+                ).data
+            )
+
+        if not self._can_review_contradictions(request, deal):
+            return Response(
+                {"error": "Only deal-responsible analysts or administrators can review contradictions."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        contradiction_id = request.data.get("id")
+        if not contradiction_id:
+            return Response(
+                {"error": "id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        contradiction = queryset.filter(id=contradiction_id).first()
+        if contradiction is None:
+            return Response(
+                {"error": "Contradiction was not found for this deal."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = DealContradictionSerializer(
+            contradiction,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
     
     @action(detail=True, methods=['get'])
     def heavy_fields(self, request, pk=None):
