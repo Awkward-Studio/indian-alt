@@ -4,11 +4,13 @@ import json
 import hashlib
 import math
 import re
+import time
 from dataclasses import asdict, dataclass
 from itertools import combinations
 from typing import Any, Iterable
 
 from django.conf import settings
+from django.utils import timezone
 
 from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.runtime import AIRuntimeService
@@ -395,7 +397,10 @@ class ContradictionDetectionService:
     def build_comparison_candidates(
         cls,
         claims: Iterable[StructuredClaim],
+        *,
+        max_candidates: int = 250,
     ) -> list[ClaimComparison]:
+        max_candidates = max(1, min(int(max_candidates), 1000))
         comparisons: list[ClaimComparison] = []
         for group in cls.group_claims(claims).values():
             for left, right in combinations(group, 2):
@@ -425,6 +430,8 @@ class ContradictionDetectionService:
                         ),
                     )
                 )
+                if len(comparisons) >= max_candidates:
+                    return comparisons
         return comparisons
 
     @classmethod
@@ -760,6 +767,120 @@ class DiscrepancyClassifier:
             self.classify(comparison.left, comparison.right)
             for comparison in comparisons
         ]
+
+    def run_for_deal(
+        self,
+        deal: Any,
+        *,
+        requested_by: Any = None,
+        max_comparisons: int = 100,
+    ) -> dict[str, Any]:
+        from ai_orchestrator.models import AIAuditLog
+
+        started_at = time.monotonic()
+        max_comparisons = max(1, min(int(max_comparisons), 250))
+        audit_log = AIAuditLog.objects.create(
+            source_type="deal_contradiction_detection",
+            source_id=str(deal.id),
+            context_label=f"Contradiction detection: {deal.title}",
+            requested_by=requested_by,
+            model_provider="vllm",
+            model_used=self.model,
+            system_prompt=(
+                "Compare normalized, evidence-bearing claims. Never mutate canonical "
+                "deal data and never classify unsupported differences as contradictions."
+            ),
+            user_prompt=f"Detect bounded discrepancies for deal {deal.id}.",
+            raw_response="",
+            parsed_json={},
+            status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "deal_id": str(deal.id),
+                "workflow": "deal_contradiction_detection",
+                "max_comparisons": max_comparisons,
+            },
+        )
+        try:
+            claims = ContradictionDetectionService.collect_deal_claims(deal)
+            comparisons = ContradictionDetectionService.build_comparison_candidates(
+                claims,
+                max_candidates=max_comparisons,
+            )
+            persisted = []
+            classifications: dict[str, int] = {}
+            for comparison in comparisons:
+                result = self.classify(comparison.left, comparison.right)
+                classifications[result.classification] = (
+                    classifications.get(result.classification, 0) + 1
+                )
+                if result.classification == "no_discrepancy":
+                    continue
+                record, created = self.persist_classification(
+                    deal=deal,
+                    left=comparison.left,
+                    right=comparison.right,
+                    classification=result,
+                    audit_log=audit_log,
+                )
+                persisted.append(
+                    {
+                        "id": str(record.id),
+                        "classification": result.classification,
+                        "created": created,
+                    }
+                )
+            summary = {
+                "deal_id": str(deal.id),
+                "claims": len(claims),
+                "comparisons": len(comparisons),
+                "persisted": len(persisted),
+                "classification_counts": classifications,
+                "records": persisted,
+                "bounded": len(comparisons) >= max_comparisons,
+            }
+            audit_log.raw_response = json.dumps(summary, sort_keys=True)
+            audit_log.parsed_json = summary
+            audit_log.request_duration_ms = round(
+                (time.monotonic() - started_at) * 1000
+            )
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.completed_at = timezone.now()
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "claim_count": len(claims),
+                "comparison_count": len(comparisons),
+                "persisted_count": len(persisted),
+            }
+            audit_log.save(
+                update_fields=[
+                    "raw_response",
+                    "parsed_json",
+                    "request_duration_ms",
+                    "status",
+                    "is_success",
+                    "completed_at",
+                    "source_metadata",
+                ]
+            )
+            return {**summary, "audit_log_id": str(audit_log.id)}
+        except Exception as exc:
+            audit_log.status = "FAILED"
+            audit_log.error_message = str(exc)
+            audit_log.request_duration_ms = round(
+                (time.monotonic() - started_at) * 1000
+            )
+            audit_log.completed_at = timezone.now()
+            audit_log.save(
+                update_fields=[
+                    "status",
+                    "error_message",
+                    "request_duration_ms",
+                    "completed_at",
+                ]
+            )
+            raise
 
     @staticmethod
     def persist_classification(

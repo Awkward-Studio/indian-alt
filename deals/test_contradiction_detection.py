@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import time
 from unittest.mock import MagicMock
 
 from django.contrib.auth.models import User
@@ -8,6 +9,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
+from ai_orchestrator.models import AIAuditLog
 from deals.models import (
     Deal,
     DealContradiction,
@@ -593,3 +595,79 @@ class DealContradictionPersistenceTests(TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(second.review_status, DealContradiction.ReviewStatus.CONFIRMED)
         self.assertEqual(DealContradiction.objects.count(), 1)
+
+    def test_end_to_end_runner_persists_result_and_ai_history(self):
+        deal = Deal.objects.create(title="Acme")
+        for title, value in (("Deck.pdf", 100), ("Accounts.pdf", 120)):
+            DealDocument.objects.create(
+                deal=deal,
+                title=title,
+                evidence_json={
+                    "document_name": title,
+                    "metrics": [
+                        {
+                            "name": "Revenue",
+                            "value": f"INR {value} Cr",
+                            "unit": "INR Cr",
+                            "period": "FY24",
+                            "source_location": "Page 1",
+                        }
+                    ],
+                },
+            )
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            "response": json.dumps(
+                {
+                    "classification": "contradiction",
+                    "confidence": 0.93,
+                    "rationale": "Two actual FY24 revenue values conflict.",
+                    "materiality": "high",
+                }
+            )
+        }
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test")
+
+        result = classifier.run_for_deal(deal)
+
+        self.assertEqual(result["claims"], 2)
+        self.assertEqual(result["comparisons"], 1)
+        self.assertEqual(result["persisted"], 1)
+        record = DealContradiction.objects.get()
+        self.assertEqual(record.classification, "contradiction")
+        self.assertEqual(str(record.audit_log_id), result["audit_log_id"])
+        audit = AIAuditLog.objects.get(id=result["audit_log_id"])
+        self.assertEqual(audit.status, "COMPLETED")
+        self.assertTrue(audit.is_success)
+        self.assertIsNotNone(audit.completed_at)
+        self.assertEqual(audit.source_metadata["persisted_count"], 1)
+
+    def test_comparison_generation_is_bounded_for_large_source_sets(self):
+        claims = []
+        for index in range(100):
+            claims.append(
+                StructuredClaim(
+                    subject="Acme",
+                    metric="revenue",
+                    value=float(index),
+                    value_text=str(index),
+                    unit="INR_crore",
+                    period="FY2024",
+                    evidence=ClaimEvidence(
+                        source_type="deal_document",
+                        source_id=f"source-{index}",
+                        source_label=f"Source {index}",
+                        passage=f"Revenue: {index}",
+                    ),
+                )
+            )
+
+        started_at = time.monotonic()
+        comparisons = ContradictionDetectionService.build_comparison_candidates(
+            claims,
+            max_candidates=75,
+        )
+        duration = time.monotonic() - started_at
+
+        self.assertEqual(len(comparisons), 75)
+        self.assertLess(duration, 1.0)
