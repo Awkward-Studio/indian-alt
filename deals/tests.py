@@ -36,6 +36,7 @@ from deals.tasks import (
     analyze_additional_documents_async,
     fetch_company_news_async_task,
     analyze_selection_async,
+    enrich_deal_vi_async_task,
     enrich_competitors_vi_async_task,
     fetch_competitors_async_task,
     process_single_document_async,
@@ -2493,6 +2494,68 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "success")
         self.assertEqual(response.data["profile"]["cin"], "U74999KA2012PTC066107")
+
+    @patch("deals.tasks.enrich_deal_vi_async_task.apply_async")
+    def test_async_enrich_creates_ai_history_record(self, mock_apply_async):
+        mock_apply_async.return_value.id = "celery-vi-1"
+
+        response = self.client.post(
+            reverse("deal-enrich", kwargs={"pk": self.deal.id}),
+            {
+                "company_name": "Flipkart",
+                "relation_type": "target",
+                "async": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "queued")
+        self.assertEqual(response.data["task_id"], "celery-vi-1")
+        audit_log = AIAuditLog.objects.get(id=response.data["audit_log_id"])
+        self.assertEqual(audit_log.source_type, "deal_enrichment")
+        self.assertEqual(audit_log.source_id, str(self.deal.id))
+        self.assertEqual(audit_log.status, "PENDING")
+        self.assertEqual(audit_log.celery_task_id, "celery-vi-1")
+        self.assertEqual(audit_log.source_metadata["relation_type"], "target")
+        self.assertEqual(
+            mock_apply_async.call_args.kwargs["kwargs"]["audit_log_id"],
+            str(audit_log.id),
+        )
+
+    @patch("deals.tasks.broadcast_audit_log_update")
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.enrich_deal")
+    def test_async_enrich_worker_completes_ai_history_record(self, mock_enrich, _mock_broadcast):
+        profile = VentureIntelligenceCompanyProfile.objects.create(
+            cin="U74999KA2012PTC066107",
+            name="Flipkart",
+        )
+        mock_enrich.return_value = profile
+        audit_log = AIAuditLog.objects.create(
+            source_type="deal_enrichment",
+            source_id=str(self.deal.id),
+            context_label="Venture Intelligence: Flipkart",
+            model_used="test",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PENDING",
+            is_success=False,
+        )
+
+        result = enrich_deal_vi_async_task.run(
+            deal_id=str(self.deal.id),
+            company_name="Flipkart",
+            relation_type="target",
+            audit_log_id=str(audit_log.id),
+        )
+
+        audit_log.refresh_from_db()
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["audit_log_id"], str(audit_log.id))
+        self.assertEqual(audit_log.status, "COMPLETED")
+        self.assertTrue(audit_log.is_success)
+        self.assertEqual(audit_log.parsed_json["profile_id"], str(profile.id))
 
     def test_enrich_view_unauthenticated(self):
         self.client.force_authenticate(user=None)

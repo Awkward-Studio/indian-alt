@@ -2307,12 +2307,27 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
 
 
 @shared_task(queue='high_priority')
-def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin: str | None = None, relation_type: str = "target", raw_data: dict | None = None) -> dict:
+def enrich_deal_vi_async_task(
+    deal_id: str,
+    company_name: str | None = None,
+    cin: str | None = None,
+    relation_type: str = "target",
+    raw_data: dict | None = None,
+    audit_log_id: str | None = None,
+) -> dict:
     """
     Enrich a deal target or competitor VI profile in the Celery worker.
     """
+    from ai_orchestrator.models import AIAuditLog
+
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first() if audit_log_id else None
     try:
         from deals.services.venture_intelligence import VentureIntelligenceService
+
+        if audit_log:
+            audit_log.status = "PROCESSING"
+            audit_log.save(update_fields=["status"])
+            broadcast_audit_log_update(audit_log)
 
         profile = VentureIntelligenceService().enrich_deal(
             deal_id=deal_id,
@@ -2321,13 +2336,38 @@ def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin
             relation_type=relation_type,
             raw_data=raw_data,
         )
+        if audit_log:
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.raw_response = (
+                f"Linked {relation_type} Venture Intelligence profile "
+                f"{profile.name or profile.cin} to the deal."
+            )
+            audit_log.parsed_json = {
+                "status": "SUCCESS",
+                "profile_id": str(profile.id),
+                "deal_id": deal_id,
+                "relation_type": relation_type,
+            }
+            audit_log.save(
+                update_fields=["status", "is_success", "raw_response", "parsed_json"]
+            )
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
             "status": "SUCCESS",
             "profile_id": str(profile.id),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
         }
     except Exception as e:
         logger.error(f"Async deal VI enrichment failed: {str(e)}")
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(e)
+            audit_log.save(update_fields=["status", "is_success", "error_message"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
             "status": "FAILURE",
             "error": str(e),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
         }

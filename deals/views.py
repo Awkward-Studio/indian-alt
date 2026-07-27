@@ -20,7 +20,7 @@ from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
 from .services.deal_flow import DealFlowService
 from .services.folder_analysis import FolderAnalysisService
-from ai_orchestrator.models import DocumentChunk
+from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
@@ -1501,6 +1501,27 @@ class DealEnrichView(APIView):
 
         if request.data.get("async"):
             from .tasks import enrich_deal_vi_async_task
+            audit_log = AIRuntimeService.create_audit_log(
+                source_type="deal_enrichment",
+                source_id=str(deal.id),
+                context_label=f"Venture Intelligence: {deal.title}",
+                skill=AIRuntimeService.get_skill("venture_intelligence_enrichment"),
+                status="PENDING",
+                is_success=False,
+                system_prompt="Queued for Venture Intelligence enrichment.",
+                user_prompt=(
+                    f"Enrich {relation_type} company "
+                    f"{company_name or cin or deal.title} for deal {deal.title}."
+                ),
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "deal_title": deal.title,
+                    "relation_type": relation_type,
+                    "company_name": company_name,
+                    "cin": cin,
+                    "result_route": f"/deals/{deal.id}?tab=key-financials#venture-intelligence-section",
+                },
+            )
             task = enrich_deal_vi_async_task.apply_async(
                 kwargs={
                     "deal_id": str(deal.id),
@@ -1508,12 +1529,16 @@ class DealEnrichView(APIView):
                     "cin": cin,
                     "relation_type": relation_type,
                     "raw_data": raw_data,
+                    "audit_log_id": str(audit_log.id),
                 },
                 queue='high_priority'
             )
+            audit_log.celery_task_id = task.id
+            audit_log.save(update_fields=["celery_task_id"])
             return Response({
                 "status": "queued",
                 "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
                 "message": f"Queued {relation_type} Venture Intelligence enrichment.",
             })
 
@@ -1547,24 +1572,29 @@ class DealEnrichStatusView(APIView):
         from celery.result import AsyncResult
 
         result = AsyncResult(task_id)
+        audit_log = AIAuditLog.objects.filter(celery_task_id=task_id).only("id").first()
+        audit_log_id = str(audit_log.id) if audit_log else None
         if result.status == 'SUCCESS':
             data = result.result or {}
             if data.get("status") == "FAILURE" or "error" in data:
                 return Response({
                     "status": "FAILURE",
                     "error": data.get("error", "VI enrichment failed."),
+                    "audit_log_id": data.get("audit_log_id") or audit_log_id,
                 }, status=200)
 
             profile = VentureIntelligenceCompanyProfile.objects.filter(id=data.get("profile_id")).first()
             return Response({
                 "status": "SUCCESS",
                 "profile": VentureIntelligenceCompanyProfileSerializer(profile).data if profile else None,
+                "audit_log_id": data.get("audit_log_id") or audit_log_id,
             })
 
         if result.status == 'FAILURE':
             return Response({
                 "status": "FAILURE",
                 "error": str(result.info or "Background VI enrichment failed unexpectedly."),
+                "audit_log_id": audit_log_id,
             }, status=500)
 
-        return Response({"status": result.status})
+        return Response({"status": result.status, "audit_log_id": audit_log_id})
