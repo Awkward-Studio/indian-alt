@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import json
+from unittest.mock import MagicMock
 
 from django.test import SimpleTestCase, TestCase
 
@@ -12,6 +14,8 @@ from deals.models import (
 from deals.services.contradiction_detection import (
     ClaimEvidence,
     ContradictionDetectionService,
+    DiscrepancyClassifier,
+    StructuredClaim,
 )
 from meetings.models import MeetingNote
 
@@ -198,3 +202,149 @@ class DealClaimCollectionTests(TestCase):
         comparisons = ContradictionDetectionService.build_comparison_candidates(claims)
         self.assertEqual(len(comparisons), 1)
         self.assertEqual(comparisons[0].metric, "revenue")
+
+
+class DiscrepancyClassifierTests(SimpleTestCase):
+    def _claim(
+        self,
+        *,
+        value=100,
+        period="FY2024",
+        unit="INR_crore",
+        passage="Revenue was INR 100 Cr in FY24.",
+        qualifier="",
+        source_id="source-a",
+    ):
+        return StructuredClaim(
+            subject="Acme",
+            metric="revenue",
+            value=value,
+            value_text=str(value),
+            unit=unit,
+            period=period,
+            evidence=ClaimEvidence(
+                source_type="deal_document",
+                source_id=source_id,
+                source_label=f"{source_id}.pdf",
+                passage=passage,
+            ),
+            qualifier=qualifier,
+        )
+
+    def test_contract_exposes_every_supported_outcome(self):
+        schema = DiscrepancyClassifier.response_format()["json_schema"]["schema"]
+
+        self.assertEqual(
+            set(schema["properties"]["classification"]["enum"]),
+            {
+                "contradiction",
+                "definition_difference",
+                "time_period_difference",
+                "estimate",
+                "opinion",
+                "insufficient_evidence",
+                "no_discrepancy",
+            },
+        )
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_period_and_unit_gates_do_not_call_the_model(self):
+        provider = MagicMock()
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test-model")
+
+        period_result = classifier.classify(
+            self._claim(period="FY2024"),
+            self._claim(period="FY2025", source_id="source-b"),
+        )
+        unit_result = classifier.classify(
+            self._claim(),
+            self._claim(unit="USD_million", source_id="source-b"),
+        )
+
+        self.assertEqual(period_result.classification, "time_period_difference")
+        self.assertEqual(unit_result.classification, "definition_difference")
+        provider.execute_standard.assert_not_called()
+
+    def test_estimates_and_opinions_are_not_sent_as_factual_contradictions(self):
+        provider = MagicMock()
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test-model")
+
+        estimate = classifier.classify(
+            self._claim(passage="Management forecasts revenue of INR 100 Cr."),
+            self._claim(value=120, source_id="source-b"),
+        )
+        opinion = classifier.classify(
+            self._claim(passage="Management believes revenue is strong."),
+            self._claim(value=120, source_id="source-b"),
+        )
+
+        self.assertEqual(estimate.classification, "estimate")
+        self.assertEqual(opinion.classification, "opinion")
+        provider.execute_standard.assert_not_called()
+
+    def test_valid_llm_contradiction_preserves_both_evidence_records(self):
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            "response": json.dumps(
+                {
+                    "classification": "contradiction",
+                    "confidence": 0.91,
+                    "rationale": "Both sources state different actual revenue for FY2024.",
+                    "materiality": "high",
+                }
+            )
+        }
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test-model")
+
+        result = classifier.classify(
+            self._claim(),
+            self._claim(value=120, source_id="source-b"),
+        )
+
+        self.assertEqual(result.classification, "contradiction")
+        self.assertEqual(result.confidence, 0.91)
+        self.assertEqual(result.left_evidence.source_id, "source-a")
+        self.assertEqual(result.right_evidence.source_id, "source-b")
+        payload = provider.execute_standard.call_args.args[0]
+        self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(
+            payload["response_format"]["json_schema"]["name"],
+            "claim_discrepancy_classification",
+        )
+
+    def test_unknown_period_prevents_model_claim_of_contradiction(self):
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            "response": json.dumps(
+                {
+                    "classification": "contradiction",
+                    "confidence": 0.99,
+                    "rationale": "Values differ.",
+                    "materiality": "high",
+                }
+            )
+        }
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test-model")
+
+        result = classifier.classify(
+            self._claim(period="unspecified"),
+            self._claim(value=120, period="unspecified", source_id="source-b"),
+        )
+
+        self.assertEqual(result.classification, "insufficient_evidence")
+        self.assertIn("periods", result.rationale)
+
+    def test_invalid_model_output_fails_closed(self):
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            "response": '{"classification":"definitely_wrong","confidence":8}'
+        }
+        classifier = DiscrepancyClassifier(llm_service=provider, model="test-model")
+
+        result = classifier.classify(
+            self._claim(),
+            self._claim(value=120, source_id="source-b"),
+        )
+
+        self.assertEqual(result.classification, "insufficient_evidence")
+        self.assertEqual(result.confidence, 0.0)
