@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from banks.models import Bank
 
@@ -54,3 +55,72 @@ class Contact(models.Model):
 
     def __str__(self):
         return self.name or f'Contact {self.id}'
+
+
+class WorkplaceVerificationSuggestion(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending review'
+        ACCEPTED = 'ACCEPTED', 'Accepted'
+        REJECTED = 'REJECTED', 'Rejected'
+        SUPERSEDED = 'SUPERSEDED', 'Superseded'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    contact = models.ForeignKey(
+        Contact,
+        on_delete=models.CASCADE,
+        related_name='workplace_verifications',
+    )
+    old_bank_name = models.TextField(blank=True, default='')
+    old_designation = models.TextField(blank=True, default='')
+    proposed_bank_name = models.TextField(blank=True, default='')
+    proposed_designation = models.TextField(blank=True, default='')
+    source_url = models.URLField(max_length=1000)
+    source_title = models.TextField(blank=True, default='')
+    source_snippet = models.TextField(blank=True, default='')
+    source_domain = models.CharField(max_length=255, blank=True, default='')
+    search_query = models.TextField()
+    confidence = models.FloatField(default=0)
+    retrieved_at = models.DateTimeField()
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    accepted_fields = models.JSONField(default=list, blank=True)
+    reviewer_comment = models.TextField(blank=True, default='')
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requested_workplace_verifications',
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_workplace_verifications',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='workplace_verifications',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(
+                fields=['contact', 'status', '-created_at'],
+                name='contacts_wo_contact_32d9fc_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.contact} workplace verification ({self.status})'
