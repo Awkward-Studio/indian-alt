@@ -17,6 +17,7 @@ from django.http import StreamingHttpResponse
 from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog, DocumentChunk
 from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
 from .services.ai_processor import AIProcessorService
+from .services.chat_scope import ChatScopeValidationError, internal_citation, parse_chat_scope
 from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
@@ -24,6 +25,7 @@ from .services.runtime import AIRuntimeService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
+from meetings.models import MeetingNote
 
 logger = logging.getLogger(__name__)
 
@@ -140,9 +142,72 @@ class DealChatView(APIView):
             return Response({"error": "deal_id and message are required"}, status=400)
         try:
             deal = Deal.objects.get(id=deal_id)
-            ai_service = AIProcessorService()
+            try:
+                scope = parse_chat_scope(request.data)
+            except ChatScopeValidationError as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            documents = list(
+                deal.documents.filter(id__in=scope.document_ids, is_indexed=True)
+            )
+            if len(documents) != len(scope.document_ids):
+                return Response(
+                    {"error": "One or more selected documents are unavailable, unauthorized, or not indexed."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            transcripts = list(
+                MeetingNote.objects.filter(
+                    deals=deal,
+                    id__in=scope.transcript_ids,
+                    is_indexed=True,
+                ).distinct()
+            )
+            if len(transcripts) != len(scope.transcript_ids):
+                return Response(
+                    {"error": "One or more selected transcripts are unavailable, unauthorized, or not indexed."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            interactive_context_data = ""
+            selected_sources: List[Dict[str, Any]] = []
+            scope_diagnostics: Dict[str, Any] = {}
+            if scope.has_private_scope:
+                chat_service = UniversalChatService(AIProcessorService())
+                query_plan = {
+                    "user_query": user_message,
+                    "selection_mode": "explicit_chat_scope",
+                    "deal_ids": [str(deal.id)],
+                }
+                if scope.document_ids:
+                    document_chunks, document_diagnostics = chat_service.chunks_for_selected_documents(
+                        plan=query_plan,
+                        deal_id=str(deal.id),
+                        document_ids=scope.document_ids,
+                    )
+                    selected_sources.extend(document_chunks)
+                    scope_diagnostics["documents"] = document_diagnostics
+                if scope.transcript_ids:
+                    transcript_chunks, transcript_diagnostics = chat_service.chunks_for_selected_transcripts(
+                        deal_id=str(deal.id),
+                        transcript_ids=scope.transcript_ids,
+                    )
+                    selected_sources.extend(transcript_chunks)
+                    scope_diagnostics["transcripts"] = transcript_diagnostics
+                if not selected_sources:
+                    return Response(
+                        {"error": "The selected scope has no retrievable indexed passages."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                interactive_context_data = chat_service.build_context_from_selection(
+                    plan=query_plan,
+                    deal_ids=[str(deal.id)],
+                    chunks=selected_sources,
+                    current_deal_id=str(deal.id),
+                )
+
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_chat').first()
+            citation_preview = [internal_citation(chunk) for chunk in selected_sources]
             
             # Create PENDING audit log for background tracking
             audit_log = AIRuntimeService.create_audit_log(
@@ -155,6 +220,15 @@ class DealChatView(APIView):
                 is_success=False,
                 system_prompt="Processing forensic query in background...",
                 user_prompt=user_message,
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "evidence_mode": scope.evidence_mode,
+                    "web_search_enabled": scope.web_search_enabled,
+                    "selected_document_ids": scope.document_ids,
+                    "selected_transcript_ids": scope.transcript_ids,
+                    "selected_sources": citation_preview,
+                    "scope_diagnostics": scope_diagnostics,
+                },
             )
 
             from .tasks import generate_chat_response_async
@@ -176,9 +250,20 @@ class DealChatView(APIView):
                 )
 
             # Save the user message to DB immediately (fixes Bug 1)
-            AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
+            AIMessage.objects.create(
+                conversation=conversation,
+                role='user',
+                content=user_message,
+                applied_filters={
+                    "audit_log_id": str(audit_log.id),
+                    "evidence_mode": scope.evidence_mode,
+                    "web_search_enabled": scope.web_search_enabled,
+                    "selected_document_ids": scope.document_ids,
+                    "selected_transcript_ids": scope.transcript_ids,
+                },
+            )
 
-            model_provider = request.data.get('model_provider', 'vllm')
+            model_provider = scope.model_provider
             if not isinstance(conversation.metadata, dict):
                 conversation.metadata = {}
             conversation.metadata['model_provider'] = model_provider
@@ -198,6 +283,12 @@ class DealChatView(APIView):
                         'metadata': {
                             'deal_id': str(deal.id),
                             'model_provider': model_provider,
+                            'web_search_enabled': scope.web_search_enabled,
+                            'evidence_mode': scope.evidence_mode,
+                            'selected_document_ids': scope.document_ids,
+                            'selected_transcript_ids': scope.transcript_ids,
+                            'interactive_context_data': interactive_context_data,
+                            'selected_sources': selected_sources,
                         },
                         'audit_log_id': str(audit_log.id)
                     }
@@ -212,8 +303,13 @@ class DealChatView(APIView):
                 "status": "queued",
                 "task_id": task_info.get("id"),
                 "audit_log_id": str(audit_log.id),
-                "conversation_id": str(conversation.id)
+                "conversation_id": str(conversation.id),
+                "evidence_mode": scope.evidence_mode,
+                "selected_document_ids": scope.document_ids,
+                "selected_transcript_ids": scope.transcript_ids,
             })
+        except Deal.DoesNotExist:
+            return Response({"error": "Deal not found."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Deal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)

@@ -1635,6 +1635,44 @@ class UniversalChatService:
             diagnostics["returned_selected_document_chunk_count"] = len(serialized)
         return serialized, diagnostics
 
+    def chunks_for_selected_transcripts(
+        self,
+        *,
+        deal_id: str,
+        transcript_ids: List[str],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        normalized_ids = list(dict.fromkeys(str(item) for item in transcript_ids if item))
+        chunks = list(
+            DocumentChunk.objects.filter(
+                deal_id=deal_id,
+                source_type="meeting_note",
+                source_id__in=normalized_ids,
+            )
+            .select_related("deal")
+            .order_by("source_id", "created_at")[:80]
+        )
+        serialized = [
+            self._serialize_chunk(
+                {
+                    "chunk": chunk,
+                    "score": 1.0,
+                    "suggested": index < 8,
+                    "rank_reason": "Selected meeting transcript passage",
+                }
+            )
+            for index, chunk in enumerate(chunks)
+        ]
+        returned_ids = {str(item.get("source_id") or "") for item in serialized}
+        return serialized, {
+            "selected_transcript_count": len(normalized_ids),
+            "returned_transcript_chunk_count": len(serialized),
+            "transcripts_without_chunks": [
+                transcript_id
+                for transcript_id in normalized_ids
+                if transcript_id not in returned_ids
+            ],
+        }
+
     def build_context_from_selection(self, *, plan: Dict[str, Any], deal_ids: List[str], chunks: List[Dict[str, Any]], extra_context: str = "", current_deal_id: str | None = None) -> str:
         target_ids = [str(item) for item in deal_ids if item]
         if current_deal_id and str(current_deal_id) not in target_ids:

@@ -2,9 +2,11 @@ import logging
 import json
 import time
 import re
+from datetime import datetime, timezone
 from celery import shared_task
 from .models import AIAuditLog, AIMessage, AIConversation, AIPersonality, AISkill
 from .services.ai_processor import AIProcessorService
+from .services.chat_scope import internal_citation, normalize_web_citation
 from .services.universal_chat import UniversalChatService
 from .services.runtime import AIRuntimeService
 
@@ -290,6 +292,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "retrieved_chunk_count": 0,
                     "selected_chunk_count": 0,
                     "selected_sources": [],
+                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
                 }
             elif (metadata or {}).get("interactive_context_data"):
                 task_metadata = {
@@ -306,6 +310,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "retrieved_chunk_count": 0,
                     "selected_chunk_count": len(metadata.get("selected_sources") or []),
                     "selected_sources": metadata.get("selected_sources") or [],
+                    "selected_document_ids": metadata.get("selected_document_ids") or [],
+                    "selected_transcript_ids": metadata.get("selected_transcript_ids") or [],
+                    "web_search_enabled": False,
+                    "evidence_mode": metadata.get("evidence_mode", "internal"),
                 }
             else:
                 task_metadata = chat_service.process_single_deal_build_metadata(
@@ -329,6 +337,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
                 "selected_chunk_count": task_metadata.get("selected_chunk_count"),
                 "selected_sources": task_metadata.get("selected_sources"),
+                "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+                "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
@@ -363,6 +375,11 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
 
         full_text = ""
         full_thinking = ""
+        structured_citations = [
+            internal_citation(source)
+            for source in (task_metadata.get("selected_sources") or [])
+            if isinstance(source, dict)
+        ]
         last_save_time = time.time()
         last_stream_broadcast = 0.0
         pending_response_delta = ""
@@ -381,6 +398,11 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 chunk = json.loads(chunk_str)
                 response_delta = chunk.get("response", "")
                 thinking_delta = chunk.get("thinking", "")
+                retrieved_at = datetime.now(timezone.utc).isoformat()
+                for raw_citation in chunk.get("citations") or []:
+                    citation = normalize_web_citation(raw_citation, retrieved_at=retrieved_at)
+                    if citation and citation not in structured_citations:
+                        structured_citations.append(citation)
                 full_text += response_delta
                 full_thinking += thinking_delta
                 pending_response_delta += response_delta
@@ -429,14 +451,29 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 role='assistant',
                 content=full_text,
                 thinking=full_thinking,
-                applied_filters={"audit_log_id": audit_log_id}
+                data_points={"citations": structured_citations},
+                applied_filters={
+                    "audit_log_id": audit_log_id,
+                    "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
+                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                    "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+                }
             )
             # Finalize Audit Log
             audit_log.raw_response = full_text
             audit_log.raw_thinking = full_thinking
             audit_log.status = 'COMPLETED'
             audit_log.is_success = True
-            audit_log.save(update_fields=['raw_response', 'raw_thinking', 'status', 'is_success'])
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "citations": structured_citations,
+                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
+                "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+            }
+            audit_log.save(update_fields=['raw_response', 'raw_thinking', 'status', 'is_success', 'source_metadata'])
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
             logger.info(f"Background chat response generated for Conv: {conversation_id}")

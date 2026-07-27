@@ -553,7 +553,8 @@ class AnthropicProviderService:
         user_prompt = payload.get("prompt") or ""
         
         # Determine options
-        max_tokens = (payload.get("options") or {}).get("max_tokens") or 8192
+        options = payload.get("options") or {}
+        max_tokens = options.get("max_tokens") or 8192
 
         prompt_lower = user_prompt.lower()
         search_keywords = [
@@ -563,8 +564,13 @@ class AnthropicProviderService:
             "who is", "who are", "website", "competitors", "peers", "news",
             "founder", "ceo", "funding", "valuation", "revenue", "financials"
         ]
-        disable_search = (payload.get("options") or {}).get("disable_search", False)
-        has_search_intent = any(kw in prompt_lower for kw in search_keywords) and not disable_search
+        explicit_search = options.get("web_search_enabled")
+        disable_search = options.get("disable_search", False)
+        has_search_intent = (
+            bool(explicit_search)
+            if isinstance(explicit_search, bool)
+            else any(kw in prompt_lower for kw in search_keywords) and not disable_search
+        )
 
         tools = []
         if has_search_intent:
@@ -580,7 +586,6 @@ class AnthropicProviderService:
             
             # Attach the native web search tool for search-capable models
             if "haiku" not in model.lower():
-                options = payload.get("options") or {}
                 max_search_uses = options.get("max_search_uses", 2)
                 web_search_tool_type = options.get("web_search_tool_type") or "web_search_20250305"
                 if options.get("enable_dynamic_web_search"):
@@ -663,7 +668,32 @@ class AnthropicProviderService:
                 continue
 
             event_type = data.get("type")
-            if event_type == "content_block_delta":
+            if event_type == "content_block_start":
+                block = data.get("content_block") or {}
+                citations = []
+                if block.get("type") == "web_search_tool_result":
+                    result_content = block.get("content") or []
+                    if isinstance(result_content, dict):
+                        result_content = [result_content]
+                    citations.extend(
+                        item
+                        for item in result_content
+                        if isinstance(item, dict) and (item.get("url") or item.get("source_url"))
+                    )
+                block_citations = block.get("citations") or []
+                if isinstance(block_citations, dict):
+                    block_citations = [block_citations]
+                citations.extend(item for item in block_citations if isinstance(item, dict))
+                if citations:
+                    yield json.dumps(
+                        {
+                            "response": "",
+                            "thinking": "",
+                            "citations": citations,
+                            "done": False,
+                        }
+                    )
+            elif event_type == "content_block_delta":
                 delta = data.get("delta") or {}
                 delta_type = delta.get("type")
                 if delta_type == "text_delta":
@@ -672,6 +702,17 @@ class AnthropicProviderService:
                 elif delta_type == "thinking_delta":
                     thinking = delta.get("thinking") or ""
                     yield json.dumps({"response": "", "thinking": thinking, "done": False})
+                elif delta_type == "citations_delta":
+                    citation = delta.get("citation") or {}
+                    if citation:
+                        yield json.dumps(
+                            {
+                                "response": "",
+                                "thinking": "",
+                                "citations": [citation],
+                                "done": False,
+                            }
+                        )
             elif event_type in ("message_stop", "message_delta") or (
                 event_type == "message_delta" and (data.get("delta") or {}).get("stop_reason") is not None
             ):

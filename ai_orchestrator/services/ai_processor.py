@@ -97,12 +97,16 @@ class AIProcessorService:
         else:
             system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         if model_provider == "anthropic":
+            web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
             system_instructions += (
                 "\n\n[PRIVACY & SEARCH DIRECTIVE]\n"
                 "You are routed through a secure privacy-preserving gateway.\n"
                 "You DO NOT have access to private database fields, uploaded files, financial details, internal metrics, or comments for any deals.\n"
-                "To answer the user's questions about deals, companies, markets, or news, you must autonomously use your native web search tool. "
-                "Ground your answers in public information and provide citations for your sources."
+                + (
+                    "Web search is explicitly enabled for this question. Use the native web search tool and ground material factual claims in cited public sources."
+                    if web_search_enabled
+                    else "Web search is explicitly disabled for this question. Do not invoke a web-search tool or imply that current public sources were checked."
+                )
             )
         prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
         response_mode = (metadata or {}).get("response_mode")
@@ -141,6 +145,10 @@ class AIProcessorService:
                 payload["chat_template_kwargs"] = metadata["chat_template_kwargs"]
             if "max_tokens" in metadata:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
+            if "web_search_enabled" in metadata:
+                payload["options"]["web_search_enabled"] = bool(metadata["web_search_enabled"])
+                payload["options"]["disable_search"] = not bool(metadata["web_search_enabled"])
+                payload["options"]["enable_dynamic_web_search"] = bool(metadata["web_search_enabled"])
 
         # Qwen's vLLM chat template otherwise emits its internal reasoning before
         # the answer. Callers can explicitly opt back in for a task that needs it.
@@ -219,6 +227,7 @@ class AIProcessorService:
         try:
             full_response = ""
             full_thinking = ""
+            collected_citations = []
             chunk_counter = 0
 
             stream_iterator = self.current_provider.execute_stream(payload)
@@ -226,6 +235,9 @@ class AIProcessorService:
             for ui_chunk, thinking_delta, response_delta in ResponseParserService.parse_stream(stream_iterator):
                 full_thinking += thinking_delta
                 full_response += response_delta
+                for citation in ui_chunk.get("citations") or []:
+                    if citation not in collected_citations:
+                        collected_citations.append(citation)
                 
                 # Broadcast to WebSockets
                 if self.channel_layer:
@@ -239,6 +251,7 @@ class AIProcessorService:
                             "thinking": thinking_delta,
                             "response_delta": response_delta,
                             "thinking_delta": thinking_delta,
+                            "citations": ui_chunk.get("citations") or [],
                             "status": "processing",
                             "done": False
                         }
@@ -265,6 +278,11 @@ class AIProcessorService:
             audit_log.status = 'COMPLETED'
             audit_log.request_duration_ms = duration_ms
             audit_log.tokens_used = estimated_tokens
+            if collected_citations:
+                audit_log.source_metadata = {
+                    **(audit_log.source_metadata or {}),
+                    "provider_citations": collected_citations,
+                }
             audit_log.save()
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
