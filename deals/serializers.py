@@ -1,8 +1,11 @@
 from rest_framework import serializers
+from django.db import transaction
 from django.utils import timezone
+from datetime import timedelta
 from .models import (
     Deal, DealContradiction, DealDocument, DealGeneratedDocument, DealPhaseLog,
     InitialAnalysisStatus,
+    SectorResearchDiscoveryRun, SectorResearchRecommendation,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
@@ -80,6 +83,35 @@ class DealContradictionSerializer(serializers.ModelSerializer):
             "left_claim", "right_claim", "classifier_version", "model_used",
             "audit_log", "reviewed_by", "reviewed_by_name", "reviewed_at",
             "detected_at", "updated_at",
+        )
+
+
+class SectorResearchRecommendationSerializer(serializers.ModelSerializer):
+    is_stale = serializers.SerializerMethodField()
+
+    def get_is_stale(self, obj):
+        return obj.last_verified_at < timezone.now() - timedelta(days=30)
+
+    class Meta:
+        model = SectorResearchRecommendation
+        fields = (
+            "id", "title", "publisher", "publisher_domain",
+            "publication_date", "url", "canonical_url", "document_type",
+            "reason", "snippet", "source_query", "accessibility",
+            "content_type", "preferred_source", "relevance_score",
+            "credibility_score", "freshness_score", "accessibility_score",
+            "total_score", "score_explanation", "retrieved_at",
+            "last_verified_at", "is_stale",
+        )
+
+
+class SectorResearchDiscoveryRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SectorResearchDiscoveryRun
+        fields = (
+            "id", "status", "trigger", "context_hash", "celery_task_id",
+            "audit_log_id", "queries", "error", "started_at", "completed_at",
+            "created_at", "updated_at",
         )
 
 
@@ -337,9 +369,23 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if deal.sector or deal.industry:
+            requested_by = getattr(self.context.get("request"), "user", None)
+            transaction.on_commit(
+                lambda: self._enqueue_research_discovery(
+                    deal,
+                    "AUTO_CREATE",
+                    requested_by,
+                )
+            )
         return deal
 
     def update(self, instance, validated_data):
+        research_context_changed = any(
+            field in validated_data
+            and validated_data[field] != getattr(instance, field)
+            for field in ("title", "sector", "industry")
+        )
         model_data = validated_data.copy()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
@@ -359,7 +405,30 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if research_context_changed and (deal.sector or deal.industry):
+            requested_by = getattr(self.context.get("request"), "user", None)
+            transaction.on_commit(
+                lambda: self._enqueue_research_discovery(
+                    deal,
+                    "AUTO_CONTEXT_CHANGE",
+                    requested_by,
+                )
+            )
         return deal
+
+    @staticmethod
+    def _enqueue_research_discovery(deal, trigger, requested_by):
+        from .services.research_discovery import ResearchDiscoveryCoordinator
+
+        ResearchDiscoveryCoordinator.enqueue(
+            deal=deal,
+            trigger=trigger,
+            requested_by=(
+                requested_by
+                if getattr(requested_by, "is_authenticated", False)
+                else None
+            ),
+        )
 
     class Meta:
         model = Deal

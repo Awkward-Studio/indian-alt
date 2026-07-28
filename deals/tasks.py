@@ -2371,3 +2371,145 @@ def enrich_deal_vi_async_task(
             "error": str(e),
             "audit_log_id": str(audit_log.id) if audit_log else None,
         }
+
+
+@shared_task(queue="high_priority")
+def discover_sector_reports_task(deal_id: str, run_id: str | None = None) -> dict:
+    """Discover public research metadata for a deal without attaching files."""
+    from ai_orchestrator.models import AIAuditLog
+    from .models import SectorResearchDiscoveryRun
+    from .services.research_discovery import ResearchDiscoveryService
+
+    run = None
+    audit_log = None
+    try:
+        if run_id:
+            run = SectorResearchDiscoveryRun.objects.select_related("deal").get(
+                id=run_id,
+                deal_id=deal_id,
+            )
+            if run.status not in {
+                SectorResearchDiscoveryRun.Status.QUEUED,
+                SectorResearchDiscoveryRun.Status.RUNNING,
+            }:
+                return {
+                    "status": run.status,
+                    "run_id": str(run.id),
+                    "result_count": run.recommendations.count(),
+                }
+            run.status = SectorResearchDiscoveryRun.Status.RUNNING
+            run.started_at = run.started_at or timezone.now()
+            run.error = ""
+            run.save(
+                update_fields=["status", "started_at", "error", "updated_at"]
+            )
+            audit_log = AIAuditLog.objects.filter(id=run.audit_log_id).first()
+            if audit_log:
+                audit_log.status = "PROCESSING"
+                audit_log.save(update_fields=["status"])
+                broadcast_audit_log_update(audit_log)
+
+        deal = Deal.objects.prefetch_related("vi_relations__company_profile").get(
+            id=deal_id
+        )
+        target_relation = next(
+            (
+                relation
+                for relation in deal.vi_relations.all()
+                if relation.relation_type == "target"
+            ),
+            None,
+        )
+        cin = (
+            str(target_relation.company_profile.cin or "").strip()
+            if target_relation
+            else ""
+        )
+        service = ResearchDiscoveryService()
+        payload = service.discover(deal=deal, cin=cin)
+        if run:
+            persisted = service.persist_recommendations(
+                deal=deal,
+                run=run,
+                payload=payload,
+            )
+            run.status = SectorResearchDiscoveryRun.Status.COMPLETED
+            run.queries = payload.get("queries", [])
+            run.completed_at = timezone.now()
+            run.save(
+                update_fields=[
+                    "status", "queries", "completed_at", "updated_at",
+                ]
+            )
+            payload["run_id"] = str(run.id)
+            payload["persisted_count"] = len(persisted)
+            if audit_log:
+                audit_log.status = "COMPLETED"
+                audit_log.is_success = True
+                audit_log.completed_at = timezone.now()
+                audit_log.raw_response = (
+                    f"Discovered and ranked {len(persisted)} public research sources."
+                )
+                audit_log.parsed_json = {
+                    "status": "COMPLETED",
+                    "run_id": str(run.id),
+                    "result_count": len(persisted),
+                    "queries": payload.get("queries", []),
+                }
+                audit_log.source_metadata = {
+                    **(audit_log.source_metadata or {}),
+                    "result_count": len(persisted),
+                    "document_types": sorted(
+                        {item.document_type for item in persisted}
+                    ),
+                }
+                audit_log.save(
+                    update_fields=[
+                        "status", "is_success", "raw_response", "parsed_json",
+                        "source_metadata", "completed_at",
+                    ]
+                )
+                broadcast_audit_log_update(
+                    audit_log,
+                    event_type="terminal",
+                    done=True,
+                )
+        return payload
+    except Deal.DoesNotExist:
+        payload = {
+            "status": "FAILED",
+            "error": "Deal not found.",
+            "recommendations": [],
+        }
+    except SectorResearchDiscoveryRun.DoesNotExist:
+        payload = {
+            "status": "FAILED",
+            "error": "Research discovery run not found.",
+            "recommendations": [],
+        }
+    except Exception as exc:
+        logger.exception("Sector research discovery failed for deal %s", deal_id)
+        payload = {
+            "status": "FAILED",
+            "error": str(exc),
+            "recommendations": [],
+        }
+    if run:
+        run.status = SectorResearchDiscoveryRun.Status.FAILED
+        run.error = payload["error"]
+        run.completed_at = timezone.now()
+        run.save(
+            update_fields=["status", "error", "completed_at", "updated_at"]
+        )
+    if audit_log:
+        audit_log.status = "FAILED"
+        audit_log.is_success = False
+        audit_log.completed_at = timezone.now()
+        audit_log.error_message = payload["error"]
+        audit_log.save(
+            update_fields=[
+                "status", "is_success", "error_message", "completed_at",
+            ]
+        )
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+    return payload

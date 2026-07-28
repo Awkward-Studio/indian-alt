@@ -14,13 +14,15 @@ from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
     Deal, DealAnalysis, DealContradiction, DealDocument, DealPhaseLog,
-    DealRelationshipContext,
+    DealRelationshipContext, SectorResearchDiscoveryRun,
+    SectorResearchRecommendation,
     VentureIntelligenceCompanyRelation,
 )
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer,
     DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
-    DealHeavyFieldsSerializer,
+    DealHeavyFieldsSerializer, SectorResearchDiscoveryRunSerializer,
+    SectorResearchRecommendationSerializer,
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
@@ -656,6 +658,88 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if profile is None or profile.is_disabled:
             return False
         return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @action(detail=True, methods=["get", "post"])
+    def research_discovery(self, request, pk=None):
+        deal = self.get_object()
+        from .services.research_discovery import ResearchDiscoveryCoordinator
+
+        if request.method == "POST":
+            if not self._can_review_contradictions(request, deal):
+                return Response(
+                    {
+                        "error": (
+                            "Only deal-responsible analysts or administrators "
+                            "can refresh research discovery."
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            run, created = ResearchDiscoveryCoordinator.enqueue(
+                deal=deal,
+                trigger=SectorResearchDiscoveryRun.Trigger.MANUAL,
+                requested_by=request.user,
+            )
+            return Response(
+                {
+                    "created": created,
+                    "run": SectorResearchDiscoveryRunSerializer(run).data,
+                },
+                status=(
+                    status.HTTP_202_ACCEPTED
+                    if created
+                    else status.HTTP_200_OK
+                ),
+            )
+
+        valid_document_types = {
+            choice
+            for choice, _label in SectorResearchRecommendation.DocumentType.choices
+        }
+        valid_accessibility = {
+            choice
+            for choice, _label in SectorResearchRecommendation.Accessibility.choices
+        }
+        document_type = request.query_params.get("document_type")
+        accessibility = request.query_params.get("accessibility")
+        if document_type and document_type not in valid_document_types:
+            return Response(
+                {"error": "Invalid document_type filter."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if accessibility and accessibility not in valid_accessibility:
+            return Response(
+                {"error": "Invalid accessibility filter."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        recommendations = deal.research_recommendations.all()
+        if document_type:
+            recommendations = recommendations.filter(
+                document_type=document_type
+            )
+        if accessibility:
+            recommendations = recommendations.filter(
+                accessibility=accessibility
+            )
+        latest_run = deal.research_discovery_runs.first()
+        current_hash = ResearchDiscoveryCoordinator.context_hash(deal)
+        return Response(
+            {
+                "run": (
+                    SectorResearchDiscoveryRunSerializer(latest_run).data
+                    if latest_run
+                    else None
+                ),
+                "context_stale": bool(
+                    latest_run and latest_run.context_hash != current_hash
+                ),
+                "recommendations": SectorResearchRecommendationSerializer(
+                    recommendations[:100],
+                    many=True,
+                ).data,
+            }
+        )
 
     @action(detail=True, methods=["get", "patch"])
     def contradictions(self, request, pk=None):
