@@ -160,6 +160,32 @@ class DocumentProcessorService:
 
         personality = AIRuntimeService.get_default_personality()
         vision_model = AIRuntimeService.get_vision_model(personality)
+        if not vision_model or vision_model == "default":
+            logger.info(
+                "[DOC-PROC] No vision model configured for %s. Using text-native fallback extraction.",
+                filename,
+            )
+            fallback_text = self.extract_text_fallback(
+                file_content,
+                filename,
+                page_limit=page_limit,
+            ).strip()
+            if fallback_text:
+                return self._build_local_result(
+                    raw_text=fallback_text,
+                    normalized_text=fallback_text,
+                    mode="fallback_text",
+                    quality_flags=["vision_disabled", "local_backend_fallback"],
+                )
+            return {
+                "text": "",
+                "raw_extracted_text": "",
+                "normalized_text": "",
+                "mode": "fallback_text",
+                "transcription_status": "failed",
+                "quality_flags": ["vision_disabled", "local_backend_fallback"],
+                "error": f"No readable text extracted for {filename}; a vision model is required for scanned/image-only documents.",
+            }
 
         transcription = ""
         total_pages = len(images_b64)

@@ -1671,6 +1671,30 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["normalized_text"], "Local text")
         mock_local_extract.assert_called_once()
 
+    @patch.object(DocumentProcessorService, "extract_text_fallback", return_value="Native PDF text")
+    @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_vision_model", return_value="")
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_default_personality", return_value=None)
+    def test_missing_vision_model_uses_text_native_fallback(
+        self,
+        _mock_personality,
+        _mock_vision_model,
+        _mock_convert,
+        mock_text_fallback,
+    ):
+        service = DocumentProcessorService()
+
+        result = service.get_extraction_result(b"pdf-bytes", "example.pdf")
+
+        self.assertEqual(result["mode"], "fallback_text")
+        self.assertEqual(result["normalized_text"], "Native PDF text")
+        self.assertIn("vision_disabled", result["quality_flags"])
+        mock_text_fallback.assert_called_once_with(
+            b"pdf-bytes",
+            "example.pdf",
+            page_limit=None,
+        )
+
 
 class AnthropicIntegrationTests(TestCase):
     def setUp(self):

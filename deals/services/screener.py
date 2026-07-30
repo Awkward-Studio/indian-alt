@@ -495,7 +495,7 @@ class ScreenerCompanyService:
     the existing company profile and relation tables.
     """
 
-    def search_company(self, company_name: str) -> dict[str, Any]:
+    def search_company(self, company_name: str, *, raise_on_error: bool = False) -> dict[str, Any]:
         name_key = _company_match_key(company_name)
         if not name_key:
             return {}
@@ -522,6 +522,8 @@ class ScreenerCompanyService:
         ))[:4]
 
         results = []
+        successful_requests = 0
+        last_error: Exception | None = None
         for query in queries:
             try:
                 response = requests.get(
@@ -539,11 +541,15 @@ class ScreenerCompanyService:
                 response.raise_for_status()
                 query_results = response.json()
             except Exception as exc:
+                last_error = exc
                 logger.warning("Direct Screener company search failed for %s: %s", query, exc)
                 continue
+            successful_requests += 1
             if isinstance(query_results, list) and query_results:
                 results.extend(query_results)
                 break
+        if not successful_requests and last_error is not None and raise_on_error:
+            raise last_error
         if not results:
             return {}
 

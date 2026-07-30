@@ -251,7 +251,7 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
 
         self.assertEqual(search_service.search_results.call_count, 2)
         search_queries = [call.args[0] for call in search_service.search_results.call_args_list]
-        self.assertTrue(any("Quick commerce India listed sector competitors" in query for query in search_queries))
+        self.assertTrue(any("Quick commerce India listed companies NSE BSE ticker" in query for query in search_queries))
         self.assertTrue(any('"Zepto"' in query and "private unlisted D2C" in query for query in search_queries))
         self.assertTrue(all(call.kwargs["aggregate_engines"] for call in search_service.search_results.call_args_list))
         self.assertEqual(llm_service.execute_standard.call_count, 2)
@@ -344,6 +344,25 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
 
         self.assertEqual(confirmed[0]["company_type"], "private")
         self.assertIn("private/unlisted", confirmed[0]["classification_source"])
+        _mock_search.assert_not_called()
+
+    @patch(
+        "deals.services.screener.ScreenerCompanyService.search_company",
+        side_effect=requests.exceptions.HTTPError("429 Too Many Requests"),
+    )
+    def test_public_classification_survives_transient_screener_failure(self, _mock_search):
+        confirmed = CompetitorWebResearchService._confirm_screener_listings([{
+            "name": "Listed Foods",
+            "company_type": "listed_public",
+            "classification_confidence": 0.9,
+            "exchange": "NSE",
+            "ticker": "LISTEDFOOD",
+            "classification_source": "Evidence says Listed Foods trades on NSE as LISTEDFOOD.",
+            "discovery_route": "public",
+        }])
+
+        self.assertEqual(confirmed[0]["company_type"], "listed_public")
+        self.assertEqual(confirmed[0]["ticker"], "LISTEDFOOD")
 
     def test_grounding_excludes_target_legal_name_alias(self):
         service = CompetitorWebResearchService(search_service=MagicMock(), llm_service=MagicMock())

@@ -1,8 +1,8 @@
 services:
-  # T4 profile: keep the LLM as the only GPU workload.
-  # Run embeddings/reranking on CPU to avoid VRAM contention on 16GB cards.
+  # T4 profile: llama.cpp serves Gemma 4 because vLLM's Gemma 4 attention
+  # kernel requires more shared memory than Turing provides.
   vllm-text:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    image: ${VLLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
     container_name: vllm-text-t4
     restart: unless-stopped
     ipc: host
@@ -17,45 +17,39 @@ services:
               count: 1
               capabilities: [gpu]
     environment:
-      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
-      VLLM_API_KEY: ${VLLM_API_KEY:-local-dev-key}
+      HF_TOKEN: ${HF_TOKEN:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
-      - ${VLLM_TEXT_MODEL}
+      - -hf
+      - ${LLAMA_MODEL_SOURCE:-google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0}
+      - --alias
+      - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q4}
       - --host
       - 0.0.0.0
       - --port
       - "8000"
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
-      - --dtype
-      - ${VLLM_DTYPE:-half}
-      - --gpu-memory-utilization
-      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.82}
-      - --max-model-len
-      - ${VLLM_MAX_MODEL_LEN:-8192}
-      - --max-num-seqs
-      - ${VLLM_MAX_NUM_SEQS:-4}
-      - --max-num-batched-tokens
-      - ${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
-      - --cpu-offload-gb
-      - ${VLLM_CPU_OFFLOAD_GB:-0}
-      - --enable-prefix-caching
-      - --enable-chunked-prefill
-      - --generation-config
-      - vllm
-      - --trust-remote-code
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os, urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/v1/models', headers={'Authorization': 'Bearer ' + os.environ.get('VLLM_API_KEY', 'local-dev-key')}); urllib.request.urlopen(req, timeout=10).read()\""]
-      interval: 30s
-      timeout: 15s
-      retries: 20
-      start_period: 180s
+      - --ctx-size
+      - ${LLAMA_CONTEXT_SIZE:-32768}
+      - --parallel
+      - ${LLAMA_PARALLEL_SEQUENCES:-1}
+      - --n-gpu-layers
+      - ${LLAMA_GPU_LAYERS:-99}
+      - --batch-size
+      - ${LLAMA_BATCH_SIZE:-2048}
+      - --ubatch-size
+      - ${LLAMA_UBATCH_SIZE:-512}
+      - --cache-type-k
+      - ${LLAMA_CACHE_TYPE_K:-q8_0}
+      - --cache-type-v
+      - ${LLAMA_CACHE_TYPE_V:-q8_0}
+      - --no-webui
 
   tei-embedding:
-    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
     container_name: tei-embedding-t4
     restart: unless-stopped
     shm_size: 1g
@@ -63,6 +57,15 @@ services:
       - "${EMBEDDING_PORT:-8081}:80"
     volumes:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     command:
       - --model-id
       - ${EMBEDDING_MODEL_ID:-Qwen/Qwen3-Embedding-0.6B}
@@ -70,8 +73,10 @@ services:
       - 0.0.0.0
       - --port
       - "80"
+      - --dtype
+      - ${TEI_DTYPE:-float16}
       - --max-batch-tokens
-      - ${EMBEDDING_MAX_BATCH_TOKENS:-4096}
+      - ${EMBEDDING_MAX_BATCH_TOKENS:-8192}
       - --auto-truncate
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/health', timeout=5).read()\""]
@@ -81,7 +86,7 @@ services:
       start_period: 120s
 
   tei-reranker:
-    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
     container_name: tei-reranker-t4
     restart: unless-stopped
     shm_size: 1g
@@ -89,13 +94,24 @@ services:
       - "${RERANKER_PORT:-8082}:80"
     volumes:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     command:
       - --model-id
-      - ${RERANKER_MODEL_ID:-BAAI/bge-reranker-v2-m3}
+      - ${RERANKER_MODEL_ID:-BAAI/bge-reranker-base}
       - --hostname
       - 0.0.0.0
       - --port
       - "80"
+      - --dtype
+      - ${TEI_DTYPE:-float16}
       - --max-batch-tokens
       - ${RERANKER_MAX_BATCH_TOKENS:-2048}
       - --auto-truncate

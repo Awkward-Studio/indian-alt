@@ -107,8 +107,9 @@ class CompetitorWebResearchService:
                 include_page_content=True,
             )
             route_instruction = (
-                "Return up to 8 direct competitor legal entities that may be listed; "
-                "use listed_public only with exact exchange and ticker evidence."
+                "Return up to 8 direct competitors or closest listed market comparables "
+                "with meaningful product/category overlap. Use listed_public only with "
+                "exact legal-entity exchange and ticker evidence."
                 if route == "public"
                 else
                 "Return up to 8 direct private or unlisted competitor companies or brands. "
@@ -482,7 +483,10 @@ class CompetitorWebResearchService:
                 (
                     f'({public_names}) {market} {place} NSE BSE listed ticker competitors'
                     if public_names
-                    else f'{market} India listed sector competitors companies NSE BSE tickers market leaders'
+                    else (
+                        f"{market} India listed companies NSE BSE ticker "
+                        "public stocks sector peers market comparables"
+                    )
                 ),
             ).strip()[:350],
             "private": re.sub(
@@ -761,17 +765,36 @@ Return one JSON object and no markdown:
 
         service = ScreenerCompanyService()
         confirmations: dict[int, dict] = {}
-        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
+        lookup_failures: set[int] = set()
+        lookup_indexes = [
+            index
+            for index, item in enumerate(candidates)
+            if (
+                item.get("discovery_route") == "public"
+                or item.get("company_type") == "listed_public"
+                or item.get("ticker")
+                or item.get("exchange")
+            )
+        ]
+        # Screener rate-limits bursts aggressively. Private-route candidates do
+        # not need a listing lookup, and two workers keep the public validation
+        # useful without turning transient 429s into a classification decision.
+        with ThreadPoolExecutor(max_workers=min(2, len(lookup_indexes) or 1)) as executor:
             futures = {
-                executor.submit(service.search_company, str(item.get("name") or "")): index
-                for index, item in enumerate(candidates)
-                if item.get("name")
+                executor.submit(
+                    service.search_company,
+                    str(candidates[index].get("name") or ""),
+                    raise_on_error=True,
+                ): index
+                for index in lookup_indexes
+                if candidates[index].get("name")
             }
             for future in as_completed(futures):
+                index = futures[future]
                 try:
-                    confirmations[futures[future]] = future.result() or {}
+                    confirmations[index] = future.result() or {}
                 except Exception:
-                    confirmations[futures[future]] = {}
+                    lookup_failures.add(index)
 
         confirmed = []
         for index, item in enumerate(candidates):
@@ -790,6 +813,14 @@ Return one JSON object and no markdown:
                         f"Direct Screener company search confirmed "
                         f"{match.get('company_name') or item.get('name')} "
                         f"({match.get('ticker') or 'listed'})."
+                    ),
+                })
+            elif index in lookup_failures:
+                confirmed.append({
+                    **item,
+                    "classification_source": (
+                        str(item.get("classification_source") or "").strip()
+                        or "Listing classification retained because Screener validation was temporarily unavailable."
                     ),
                 })
             elif item.get("discovery_route") == "private":

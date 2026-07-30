@@ -32,6 +32,11 @@ class Command(BaseCommand):
             help="Persist fetched profile/relation/chunks. By default DB writes are rolled back.",
         )
         parser.add_argument(
+            "--persist-all-public",
+            action="store_true",
+            help="Persist every discovered listed/public competitor, not only the first diagnostic candidate.",
+        )
+        parser.add_argument(
             "--skip-embedding",
             action="store_true",
             help="Fetch and store profile/financial rows but skip RAG embedding during the diagnostic.",
@@ -77,6 +82,8 @@ class Command(BaseCommand):
         company = options.get("company")
         if not deal_id and not company:
             raise SystemExit("Provide either --deal-id or --company.")
+        if options["persist_all_public"] and not options["persist"]:
+            raise SystemExit("--persist-all-public requires --persist.")
 
         with transaction.atomic():
             if deal_id:
@@ -191,6 +198,27 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS("Embedding completed."))
             else:
                 self.stdout.write(self.style.WARNING("Embedding skipped by --skip-embedding."))
+
+            if options["persist_all_public"]:
+                additional_public = [
+                    item
+                    for item in competitors
+                    if item is not selected and self._select_public_candidate([item])
+                ]
+                self.stdout.write("")
+                self.stdout.write(self.style.MIGRATE_HEADING("5. Persisting remaining public competitors"))
+                if not additional_public:
+                    self.stdout.write(self.style.WARNING("No additional public competitors were discovered."))
+                for item in additional_public:
+                    additional_profile = screener_service.save_public_competitor(deal, item)
+                    if not options["skip_embedding"]:
+                        screener_service.index_profile_for_rag(additional_profile, deal=deal)
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"Stored {additional_profile.name} "
+                            f"({additional_profile.ticker or 'listed'}) as a deal competitor."
+                        )
+                    )
 
             if created_temp_deal:
                 self.stdout.write("")
