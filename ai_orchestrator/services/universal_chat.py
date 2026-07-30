@@ -3146,6 +3146,7 @@ class UniversalChatService:
                 limit=candidate_limit,
                 deal_ids=deal_ids or None,
                 source_ids=search_source_ids,
+                rerank=False,
             )
             candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
             self._trace_chunks("semantic_search_done", query_matches=len(query_matches), candidate_chunks=len(candidate_chunks))
@@ -3230,54 +3231,11 @@ class UniversalChatService:
             scored_items.append({"chunk": chunk, "score": round(score, 3)})
 
         scored_items.sort(key=lambda item: item["score"], reverse=True)
-        llm_candidates = []
-        if scored_items:
-            self._trace_chunks("score_llm_rerank_context_build_start", scored_items=len(scored_items))
-            active_context = json.dumps(
-                {
-                    "deals": [self._serialize_deal(deal) for deal in scoped_deals[:6]],
-                    "query_plan": plan,
-                },
-                default=str,
-                ensure_ascii=True,
-                indent=2,
-            )
-            for item in scored_items[: min(len(scored_items), 8)]:
-                chunk = item["chunk"]
-                document_metadata = self._document_metadata_for_chunk(chunk)
-                llm_candidates.append({
-                    "title": document_metadata.get("document_name") or (chunk.metadata or {}).get("title") or (chunk.metadata or {}).get("filename") or chunk.source_type,
-                    "summary": self._truncate_for_prompt(document_metadata.get("document_summary") or "", 900),
-                    "context": self._truncate_for_prompt(
-                        json.dumps({
-                            "deal": chunk.deal.title if chunk.deal else "",
-                            "source_type": chunk.source_type,
-                            "source_id": chunk.source_id,
-                            "chunk_kind": (chunk.metadata or {}).get("chunk_kind"),
-                            "chunk_text": chunk.content[:1600],
-                        }, default=str, ensure_ascii=True),
-                        1600,
-                    ),
-                    "base_score": item["score"],
-                })
-            self._trace_chunks("score_llm_rerank_call_start", candidates=len(llm_candidates))
-            llm_adjustments = self._text_model_rerank(
-                label="chunk",
-                query=self._build_rerank_query(plan),
-                active_context=active_context,
-                candidates=llm_candidates,
-                candidate_limit=min(len(llm_candidates), 8),
-            )
-            if llm_adjustments:
-                for index, item in enumerate(scored_items):
-                    adjustment = llm_adjustments.get(index)
-                    if not adjustment:
-                        continue
-                    llm_boost = (float(adjustment.get("relevance_score") or 0) - 50.0) * 1.2
-                    item["score"] = round(item["score"] + llm_boost, 3)
-                    item["llm_reason"] = adjustment.get("reason")
-                scored_items.sort(key=lambda item: item["score"], reverse=True)
-            self._trace_chunks("score_llm_rerank_done")
+        # The cross-encoder has already ranked enriched chunk payloads containing
+        # document summaries, metrics, tables, risks, and planner intent. A second
+        # generative-model rerank duplicated that work and added a long, serial
+        # completion before every chat answer. Keep retrieval deterministic and
+        # let the text model run only once for the user-facing answer.
         self._trace_chunks("score_done", scored_items=len(scored_items), dropped_by_zero_score=dropped_by_zero_score)
         selected: List[Dict[str, Any]] = []
         per_deal_counts: Dict[str, int] = {}
@@ -3325,6 +3283,8 @@ class UniversalChatService:
             "dropped_by_total_cap": dropped_by_total_cap,
             "dropped_as_duplicates": dropped_as_duplicates,
             "dropped_by_zero_score": dropped_by_zero_score,
+            "chunk_ranking_pipeline": "hybrid_search+bge_cross_encoder+heuristic_evidence_priors",
+            "text_model_chunk_rerank_used": False,
             "synthesis_document_candidate_count": len(synthesis_document_candidates),
             "chunk_scope_deal_ids": [str(deal.id) for deal in scoped_deals],
             "chunk_scope_deal_titles": [str(deal.title or "") for deal in scoped_deals],

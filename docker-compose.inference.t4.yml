@@ -23,9 +23,9 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - -hf
-      - ${LLAMA_MODEL_SOURCE:-google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0}
+      - ${LLAMA_MODEL_SOURCE:-bartowski/gemma-4-12B-it-GGUF:Q5_K_M}
       - --alias
-      - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q4}
+      - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q5}
       - --host
       - 0.0.0.0
       - --port
@@ -51,6 +51,11 @@ services:
   tei-embedding:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
     container_name: tei-embedding-t4
+    # TEI 1.9.3's wrapper only recognizes the standard "CUDA Version" field.
+    # Azure's CUDA 13 driver reports KMD/UMD fields instead, so the wrapper
+    # mistakes it for an old driver and prepends incompatible cuda-compat-12-9.
+    entrypoint:
+      - /usr/local/bin/text-embeddings-router
     restart: unless-stopped
     shm_size: 1g
     ports:
@@ -66,6 +71,10 @@ services:
               capabilities: [gpu]
     environment:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      # CUDA 13 hosts must use the NVIDIA driver libraries injected by the
+      # container runtime. TEI's bundled cuda-compat-12-9 library otherwise
+      # produces CUDA_ERROR_SYSTEM_DRIVER_MISMATCH (803) and falls back to CPU.
+      LD_LIBRARY_PATH: ${TEI_LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64}
     command:
       - --model-id
       - ${EMBEDDING_MODEL_ID:-Qwen/Qwen3-Embedding-0.6B}
@@ -76,7 +85,11 @@ services:
       - --dtype
       - ${TEI_DTYPE:-float16}
       - --max-batch-tokens
-      - ${EMBEDDING_MAX_BATCH_TOKENS:-8192}
+      - ${EMBEDDING_MAX_BATCH_TOKENS:-2048}
+      - --max-batch-requests
+      - ${EMBEDDING_MAX_BATCH_REQUESTS:-1}
+      - --max-client-batch-size
+      - ${EMBEDDING_MAX_CLIENT_BATCH_SIZE:-8}
       - --auto-truncate
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/health', timeout=5).read()\""]
@@ -88,6 +101,8 @@ services:
   tei-reranker:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
     container_name: tei-reranker-t4
+    entrypoint:
+      - /usr/local/bin/text-embeddings-router
     restart: unless-stopped
     shm_size: 1g
     ports:
@@ -103,6 +118,7 @@ services:
               capabilities: [gpu]
     environment:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      LD_LIBRARY_PATH: ${TEI_LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64}
     command:
       - --model-id
       - ${RERANKER_MODEL_ID:-BAAI/bge-reranker-base}

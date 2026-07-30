@@ -1186,14 +1186,27 @@ class UniversalChatServiceTests(TestCase):
             "user_query": "Which consumer or wellness deals mention a funding ask and strong repeat customer behavior?",
         }
 
-        with patch.object(self.service.embed_service, "search_global_chunks", return_value=[risk_chunk, summary_chunk]), \
-             patch.object(self.service.embed_service, "_rerank_chunks", side_effect=lambda chunks, query, limit: chunks), \
+        with patch.object(
+            self.service.embed_service,
+            "search_global_chunks",
+            return_value=[risk_chunk, summary_chunk],
+        ) as search_global_chunks, \
+             patch.object(self.service, "_rerank_candidate_chunks", side_effect=lambda chunks, query, plan: chunks), \
              patch.object(self.service, "_augment_with_deal_summary_candidates", side_effect=lambda chunks, deals: chunks), \
-             patch.object(self.service, "_compute_chunk_budgets", return_value=(10, 10)):
+             patch.object(self.service, "_compute_chunk_budgets", return_value=(10, 10)), \
+             patch.object(self.service, "_text_model_rerank") as text_model_rerank:
             selected, diagnostics = self.service._search_ranked_chunks(plan, [deal])
 
         self.assertEqual(selected[0]["chunk"], summary_chunk)
         self.assertEqual(diagnostics["selected_chunk_count"], 2)
+        self.assertEqual(
+            diagnostics["chunk_ranking_pipeline"],
+            "hybrid_search+bge_cross_encoder+heuristic_evidence_priors",
+        )
+        self.assertFalse(diagnostics["text_model_chunk_rerank_used"])
+        text_model_rerank.assert_not_called()
+        _, search_kwargs = search_global_chunks.call_args
+        self.assertFalse(search_kwargs["rerank"])
 
     def test_search_ranked_chunks_prefers_document_backed_evidence_for_single_deal_depth_first_queries(self):
         deal = MagicMock()
@@ -1238,7 +1251,7 @@ class UniversalChatServiceTests(TestCase):
         }
 
         with patch.object(self.service.embed_service, "search_global_chunks", return_value=[summary_chunk, document_chunk]), \
-             patch.object(self.service.embed_service, "_rerank_chunks", side_effect=lambda chunks, query, limit: chunks), \
+             patch.object(self.service, "_rerank_candidate_chunks", side_effect=lambda chunks, query, plan: chunks), \
              patch.object(self.service, "_augment_with_deal_summary_candidates", side_effect=lambda chunks, deals: chunks), \
              patch.object(self.service, "_compute_chunk_budgets", return_value=(8, 24)):
             selected, _ = self.service._search_ranked_chunks(plan, [deal])

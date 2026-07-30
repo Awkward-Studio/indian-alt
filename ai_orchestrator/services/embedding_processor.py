@@ -804,8 +804,16 @@ class EmbeddingService:
         )
         return self._rerank_chunks(candidates, normalized_query, limit)
 
-    def search_global_chunks(self, query: str, limit: int = 10, deal_ids: Optional[List[str]] = None, source_ids: Optional[List[str]] = None) -> List[DocumentChunk]:
-        """Global hybrid dense vector + PostgreSQL full-text search across deals."""
+    def search_global_chunks(
+        self,
+        query: str,
+        limit: int = 10,
+        deal_ids: Optional[List[str]] = None,
+        source_ids: Optional[List[str]] = None,
+        *,
+        rerank: bool = True,
+    ) -> List[DocumentChunk]:
+        """Global hybrid search, with optional cross-encoder reranking."""
         normalized_query = self._normalize_query_text(query)
         if not normalized_query:
             return []
@@ -815,6 +823,8 @@ class EmbeddingService:
             deal_ids=deal_ids,
             source_ids=source_ids,
         )
+        if not rerank:
+            return candidates[:limit]
         return self._rerank_chunks(candidates, normalized_query, limit)
 
     def _hybrid_chunk_candidates(
