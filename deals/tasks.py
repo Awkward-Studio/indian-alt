@@ -1414,7 +1414,10 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
         if is_body:
             # OPTIMIZED PATH: Extract text directly from DB/HTML (Zero Loss)
             email = Email.objects.get(id=email_id)
-            raw_body = email.body_html or email.body_text or email.body_preview or ""
+            raw_body = file_info.get("body_delta")
+            body_was_preprocessed = raw_body is not None
+            if raw_body is None:
+                raw_body = email.body_html or email.body_text or email.body_preview or ""
             
             # Pre-clean HTML to save tokens and prevent model confusion
             import re
@@ -1426,11 +1429,18 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
             
             clean_body = fast_strip_html(raw_body)
             
-            # CHUNKING LOGIC: If body is massive (> 40k chars), chunk it
-            MAX_BODY_CHARS = 40000
-            if len(clean_body) > MAX_BODY_CHARS:
+            if body_was_preprocessed:
+                # EmailThreadUnfolder already removed quoted history. Preserve
+                # the exact delta; another model pass can drop terse facts or
+                # truncate long messages while echoing their content.
+                raw_markdown = clean_body
+                log_worker_event(audit_log, f"Using deterministic reply delta: {file_name}", status='PROCESSING')
+            elif len(clean_body) > 12000:
+                # Legacy callers without a deterministic delta retain a bounded
+                # cleanup fallback.
+                MAX_BODY_CHARS = 12000
                 log_worker_event(audit_log, f"Email body is massive ({len(clean_body)} chars). Chunking...", status='PROCESSING')
-                chunks = [clean_body[i:i + 35000] for i in range(0, len(clean_body), 30000)]
+                chunks = [clean_body[i:i + MAX_BODY_CHARS] for i in range(0, len(clean_body), MAX_BODY_CHARS)]
                 unrolled_parts = []
                 for idx, chunk in enumerate(chunks):
                     log_worker_event(audit_log, f"Unrolling chunk {idx+1}/{len(chunks)}...", status='PROCESSING')
@@ -1438,7 +1448,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
                         content=chunk, 
                         skill_name="email_unroll", 
                         source_type="email",
-                        metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                        metadata={
+                            "chat_template_kwargs": {"enable_thinking": False},
+                            "max_tokens": 768,
+                            "request_timeout": 120,
+                        }
                     )
                     unrolled_parts.append(chunk_res.get('response') or chunk_res.get('text') or "")
                 raw_markdown = "\n\n--- THREAD CONTINUATION ---\n\n".join(unrolled_parts)
@@ -1448,7 +1462,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
                     content=clean_body, 
                     skill_name="email_unroll", 
                     source_type="email",
-                    metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                    metadata={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "max_tokens": 768,
+                        "request_timeout": 120,
+                    }
                 )
                 raw_markdown = unroll_result.get('response') or unroll_result.get('text') or ""
             
@@ -1484,7 +1502,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
             content=raw_markdown,
             skill_name="document_normalization",
             source_type="normalization",
-            metadata={"chat_template_kwargs": {"enable_thinking": False}}
+            metadata={
+                "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": 2048,
+                "request_timeout": 180,
+            }
         )
         
         # FIX: result is already the parsed JSON dict

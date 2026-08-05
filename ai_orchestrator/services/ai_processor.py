@@ -146,6 +146,8 @@ class AIProcessorService:
                 payload["chat_template_kwargs"] = metadata["chat_template_kwargs"]
             if "max_tokens" in metadata:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
+            if "request_timeout" in metadata:
+                payload["_request_timeout"] = metadata["request_timeout"]
             if "web_search_enabled" in metadata:
                 payload["options"]["web_search_enabled"] = bool(metadata["web_search_enabled"])
                 payload["options"]["disable_search"] = not bool(metadata["web_search_enabled"])
@@ -335,7 +337,11 @@ class AIProcessorService:
         """
         start_time = time.time()
         try:
-            data = self.current_provider.execute_standard(payload)
+            request_timeout = payload.pop("_request_timeout", None)
+            if request_timeout is None:
+                data = self.current_provider.execute_standard(payload)
+            else:
+                data = self.current_provider.execute_standard(payload, timeout=int(request_timeout))
             
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")

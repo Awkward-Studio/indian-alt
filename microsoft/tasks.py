@@ -7,6 +7,7 @@ from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
 from ai_orchestrator.services.runtime import AIRuntimeService
 from .services.graph_service import GraphAPIService
 from deals.services.email_intelligence import EmailIntelligenceService
+from .services.email_thread_unfolder import EmailThreadUnfolder
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,13 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
 
     try:
         # 3. Aggregate FULL Thread History
-        thread_emails = Email.objects.filter(conversation_id=email.conversation_id).order_by('created_at')
-        email_count = thread_emails.count()
+        if email.conversation_id:
+            thread_emails = list(Email.objects.filter(conversation_id=email.conversation_id))
+        else:
+            thread_emails = [email]
+        thread_deltas = EmailThreadUnfolder.unfold(thread_emails)
+        emails_by_id = {str(item.id): item for item in thread_emails}
+        email_count = len(thread_emails)
         log_worker_event(audit_log, f"Thread discovery complete: Found {email_count} messages in this conversation.", status='PROCESSING')
         
         file_tree = []
@@ -79,17 +85,21 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
         # Track seen attachments to avoid duplicates across the thread
         seen_attachment_ids = set()
 
-        for e in thread_emails:
+        for delta in thread_deltas:
+            e = emails_by_id[delta.email_id]
             # Add each Body as a separate analysis object
-            # This ensures the AI sees the full history of every reply
-            file_tree.append({
-                "id": f"body_{e.id}",
-                "name": f"Email Body - {e.created_at.strftime('%Y-%m-%d %H:%M')}",
-                "email_id": str(e.id),
-                "type": "file",
-                "is_body": True,
-                "real_body_id": "body" 
-            })
+            # Empty deltas are exact repeats/empty bodies and must not be analyzed twice.
+            if delta.text:
+                file_tree.append({
+                    "id": f"body_{e.id}",
+                    "name": f"Email Body - {e.created_at.strftime('%Y-%m-%d %H:%M')}",
+                    "email_id": str(e.id),
+                    "type": "file",
+                    "is_body": True,
+                    "real_body_id": "body",
+                    "body_delta": delta.text,
+                    "delta_diagnostics": delta.as_dict(),
+                })
             
             # Add Attachments from this specific message
             attachments = e.attachments if isinstance(e.attachments, list) else []
@@ -123,9 +133,10 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             "email_id": email_id,
             "thread_stats": {
                 "message_count": email_count,
-                "oldest_msg": thread_emails.first().created_at.isoformat(),
-                "latest_msg": thread_emails.last().created_at.isoformat(),
-                "subjects": list(thread_emails.values_list('subject', flat=True).distinct())
+                "oldest_msg": min(e.created_at for e in thread_emails).isoformat(),
+                "latest_msg": max(e.created_at for e in thread_emails).isoformat(),
+                "subjects": list(dict.fromkeys(e.subject for e in thread_emails)),
+                "body_deltas": [delta.as_dict() for delta in thread_deltas],
             },
             "proposed_intel": proposed_intel,
             "child_task_ids": child_task_ids,
@@ -148,4 +159,3 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
     except Exception as e:
         log_worker_event(audit_log, f"Thread analysis error: {str(e)}", status='FAILED', done=True)
         raise e
-
