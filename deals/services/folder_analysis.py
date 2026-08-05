@@ -2,6 +2,7 @@ import uuid
 import traceback
 import logging
 from django.core.cache import cache
+from django.db import transaction
 from ai_orchestrator.services.runtime import AIRuntimeService
 from deals.models import Deal
 from deals.services.deal_creation import DealCreationService
@@ -572,6 +573,7 @@ class FolderAnalysisService:
         }
 
     @staticmethod
+    @transaction.atomic
     def confirm_deal_from_session(session_id: str, deal: Deal) -> dict:
         """
         Updates the newly created Deal with cached forensic mapping.
@@ -594,7 +596,17 @@ class FolderAnalysisService:
         if not session_data:
             return {"error": "Session expired or invalid. Please re-analyze the source."}
 
-        existing_deal = FolderAnalysisService._get_existing_confirmed_deal(session_data)
+        audit_log_id = session_data.get("originating_audit_log_id") or session_data.get("preflight_audit_log_id")
+        origin_log = None
+        if audit_log_id:
+            from ai_orchestrator.models import AIAuditLog
+
+            origin_log = AIAuditLog.objects.select_for_update().filter(id=audit_log_id).first()
+
+        confirmed_deal_id = (origin_log.source_metadata or {}).get("deal_id") if origin_log else None
+        existing_deal = Deal.objects.filter(id=confirmed_deal_id).first() if confirmed_deal_id else None
+        if not existing_deal:
+            existing_deal = FolderAnalysisService._get_existing_confirmed_deal(session_data)
         if existing_deal:
             if existing_deal.id != deal.id:
                 deal.delete()
@@ -606,7 +618,6 @@ class FolderAnalysisService:
             
         analysis_json = session_data.get('preliminary_data', {})
         source_type = session_data.get('source_type', 'onedrive_folder')
-        origin_log = FolderAnalysisService._get_originating_audit_log(session_data)
         origin_meta = origin_log.source_metadata if origin_log else {}
 
         deal.processing_status = 'idle'

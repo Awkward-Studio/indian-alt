@@ -8,6 +8,7 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 from .services.graph_service import GraphAPIService
 from deals.services.email_intelligence import EmailIntelligenceService
 from .services.email_thread_unfolder import EmailThreadUnfolder
+from .services.email_thread_router import EmailThreadRouter, EmailThreadRouteMode
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,27 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             thread_emails = list(Email.objects.filter(conversation_id=email.conversation_id))
         else:
             thread_emails = [email]
+        route = EmailThreadRouter.resolve(thread_emails)
+        route_payload = route.as_dict()
+        if route.mode == EmailThreadRouteMode.BLOCKED_AMBIGUOUS:
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "email_id": email_id,
+                "route": route_payload,
+                "workflow_stage": "routing_blocked",
+                "interaction_status": "blocked",
+            }
+            audit_log.error_message = route.error
+            audit_log.save(update_fields=["source_metadata", "error_message"])
+            log_worker_event(audit_log, route.error, status="FAILED", done=True)
+            return {
+                "status": "blocked",
+                "phase": "routing",
+                "audit_log_id": str(audit_log.id),
+                "route": route_payload,
+                "error": route.error,
+            }
+
         thread_deltas = EmailThreadUnfolder.unfold(thread_emails)
         emails_by_id = {str(item.id): item for item in thread_emails}
         email_count = len(thread_emails)
@@ -118,12 +140,11 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
         # 4. Trigger Parallel Extraction Swarm
         log_worker_event(audit_log, f"Queueing {len(file_tree)} objects (bodies + attachments) for parallel analysis...")
         
-        # Note: We pass deal_id=None as it doesn't exist yet
         tasks = [
-            process_single_thread_document_async.s(file, None, user_email, str(audit_log.id))
+            process_single_thread_document_async.s(file, route.deal_id, user_email, str(audit_log.id))
             for file in file_tree
         ]
-        callback = finalize_thread_analysis_async.s(None, str(audit_log.id))
+        callback = finalize_thread_analysis_async.s(route.deal_id, str(audit_log.id))
         
         # Prepare tracking IDs
         _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
@@ -131,6 +152,7 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
         audit_log.source_metadata = {
             "file_tree": file_tree,
             "email_id": email_id,
+            "route": route_payload,
             "thread_stats": {
                 "message_count": email_count,
                 "oldest_msg": min(e.created_at for e in thread_emails).isoformat(),
@@ -153,7 +175,8 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             "status": "queued",
             "phase": "analysis",
             "audit_log_id": str(audit_log.id),
-            "total_objects": len(file_tree)
+            "total_objects": len(file_tree),
+            "route": route_payload,
         }
         
     except Exception as e:

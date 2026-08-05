@@ -9,6 +9,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db import transaction
 from django.db.models import Exists, F, OuterRef, Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
@@ -131,6 +132,7 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'title', 'document_type']
     ordering = ['-created_at']
 
+    @transaction.atomic
     def perform_create(self, serializer):
         if hasattr(self.request.user, 'profile'):
             serializer.save(uploaded_by=self.request.user.profile)
@@ -980,35 +982,40 @@ Rules:
         try:
             from ai_orchestrator.models import AIAuditLog
             from .services.folder_analysis import FolderAnalysisService
-            from .services.email_intelligence import EmailIntelligenceService
 
             # 1. Resolve Session/Audit Log
             audit_log = AIAuditLog.objects.filter(id=session_id).first()
             if not audit_log:
                 return Response({"error": "Invalid session or audit log ID"}, status=400)
 
-            # 2. Create the Deal record first (with user-edited form data)
+            # 2. Validate before opening the atomic persistence boundary.
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            deal = serializer.save()
 
-            # 3. Handle source-specific initialization
-            source_type = audit_log.source_type
-            
-            if source_type == 'email':
-                # Link intelligence specifically from email thread
-                proposed_intel = (audit_log.source_metadata or {}).get("proposed_intel", {})
-                EmailIntelligenceService.create_deal_from_intelligence(audit_log.source_id, proposed_intel)
-                # Ensure the deal we just saved is the one linked.
-                deal.source_email_id = audit_log.source_id
-                deal.save(update_fields=['source_email_id'])
+            with transaction.atomic():
+                deal = serializer.save()
+                result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
 
-            # 4. Finalize deal with analysis session data (common for folder/email)
-            # This handles doc linking, embedding, and synthesis persistence
-            result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
-            
-            if result.get("error"):
-                return Response(result, status=400)
+                if result.get("error"):
+                    transaction.set_rollback(True)
+                    return Response(result, status=400)
+
+                confirmed_deal_id = result.get("deal_id")
+                if confirmed_deal_id and str(confirmed_deal_id) != str(deal.id):
+                    deal = Deal.objects.get(id=confirmed_deal_id)
+
+                if audit_log.source_type == 'email' and audit_log.source_id:
+                    from microsoft.models import Email
+
+                    source_email = Email.objects.select_for_update().filter(id=audit_log.source_id).first()
+                    if not source_email:
+                        raise ValueError(f"Source email {audit_log.source_id} does not exist")
+                    thread = Email.objects.filter(id=source_email.id)
+                    if source_email.conversation_id:
+                        thread = Email.objects.filter(conversation_id=source_email.conversation_id)
+                    thread.update(deal=deal)
+                    source_email.is_processed = True
+                    source_email.save(update_fields=["is_processed"])
 
             # 5. Return the finalized deal
             return Response(self.get_serializer(deal).data, status=status.HTTP_201_CREATED)

@@ -1539,11 +1539,19 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     """
     from ai_orchestrator.models import AIAuditLog
     from ai_orchestrator.services.ai_processor import AIProcessorService
-    from deals.models import Deal
+    from deals.models import Deal, DealAnalysis
     from deals.services.deal_creation import DealCreationService
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
     deal = Deal.objects.filter(id=deal_id).first() if deal_id else None
+    prior_analysis_id = (audit_log.source_metadata or {}).get("deal_analysis_id")
+    if deal and prior_analysis_id and DealAnalysis.objects.filter(id=prior_analysis_id, deal=deal).exists():
+        return {
+            "status": "success",
+            "deal_id": str(deal.id),
+            "deal_analysis_id": str(prior_analysis_id),
+            "idempotent_replay": True,
+        }
     ai_service = AIProcessorService()
     
     passed_results = [r for r in results if r.get("status") == "passed"]
@@ -1736,16 +1744,73 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
             analysis.setdefault("deal_model_data", {})["title"] = proposed_intel.get("company_name")
 
         # Apply the synthesis to the actual Deal object if it exists
+        existing_canonical_snapshot = (
+            ((deal.current_analysis or {}).get("canonical_snapshot") or {})
+            if deal and hasattr(deal, "current_analysis")
+            else {}
+        )
+        analysis_kind = AnalysisKind.SUPPLEMENTAL if deal else AnalysisKind.INITIAL
+        document_evidence = [
+            item.get("normalized_json") or item.get("document_artifact") or {}
+            for item in passed_results
+            if item.get("normalized_json") or item.get("document_artifact")
+        ]
         normalized_analysis = _normalize_synthesis_result(
             analysis,
-            analysis_kind=AnalysisKind.INITIAL,
-            document_evidence=[], 
+            previous_snapshot=existing_canonical_snapshot,
+            analysis_kind=analysis_kind,
+            document_evidence=document_evidence,
             analysis_input_files=[{"file_name": r["file_name"]} for r in passed_results],
             failed_files=[r for r in results if r.get("status") != "passed"],
         )
+        normalized_analysis.setdefault("metadata", {})["audit_log_id"] = audit_log_id
         
         if deal:
-            DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+            with transaction.atomic():
+                deal = Deal.objects.select_for_update().get(id=deal.id)
+                latest_analysis = deal.analyses.order_by("-version", "-created_at").first()
+                next_version = latest_analysis.version + 1 if latest_analysis else 1
+                deal_analysis = DealAnalysis.objects.create(
+                    deal=deal,
+                    version=next_version,
+                    analysis_kind=AnalysisKind.SUPPLEMENTAL,
+                    thinking=result.get("thinking", "") if isinstance(result, dict) else "",
+                    ambiguities=normalized_analysis.get("metadata", {}).get("ambiguous_points", []),
+                    analysis_json=normalized_analysis,
+                )
+                DealCreationService.apply_analysis_to_deal(
+                    deal,
+                    normalized_analysis,
+                    overwrite=False,
+                    overwrite_themes=False,
+                )
+
+                for item in passed_results:
+                    source_file_id = str(item.get("file_id") or "")
+                    if not source_file_id or source_file_id.startswith("body_"):
+                        continue
+                    artifact = item.get("normalized_json") or item.get("document_artifact") or {}
+                    DealDocument.objects.update_or_create(
+                        deal=deal,
+                        onedrive_id=source_file_id,
+                        defaults={
+                            "title": item.get("file_name") or "Email attachment",
+                            "document_type": item.get("document_type") or artifact.get("document_type") or DocumentType.OTHER,
+                            "extracted_text": item.get("extracted_text") or item.get("normalized_text") or "",
+                            "normalized_text": item.get("normalized_text") or "",
+                            "evidence_json": artifact,
+                            "source_map_json": artifact.get("source_map", {}) if isinstance(artifact, dict) else {},
+                            "table_json": artifact.get("tables_summary", []) if isinstance(artifact, dict) else [],
+                            "key_metrics_json": artifact.get("metrics", []) if isinstance(artifact, dict) else [],
+                            "reasoning": item.get("document_reasoning") or "",
+                            "is_ai_analyzed": True,
+                            "transcription_status": TranscriptionStatus.COMPLETE,
+                        },
+                    )
+                source_meta = audit_log.source_metadata or {}
+                source_meta["deal_analysis_id"] = str(deal_analysis.id)
+                source_meta["deal_analysis_version"] = next_version
+                audit_log.source_metadata = source_meta
         
         audit_log.parsed_json = normalized_analysis
         audit_log.status = 'COMPLETED'
@@ -1762,7 +1827,11 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         audit_log.save(update_fields=['parsed_json', 'status', 'is_success', 'source_metadata'])
         log_worker_event(audit_log, "Deal intelligence synthesized successfully.", status='COMPLETED', done=True)
         
-        return {"status": "success", "deal_id": str(deal.id) if deal else None}
+        return {
+            "status": "success",
+            "deal_id": str(deal.id) if deal else None,
+            "deal_analysis_id": str(deal_analysis.id) if deal else None,
+        }
     else:
         error_msg = analysis.get("error", "AI model returned an empty or unparseable response.")
         log_worker_event(audit_log, f"Synthesis failed: {error_msg}", status='FAILED', done=True)

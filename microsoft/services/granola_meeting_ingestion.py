@@ -22,6 +22,25 @@ class GranolaMeetingPayload:
     transcript: str
     meeting_at: datetime
     deal_name_source: str
+    resolution_evidence: dict
+
+
+@dataclass(frozen=True)
+class DealMatchResolution:
+    deal: Optional[Deal]
+    status: str
+    source: str
+    query: str
+    candidates: tuple[dict, ...] = ()
+
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "source": self.source,
+            "query": self.query,
+            "deal_id": str(self.deal.id) if self.deal else None,
+            "candidates": list(self.candidates),
+        }
 
 
 class GranolaMeetingEmailIngestionService:
@@ -48,6 +67,7 @@ class GranolaMeetingEmailIngestionService:
 
     GRANOLA_MARKER = "granola"
     FUZZY_DEAL_MATCH_THRESHOLD = 0.88
+    FUZZY_DEAL_MATCH_MIN_MARGIN = 0.08
     DEAL_TITLE_STOPWORDS = {
         "advisors",
         "deal",
@@ -77,6 +97,17 @@ class GranolaMeetingEmailIngestionService:
 
         payload = cls.extract_payload(email)
         if payload is None:
+            if cls.is_meeting_note_email(email):
+                resolution = cls.resolve_deal(email.subject or "", cls._email_text(email))
+                if resolution.status in {"ambiguous", "unmatched"}:
+                    metadata = dict(email.graph_metadata or {})
+                    metadata["meeting_deal_resolution"] = resolution.as_dict()
+                    email.graph_metadata = metadata
+                    email.processing_error = (
+                        "Meeting note was not auto-linked because deal resolution was "
+                        f"{resolution.status}. Review candidates and attach it manually."
+                    )
+                    email.save(update_fields=["graph_metadata", "processing_error", "updated_at"])
             return None
 
         with transaction.atomic():
@@ -94,6 +125,7 @@ class GranolaMeetingEmailIngestionService:
                         "email_subject": email.subject,
                         "email_from": email.from_email,
                         "deal_name_source": payload.deal_name_source,
+                        "deal_resolution": payload.resolution_evidence,
                     },
                 },
             )
@@ -203,9 +235,10 @@ class GranolaMeetingEmailIngestionService:
     def extract_payload(cls, email) -> Optional[GranolaMeetingPayload]:
         subject = email.subject or ""
         body = cls._email_text(email)
-        deal, deal_name_source = cls._resolve_deal(subject, body)
-        if deal is None:
+        resolution = cls.resolve_deal(subject, body)
+        if resolution.deal is None:
             return None
+        deal = resolution.deal
 
         summary = cls._extract_section(body, "summary")
         transcript = cls._extract_section(body, "transcript") or cls._extract_section(body, "notes")
@@ -226,7 +259,8 @@ class GranolaMeetingEmailIngestionService:
             summary=summary,
             transcript=transcript,
             meeting_at=meeting_at,
-            deal_name_source=deal_name_source,
+            deal_name_source=resolution.source,
+            resolution_evidence=resolution.as_dict(),
         )
 
     @classmethod
@@ -257,22 +291,57 @@ class GranolaMeetingEmailIngestionService:
 
     @classmethod
     def _resolve_deal(cls, subject: str, body: str) -> tuple[Optional[Deal], str]:
-        deal_name = cls._extract_deal_name(subject) or cls._extract_deal_name(body)
-        if deal_name:
-            deal = cls._deal_by_exact_title(deal_name)
-            if deal:
-                return deal, "deal_name"
-            deal, score = cls._deal_by_fuzzy_title(deal_name)
-            return deal, f"deal_name_fuzzy:{score:.2f}" if deal else ""
+        resolution = cls.resolve_deal(subject, body)
+        return resolution.deal, resolution.source if resolution.deal else ""
 
-        subject_name = cls._normalize_subject(subject)
-        if not subject_name:
-            return None, ""
-        deal = cls._deal_by_exact_title(subject_name)
-        if deal:
-            return deal, "subject"
-        deal, score = cls._deal_by_fuzzy_title(subject_name)
-        return deal, f"subject_fuzzy:{score:.2f}" if deal else ""
+    @classmethod
+    def resolve_deal(cls, subject: str, body: str) -> DealMatchResolution:
+        deal_name = cls._extract_deal_name(subject) or cls._extract_deal_name(body)
+        source_prefix = "deal_name" if deal_name else "subject"
+        query = deal_name or cls._normalize_subject(subject)
+        if not query:
+            return DealMatchResolution(None, "unmatched", source_prefix, "")
+
+        exact_matches = cls._deals_by_exact_title(query)
+        if len(exact_matches) == 1:
+            return DealMatchResolution(
+                exact_matches[0],
+                "matched",
+                source_prefix,
+                query,
+                ({"deal_id": str(exact_matches[0].id), "title": exact_matches[0].title, "score": 1.0},),
+            )
+        if len(exact_matches) > 1:
+            candidates = tuple(
+                {"deal_id": str(deal.id), "title": deal.title, "score": 1.0}
+                for deal in exact_matches
+            )
+            return DealMatchResolution(None, "ambiguous", source_prefix, query, candidates)
+
+        candidates = cls._fuzzy_deal_candidates(query)
+        if not candidates or candidates[0][1] < cls.FUZZY_DEAL_MATCH_THRESHOLD:
+            evidence = tuple(
+                {"deal_id": str(deal.id), "title": deal.title, "score": round(score, 4)}
+                for deal, score in candidates[:3]
+            )
+            return DealMatchResolution(None, "unmatched", source_prefix, query, evidence)
+
+        best_deal, best_score = candidates[0]
+        runner_score = candidates[1][1] if len(candidates) > 1 else 0.0
+        evidence = tuple(
+            {"deal_id": str(deal.id), "title": deal.title, "score": round(score, 4)}
+            for deal, score in candidates[:3]
+        )
+        if runner_score >= cls.FUZZY_DEAL_MATCH_THRESHOLD and best_score - runner_score < cls.FUZZY_DEAL_MATCH_MIN_MARGIN:
+            return DealMatchResolution(None, "ambiguous", source_prefix, query, evidence)
+
+        return DealMatchResolution(
+            best_deal,
+            "matched",
+            f"{source_prefix}_fuzzy:{best_score:.2f}",
+            query,
+            evidence,
+        )
 
     @classmethod
     def _extract_deal_name(cls, text: str) -> str:
@@ -283,24 +352,43 @@ class GranolaMeetingEmailIngestionService:
 
     @staticmethod
     def _deal_by_exact_title(name: str) -> Optional[Deal]:
+        matches = GranolaMeetingEmailIngestionService._deals_by_exact_title(name)
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _deals_by_exact_title(name: str) -> list[Deal]:
         normalized = GranolaMeetingEmailIngestionService._normalize_match_text(name)
+        matches = []
         for deal in Deal.objects.exclude(title__isnull=True).exclude(title="").order_by("title", "id"):
             if GranolaMeetingEmailIngestionService._normalize_match_text(deal.title) == normalized:
-                return deal
-        return None
+                matches.append(deal)
+        return matches
 
     @classmethod
     def _deal_by_fuzzy_title(cls, name: str) -> tuple[Optional[Deal], float]:
-        best_deal = None
-        best_score = 0.0
-        for deal in Deal.objects.exclude(title__isnull=True).exclude(title="").order_by("title", "id"):
-            score = cls._title_match_score(name, deal.title)
-            if score > best_score:
-                best_deal = deal
-                best_score = score
-        if best_deal and best_score >= cls.FUZZY_DEAL_MATCH_THRESHOLD:
+        candidates = cls._fuzzy_deal_candidates(name)
+        if not candidates:
+            return None, 0.0
+        best_deal, best_score = candidates[0]
+        runner_score = candidates[1][1] if len(candidates) > 1 else 0.0
+        if (
+            best_score >= cls.FUZZY_DEAL_MATCH_THRESHOLD
+            and not (
+                runner_score >= cls.FUZZY_DEAL_MATCH_THRESHOLD
+                and best_score - runner_score < cls.FUZZY_DEAL_MATCH_MIN_MARGIN
+            )
+        ):
             return best_deal, best_score
         return None, best_score
+
+    @classmethod
+    def _fuzzy_deal_candidates(cls, name: str) -> list[tuple[Deal, float]]:
+        candidates = []
+        for deal in Deal.objects.exclude(title__isnull=True).exclude(title="").order_by("title", "id"):
+            score = cls._title_match_score(name, deal.title)
+            if score > 0:
+                candidates.append((deal, score))
+        return sorted(candidates, key=lambda item: (-item[1], str(item[0].id)))
 
     @classmethod
     def _title_match_score(cls, alias: str, title: str) -> float:

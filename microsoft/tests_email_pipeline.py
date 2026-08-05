@@ -6,9 +6,51 @@ from django.core.management import CommandError, call_command
 from django.test import TestCase
 from django.utils import timezone
 
+from deals.models import Deal
 from microsoft.models import Email, EmailAccount
 from microsoft.services.email_reader import EmailReaderService
 from microsoft.services.email_thread_unfolder import EmailThreadUnfolder
+from microsoft.services.email_thread_router import (
+    EmailThreadRouteMode,
+    EmailThreadRouter,
+)
+
+
+class EmailThreadRouterTests(TestCase):
+    def test_unlinked_messages_propose_a_new_deal(self):
+        messages = [SimpleNamespace(id="one", deal_id=None)]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.PROPOSE_NEW)
+        self.assertIsNone(route.deal_id)
+        self.assertEqual(route.evidence, ())
+
+    def test_one_linked_deal_routes_the_whole_thread_to_enrichment(self):
+        messages = [
+            SimpleNamespace(id="one", deal_id=None),
+            SimpleNamespace(id="two", deal_id="deal-1"),
+            SimpleNamespace(id="three", deal_id="deal-1"),
+        ]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.ENRICH_EXISTING)
+        self.assertEqual(route.deal_id, "deal-1")
+        self.assertEqual([item["email_id"] for item in route.evidence], ["two", "three"])
+
+    def test_conflicting_deal_links_block_automatic_mutation(self):
+        messages = [
+            SimpleNamespace(id="one", deal_id="deal-1"),
+            SimpleNamespace(id="two", deal_id="deal-2"),
+        ]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.BLOCKED_AMBIGUOUS)
+        self.assertIsNone(route.deal_id)
+        self.assertIn("deal-1", route.error)
+        self.assertIn("deal-2", route.error)
 
 
 class EmailThreadUnfolderTests(TestCase):
@@ -217,6 +259,57 @@ class ThreadTaskPayloadTests(TestCase):
             "SECOND_MARKER reply",
         ])
         self.assertNotIn("FIRST_MARKER", bodies[1]["body_delta"])
+
+    @patch("microsoft.tasks.chord")
+    @patch("deals.tasks._prepare_vdr_task_ids", return_value=([], MagicMock(), ["child"], "callback"))
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_linked_thread_passes_deal_to_workers_and_finalizer(
+        self, create_log, _model, _log_event, prepare, chord_mock
+    ):
+        deal = Deal.objects.create(title="Existing Pipeline Deal")
+        self.reply.deal = deal
+        self.reply.save(update_fields=["deal"])
+        audit = MagicMock(id="00000000-0000-0000-0000-000000000001", source_metadata={})
+        create_log.return_value = audit
+        chord_mock.return_value = MagicMock()
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.first.id))
+
+        self.assertEqual(result["route"]["mode"], "ENRICH_EXISTING")
+        self.assertEqual(result["route"]["deal_id"], str(deal.id))
+        worker_signatures, callback = prepare.call_args.args
+        self.assertTrue(worker_signatures)
+        self.assertTrue(all(signature.args[1] == str(deal.id) for signature in worker_signatures))
+        self.assertEqual(callback.args[0], str(deal.id))
+
+    @patch("microsoft.tasks.chord")
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_conflicting_thread_links_stop_before_synthesis(
+        self, create_log, _model, log_event, chord_mock
+    ):
+        first_deal = Deal.objects.create(title="First Deal")
+        second_deal = Deal.objects.create(title="Second Deal")
+        self.first.deal = first_deal
+        self.reply.deal = second_deal
+        self.first.save(update_fields=["deal"])
+        self.reply.save(update_fields=["deal"])
+        audit = MagicMock(id="00000000-0000-0000-0000-000000000001", source_metadata={})
+        create_log.return_value = audit
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.first.id))
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["route"]["mode"], "BLOCKED_AMBIGUOUS")
+        chord_mock.assert_not_called()
+        audit.save.assert_called_once_with(update_fields=["source_metadata", "error_message"])
+        self.assertEqual(audit.source_metadata["workflow_stage"], "routing_blocked")
+        self.assertEqual(log_event.call_args.kwargs["status"], "FAILED")
 
     @patch("deals.tasks._persist_folder_analysis_document")
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
