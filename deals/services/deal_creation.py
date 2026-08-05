@@ -23,6 +23,7 @@ class DealCreationService:
         source_email_id = validated_data.get('source_email_id')
         contact_discovery = validated_data.get('contact_discovery')
         analysis_json = validated_data.get('analysis_json')
+        primary_contact_was_explicit = 'primary_contact' in validated_data
         
         # Parse strings to dicts if necessary
         if isinstance(contact_discovery, str):
@@ -40,7 +41,12 @@ class DealCreationService:
         DealCreationService._discover_and_link_contacts(deal, contact_discovery)
         
         # 3. Handle Email Linking & Threading
-        DealCreationService._link_email_thread(deal, source_email_id, request_user)
+        DealCreationService._link_email_thread(
+            deal,
+            source_email_id,
+            request_user,
+            prefer_originator=not primary_contact_was_explicit,
+        )
 
     @staticmethod
     def _get_analysis_model_data(analysis_json: dict | None) -> dict:
@@ -395,23 +401,28 @@ class DealCreationService:
                 if updated_fields:
                     contact.save(update_fields=updated_fields)
 
-            is_new_link = deal.primary_contact_id != contact.id
-            deal.primary_contact = contact
-            if bank:
-                deal.bank = bank
-
+            is_new_link = deal.primary_contact_id is None
             if is_new_link:
+                deal.primary_contact = contact
+                if bank:
+                    deal.bank = bank
                 contact.source_count += 1
                 contact.save(update_fields=['source_count'])
-            deal.save(update_fields=['primary_contact', 'bank'])
-            sync_deal_contact_links(
-                deal,
-                primary_contact=contact,
-                primary_contact_provided=True,
-            )
+                deal.save(update_fields=['primary_contact', 'bank'])
+                sync_deal_contact_links(
+                    deal,
+                    primary_contact=contact,
+                    primary_contact_provided=True,
+                )
 
     @staticmethod
-    def _link_email_thread(deal: Deal, source_email_id: str, request_user=None):
+    def _link_email_thread(
+        deal: Deal,
+        source_email_id: str,
+        request_user=None,
+        *,
+        prefer_originator: bool = True,
+    ):
         if not source_email_id:
             return
             
@@ -429,9 +440,13 @@ class DealCreationService:
         thread = Email.objects.filter(id=source_email.id)
         if source_email.conversation_id:
             thread = Email.objects.filter(conversation_id=source_email.conversation_id)
+        thread_emails = list(thread.select_related("email_account"))
         thread.update(deal=deal)
 
-        for thread_email in thread:
+        if prefer_originator:
+            DealCreationService._link_originating_sender(deal, thread_emails)
+
+        for thread_email in thread_emails:
             if thread_email.attachments:
                 DealCreationService._extract_documents_from_email(deal, thread_email, request_user)
 
@@ -446,6 +461,39 @@ class DealCreationService:
             embed_service.vectorize_email(source_email)
         except Exception as e:
             logger.error(f"Vectorization failed: {str(e)}")
+
+    @staticmethod
+    def _link_originating_sender(deal: Deal, thread_emails: list) -> None:
+        from contacts.models import Contact
+        from deals.services.contact_linking import sync_deal_contact_links
+        from microsoft.services.email_thread_originator import EmailThreadOriginatorResolver
+
+        originator = EmailThreadOriginatorResolver.resolve(thread_emails)
+        if not originator:
+            return
+
+        contact = Contact.objects.filter(email__iexact=originator.address).first()
+        if not contact:
+            contact = Contact.objects.create(
+                name=originator.address.split("@", 1)[0],
+                email=originator.address,
+                designation="Auto-created from originating email",
+            )
+
+        if deal.primary_contact_id == contact.id:
+            return
+
+        deal.primary_contact = contact
+        if contact.bank_id:
+            deal.bank = contact.bank
+        contact.source_count += 1
+        contact.save(update_fields=["source_count"])
+        deal.save(update_fields=["primary_contact", "bank"])
+        sync_deal_contact_links(
+            deal,
+            primary_contact=contact,
+            primary_contact_provided=True,
+        )
 
     @staticmethod
     def _extract_documents_from_email(deal: Deal, source_email, request_user=None):

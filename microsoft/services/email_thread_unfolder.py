@@ -50,6 +50,7 @@ class EmailThreadUnfolder:
     def unfold(cls, messages: Iterable[object]) -> list[ThreadMessageDelta]:
         ordered = sorted(messages, key=cls._sort_key)
         prior_bodies: list[str] = []
+        prior_deltas: list[str] = []
         deltas: list[ThreadMessageDelta] = []
 
         for position, message in enumerate(ordered):
@@ -61,7 +62,11 @@ class EmailThreadUnfolder:
             if html_quote_removed:
                 strategy = "html_quote"
 
-            delta, repeated_strategy = cls._strip_repeated_history(delta, prior_bodies)
+            delta, repeated_strategy = cls._strip_repeated_history(
+                delta,
+                prior_bodies,
+                prior_deltas=prior_deltas,
+            )
             if repeated_strategy:
                 strategy = repeated_strategy
 
@@ -86,6 +91,8 @@ class EmailThreadUnfolder:
             )
             if source:
                 prior_bodies.append(source)
+            if delta:
+                prior_deltas.append(delta)
 
         return deltas
 
@@ -140,11 +147,19 @@ class EmailThreadUnfolder:
         return cls._clean_text(text[:earliest]), "reply_boundary"
 
     @classmethod
-    def _strip_repeated_history(cls, text: str, prior_bodies: list[str]) -> tuple[str, str | None]:
+    def _strip_repeated_history(
+        cls,
+        text: str,
+        prior_bodies: list[str],
+        *,
+        prior_deltas: list[str] | None = None,
+    ) -> tuple[str, str | None]:
         normalized = cls._clean_text(text)
         if not normalized:
             return "", None
 
+        earliest_known = None
+        known_strategy = None
         for previous in reversed(prior_bodies):
             previous = cls._clean_text(previous)
             if len(previous) < 24:
@@ -152,8 +167,24 @@ class EmailThreadUnfolder:
             if normalized == previous:
                 return "", "duplicate"
             index = normalized.find(previous)
-            if index >= 0:
-                prefix = cls._clean_text(normalized[:index])
-                if prefix:
-                    return prefix, "repeated_history"
+            if index > 0 and (earliest_known is None or index < earliest_known):
+                earliest_known = index
+                known_strategy = "repeated_history"
+
+        # Forwarded-back conversations commonly reformat headers, so a whole
+        # prior body may no longer match. The first already-seen contribution
+        # still marks where known history begins; everything before it is the
+        # new forward wrapper plus any previously unseen embedded messages.
+        for previous_delta in reversed(prior_deltas or []):
+            previous_delta = cls._clean_text(previous_delta)
+            if len(previous_delta) < 16:
+                continue
+            index = normalized.find(previous_delta)
+            if index > 0 and (earliest_known is None or index < earliest_known):
+                earliest_known = index
+                known_strategy = "forward_reentry"
+        if earliest_known is not None:
+            prefix = cls._clean_text(normalized[:earliest_known])
+            if prefix:
+                return prefix, known_strategy
         return normalized, None

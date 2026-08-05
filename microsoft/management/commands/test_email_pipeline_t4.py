@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,7 @@ def build_cases() -> dict[str, list[SimpleNamespace]]:
 
     original = "ALPHA_UNIQUE_731 Initial revenue is INR 125 crore."
     reply = "BETA_UNIQUE_842 Please validate the customer concentration."
-    return {
+    cases = {
         "single": [message("single", "Pipeline Deal", "SINGLE_UNIQUE_620 New investment memorandum.")],
         "nested_reply": [
             message("original", "Pipeline Deal", original),
@@ -81,6 +82,34 @@ def build_cases() -> dict[str, list[SimpleNamespace]]:
             "\nLONG_END_720 End of long evidence.",
         )],
     }
+    long_thread = []
+    contributions = []
+    for index in range(100):
+        contribution = (
+            f"Project Banyan update {index + 1}: monthly revenue reached INR {41 + index} crore, "
+            f"active merchants reached {1200 + index * 17}, and Region-{index:03d} requires "
+            f"a distribution diligence response by day {index + 1}."
+        )
+        contributions.append(contribution)
+        body = contribution
+        subject = "Project Banyan investment thread"
+        if index and index % 20 == 0:
+            subject = "Fwd: Project Banyan investment thread"
+            body = (
+                f"Forward wave {index // 20}: the external discussion is returning to the fund.\n\n"
+                f"---------- Original Message ----------\n{contribution}\n\n"
+                f"From: Prior Participant <prior@example.test>\nSent: Wednesday\n"
+                f"Subject: Re: Project Banyan\n\n{contributions[index - 1]}"
+            )
+        elif index:
+            subject = "Re: Project Banyan investment thread"
+            body = (
+                f"{contribution}\n\nOn Wed, Aug 5, 2026 at 10:{index:02d} AM Sender wrote:\n"
+                f"{contributions[index - 1]}"
+            )
+        long_thread.append(message(f"long-thread-{index}", subject, body, offset=index))
+    cases["long_thread"] = long_thread
+    return cases
 
 
 class Command(BaseCommand):
@@ -151,10 +180,28 @@ class Command(BaseCommand):
         started = time.monotonic()
         deltas = EmailThreadUnfolder.unfold(messages)
         non_empty = [delta for delta in deltas if delta.text]
+        model_deltas = non_empty
+        if name == "long_thread":
+            # Run every unfolded contribution through the T4 in five complete,
+            # chronological waves. This bounds individual context size while
+            # verifying all 100 messages rather than sampling endpoints.
+            model_deltas = []
+            for wave_index in range(5):
+                wave_start = wave_index * 20
+                for batch_index in range(4):
+                    start = wave_start + batch_index * 5
+                    batch = non_empty[start:start + 5]
+                    batch_text = "\n\n--- NEXT EMAIL DELTA ---\n\n".join(item.text for item in batch)
+                    model_deltas.append(SimpleNamespace(
+                        email_id=f"long-wave-{wave_index + 1}-batch-{batch_index + 1}",
+                        text=batch_text,
+                        strategy="sequential_wave_batch",
+                        delta_length=len(batch_text),
+                    ))
         outputs = []
         failures = []
 
-        for delta in non_empty:
+        for delta in model_deltas:
             expected_markers = self._markers(delta.text)
             expected_facts = self._expected_facts(name, delta.email_id)
             try:
@@ -171,8 +218,9 @@ class Command(BaseCommand):
                         "request_timeout": 180,
                     },
                 )
-                combined = f"{cleaned}\n{json.dumps(normalized, default=str)}"
-                missing = [fact for fact in expected_facts if fact.casefold() not in combined.casefold()]
+                normalized_text = json.dumps(normalized, default=str)
+                semantic_haystack = normalized_text if name == "long_thread" else f"{cleaned}\n{normalized_text}"
+                missing = [fact for fact in expected_facts if fact.casefold() not in semantic_haystack.casefold()]
                 if missing:
                     failures.append(f"{delta.email_id}: missing semantic facts {missing}")
                 outputs.append({
@@ -194,6 +242,17 @@ class Command(BaseCommand):
             texts = [delta.text for delta in non_empty]
             if any("ALPHA_UNIQUE_731" in text for text in texts[1:]):
                 failures.append("quoted ALPHA marker leaked into a reply delta")
+        if name == "long_thread":
+            combined_deltas = "\n".join(delta.text for delta in non_empty)
+            if len(non_empty) != 100:
+                failures.append(f"expected 100 non-empty deltas, got {len(non_empty)}")
+            for index in range(100):
+                if combined_deltas.count(f"Region-{index:03d}") != 1:
+                    failures.append(f"Region-{index:03d} was not retained exactly once")
+                    break
+            for index in (20, 40, 60, 80):
+                if deltas[index].strategy != "forward_reentry":
+                    failures.append(f"forward wave {index // 20} did not use forward_reentry strategy")
 
         return {
             "name": name,
@@ -255,6 +314,16 @@ class Command(BaseCommand):
 
     @staticmethod
     def _expected_facts(case_name, email_id):
+        if case_name == "long_thread" and email_id.startswith("long-wave-"):
+            match = re.fullmatch(r"long-wave-(\d+)-batch-(\d+)", email_id)
+            wave_index = int(match.group(1)) - 1
+            batch_index = int(match.group(2)) - 1
+            start = wave_index * 20 + batch_index * 5
+            end = start + 4
+            return (
+                [f"Region-{index:03d}" for index in range(start, end + 1)]
+                + [str(41 + start), str(41 + end), str(1200 + start * 17), str(1200 + end * 17)]
+            )
         facts = {
             ("single", "single"): ["investment memorandum"],
             ("nested_reply", "original"): ["revenue", "125"],

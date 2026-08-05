@@ -1739,6 +1739,22 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     analysis = result
     
     if analysis and "error" not in analysis:
+        # Some constrained local models return a valid evidence-rich context
+        # but omit the optional analyst_report field. Never persist a blank
+        # visible report when the synthesis response contains usable prose.
+        if not str(analysis.get("analyst_report") or "").strip():
+            fallback_report = next(
+                (
+                    str(analysis.get(key) or "").strip()
+                    for key in ("_full_context", "response", "_raw_response")
+                    if str(analysis.get(key) or "").strip()
+                ),
+                "",
+            )
+            if fallback_report:
+                analysis = dict(analysis)
+                analysis["analyst_report"] = fallback_report
+
         # Ensure deal_model_data has title if deal is missing
         if not analysis.get("deal_model_data", {}).get("title"):
             analysis.setdefault("deal_model_data", {})["title"] = proposed_intel.get("company_name")

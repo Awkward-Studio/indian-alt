@@ -9,6 +9,7 @@ from .services.graph_service import GraphAPIService
 from deals.services.email_intelligence import EmailIntelligenceService
 from .services.email_thread_unfolder import EmailThreadUnfolder
 from .services.email_thread_router import EmailThreadRouter, EmailThreadRouteMode
+from .services.email_thread_originator import EmailThreadOriginatorResolver
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,14 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             thread_emails = [email]
         route = EmailThreadRouter.resolve(thread_emails)
         route_payload = route.as_dict()
+        originator = EmailThreadOriginatorResolver.resolve(thread_emails)
+        originator_payload = originator.as_dict() if originator else None
         if route.mode == EmailThreadRouteMode.BLOCKED_AMBIGUOUS:
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "email_id": email_id,
                 "route": route_payload,
+                "originator": originator_payload,
                 "workflow_stage": "routing_blocked",
                 "interaction_status": "blocked",
             }
@@ -153,6 +157,7 @@ def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
             "file_tree": file_tree,
             "email_id": email_id,
             "route": route_payload,
+            "originator": originator_payload,
             "thread_stats": {
                 "message_count": email_count,
                 "oldest_msg": min(e.created_at for e in thread_emails).isoformat(),

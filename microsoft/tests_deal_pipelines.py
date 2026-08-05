@@ -95,6 +95,70 @@ class NewDealEmailPipelineTests(TestCase):
         self.assertFalse(Contact.objects.filter(email="banker@example.test").exists())
         self.assertFalse(Bank.objects.filter(name="Example Bank").exists())
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
+    def test_oldest_sender_becomes_primary_banker_and_all_thread_files_persist(self, _embedding):
+        originator = Contact.objects.create(
+            name="Original Banker",
+            email="originator@example.test",
+            designation="Director",
+        )
+        self.first.from_email = originator.email
+        self.first.attachments = [{"id": "origin-file", "name": "Origin Teaser.pdf"}]
+        self.first.save(update_fields=["from_email", "attachments"])
+        self.reply.from_email = "later@example.test"
+        self.reply.attachments = [{"id": "reply-file", "name": "Reply MIS.xlsx"}]
+        self.reply.save(update_fields=["from_email", "attachments"])
+        third = Email.objects.create(
+            email_account=self.account,
+            graph_id="new-deal-3",
+            conversation_id="new-deal-thread",
+            subject="Fwd: Acme opportunity",
+            from_email="forwarder@example.test",
+            body_text="Forward wrapper and unseen update",
+            attachments=[{"id": "forward-file", "name": "Forward Model.xlsx"}],
+            date_received=timezone.now() + timedelta(minutes=10),
+        )
+        fourth = Email.objects.create(
+            email_account=self.account,
+            graph_id="new-deal-4",
+            conversation_id="new-deal-thread",
+            subject="Re: Acme opportunity",
+            from_email=self.account.email,
+            body_text="Our team requested the customer cohort bridge and capex schedule.",
+            attachments=[{"id": "team-file", "name": "Diligence Request.xlsx"}],
+            date_received=timezone.now() + timedelta(minutes=15),
+        )
+        fifth = Email.objects.create(
+            email_account=self.account,
+            graph_id="new-deal-5",
+            conversation_id="new-deal-thread",
+            subject="Re: Acme opportunity",
+            from_email=originator.email,
+            body_text="The originating banker supplied the requested cohort bridge.",
+            attachments=[{"id": "banker-file", "name": "Cohort Bridge.xlsx"}],
+            date_received=timezone.now() + timedelta(minutes=20),
+        )
+        deal = Deal.objects.create(title="Acme")
+
+        payload = {
+            "source_email_id": str(third.id),
+            "analysis_json": self.analysis,
+            "contact_discovery": self.contact,
+        }
+        DealCreationService.process_deal_creation(deal, payload)
+        DealCreationService.process_deal_creation(deal, payload)
+
+        deal.refresh_from_db()
+        originator.refresh_from_db()
+        self.assertEqual(deal.primary_contact_id, originator.id)
+        self.assertEqual(originator.source_count, 1)
+        self.assertEqual(Email.objects.filter(conversation_id="new-deal-thread", deal=deal).count(), 5)
+        self.assertEqual(
+            set(DealDocument.objects.filter(deal=deal).values_list("onedrive_id", flat=True)),
+            {"origin-file", "reply-file", "forward-file", "team-file", "banker-file"},
+        )
+        self.assertEqual(DealDocument.objects.filter(deal=deal).count(), 5)
+
 
 class ExistingDealEmailPipelineTests(TestCase):
     def setUp(self):
@@ -189,6 +253,33 @@ class ExistingDealEmailPipelineTests(TestCase):
         self.assertTrue(document.is_ai_analyzed)
         self.assertEqual(DealDocument.objects.filter(deal=self.deal).count(), 1)
         self.assertEqual(self.audit.source_metadata["deal_analysis_version"], 2)
+
+    @patch("ai_orchestrator.services.realtime.broadcast_audit_log_update")
+    @patch("deals.tasks.log_worker_event")
+    @patch("ai_orchestrator.services.ai_processor.AIProcessorService")
+    def test_evidence_context_becomes_visible_report_when_model_omits_report(
+        self, ai_cls, _log_event, _broadcast
+    ):
+        fallback_report = (
+            "Project Banyan requires INR 125 crore. FY26 revenue is INR 80 crore, "
+            "customer concentration is 22 percent, and Pune commissioning is October 2026."
+        )
+        ai_cls.return_value.process_content.return_value = {
+            "_full_context": fallback_report,
+            "deal_model_data": {},
+            "metadata": {"ambiguous_points": []},
+        }
+
+        from deals.tasks import finalize_thread_analysis_async
+        result = finalize_thread_analysis_async.run(
+            self.results, str(self.deal.id), str(self.audit.id)
+        )
+
+        self.deal.refresh_from_db()
+        supplemental = self.deal.analyses.get(id=result["deal_analysis_id"])
+        self.assertEqual(supplemental.analysis_json["analyst_report"], fallback_report)
+        self.assertIn(fallback_report, supplemental.analysis_json["canonical_snapshot"]["analyst_report"])
+        self.assertEqual(self.deal.deal_summary, fallback_report)
 
 
 class DealPipelineT4CommandTests(TestCase):
