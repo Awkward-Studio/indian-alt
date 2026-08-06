@@ -1,6 +1,11 @@
 from rest_framework import serializers
+from django.db import transaction
+from django.utils import timezone
+from datetime import timedelta
 from .models import (
-    Deal, DealDocument, DealGeneratedDocument, DealPhaseLog, InitialAnalysisStatus,
+    Deal, DealContradiction, DealDocument, DealGeneratedDocument, DealPhaseLog,
+    InitialAnalysisStatus,
+    SectorResearchDiscoveryRun, SectorResearchRecommendation,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
@@ -18,6 +23,96 @@ class DealPhaseLogSerializer(serializers.ModelSerializer):
         model = DealPhaseLog
         fields = '__all__'
         read_only_fields = ('id', 'changed_at')
+
+
+class DealContradictionSerializer(serializers.ModelSerializer):
+    reviewed_by_name = serializers.CharField(
+        source="reviewed_by.name",
+        read_only=True,
+    )
+
+    def validate_review_status(self, value):
+        instance = self.instance
+        if instance is None:
+            raise serializers.ValidationError(
+                "Contradiction records can only be created by the detection pipeline."
+            )
+        current = instance.review_status
+        if current == DealContradiction.ReviewStatus.UNREVIEWED:
+            if value not in {
+                DealContradiction.ReviewStatus.CONFIRMED,
+                DealContradiction.ReviewStatus.DISMISSED,
+            }:
+                raise serializers.ValidationError(
+                    "Review status must transition to CONFIRMED or DISMISSED."
+                )
+        elif value != current:
+            raise serializers.ValidationError(
+                "A completed contradiction review cannot be changed to another status."
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        requested_status = validated_data.get("review_status")
+        if (
+            requested_status
+            and requested_status != instance.review_status
+        ):
+            request = self.context.get("request")
+            profile = getattr(getattr(request, "user", None), "profile", None)
+            if profile is None:
+                raise serializers.ValidationError(
+                    "The authenticated user does not have an analyst profile."
+                )
+            instance.reviewed_by = profile
+            instance.reviewed_at = timezone.now()
+        return super().update(instance, validated_data)
+
+    class Meta:
+        model = DealContradiction
+        fields = (
+            "id", "deal", "fingerprint", "subject", "metric", "period", "unit",
+            "classification", "confidence", "materiality", "rationale",
+            "left_claim", "right_claim", "classifier_version", "model_used",
+            "audit_log", "review_status", "analyst_comment", "reviewed_by",
+            "reviewed_by_name", "reviewed_at", "detected_at", "updated_at",
+        )
+        read_only_fields = (
+            "id", "deal", "fingerprint", "subject", "metric", "period", "unit",
+            "classification", "confidence", "materiality", "rationale",
+            "left_claim", "right_claim", "classifier_version", "model_used",
+            "audit_log", "reviewed_by", "reviewed_by_name", "reviewed_at",
+            "detected_at", "updated_at",
+        )
+
+
+class SectorResearchRecommendationSerializer(serializers.ModelSerializer):
+    is_stale = serializers.SerializerMethodField()
+
+    def get_is_stale(self, obj):
+        return obj.last_verified_at < timezone.now() - timedelta(days=30)
+
+    class Meta:
+        model = SectorResearchRecommendation
+        fields = (
+            "id", "title", "publisher", "publisher_domain",
+            "publication_date", "url", "canonical_url", "document_type",
+            "reason", "snippet", "source_query", "accessibility",
+            "content_type", "preferred_source", "relevance_score",
+            "credibility_score", "freshness_score", "accessibility_score",
+            "total_score", "score_explanation", "retrieved_at",
+            "last_verified_at", "is_stale",
+        )
+
+
+class SectorResearchDiscoveryRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SectorResearchDiscoveryRun
+        fields = (
+            "id", "status", "trigger", "context_hash", "celery_task_id",
+            "audit_log_id", "queries", "error", "started_at", "completed_at",
+            "created_at", "updated_at",
+        )
 
 
 class DealDocumentSerializer(serializers.ModelSerializer):
@@ -164,6 +259,7 @@ class DealGeneratedDocumentSerializer(serializers.ModelSerializer):
 
 
 class DealSerializer(serializers.ModelSerializer):
+    days_since_sourcing = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
@@ -189,6 +285,38 @@ class DealSerializer(serializers.ModelSerializer):
         queryset=Profile.objects.all(),
         required=False
     )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        status_supplied = self.instance is None or 'deal_status' in attrs or 'current_phase' in attrs
+        if not status_supplied:
+            return attrs
+
+        current_status = (
+            getattr(self.instance, 'current_phase', None)
+            or getattr(self.instance, 'deal_status', None)
+        )
+        target_status = attrs.get('current_phase') or attrs.get('deal_status') or current_status
+        transitioning_to_passed = target_status == 'Passed' and current_status != 'Passed'
+        if not transitioning_to_passed:
+            return attrs
+
+        effective_reason = (
+            attrs.get('reasons_for_passing')
+            or getattr(self.instance, 'reasons_for_passing', None)
+        )
+        normalized_reason = str(effective_reason or '').strip()
+        if not normalized_reason:
+            raise serializers.ValidationError({
+                'reasons_for_passing': 'A non-whitespace reason is required before passing a deal.'
+            })
+        attrs['reasons_for_passing'] = normalized_reason
+        return attrs
+
+    def get_days_since_sourcing(self, obj):
+        if not obj.received_at:
+            return None
+        return max((timezone.localdate() - obj.received_at).days, 0)
 
     def get_other_contact_details(self, obj):
         contacts = obj.additional_contacts.select_related('bank').all()
@@ -241,9 +369,23 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if deal.sector or deal.industry:
+            requested_by = getattr(self.context.get("request"), "user", None)
+            transaction.on_commit(
+                lambda: self._enqueue_research_discovery(
+                    deal,
+                    "AUTO_CREATE",
+                    requested_by,
+                )
+            )
         return deal
 
     def update(self, instance, validated_data):
+        research_context_changed = any(
+            field in validated_data
+            and validated_data[field] != getattr(instance, field)
+            for field in ("title", "sector", "industry")
+        )
         model_data = validated_data.copy()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
@@ -263,7 +405,30 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if research_context_changed and (deal.sector or deal.industry):
+            requested_by = getattr(self.context.get("request"), "user", None)
+            transaction.on_commit(
+                lambda: self._enqueue_research_discovery(
+                    deal,
+                    "AUTO_CONTEXT_CHANGE",
+                    requested_by,
+                )
+            )
         return deal
+
+    @staticmethod
+    def _enqueue_research_discovery(deal, trigger, requested_by):
+        from .services.research_discovery import ResearchDiscoveryCoordinator
+
+        ResearchDiscoveryCoordinator.enqueue(
+            deal=deal,
+            trigger=trigger,
+            requested_by=(
+                requested_by
+                if getattr(requested_by, "is_authenticated", False)
+                else None
+            ),
+        )
 
     class Meta:
         model = Deal
@@ -388,7 +553,7 @@ class DealDetailSerializer(DealSerializer):
             'primary_contact_name', 'primary_contact_details', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'current_phase', 'industry',
             'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
-            'ic_stage', 'city', 'country', 'created_at', 'deal_summary',
+            'ic_stage', 'city', 'country', 'received_at', 'days_since_sourcing', 'created_at', 'deal_summary',
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
             'legacy_investment_bank', 'other_contacts', 'other_contact_details', 'additional_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
             'generated_documents', 'analysis_prompt',
@@ -435,24 +600,36 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 
 class DealListSerializer(serializers.ModelSerializer):
+    days_since_sourcing = serializers.SerializerMethodField()
+    has_analysis = serializers.BooleanField(read_only=True)
+    has_vi_data = serializers.BooleanField(read_only=True)
+    has_competitors = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
         read_only=True
     )
+
+    def get_days_since_sourcing(self, obj):
+        if not obj.received_at:
+            return None
+        return max((timezone.localdate() - obj.received_at).days, 0)
+
+    def get_has_competitors(self, obj):
+        return bool(obj.competitor_candidates) or bool(
+            getattr(obj, 'has_vi_competitors', False)
+        ) or bool(getattr(obj, 'has_relationship_competitors', False))
     
     class Meta:
         model = Deal
         fields = (
-            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase', 'created_at',
+            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
+            'received_at', 'days_since_sourcing', 'created_at',
+            'has_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'rejection_stage_id', 'rejection_reason'
+            'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
         )
-        read_only_fields = ('id', 'created_at')
-
-
-
-
+        read_only_fields = ('id', 'created_at', 'days_since_sourcing')

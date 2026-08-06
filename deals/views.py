@@ -9,21 +9,52 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db import transaction
+from django.db.models import Exists, F, OuterRef, Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
-from .models import Deal, DealDocument, DealPhaseLog
+from .models import (
+    Deal, DealAnalysis, DealContradiction, DealDocument, DealPhaseLog,
+    DealRelationshipContext, SectorResearchDiscoveryRun,
+    SectorResearchRecommendation,
+    VentureIntelligenceCompanyRelation,
+)
 from .serializers import (
-    DealSerializer, DealListSerializer, DealDetailSerializer, 
-    DealDocumentSerializer, DealPhaseLogSerializer, DealHeavyFieldsSerializer
+    DealSerializer, DealListSerializer, DealDetailSerializer,
+    DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
+    DealHeavyFieldsSerializer, SectorResearchDiscoveryRunSerializer,
+    SectorResearchRecommendationSerializer,
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
-from .services.deal_flow import DealFlowService
+from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
-from ai_orchestrator.models import DocumentChunk
+from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
+
+
+class DealOrderingFilter(filters.OrderingFilter):
+    """Keep undated deals after dated deals for either receipt-date direction."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+
+        expressions = []
+        for field in ordering:
+            if field.lstrip('-') == 'received_at':
+                expression = F('received_at')
+                expressions.append(
+                    expression.desc(nulls_last=True)
+                    if field.startswith('-')
+                    else expression.asc(nulls_last=True)
+                )
+            else:
+                expressions.append(field)
+        return queryset.order_by(*expressions)
 
 
 def serialize_vi_cin_candidates(resolution):
@@ -55,13 +86,35 @@ class DealPagination(PageNumberPagination):
 class DealFilterSet(django_filters.FilterSet):
     sector = django_filters.CharFilter(lookup_expr='icontains')
     city = django_filters.CharFilter(lookup_expr='icontains')
+    bank_name = django_filters.CharFilter(field_name='bank__name', lookup_expr='icontains')
+    banker_name = django_filters.CharFilter(field_name='primary_contact__name', lookup_expr='icontains')
+    has_analysis = django_filters.BooleanFilter(field_name='has_analysis')
+    has_vi_data = django_filters.BooleanFilter(field_name='has_vi_data')
+    has_competitors = django_filters.BooleanFilter(
+        method='filter_has_competitors'
+    )
+
+    def filter_has_competitors(self, queryset, name, value):
+        competitor_data = (
+            Q(has_vi_competitors=True)
+            | Q(has_relationship_competitors=True)
+            | (
+                Q(competitor_candidates__isnull=False)
+                & ~Q(competitor_candidates=[])
+            )
+        )
+        return queryset.filter(competitor_data) if value else queryset.exclude(
+            competitor_data
+        )
 
     class Meta:
         model = Deal
         fields = [
             'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'current_phase', 'sector', 'city', 'primary_contact'
+            'current_phase', 'sector', 'city', 'primary_contact',
+            'bank_name', 'banker_name',
+            'has_analysis', 'has_vi_data', 'has_competitors',
         ]
 
 
@@ -82,6 +135,7 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'title', 'document_type']
     ordering = ['-created_at']
 
+    @transaction.atomic
     def perform_create(self, serializer):
         if hasattr(self.request.user, 'profile'):
             serializer.save(uploaded_by=self.request.user.profile)
@@ -215,10 +269,35 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 )
 class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     # Use select_related to avoid N+1 queries on foreign keys
-    queryset = Deal.objects.select_related('bank', 'primary_contact', 'request').prefetch_related('responsibility', 'additional_contacts').all()
+    queryset = Deal.objects.select_related(
+        'bank', 'primary_contact', 'request'
+    ).prefetch_related(
+        'responsibility', 'additional_contacts'
+    ).annotate(
+        has_analysis=Exists(
+            DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+        ),
+        has_vi_data=Exists(
+            VentureIntelligenceCompanyRelation.objects.filter(
+                deal_id=OuterRef('pk')
+            )
+        ),
+        has_vi_competitors=Exists(
+            VentureIntelligenceCompanyRelation.objects.filter(
+                deal_id=OuterRef('pk'),
+                relation_type='competitor',
+            )
+        ),
+        has_relationship_competitors=Exists(
+            DealRelationshipContext.objects.filter(
+                deal_id=OuterRef('pk'),
+                relationship_type='competitor',
+            )
+        ),
+    )
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, DealOrderingFilter]
     filterset_class = DealFilterSet
     search_fields = [
         'title', 'deal_summary', 'industry', 'sector', 'city', 'state',
@@ -227,10 +306,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         'legacy_investment_bank', 'primary_contact__name'
     ]
     ordering_fields = [
-        'created_at', 'title', 'priority', 'deal_status',
-        'sector', 'industry', 'fund', 'current_phase', 'city'
+        'received_at', 'created_at', 'title', 'priority', 'deal_status',
+        'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
+        'is_female_led', 'has_analysis', 'has_vi_data', 'bank__name',
+        'primary_contact__name',
     ]
-    ordering = ['-created_at']
+    ordering = ['-received_at', '-created_at']
     @staticmethod
     def _parse_funding_ask(value):
         if value in (None, ''):
@@ -574,6 +655,156 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if self.action == 'heavy_fields':
             return DealHeavyFieldsSerializer
         return DealSerializer
+
+    def _can_review_contradictions(self, request, deal):
+        user = request.user
+        if user.is_superuser or user.is_staff:
+            return True
+        profile = getattr(user, "profile", None)
+        if profile is None or profile.is_disabled:
+            return False
+        return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @action(detail=True, methods=["get", "post"])
+    def research_discovery(self, request, pk=None):
+        deal = self.get_object()
+        from .services.research_discovery import ResearchDiscoveryCoordinator
+
+        if request.method == "POST":
+            if not self._can_review_contradictions(request, deal):
+                return Response(
+                    {
+                        "error": (
+                            "Only deal-responsible analysts or administrators "
+                            "can refresh research discovery."
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            run, created = ResearchDiscoveryCoordinator.enqueue(
+                deal=deal,
+                trigger=SectorResearchDiscoveryRun.Trigger.MANUAL,
+                requested_by=request.user,
+            )
+            return Response(
+                {
+                    "created": created,
+                    "run": SectorResearchDiscoveryRunSerializer(run).data,
+                },
+                status=(
+                    status.HTTP_202_ACCEPTED
+                    if created
+                    else status.HTTP_200_OK
+                ),
+            )
+
+        valid_document_types = {
+            choice
+            for choice, _label in SectorResearchRecommendation.DocumentType.choices
+        }
+        valid_accessibility = {
+            choice
+            for choice, _label in SectorResearchRecommendation.Accessibility.choices
+        }
+        document_type = request.query_params.get("document_type")
+        accessibility = request.query_params.get("accessibility")
+        if document_type and document_type not in valid_document_types:
+            return Response(
+                {"error": "Invalid document_type filter."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if accessibility and accessibility not in valid_accessibility:
+            return Response(
+                {"error": "Invalid accessibility filter."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        recommendations = deal.research_recommendations.all()
+        if document_type:
+            recommendations = recommendations.filter(
+                document_type=document_type
+            )
+        if accessibility:
+            recommendations = recommendations.filter(
+                accessibility=accessibility
+            )
+        latest_run = deal.research_discovery_runs.first()
+        current_hash = ResearchDiscoveryCoordinator.context_hash(deal)
+        return Response(
+            {
+                "run": (
+                    SectorResearchDiscoveryRunSerializer(latest_run).data
+                    if latest_run
+                    else None
+                ),
+                "context_stale": bool(
+                    latest_run and latest_run.context_hash != current_hash
+                ),
+                "recommendations": SectorResearchRecommendationSerializer(
+                    recommendations[:100],
+                    many=True,
+                ).data,
+            }
+        )
+
+    @action(detail=True, methods=["get", "patch"])
+    def contradictions(self, request, pk=None):
+        deal = self.get_object()
+        queryset = deal.contradictions.select_related(
+            "reviewed_by",
+            "audit_log",
+        ).all()
+
+        if request.method == "GET":
+            review_status = request.query_params.get("status")
+            classification = request.query_params.get("classification")
+            if review_status:
+                valid_statuses = {
+                    choice
+                    for choice, _label in DealContradiction.ReviewStatus.choices
+                }
+                if review_status not in valid_statuses:
+                    return Response(
+                        {"error": "status must be UNREVIEWED, CONFIRMED, or DISMISSED."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                queryset = queryset.filter(review_status=review_status)
+            if classification:
+                queryset = queryset.filter(classification=classification)
+            return Response(
+                DealContradictionSerializer(
+                    queryset,
+                    many=True,
+                    context={"request": request},
+                ).data
+            )
+
+        if not self._can_review_contradictions(request, deal):
+            return Response(
+                {"error": "Only deal-responsible analysts or administrators can review contradictions."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        contradiction_id = request.data.get("id")
+        if not contradiction_id:
+            return Response(
+                {"error": "id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        contradiction = queryset.filter(id=contradiction_id).first()
+        if contradiction is None:
+            return Response(
+                {"error": "Contradiction was not found for this deal."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = DealContradictionSerializer(
+            contradiction,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
     
     @action(detail=True, methods=['get'])
     def heavy_fields(self, request, pk=None):
@@ -631,6 +862,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         else:
             deal.deal_summary = report
             deal.save(update_fields=['deal_summary'])
+            from work_items.services import sync_deal_suggestions
+            sync_deal_suggestions(deal, None)
 
         deal.refresh_from_db()
         return Response({
@@ -643,8 +876,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def rewrite_analysis_section(self, request, pk=None):
         """
-        Generate a preview rewrite for one analysis report section.
-        The rewritten markdown is returned to the caller and is not persisted.
+        Preview one analysis report section rewrite, then persist only after a
+        separate signed confirmation request.
         """
         deal = self.get_object()
         section_markdown = request.data.get('section_markdown')
@@ -678,66 +911,72 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
-        prompt = f"""
-You are editing one section of a private equity analysis report.
-
-Rewrite only the selected section according to the analyst instruction. Use the full report only for context and consistency.
-
-Rules:
-- Return Markdown only.
-- Preserve the selected section heading unless the analyst explicitly asks to rename it.
-- Do not add commentary, JSON, code fences, or explanations.
-- Do not invent new facts. If the instruction asks for emphasis, reframe using facts already present in the selected section or full report.
-- Keep tables as valid Markdown tables when the source section contains tables.
-
-[DEAL]
-{deal.title}
-
-[SELECTED SECTION TITLE]
-{section_title}
-
-[ANALYST INSTRUCTION]
-{instruction}
-
-[SELECTED SECTION MARKDOWN]
-{section_markdown}
-
-[FULL REPORT CONTEXT]
-{full_report}
-""".strip()
-
         try:
-            from ai_orchestrator.services.ai_processor import AIProcessorService
+            import hashlib
+            from django.core import signing
+            from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
 
-            ai_service = AIProcessorService()
-            result = ai_service.process_content(
-                content=prompt,
-                skill_name=None,
-                source_type="analysis_section_rewrite",
-                source_id=str(deal.id),
-                metadata={
-                    "model_provider": "vllm",
-                    "response_mode": "markdown",
-                    "personality_only_system": True,
+            rewrite_service = AnalysisSectionRewriteService()
+            confirmation_token = request.data.get("confirmation_token")
+            if confirmation_token:
+                try:
+                    confirmation = signing.loads(
+                        confirmation_token,
+                        salt="analysis-section-rewrite",
+                        max_age=3600,
+                    )
+                except signing.BadSignature:
+                    return Response(
+                        {"error": "The rewrite confirmation is invalid or expired."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                expected = {
                     "deal_id": str(deal.id),
+                    "version": str(version or ""),
                     "section_title": section_title,
-                    "analysis_version": version,
-                },
+                    "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+                }
+                if any(confirmation.get(key) != value for key, value in expected.items()):
+                    return Response(
+                        {"error": "The report or section changed after the preview. Generate a new rewrite preview."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                rewritten = str(confirmation.get("section_markdown") or "").strip()
+                updated_report = rewrite_service.replace_section(full_report, section_title, rewritten)
+                rewrite_service.persist(deal=deal, full_report=updated_report, version=version)
+                return Response({
+                    "section_markdown": rewritten,
+                    "full_report": updated_report,
+                    "persisted": True,
+                    "confirmation_required": False,
+                })
+
+            rewritten = rewrite_service.rewrite(
+                deal=deal,
+                section_title=section_title,
+                section_markdown=section_markdown,
+                instruction=instruction,
+                full_report=full_report,
+                version=version,
             )
-            if isinstance(result, dict):
-                rewritten = (
-                    result.get('response')
-                    or result.get('_raw_response')
-                    or result.get('content')
-                    or ""
-                ).strip()
-            else:
-                rewritten = str(result or "").strip()
-
-            if not rewritten:
-                return Response({"error": "AI did not return a rewritten section"}, status=502)
-
-            return Response({"section_markdown": rewritten})
+            token = signing.dumps(
+                {
+                    "deal_id": str(deal.id),
+                    "version": str(version or ""),
+                    "section_title": section_title,
+                    "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+                    "section_markdown": rewritten,
+                },
+                salt="analysis-section-rewrite",
+                compress=True,
+            )
+            return Response({
+                "section_markdown": rewritten,
+                "full_report": full_report,
+                "persisted": False,
+                "confirmation_required": True,
+                "confirmation_token": token,
+            })
         except Exception as exc:
             logger.exception("Failed to rewrite analysis section for deal %s", deal.id)
             return Response({"error": str(exc)}, status=500)
@@ -753,35 +992,40 @@ Rules:
         try:
             from ai_orchestrator.models import AIAuditLog
             from .services.folder_analysis import FolderAnalysisService
-            from .services.email_intelligence import EmailIntelligenceService
 
             # 1. Resolve Session/Audit Log
             audit_log = AIAuditLog.objects.filter(id=session_id).first()
             if not audit_log:
                 return Response({"error": "Invalid session or audit log ID"}, status=400)
 
-            # 2. Create the Deal record first (with user-edited form data)
+            # 2. Validate before opening the atomic persistence boundary.
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            deal = serializer.save()
 
-            # 3. Handle source-specific initialization
-            source_type = audit_log.source_type
-            
-            if source_type == 'email':
-                # Link intelligence specifically from email thread
-                proposed_intel = (audit_log.source_metadata or {}).get("proposed_intel", {})
-                EmailIntelligenceService.create_deal_from_intelligence(audit_log.source_id, proposed_intel)
-                # Ensure the deal we just saved is the one linked.
-                deal.source_email_id = audit_log.source_id
-                deal.save(update_fields=['source_email_id'])
+            with transaction.atomic():
+                deal = serializer.save()
+                result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
 
-            # 4. Finalize deal with analysis session data (common for folder/email)
-            # This handles doc linking, embedding, and synthesis persistence
-            result = FolderAnalysisService.confirm_deal_from_session(session_id, deal)
-            
-            if result.get("error"):
-                return Response(result, status=400)
+                if result.get("error"):
+                    transaction.set_rollback(True)
+                    return Response(result, status=400)
+
+                confirmed_deal_id = result.get("deal_id")
+                if confirmed_deal_id and str(confirmed_deal_id) != str(deal.id):
+                    deal = Deal.objects.get(id=confirmed_deal_id)
+
+                if audit_log.source_type == 'email' and audit_log.source_id:
+                    from microsoft.models import Email
+
+                    source_email = Email.objects.select_for_update().filter(id=audit_log.source_id).first()
+                    if not source_email:
+                        raise ValueError(f"Source email {audit_log.source_id} does not exist")
+                    thread = Email.objects.filter(id=source_email.id)
+                    if source_email.conversation_id:
+                        thread = Email.objects.filter(conversation_id=source_email.conversation_id)
+                    thread.update(deal=deal)
+                    source_email.is_processed = True
+                    source_email.save(update_fields=["is_processed"])
 
             # 5. Return the finalized deal
             return Response(self.get_serializer(deal).data, status=status.HTTP_201_CREATED)
@@ -874,12 +1118,15 @@ Rules:
         Transitions a deal to a new phase and logs the rationale.
         """
         deal = self.get_object()
-        result = DealFlowService.transition_phase(
-            deal=deal,
-            to_phase=request.data.get('to_phase'),
-            rationale=request.data.get('rationale'),
-            request_user=request.user
-        )
+        try:
+            result = DealFlowService.transition_phase(
+                deal=deal,
+                to_phase=request.data.get('to_phase'),
+                rationale=request.data.get('rationale'),
+                request_user=request.user
+            )
+        except DealFlowValidationError as exc:
+            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
 
     @action(detail=True, methods=['post'])
@@ -889,14 +1136,17 @@ Rules:
         Accepts `active_stage`, `decisions_update` (dict), and optional `reason`.
         """
         deal = self.get_object()
-        result = DealFlowService.update_flow_state(
-            deal=deal,
-            active_stage=request.data.get('active_stage'),
-            decisions_update=request.data.get('decisions_update'),
-            reason=request.data.get('reason'),
-            rejection_stage_id=request.data.get('rejection_stage_id'),
-            request_user=request.user
-        )
+        try:
+            result = DealFlowService.update_flow_state(
+                deal=deal,
+                active_stage=request.data.get('active_stage'),
+                decisions_update=request.data.get('decisions_update'),
+                reason=request.data.get('reason'),
+                rejection_stage_id=request.data.get('rejection_stage_id'),
+                request_user=request.user
+            )
+        except DealFlowValidationError as exc:
+            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
 
     @action(detail=True, methods=['get'])
@@ -1124,6 +1374,8 @@ Rules:
                 doc_type = DocumentType.LEGAL
             elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
                 doc_type = DocumentType.PITCH_DECK
+            elif any(k in name_lower for k in ['annual report', 'industry report', 'market report', 'sector report']):
+                doc_type = DocumentType.MEMO
                 
             extraction = doc_processor.get_extraction_result(file_content, file_name)
             extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
@@ -1188,14 +1440,23 @@ Rules:
                     existing_competitors=existing_competitors,
                 )
                 if result.get("error"):
-                    return Response({"status": "FAILURE", "error": result["error"]}, status=500)
+                    return Response({"status": "FAILURE", "error": result["error"]}, status=400)
                 from .services.competitor_intelligence import annotate_existing_competitors
                 competitors = annotate_existing_competitors(deal, result.get("competitors", []))
+                if not competitors:
+                    return Response({
+                        "status": "FAILURE",
+                        "error": result.get("message", "Live web search returned no grounded competitors."),
+                        "response": result.get("response", ""),
+                        "competitors": [],
+                        "diagnostics": result.get("diagnostics", {}),
+                    })
                 return Response({
                     "status": "SUCCESS",
                     "response": result.get("response", ""),
                     "competitors": competitors,
-                    "message": "Competitor research completed.",
+                    "message": result.get("message", "Competitor research completed."),
+                    "diagnostics": result.get("diagnostics", {}),
                 })
             except Exception as e:
                 logger.error(f"Failed to run synchronous competitors search for deal {deal.id}: {str(e)}", exc_info=True)
@@ -1232,10 +1493,21 @@ Rules:
             if "error" in data:
                 return Response({"status": "FAILURE", "error": data["error"]}, status=200)
             from .services.competitor_intelligence import annotate_existing_competitors
+            competitors = annotate_existing_competitors(self.get_object(), data.get("competitors", []))
+            if not competitors:
+                return Response({
+                    "status": "FAILURE",
+                    "error": data.get("message", "Live web search returned no grounded competitors."),
+                    "response": data.get("response", ""),
+                    "competitors": [],
+                    "diagnostics": data.get("diagnostics", {}),
+                })
             return Response({
                 "status": "SUCCESS",
                 "response": data.get("response", ""),
-                "competitors": annotate_existing_competitors(self.get_object(), data.get("competitors", [])),
+                "competitors": competitors,
+                "message": data.get("message", "Competitor research completed."),
+                "diagnostics": data.get("diagnostics", {}),
             })
         elif res.status == 'FAILURE':
             return Response({
@@ -1479,6 +1751,27 @@ class DealEnrichView(APIView):
 
         if request.data.get("async"):
             from .tasks import enrich_deal_vi_async_task
+            audit_log = AIRuntimeService.create_audit_log(
+                source_type="deal_enrichment",
+                source_id=str(deal.id),
+                context_label=f"Venture Intelligence: {deal.title}",
+                skill=AIRuntimeService.get_skill("venture_intelligence_enrichment"),
+                status="PENDING",
+                is_success=False,
+                system_prompt="Queued for Venture Intelligence enrichment.",
+                user_prompt=(
+                    f"Enrich {relation_type} company "
+                    f"{company_name or cin or deal.title} for deal {deal.title}."
+                ),
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "deal_title": deal.title,
+                    "relation_type": relation_type,
+                    "company_name": company_name,
+                    "cin": cin,
+                    "result_route": f"/deals/{deal.id}?tab=key-financials#venture-intelligence-section",
+                },
+            )
             task = enrich_deal_vi_async_task.apply_async(
                 kwargs={
                     "deal_id": str(deal.id),
@@ -1486,12 +1779,16 @@ class DealEnrichView(APIView):
                     "cin": cin,
                     "relation_type": relation_type,
                     "raw_data": raw_data,
+                    "audit_log_id": str(audit_log.id),
                 },
                 queue='high_priority'
             )
+            audit_log.celery_task_id = task.id
+            audit_log.save(update_fields=["celery_task_id"])
             return Response({
                 "status": "queued",
                 "task_id": task.id,
+                "audit_log_id": str(audit_log.id),
                 "message": f"Queued {relation_type} Venture Intelligence enrichment.",
             })
 
@@ -1525,24 +1822,29 @@ class DealEnrichStatusView(APIView):
         from celery.result import AsyncResult
 
         result = AsyncResult(task_id)
+        audit_log = AIAuditLog.objects.filter(celery_task_id=task_id).only("id").first()
+        audit_log_id = str(audit_log.id) if audit_log else None
         if result.status == 'SUCCESS':
             data = result.result or {}
             if data.get("status") == "FAILURE" or "error" in data:
                 return Response({
                     "status": "FAILURE",
                     "error": data.get("error", "VI enrichment failed."),
+                    "audit_log_id": data.get("audit_log_id") or audit_log_id,
                 }, status=200)
 
             profile = VentureIntelligenceCompanyProfile.objects.filter(id=data.get("profile_id")).first()
             return Response({
                 "status": "SUCCESS",
                 "profile": VentureIntelligenceCompanyProfileSerializer(profile).data if profile else None,
+                "audit_log_id": data.get("audit_log_id") or audit_log_id,
             })
 
         if result.status == 'FAILURE':
             return Response({
                 "status": "FAILURE",
                 "error": str(result.info or "Background VI enrichment failed unexpectedly."),
+                "audit_log_id": audit_log_id,
             }, status=500)
 
-        return Response({"status": result.status})
+        return Response({"status": result.status, "audit_log_id": audit_log_id})

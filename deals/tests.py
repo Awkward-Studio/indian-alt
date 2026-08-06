@@ -7,7 +7,7 @@ import requests
 
 from django.core.management import call_command
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from django.urls import reverse
@@ -36,13 +36,554 @@ from deals.tasks import (
     analyze_additional_documents_async,
     fetch_company_news_async_task,
     analyze_selection_async,
+    enrich_deal_vi_async_task,
     enrich_competitors_vi_async_task,
     fetch_competitors_async_task,
     process_single_document_async,
 )
 from deals.services.competitor_intelligence import competitor_names_from_payload
-from deals.services.screener import ScreenerCompanyService
+from deals.services.competitor_web_research import CompetitorWebResearchService
+from ai_orchestrator.services.search_provider import SearXNGProviderService
+from deals.services.screener import ScreenerCompanyService, _normalize_screener_url
 from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.analysis_next_steps import inspect_analysis_next_steps
+
+
+class AnalysisNextStepsInspectionTests(SimpleTestCase):
+    def test_extracts_section_and_canonical_task_tables(self):
+        report = r"""
+## Key Financials
+| Next steps / further diligence / red flags | Details |
+| :--- | :--- |
+| **Financial Validation** | Request audited statements.<br>Validate revenue. |
+
+## Next Steps
+| Serial Number | Tasks / Next Step | Task Owner | Task assigned to | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | Request audited statements. | Analyst | Deal Team | Pending |
+"""
+
+        result = inspect_analysis_next_steps(report)
+
+        self.assertEqual(result["summary"]["section_tables"], 1)
+        self.assertEqual(result["summary"]["canonical_task_tables"], 1)
+        self.assertEqual(result["summary"]["task_candidates"], 2)
+        section_task, canonical_task = result["tasks"]
+        self.assertEqual(section_task["source_section"], "Key Financials")
+        self.assertEqual(section_task["category"], "Financial Validation")
+        self.assertEqual(section_task["task"], "Request audited statements.\nValidate revenue.")
+        self.assertIn("assignee", section_task["missing_fields"])
+        self.assertEqual(canonical_task["owner"], "Analyst")
+        self.assertEqual(canonical_task["assignee"], "Deal Team")
+        self.assertEqual(canonical_task["status"], "Pending")
+        self.assertEqual(canonical_task["missing_fields"], ["priority", "due_date"])
+
+    def test_extracts_action_table_and_ignores_analysis_table(self):
+        report = """
+## Transaction
+| Item | Action | Priority |
+| --- | --- | --- |
+| Valuation Basis | Understand the valuation rationale. | High |
+
+| Metric | Value |
+| --- | --- |
+| Revenue | INR 10 Cr |
+"""
+
+        result = inspect_analysis_next_steps(report)
+
+        self.assertEqual(result["summary"]["action_tables"], 1)
+        self.assertEqual(len(result["tables"]), 1)
+        self.assertEqual(result["tasks"][0]["task"], "Understand the valuation rationale.")
+        self.assertEqual(result["tasks"][0]["priority"], "High")
+
+    def test_preserves_escaped_pipes_inside_cells(self):
+        report = r"""
+## Next Steps
+| Task | Owner | Status |
+| --- | --- | --- |
+| Compare base \| downside cases | Analyst | Pending |
+"""
+
+        task = inspect_analysis_next_steps(report)["tasks"][0]
+
+        self.assertEqual(task["task"], "Compare base | downside cases")
+
+
+@override_settings(
+    SEARXNG_BASE_URL="http://search.internal:8888",
+    SEARXNG_TIMEOUT=7,
+    SEARXNG_MAX_RESULTS=10,
+    SEARXNG_SEARCH_WORKERS=2,
+)
+class SearXNGProviderTests(SimpleTestCase):
+    @patch("ai_orchestrator.services.search_provider.requests.get")
+    def test_search_many_uses_configured_url_and_deduplicates_sources(self, mock_get):
+        def response_for_query(*args, **kwargs):
+            query = kwargs["params"]["q"]
+            response = MagicMock()
+            response.json.return_value = {
+                "results": [
+                    {"title": f"{query} result", "content": "Evidence", "url": "https://example.com/shared"},
+                    {"title": f"{query} unique", "content": "More evidence", "url": f"https://example.com/{query}"},
+                ]
+            }
+            return response
+
+        mock_get.side_effect = response_for_query
+        service = SearXNGProviderService()
+
+        results = service.search_many(["alpha", "beta"], results_per_query=2, max_results=10)
+        context = service.format_context(results)
+
+        self.assertEqual(service.base_url, "http://search.internal:8888")
+        self.assertEqual(len(results), 3)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertTrue(all(call.args[0] == "http://search.internal:8888/search" for call in mock_get.call_args_list))
+        self.assertIn("[S1]", context)
+        self.assertEqual(context.count("https://example.com/shared"), 1)
+
+    @override_settings(SEARXNG_ENGINES=["brave", "google", "duckduckgo", "bing"])
+    @patch("ai_orchestrator.services.search_provider.requests.get")
+    def test_aggregate_search_uses_configured_engines_in_one_request(self, mock_get):
+        response = MagicMock()
+        response.json.return_value = {
+            "results": [{
+                "title": "Competitor list",
+                "content": "Grounded competitor evidence",
+                "url": "https://example.com/competitors",
+                "engine": "duckduckgo",
+            }],
+        }
+        mock_get.return_value = response
+
+        results = SearXNGProviderService().search_results(
+            "company competitors",
+            aggregate_engines=True,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(
+            mock_get.call_args.kwargs["params"]["engines"],
+            "brave,google,duckduckgo,bing",
+        )
+
+    @override_settings(SEARXNG_ENGINES=["bing", "yep"], SEARXNG_LANGUAGE="en-IN")
+    @patch("ai_orchestrator.services.search_provider.requests.get")
+    def test_search_distributes_queries_and_falls_back_sequentially(self, mock_get):
+        service = SearXNGProviderService()
+        engine_order = service._engine_order("competitor research")
+
+        empty_response = MagicMock()
+        empty_response.json.return_value = {
+            "results": [],
+            "unresponsive_engines": [[engine_order[0], "too many requests"]],
+        }
+        result_response = MagicMock()
+        result_response.json.return_value = {
+            "results": [{
+                "title": "Verified competitor",
+                "content": "Evidence",
+                "url": "https://example.com/competitor",
+                "engine": engine_order[1],
+            }],
+            "unresponsive_engines": [],
+        }
+        mock_get.side_effect = [empty_response, result_response]
+
+        results = service.search_results("competitor research")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_get.call_args_list[0].kwargs["params"]["engines"], engine_order[0])
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"]["engines"], engine_order[1])
+        self.assertTrue(all(call.kwargs["params"]["language"] == "en-IN" for call in mock_get.call_args_list))
+
+
+@override_settings(VLLM_TEXT_MODEL="configured-local-model")
+class GroundedCompetitorWebResearchTests(SimpleTestCase):
+    databases = {"default"}
+
+    @patch("deals.services.screener.ScreenerCompanyService.search_company")
+    def test_two_searches_extract_and_classify_grounded_competitors(self, mock_screener_search):
+        search_service = SearXNGProviderService()
+        evidence_results = [{
+            "title": "Quick commerce competitors and ownership",
+            "snippet": "Shadowfax is listed on NSE with ticker SHADOWFAX. Blinkit is a privately held quick-commerce competitor.",
+            "url": "https://example.com/quick-commerce",
+            "query": "single query",
+        }]
+        search_service.search_results = MagicMock(return_value=evidence_results)
+
+        llm_service = MagicMock()
+        llm_service.execute_standard.return_value = {
+            "response": json.dumps({"competitors": [
+                {
+                    "company_name": "Shadowfax",
+                    "company_type": "listed_public",
+                    "classification_confidence": 0.95,
+                    "exchange": "NSE",
+                    "ticker": "SHADOWFAX",
+                    "classification_source": "Shadowfax is listed on NSE with ticker SHADOWFAX.",
+                    "evidence_urls": ["https://example.com/quick-commerce"],
+                },
+                {
+                    "company_name": "Blinkit",
+                    "company_type": "private",
+                    "classification_confidence": 0.9,
+                    "classification_source": "Evidence describes Blinkit as privately held.",
+                    "evidence_urls": ["https://example.com/quick-commerce"],
+                },
+            ]}),
+        }
+        competitor_response = llm_service.execute_standard.return_value
+        llm_service.execute_standard.side_effect = [
+            {"response": json.dumps({
+                "public_query": "India listed quick commerce logistics peers NSE BSE",
+                "private_query": '"Zepto" private quick commerce competitors India',
+                "inferred_category": "quick commerce and last-mile delivery",
+            })},
+            competitor_response,
+            competitor_response,
+        ]
+        mock_screener_search.side_effect = lambda name: (
+            {
+                "company_name": "Shadowfax Technologies Ltd",
+                "ticker": "SHADOWFAX",
+                "screener_url": "https://www.screener.in/company/SHADOWFAX/",
+            }
+            if name == "Shadowfax"
+            else {}
+        )
+        service = CompetitorWebResearchService(search_service=search_service, llm_service=llm_service)
+        service._enrich_evidence = MagicMock(side_effect=lambda **kwargs: kwargs["results"])
+
+        result = service.research(company_name="Zepto", sector="Quick commerce", location="India")
+
+        self.assertEqual(search_service.search_results.call_count, 2)
+        search_queries = [call.args[0] for call in search_service.search_results.call_args_list]
+        self.assertIn("India listed quick commerce logistics peers NSE BSE", search_queries)
+        self.assertIn('"Zepto" private quick commerce competitors India', search_queries)
+        self.assertTrue(all(call.kwargs["aggregate_engines"] for call in search_service.search_results.call_args_list))
+        self.assertEqual(llm_service.execute_standard.call_count, 3)
+        self.assertTrue(all(call.args[0]["model"] == "configured-local-model" for call in llm_service.execute_standard.call_args_list))
+        self.assertEqual(
+            llm_service.execute_standard.call_args.args[0]["response_format"]["type"],
+            "json_schema",
+        )
+        self.assertEqual([item["name"] for item in result["competitors"]], ["Shadowfax", "Blinkit"])
+        self.assertEqual(result["competitors"][0]["company_type"], "listed_public")
+        self.assertEqual(result["competitors"][0]["evidence_urls"], ["https://example.com/quick-commerce"])
+        self.assertEqual(result["competitors"][1]["company_type"], "private")
+        self.assertEqual(result["diagnostics"]["search_requests"], 2)
+        self.assertEqual(result["diagnostics"]["discovered_candidates"], 2)
+        self.assertEqual(result["diagnostics"]["query_plan"]["source"], "vm")
+
+    @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
+    def test_single_search_downgrades_unsupported_classification_to_unknown(self, _mock_screener_search):
+        search_service = SearXNGProviderService()
+        search_service.search_results = MagicMock(return_value=[
+            {"title": "Peers", "snippet": "Blinkit and Dunzo compete with Zepto.", "url": "https://example.com/peers", "query": "single query"},
+        ])
+        llm_service = MagicMock()
+        llm_service.execute_standard.return_value = {
+            "response": json.dumps({"competitors": [
+                {
+                    "company_name": "Blinkit",
+                    "company_type": "listed_public",
+                    "classification_confidence": 0.99,
+                    "exchange": "NSE",
+                    "ticker": "BLINKIT",
+                    "evidence_urls": ["https://invented.example/blinkit"],
+                },
+                {"company_name": "Dunzo", "company_type": "unknown", "evidence_urls": ["https://example.com/peers"]},
+            ]}),
+        }
+        competitor_response = llm_service.execute_standard.return_value
+        llm_service.execute_standard.side_effect = [
+            {"response": json.dumps({
+                "public_query": "India listed quick commerce peers NSE BSE",
+                "private_query": '"Zepto" private competitors India',
+                "inferred_category": "quick commerce",
+            })},
+            competitor_response,
+            competitor_response,
+        ]
+
+        service = CompetitorWebResearchService(search_service=search_service, llm_service=llm_service)
+        service._enrich_evidence = MagicMock(side_effect=lambda **kwargs: kwargs["results"])
+        result = service.research(company_name="Zepto")
+
+        self.assertEqual(search_service.search_results.call_count, 2)
+        self.assertEqual(llm_service.execute_standard.call_count, 3)
+        self.assertEqual([item["name"] for item in result["competitors"]], ["Blinkit", "Dunzo"])
+        self.assertTrue(all(item["company_type"] == "unknown" for item in result["competitors"]))
+        self.assertEqual(result["competitors"][1]["evidence_urls"], ["https://example.com/peers"])
+
+    def test_page_extractor_keeps_article_content_and_removes_navigation(self):
+        service = CompetitorWebResearchService(search_service=MagicMock(), llm_service=MagicMock())
+        html = """
+        <html><body><nav>Navigation should disappear</nav><article>
+          <h1>Electric motorcycle competitors</h1>
+          <p>Ultraviolette competes with Ather Energy, Revolt Motors, Oben Electric, and Tork Motors in India.</p>
+          <script>ignoreMe()</script>
+        </article></body></html>
+        """
+
+        extracted = service._extract_page_text(html)
+
+        self.assertIn("Ather Energy", extracted)
+        self.assertIn("Revolt Motors", extracted)
+        self.assertNotIn("Navigation", extracted)
+        self.assertNotIn("ignoreMe", extracted)
+
+    def test_page_fetch_rejects_private_network_urls(self):
+        service = CompetitorWebResearchService(search_service=MagicMock(), llm_service=MagicMock())
+
+        self.assertFalse(service._is_safe_public_url("http://127.0.0.1/private"))
+        self.assertFalse(service._is_safe_public_url("http://localhost/private"))
+
+    def test_balances_ten_competitors_across_public_and_private(self):
+        candidates = [
+            *[{"name": f"Public {index}", "company_type": "listed_public"} for index in range(7)],
+            *[{"name": f"Private {index}", "company_type": "private"} for index in range(7)],
+        ]
+
+        selected = CompetitorWebResearchService._balance_company_types(candidates, limit=10)
+
+        self.assertEqual(len(selected), 10)
+        self.assertGreaterEqual(sum(item["company_type"] == "listed_public" for item in selected), 4)
+        self.assertGreaterEqual(sum(item["company_type"] == "private" for item in selected), 4)
+
+    def test_public_discovery_query_is_target_specific(self):
+        queries = CompetitorWebResearchService(
+            search_service=MagicMock(),
+            llm_service=MagicMock(),
+        )._research_queries(
+            company_name="Perfora",
+            sector="Consumer",
+            industry="Oral Care",
+            location="India",
+            business_summary="A multi-city brewpub chain serving craft beer and food.",
+            instruction="",
+        )
+
+        self.assertNotIn('"Perfora"', queries["public"])
+        self.assertIn("listed", queries["public"])
+        self.assertIn("NSE BSE", queries["public"])
+        self.assertIn("brewpub", queries["public"])
+        self.assertIn("brewpub", queries["private"])
+
+    @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
+    def test_private_route_without_screener_match_is_retained_as_unlisted(self, _mock_search):
+        confirmed = CompetitorWebResearchService._confirm_screener_listings([{
+            "name": "Private Beauty Brand",
+            "company_type": "unknown",
+            "classification_confidence": 0.3,
+            "discovery_route": "private",
+        }])
+
+        self.assertEqual(confirmed[0]["company_type"], "private")
+        self.assertIn("private/unlisted", confirmed[0]["classification_source"])
+        _mock_search.assert_not_called()
+
+    @patch(
+        "deals.services.screener.ScreenerCompanyService.search_company",
+        side_effect=requests.exceptions.HTTPError("429 Too Many Requests"),
+    )
+    def test_public_classification_survives_transient_screener_failure(self, _mock_search):
+        confirmed = CompetitorWebResearchService._confirm_screener_listings([{
+            "name": "Listed Foods",
+            "company_type": "listed_public",
+            "classification_confidence": 0.9,
+            "exchange": "NSE",
+            "ticker": "LISTEDFOOD",
+            "classification_source": "Evidence says Listed Foods trades on NSE as LISTEDFOOD.",
+            "discovery_route": "public",
+        }])
+
+        self.assertEqual(confirmed[0]["company_type"], "listed_public")
+        self.assertEqual(confirmed[0]["ticker"], "LISTEDFOOD")
+
+    def test_grounding_excludes_target_legal_name_alias(self):
+        service = CompetitorWebResearchService(search_service=MagicMock(), llm_service=MagicMock())
+        evidence = [{
+            "title": "Honasa Consumer Limited Mamaearth",
+            "snippet": "Honasa Consumer Limited operates the Mamaearth brand.",
+            "url": "https://example.com/honasa",
+        }]
+
+        grounded = service._ground_candidates(
+            [{
+                "name": "Honasa Consumer Limited (Mamaearth)",
+                "company_type": "unknown",
+                "evidence_urls": ["https://example.com/honasa"],
+            }],
+            evidence_results=evidence,
+            target_company_name="Mamaearth",
+        )
+
+        self.assertEqual(grounded, [])
+
+
+class ScreenerUrlResolutionTests(SimpleTestCase):
+    @patch("deals.services.screener.requests.get")
+    def test_direct_company_search_confirms_exact_listed_entity(self, mock_get):
+        response = MagicMock()
+        response.json.return_value = [{
+            "id": 1350,
+            "name": "Hindustan Unilever Ltd",
+            "url": "/company/HINDUNILVR/consolidated/",
+        }]
+        mock_get.return_value = response
+
+        result = ScreenerCompanyService().search_company("Hindustan Unilever Limited")
+
+        self.assertEqual(result["ticker"], "HINDUNILVR")
+        self.assertEqual(
+            result["screener_url"],
+            "https://www.screener.in/company/HINDUNILVR/consolidated/",
+        )
+
+    @patch("deals.services.screener.requests.get")
+    def test_direct_company_search_rejects_ambiguous_single_word_match(self, mock_get):
+        response = MagicMock()
+        response.json.return_value = [{
+            "id": 123,
+            "name": "Himalaya Food International Ltd",
+            "url": "/company/526899/",
+        }]
+        mock_get.return_value = response
+
+        result = ScreenerCompanyService().search_company("Himalaya")
+
+        self.assertEqual(result, {})
+
+    @patch("deals.services.screener.requests.get")
+    def test_direct_company_search_uses_short_alias_fallback(self, mock_get):
+        empty_response = MagicMock()
+        empty_response.json.return_value = []
+        matched_response = MagicMock()
+        matched_response.json.return_value = [{
+            "id": 685,
+            "name": "Colgate-Palmolive (India) Ltd",
+            "url": "/company/COLPAL/",
+        }]
+        mock_get.side_effect = [empty_response, matched_response]
+
+        result = ScreenerCompanyService().search_company("Colgate-Palmolive India")
+
+        self.assertEqual(result["ticker"], "COLPAL")
+        self.assertEqual(mock_get.call_args_list[1].kwargs["params"]["q"], "Colgate")
+
+    @patch("deals.services.screener.requests.get")
+    def test_direct_company_search_resolves_known_listed_brand_legal_name(self, mock_get):
+        empty_response = MagicMock()
+        empty_response.json.return_value = []
+        matched_response = MagicMock()
+        matched_response.json.return_value = [{
+            "id": 1277758,
+            "name": "FSN E-Commerce Ventures Ltd",
+            "url": "/company/NYKAA/consolidated/",
+        }]
+        mock_get.side_effect = [empty_response, matched_response]
+
+        result = ScreenerCompanyService().search_company("Nykaa")
+
+        self.assertEqual(result["ticker"], "NYKAA")
+        self.assertEqual(
+            result["screener_url"],
+            "https://www.screener.in/company/NYKAA/consolidated/",
+        )
+        self.assertEqual(
+            mock_get.call_args_list[1].kwargs["params"]["q"],
+            "FSN E-Commerce Ventures",
+        )
+
+    def test_normalizes_only_official_screener_company_urls(self):
+        self.assertEqual(
+            _normalize_screener_url("https://screener.in/company/M&M/consolidated/?utm_source=test#top"),
+            "https://www.screener.in/company/M&M/consolidated/",
+        )
+        self.assertEqual(_normalize_screener_url("http://www.screener.in/company/PEER/"), "")
+        self.assertEqual(_normalize_screener_url("https://example.com/company/PEER/"), "")
+        self.assertEqual(_normalize_screener_url("https://www.screener.in/screens/1/"), "")
+        self.assertEqual(_normalize_screener_url("https://www.screener.in:bad/company/PEER/"), "")
+
+    def test_supplied_url_is_fetched_without_search_resolution(self):
+        service = ScreenerCompanyService()
+        service.fetch_screener_direct_snapshot = MagicMock(return_value={
+            "is_listed": True,
+            "company_name": "Peer Ltd",
+        })
+        service.resolve_screener_url = MagicMock()
+
+        result = service.fetch_public_company_snapshot(
+            "Peer",
+            ticker="PEER",
+            exchange="NSE",
+            screener_url="https://screener.in/company/PEER/?utm_source=discovery",
+        )
+
+        self.assertTrue(result["is_listed"])
+        service.fetch_screener_direct_snapshot.assert_called_once_with(
+            ticker="PEER",
+            screener_url="https://www.screener.in/company/PEER/",
+        )
+        service.resolve_screener_url.assert_not_called()
+
+    def test_ticker_is_fetched_without_search_when_no_url_is_supplied(self):
+        service = ScreenerCompanyService()
+        service.fetch_screener_direct_snapshot = MagicMock(return_value={
+            "is_listed": True,
+            "company_name": "Peer Ltd",
+        })
+        service.resolve_screener_url = MagicMock()
+
+        result = service.fetch_public_company_snapshot("Peer", ticker="PEER", exchange="NSE")
+
+        self.assertTrue(result["is_listed"])
+        service.fetch_screener_direct_snapshot.assert_called_once_with(ticker="PEER")
+        service.resolve_screener_url.assert_not_called()
+
+    def test_search_resolution_runs_once_only_after_direct_fetch_fails(self):
+        service = ScreenerCompanyService()
+        service.fetch_screener_direct_snapshot = MagicMock(side_effect=[
+            {},
+            {"is_listed": True, "company_name": "Resolved Peer Ltd"},
+        ])
+        service.resolve_screener_url = MagicMock(return_value={
+            "ticker": "RESOLVED",
+            "exchange": "NSE",
+            "screener_url": "https://www.screener.in/company/RESOLVED/",
+        })
+
+        result = service.fetch_public_company_snapshot("Peer", ticker="PEER", exchange="NSE")
+
+        self.assertTrue(result["is_listed"])
+        service.resolve_screener_url.assert_called_once_with("Peer", ticker="PEER", exchange="NSE")
+        self.assertEqual(service.fetch_screener_direct_snapshot.call_count, 2)
+        service.fetch_screener_direct_snapshot.assert_any_call(ticker="PEER")
+        service.fetch_screener_direct_snapshot.assert_any_call(
+            ticker="RESOLVED",
+            screener_url="https://www.screener.in/company/RESOLVED/",
+        )
+
+    def test_search_result_does_not_refetch_an_already_attempted_ticker_url(self):
+        service = ScreenerCompanyService()
+        service.fetch_screener_direct_snapshot = MagicMock(return_value={})
+        service.resolve_screener_url = MagicMock(return_value={
+            "ticker": "PEER",
+            "exchange": "NSE",
+            "screener_url": "https://www.screener.in/company/PEER/consolidated/",
+        })
+
+        result = service.fetch_public_company_snapshot("Peer", ticker="PEER", exchange="NSE")
+
+        self.assertFalse(result["is_listed"])
+        service.resolve_screener_url.assert_called_once()
+        service.fetch_screener_direct_snapshot.assert_called_once_with(ticker="PEER")
 
 
 class CompetitorSearchPipelineTests(TestCase):
@@ -91,8 +632,18 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertAlmostEqual(snapshot["trading_comps"]["ev_sales"], 15192.44 / 2392.0)
 
     @patch("deals.tasks.EmbeddingService")
-    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
-    def test_company_news_search_persists_dated_memo_document(self, mock_provider, mock_embedding_service):
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
+    @patch(
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        return_value=[{
+            "title": "Acme raised growth capital",
+            "snippet": "Acme announced a new funding round.",
+            "url": "https://example.com/acme-funding",
+            "engine": "test",
+            "query": "Acme public news latest",
+        }],
+    )
+    def test_company_news_search_persists_dated_memo_document(self, mock_search, mock_provider, mock_embedding_service):
         deal = Deal.objects.create(
             title="Acme Commerce",
             sector="Consumer",
@@ -150,8 +701,8 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("awards", prompt)
         self.assertIn("red/green flags", prompt)
         self.assertIn("at most 5 news_cards", prompt)
-        self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_search_uses"], 1)
         self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 4000)
+        self.assertEqual(mock_search.call_count, 2)
 
         docs = DealDocument.objects.filter(deal=deal, title__startswith="Public Domain News Research").order_by("created_at")
         self.assertEqual(docs.count(), 2)
@@ -162,8 +713,52 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
         self.assertEqual(second["document"]["title"], docs.last().title)
 
-    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
-    def test_initial_competitor_search_classifies_public_and_private_candidates(self, mock_provider):
+    @patch("deals.tasks.EmbeddingService")
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
+    @patch(
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        return_value=[{
+            "title": "Dil (1990 film)",
+            "snippet": "A Bollywood film starring Aamir Khan and Madhuri Dixit.",
+            "url": "https://example.com/dil-film",
+            "engine": "test",
+            "query": "Dil Foods company news",
+        }],
+    )
+    def test_company_news_exposes_warning_when_search_evidence_is_irrelevant(
+        self, mock_search, mock_provider, mock_embedding_service
+    ):
+        deal = Deal.objects.create(
+            title="Dil Foods",
+            sector="Consumer",
+            industry="Food Processing",
+            country="India",
+        )
+        explanation = (
+            "The search results only describe a Bollywood film and contain no "
+            "corporate information for Dil Foods."
+        )
+        mock_provider.return_value.execute_standard.return_value = {
+            "response": json.dumps({
+                "overview": "No information available for Dil Foods.",
+                "executive_summary": explanation,
+                "news_cards": [],
+                "sources": [],
+            })
+        }
+        mock_embedding_service.return_value.vectorize_document.return_value = True
+
+        result = fetch_company_news_async_task(str(deal.id))
+
+        self.assertEqual(result["news_cards"], [])
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("No grounded company news cards", result["warnings"][0])
+        self.assertIn(explanation, result["warnings"][0])
+        document = DealDocument.objects.get(id=result["document"]["id"])
+        self.assertEqual(document.source_map_json["warnings"], result["warnings"])
+
+    @patch("deals.services.competitor_web_research.CompetitorWebResearchService.research")
+    def test_initial_competitor_search_classifies_public_and_private_candidates(self, mock_research):
         deal = Deal.objects.create(
             title="Acme Commerce",
             sector="Consumer",
@@ -172,42 +767,32 @@ class CompetitorSearchPipelineTests(TestCase):
             country="India",
             deal_summary="Online commerce platform.",
         )
-        provider = mock_provider.return_value
-        provider.execute_standard.return_value = {
-            "response": json.dumps({
-                "competitors": [
-                    {
-                        "company_name": "Peer Commerce",
-                        "core_business": "Online marketplace",
-                        "nature_of_competition": "Direct category peer",
-                        "country_or_region": "India",
-                        "company_type": "listed_public",
-                        "classification_confidence": 0.9,
-                        "exchange": "NSE",
-                        "ticker": "PEER",
-                        "screener_url": "https://www.screener.in/company/PEER/",
-                        "classification_source": "Listed on NSE",
-                    }
-                ]
-            })
+        mock_research.return_value = {
+            "response": "Verified competitor research",
+            "competitors": [{
+                "name": "Peer Commerce",
+                "notes": "Direct category peer",
+                "cin": "",
+                "company_type": "listed_public",
+                "classification_confidence": 0.9,
+                "exchange": "NSE",
+                "ticker": "PEER",
+                "screener_url": "https://www.screener.in/company/PEER/",
+                "classification_source": "Listed on NSE",
+                "evidence_urls": ["https://example.com/peer-listing"],
+            }],
         }
 
         result = fetch_competitors_async_task(str(deal.id))
 
-        prompt = provider.execute_standard.call_args.args[0]["prompt"]
-        self.assertNotIn("Prefer companies with VI/MCA-compatible Indian CINs", prompt)
-        self.assertIn('"company_type"', prompt)
-        self.assertIn('"ticker"', prompt)
-        self.assertIn("Screener", prompt)
         self.assertEqual(result["competitors"][0]["name"], "Peer Commerce")
         self.assertEqual(result["competitors"][0]["company_type"], "listed_public")
         self.assertEqual(result["competitors"][0]["ticker"], "PEER")
         self.assertEqual(result["competitors"][0]["exchange"], "NSE")
+        self.assertEqual(result["competitors"][0]["evidence_urls"], ["https://example.com/peer-listing"])
+        self.assertIn("https://example.com/peer-listing", result["response"])
         self.assertNotIn("CIN:", result["response"])
-        payload = provider.execute_standard.call_args.args[0]
-        self.assertEqual(payload["options"]["web_search_tool_type"], "web_search_20250305")
-        self.assertEqual(payload["options"]["max_search_uses"], 3)
-        self.assertEqual(payload["options"]["max_tokens"], 2200)
+        mock_research.assert_called_once()
 
     def test_competitor_parser_accepts_nested_grouped_public_private_payloads(self):
         payload = {
@@ -239,8 +824,8 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(competitors[0]["exchange"], "NSE")
         self.assertEqual(competitors[1]["company_type"], "private")
 
-    @patch("ai_orchestrator.services.llm_providers.AnthropicProviderService")
-    def test_initial_competitor_search_parses_nested_grouped_response(self, mock_provider):
+    @patch("deals.services.competitor_web_research.CompetitorWebResearchService.research")
+    def test_initial_competitor_search_parses_nested_grouped_response(self, mock_research):
         deal = Deal.objects.create(
             title="Acme Commerce",
             sector="Consumer",
@@ -249,22 +834,12 @@ class CompetitorSearchPipelineTests(TestCase):
             country="India",
             deal_summary="Online commerce platform.",
         )
-        provider = mock_provider.return_value
-        provider.execute_standard.return_value = {
-            "response": json.dumps({
-                "data": {
-                    "public_competitors": [{
-                        "competitor_name": "Listed Peer",
-                        "listing_status": "public company",
-                        "stock_symbol": "LISTED",
-                        "exchange": "NSE",
-                    }],
-                    "private_competitors": [{
-                        "peer_name": "Private Peer",
-                        "public_private_status": "private company",
-                    }],
-                }
-            })
+        mock_research.return_value = {
+            "response": "Grounded research",
+            "competitors": [
+                {"name": "Listed Peer", "company_type": "listed_public", "ticker": "LISTED", "exchange": "NSE"},
+                {"name": "Private Peer", "company_type": "private", "ticker": "", "exchange": ""},
+            ],
         }
 
         result = fetch_competitors_async_task(str(deal.id))
@@ -321,7 +896,7 @@ class CompetitorSearchPipelineTests(TestCase):
                 "summary": "Screener public-market profile parsed directly for Peer Commerce Ltd.",
                 "sources": [{"title": "Screener", "url": "https://www.screener.in/company/PEER/"}],
             },
-        ):
+        ) as mock_snapshot:
             result = enrich_competitors_vi_async_task(
                 str(deal.id),
                 competitors=[{
@@ -329,11 +904,16 @@ class CompetitorSearchPipelineTests(TestCase):
                     "company_type": "listed_public",
                     "exchange": "NSE",
                     "ticker": "PEER",
+                    "screener_url": "https://www.screener.in/company/PEER/",
                     "notes": "Public ecommerce peer",
                 }],
             )
 
         self.assertEqual(result["status"], "SUCCESS")
+        mock_snapshot.assert_called_once_with(
+            ticker="PEER",
+            screener_url="https://www.screener.in/company/PEER/",
+        )
         enrichment = result["vi_enrichment"]
         self.assertEqual(enrichment["steps"]["screener_fetch"]["enriched"][0]["ticker"], "PEER")
         self.assertEqual(enrichment["steps"]["vi_fetch"]["enriched"], [])
@@ -401,6 +981,37 @@ class CompetitorSearchPipelineTests(TestCase):
         embedding = result["vi_enrichment"]["steps"]["embedding"]
         self.assertEqual(embedding["status"], "skipped_unavailable")
         self.assertEqual(embedding["reason"], "connection refused")
+
+
+class DealLedgerBankerBankTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ledger-user", password="test")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        alpha_bank = Bank.objects.create(name="Alpha Capital")
+        zeta_bank = Bank.objects.create(name="Zeta Advisory")
+        alpha_banker = Contact.objects.create(name="Aarav Banker", bank=alpha_bank)
+        zeta_banker = Contact.objects.create(name="Zoya Banker", bank=zeta_bank)
+        Deal.objects.create(title="Alpha Deal", bank=alpha_bank, primary_contact=alpha_banker)
+        Deal.objects.create(title="Zeta Deal", bank=zeta_bank, primary_contact=zeta_banker)
+
+    def test_ledger_filters_by_banker_and_bank_names(self):
+        banker_response = self.client.get(reverse("deal-list"), {"banker_name": "aarav"})
+        bank_response = self.client.get(reverse("deal-list"), {"bank_name": "zeta"})
+
+        self.assertEqual(banker_response.status_code, 200)
+        self.assertEqual([row["title"] for row in banker_response.data["results"]], ["Alpha Deal"])
+        self.assertEqual(bank_response.status_code, 200)
+        self.assertEqual([row["title"] for row in bank_response.data["results"]], ["Zeta Deal"])
+        self.assertEqual(banker_response.data["results"][0]["primary_contact_name"], "Aarav Banker")
+        self.assertEqual(bank_response.data["results"][0]["bank_name"], "Zeta Advisory")
+
+    def test_ledger_sorts_by_banker_and_bank_names(self):
+        by_banker = self.client.get(reverse("deal-list"), {"ordering": "primary_contact__name"})
+        by_bank_desc = self.client.get(reverse("deal-list"), {"ordering": "-bank__name"})
+
+        self.assertEqual([row["title"] for row in by_banker.data["results"]], ["Alpha Deal", "Zeta Deal"])
+        self.assertEqual([row["title"] for row in by_bank_desc.data["results"]], ["Zeta Deal", "Alpha Deal"])
 
 
 class DealAnalysisMappingTests(TestCase):
@@ -1012,6 +1623,106 @@ class DealStatusSyncTests(TestCase):
         self.assertTrue(DocumentArtifactService.artifact_complete(complete_doc))
         self.assertEqual(DocumentArtifactService.artifact_status(degraded_doc), DocumentArtifactService.STATUS_DEGRADED)
 
+    def test_document_artifact_service_exposes_partial_and_failed_terminal_states(self):
+        deal = Deal.objects.create(title="Artifact State Deal")
+        partial_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Preview.pdf",
+            extracted_text="Preview text",
+            normalized_text="Preview text",
+            transcription_status="partial",
+        )
+        failed_doc = DealDocument.objects.create(
+            deal=deal,
+            title="Unreadable.pdf",
+            transcription_status="failed",
+            chunking_status="failed",
+        )
+
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(partial_doc),
+            DocumentArtifactService.STATUS_PARTIAL,
+        )
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(failed_doc),
+            DocumentArtifactService.STATUS_FAILED,
+        )
+        self.assertFalse(DocumentArtifactService.artifact_complete(partial_doc))
+        self.assertFalse(DocumentArtifactService.artifact_complete(failed_doc))
+
+    def test_document_artifact_service_normalizes_grounded_industry_evidence(self):
+        artifact = DocumentArtifactService.artifact_from_file_record({
+            "file_name": "Annual Report.pdf",
+            "document_type": "Memo",
+            "document_artifact": {
+                "normalized_text": "The market reached INR 1,250 Cr in FY26.",
+                "industry_overview": {
+                    "citations": [
+                        {
+                            "id": "market-page",
+                            "label": "Annual Report",
+                            "page": "42",
+                            "section": "Industry outlook",
+                            "passage": "The addressable market reached INR 1,250 Cr.",
+                        },
+                        {
+                            "id": "unsupported",
+                            "label": "Missing passage",
+                            "page": "43",
+                        },
+                    ],
+                    "findings": [
+                        {
+                            "title": "Market expansion",
+                            "summary": "The report describes sustained category expansion.",
+                            "period": "FY26",
+                            "as_of_date": "2026-03-31",
+                            "source_ids": ["market-page"],
+                        },
+                        {
+                            "title": "Unsupported finding",
+                            "summary": "This citation does not resolve.",
+                            "source_ids": ["unsupported"],
+                        },
+                    ],
+                    "market_figures": [
+                        {
+                            "label": "Addressable market",
+                            "value": "1250",
+                            "unit": "INR Cr",
+                            "period": "FY26",
+                            "as_of_date": "2026-03-31",
+                            "calculation_method": "Reported directly.",
+                            "source_ids": ["market-page"],
+                        },
+                        {
+                            "label": "Unusable growth",
+                            "value": "not-a-number",
+                            "unit": "%",
+                            "period": "FY26",
+                            "as_of_date": "not-a-date",
+                            "calculation_method": "Unknown",
+                            "source_ids": ["market-page"],
+                        },
+                    ],
+                },
+            },
+        })
+
+        overview = artifact["industry_overview"]
+        self.assertEqual(len(overview["citations"]), 1)
+        self.assertEqual(len(overview["findings"]), 1)
+        self.assertEqual(len(overview["market_figures"]), 1)
+        self.assertEqual(overview["market_figures"][0]["value"], 1250.0)
+        self.assertEqual(overview["market_figures"][0]["source_ids"], ["market-page"])
+
+        chunk_kinds = {
+            chunk["metadata"]["chunk_kind"]
+            for chunk in DocumentArtifactService.build_embedding_chunks(artifact)
+        }
+        self.assertIn("industry_finding", chunk_kinds)
+        self.assertIn("industry_market_figure", chunk_kinds)
+
     def test_document_serializer_exposes_artifact_status(self):
         deal = Deal.objects.create(title="Serializer Deal")
         doc = DealDocument.objects.create(
@@ -1054,6 +1765,40 @@ class DealStatusSyncTests(TestCase):
         self.assertIn("table_summary", kinds)
         self.assertIn("claim", kinds)
         self.assertIn("risk", kinds)
+
+    def test_document_artifact_service_maps_phase2_table_definitions(self):
+        artifact = DocumentArtifactService.artifact_from_file_record({
+            "file_name": "Model.xlsx",
+            "document_type": "Financial Model",
+            "document_artifact": {
+                "document_name": "Model.xlsx",
+                "document_type": "Financial Model",
+                "document_type_suggestion": {
+                    "label": "Financial Model",
+                    "display_label": "Financial Model",
+                    "confidence": "High",
+                    "rationale": "Workbook with financial tabs",
+                },
+                "document_summary": "Financial model summary",
+                "claims": [],
+                "metrics": [],
+                "numeric_evidence": [],
+                "table_definitions": [{"title": "P&L", "range": "A1:D10"}],
+                "contacts_found": [],
+                "risks": [],
+                "open_questions": [],
+                "diligence_gaps": [],
+                "citations": ["Model.xlsx"],
+                "quality_flags": [],
+                "normalized_text": "Revenue and EBITDA by year.",
+                "source_map": {"document_name": "Model.xlsx"},
+            },
+        })
+
+        self.assertEqual(artifact["table_definitions"], [{"title": "P&L", "range": "A1:D10"}])
+        self.assertEqual(artifact["tables_summary"], [{"title": "P&L", "range": "A1:D10"}])
+        chunks = DocumentArtifactService.build_embedding_chunks(artifact)
+        self.assertIn("table_summary", [chunk["metadata"]["chunk_kind"] for chunk in chunks])
 
     def test_vectorize_document_creates_multiple_chunk_families(self):
         deal = Deal.objects.create(title="Chunked Deal")
@@ -1994,6 +2739,68 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "success")
         self.assertEqual(response.data["profile"]["cin"], "U74999KA2012PTC066107")
+
+    @patch("deals.tasks.enrich_deal_vi_async_task.apply_async")
+    def test_async_enrich_creates_ai_history_record(self, mock_apply_async):
+        mock_apply_async.return_value.id = "celery-vi-1"
+
+        response = self.client.post(
+            reverse("deal-enrich", kwargs={"pk": self.deal.id}),
+            {
+                "company_name": "Flipkart",
+                "relation_type": "target",
+                "async": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "queued")
+        self.assertEqual(response.data["task_id"], "celery-vi-1")
+        audit_log = AIAuditLog.objects.get(id=response.data["audit_log_id"])
+        self.assertEqual(audit_log.source_type, "deal_enrichment")
+        self.assertEqual(audit_log.source_id, str(self.deal.id))
+        self.assertEqual(audit_log.status, "PENDING")
+        self.assertEqual(audit_log.celery_task_id, "celery-vi-1")
+        self.assertEqual(audit_log.source_metadata["relation_type"], "target")
+        self.assertEqual(
+            mock_apply_async.call_args.kwargs["kwargs"]["audit_log_id"],
+            str(audit_log.id),
+        )
+
+    @patch("deals.tasks.broadcast_audit_log_update")
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.enrich_deal")
+    def test_async_enrich_worker_completes_ai_history_record(self, mock_enrich, _mock_broadcast):
+        profile = VentureIntelligenceCompanyProfile.objects.create(
+            cin="U74999KA2012PTC066107",
+            name="Flipkart",
+        )
+        mock_enrich.return_value = profile
+        audit_log = AIAuditLog.objects.create(
+            source_type="deal_enrichment",
+            source_id=str(self.deal.id),
+            context_label="Venture Intelligence: Flipkart",
+            model_used="test",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PENDING",
+            is_success=False,
+        )
+
+        result = enrich_deal_vi_async_task.run(
+            deal_id=str(self.deal.id),
+            company_name="Flipkart",
+            relation_type="target",
+            audit_log_id=str(audit_log.id),
+        )
+
+        audit_log.refresh_from_db()
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["audit_log_id"], str(audit_log.id))
+        self.assertEqual(audit_log.status, "COMPLETED")
+        self.assertTrue(audit_log.is_success)
+        self.assertEqual(audit_log.parsed_json["profile_id"], str(profile.id))
 
     def test_enrich_view_unauthenticated(self):
         self.client.force_authenticate(user=None)

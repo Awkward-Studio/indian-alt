@@ -1,0 +1,578 @@
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from django.core.management import CommandError, call_command
+from django.test import TestCase
+from django.utils import timezone
+
+from deals.models import Deal
+from microsoft.models import Email, EmailAccount
+from microsoft.services.email_reader import EmailReaderService
+from microsoft.services.email_thread_unfolder import EmailThreadUnfolder
+from microsoft.services.email_thread_router import (
+    EmailThreadRouteMode,
+    EmailThreadRouter,
+)
+from microsoft.services.email_thread_originator import EmailThreadOriginatorResolver
+
+
+class EmailThreadRouterTests(TestCase):
+    def test_unlinked_messages_propose_a_new_deal(self):
+        messages = [SimpleNamespace(id="one", deal_id=None)]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.PROPOSE_NEW)
+        self.assertIsNone(route.deal_id)
+        self.assertEqual(route.evidence, ())
+
+    def test_one_linked_deal_routes_the_whole_thread_to_enrichment(self):
+        messages = [
+            SimpleNamespace(id="one", deal_id=None),
+            SimpleNamespace(id="two", deal_id="deal-1"),
+            SimpleNamespace(id="three", deal_id="deal-1"),
+        ]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.ENRICH_EXISTING)
+        self.assertEqual(route.deal_id, "deal-1")
+        self.assertEqual([item["email_id"] for item in route.evidence], ["two", "three"])
+
+    def test_conflicting_deal_links_block_automatic_mutation(self):
+        messages = [
+            SimpleNamespace(id="one", deal_id="deal-1"),
+            SimpleNamespace(id="two", deal_id="deal-2"),
+        ]
+
+        route = EmailThreadRouter.resolve(messages)
+
+        self.assertEqual(route.mode, EmailThreadRouteMode.BLOCKED_AMBIGUOUS)
+        self.assertIsNone(route.deal_id)
+        self.assertIn("deal-1", route.error)
+        self.assertIn("deal-2", route.error)
+
+
+class EmailThreadUnfolderTests(TestCase):
+    def _message(self, marker, *, minutes=0, subject="Re: Deal", text="", html=""):
+        return SimpleNamespace(
+            id=marker,
+            subject=subject,
+            body_text=text,
+            body_html=html,
+            body_preview="",
+            date_received=timezone.now() + timedelta(minutes=minutes),
+        )
+
+    def test_orders_messages_and_extracts_nested_reply_deltas(self):
+        first = self._message("one", minutes=0, subject="Deal", text="FIRST_MARKER initial note")
+        second = self._message(
+            "two",
+            minutes=1,
+            text="SECOND_MARKER reply\n\nOn Wed, Aug 5, 2026 at 10:00 AM A wrote:\nFIRST_MARKER initial note",
+        )
+        third = self._message(
+            "three",
+            minutes=2,
+            text=(
+                "THIRD_MARKER final reply\n\nOn Wed, Aug 5, 2026 at 10:05 AM B wrote:\n"
+                "SECOND_MARKER reply\nFIRST_MARKER initial note"
+            ),
+        )
+
+        deltas = EmailThreadUnfolder.unfold([third, first, second])
+
+        self.assertEqual([item.email_id for item in deltas], ["one", "two", "three"])
+        self.assertEqual([item.text for item in deltas], [
+            "FIRST_MARKER initial note",
+            "SECOND_MARKER reply",
+            "THIRD_MARKER final reply",
+        ])
+
+    def test_removes_html_blockquote_but_keeps_new_html_content(self):
+        message = self._message(
+            "html",
+            html=(
+                "<html><body><p>HTML_DELTA approved.</p>"
+                "<blockquote><p>OLD_MARKER quoted.</p></blockquote></body></html>"
+            ),
+        )
+
+        delta = EmailThreadUnfolder.unfold([message])[0]
+
+        self.assertEqual(delta.text, "HTML_DELTA approved.")
+        self.assertEqual(delta.strategy, "html_quote")
+
+    def test_removes_repeated_prior_body_without_a_separator(self):
+        first = self._message("one", subject="Deal", text="FIRST_MARKER sufficiently long original body")
+        second = self._message(
+            "two",
+            minutes=1,
+            text="SECOND_MARKER reply\n\nFIRST_MARKER sufficiently long original body",
+        )
+
+        deltas = EmailThreadUnfolder.unfold([first, second])
+
+        self.assertEqual(deltas[1].text, "SECOND_MARKER reply")
+        self.assertEqual(deltas[1].strategy, "repeated_history")
+
+    def test_skips_exact_duplicate_and_preserves_forwarded_content(self):
+        body = "FIRST_MARKER sufficiently long original body"
+        first = self._message("one", subject="Deal", text=body)
+        duplicate = self._message("two", minutes=1, text=body)
+        forwarded = self._message(
+            "three",
+            minutes=2,
+            subject="Fwd: Deal",
+            text="FORWARD_NOTE\n\n---------- Original Message ----------\nFORWARDED_EVIDENCE",
+        )
+
+        deltas = EmailThreadUnfolder.unfold([forwarded, duplicate, first])
+
+        self.assertEqual(deltas[1].text, "")
+        self.assertEqual(deltas[1].strategy, "duplicate")
+        self.assertIn("FORWARDED_EVIDENCE", deltas[2].text)
+
+    def test_ambiguous_short_body_is_retained(self):
+        message = self._message("short", text="Yes")
+
+        delta = EmailThreadUnfolder.unfold([message])[0]
+
+        self.assertEqual(delta.text, "Yes")
+        self.assertEqual(delta.strategy, "full_body")
+
+    def test_unfolds_one_hundred_message_chain_without_losing_endpoints(self):
+        messages = []
+        contributions = []
+        for index in range(100):
+            contribution = (
+                f"Hello investment team,\n\nUpdate {index + 1} on Project Banyan: "
+                f"the company recorded monthly revenue of INR {41 + index} crore, "
+                f"served {1200 + index * 17} active merchants, and reported gross margin of "
+                f"{31 + (index % 9)} percent. Management's open item {index + 1} is to validate "
+                f"the distribution plan for Region-{index:03d}.\n\nRegards,\nSender {index + 1}"
+            )
+            contributions.append(contribution)
+            if index == 0:
+                body = contribution
+                subject = "Long Deal"
+            elif index % 20 == 0:
+                subject = "Fwd: Long Deal"
+                body = (
+                    f"Forward wave {index // 20}: this conversation returned to the investment mailbox "
+                    f"after continuing externally.\n\n---------- Original Message ----------\n"
+                    f"{contribution}\n\nFrom: Prior Participant <prior@example.test>\n"
+                    f"Sent: Wednesday\nSubject: Re: Long Deal\n\n{contributions[index - 1]}"
+                )
+            else:
+                body = (
+                    f"{contribution}\n\nOn Wed, Aug 5, 2026 at 10:{index:02d} AM Sender wrote:\n"
+                    f"{contributions[index - 1]}"
+                )
+                subject = "Re: Long Deal"
+            messages.append(self._message(str(index), minutes=index, subject=subject, text=body))
+
+        deltas = EmailThreadUnfolder.unfold(reversed(messages))
+
+        self.assertEqual(len(deltas), 100)
+        self.assertEqual(deltas[0].text, contributions[0])
+        self.assertEqual(deltas[50].text, contributions[50])
+        self.assertEqual(deltas[-1].text, contributions[-1])
+        for index in (20, 40, 60, 80):
+            self.assertEqual(deltas[index].strategy, "forward_reentry")
+            self.assertIn(f"Forward wave {index // 20}", deltas[index].text)
+            self.assertIn(contributions[index], deltas[index].text)
+            self.assertNotIn(contributions[index - 1], deltas[index].text)
+        combined = "\n".join(delta.text for delta in deltas)
+        for index in range(100):
+            self.assertEqual(combined.count(f"Region-{index:03d}"), 1)
+        self.assertIn("monthly revenue of INR 41 crore", combined)
+        self.assertIn("monthly revenue of INR 140 crore", combined)
+        self.assertIn("served 2883 active merchants", combined)
+
+    def test_forwarded_back_thread_keeps_wrapper_and_unseen_segment_only(self):
+        first = self._message(
+            "first",
+            subject="Deal",
+            text="FIRST_KNOWN_FACT initial opportunity details",
+        )
+        second = self._message(
+            "second",
+            minutes=1,
+            text=(
+                "SECOND_KNOWN_FACT diligence response\n\n"
+                "On Wed, Aug 5, 2026 at 10:00 AM Banker wrote:\n"
+                "FIRST_KNOWN_FACT initial opportunity details"
+            ),
+        )
+        forwarded_back = self._message(
+            "forwarded",
+            minutes=2,
+            subject="Fwd: Deal",
+            text=(
+                "FORWARD_WRAPPER please review the conversation that continued externally.\n\n"
+                "---------- Original Message ----------\n"
+                "UNSEEN_MIDDLE_FACT management accepted the revised covenant.\n\n"
+                "From: Analyst <analyst@example.test>\nSent: Wednesday\nSubject: Re: Deal\n\n"
+                "SECOND_KNOWN_FACT diligence response\n"
+                "FIRST_KNOWN_FACT initial opportunity details"
+            ),
+        )
+
+        delta = EmailThreadUnfolder.unfold([first, second, forwarded_back])[-1]
+
+        self.assertEqual(delta.strategy, "forward_reentry")
+        self.assertIn("FORWARD_WRAPPER", delta.text)
+        self.assertIn("UNSEEN_MIDDLE_FACT", delta.text)
+        self.assertNotIn("SECOND_KNOWN_FACT", delta.text)
+        self.assertNotIn("FIRST_KNOWN_FACT", delta.text)
+
+
+class EmailThreadOriginatorTests(TestCase):
+    def test_selects_oldest_external_sender_and_ignores_mailbox_messages(self):
+        account = SimpleNamespace(email="pipeline@example.test")
+        now = timezone.now()
+        messages = [
+            SimpleNamespace(id="internal", from_email="pipeline@example.test", email_account=account, date_received=now),
+            SimpleNamespace(id="origin", from_email="Banker@One.Test", email_account=account, date_received=now + timedelta(minutes=1)),
+            SimpleNamespace(id="later", from_email="other@example.test", email_account=account, date_received=now + timedelta(minutes=2)),
+        ]
+
+        originator = EmailThreadOriginatorResolver.resolve(reversed(messages))
+
+        self.assertEqual(originator.email_id, "origin")
+        self.assertEqual(originator.address, "banker@one.test")
+        self.assertEqual(originator.position, 1)
+
+
+class EmailReaderPipelineTests(TestCase):
+    def setUp(self):
+        self.account = EmailAccount.objects.create(email="pipeline@example.test")
+
+    @staticmethod
+    def _graph_message(graph_id, marker, received, *, attachments=False):
+        return {
+            "id": graph_id,
+            "internetMessageId": f"<{graph_id}@example.test>",
+            "subject": "Re: Pipeline Deal" if graph_id != "graph-1" else "Pipeline Deal",
+            "from": {"emailAddress": {"name": "Banker", "address": "banker@example.test"}},
+            "toRecipients": [{"emailAddress": {"address": "pipeline@example.test"}}],
+            "body": {"contentType": "text", "content": marker},
+            "bodyPreview": marker,
+            "receivedDateTime": received,
+            "sentDateTime": received,
+            "conversationId": "conversation-1",
+            "hasAttachments": attachments,
+        }
+
+    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
+    @patch("microsoft.services.email_reader.GraphAPIService")
+    def test_paginated_graph_fetch_persists_updates_and_attachment_metadata(self, graph_cls, process_email):
+        graph = graph_cls.return_value
+        first = self._graph_message("graph-1", "FIRST_MARKER original", "2026-08-05T08:00:00Z")
+        second = self._graph_message(
+            "graph-2",
+            "SECOND_MARKER reply\n\nOn Wed, Aug 5, 2026 at 8:00 AM Banker wrote:\nFIRST_MARKER original",
+            "2026-08-05T08:05:00Z",
+            attachments=True,
+        )
+        graph.get_messages.side_effect = [
+            {"value": [first, second]},
+            {"value": []},
+        ]
+        graph.get_message_attachments.return_value = [{
+            "id": "attachment-1", "name": "memo.pdf", "contentType": "application/pdf", "size": 123
+        }]
+        service = EmailReaderService()
+
+        result = service.fetch_emails_for_account(self.account, return_emails=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["new_count"], 2)
+        self.assertEqual(Email.objects.count(), 2)
+        stored = Email.objects.get(graph_id="graph-2")
+        self.assertEqual(stored.attachments[0]["name"], "memo.pdf")
+        self.assertEqual(
+            [item.text for item in EmailThreadUnfolder.unfold(Email.objects.all())],
+            ["FIRST_MARKER original", "SECOND_MARKER reply"],
+        )
+        self.assertEqual(process_email.call_count, 2)
+
+        first["body"]["content"] = "FIRST_MARKER corrected original"
+        graph.get_messages.side_effect = [{"value": [first]}, {"value": []}]
+        updated = service.fetch_emails_for_account(self.account)
+        self.assertEqual(updated["updated_count"], 1)
+        self.assertEqual(Email.objects.get(graph_id="graph-1").body_text, "FIRST_MARKER corrected original")
+
+    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
+    @patch("microsoft.services.email_reader.GraphAPIService")
+    def test_graph_failure_is_reported_without_creating_email(self, graph_cls, _process_email):
+        graph_cls.return_value.get_messages.side_effect = RuntimeError("Graph unavailable")
+
+        result = EmailReaderService().fetch_emails_for_account(self.account)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(Email.objects.count(), 0)
+        self.assertIn("Graph unavailable", result["errors"][0])
+
+
+class ThreadTaskPayloadTests(TestCase):
+    def setUp(self):
+        self.account = EmailAccount.objects.create(email="pipeline@example.test")
+        self.first = Email.objects.create(
+            email_account=self.account,
+            graph_id="task-graph-1",
+            conversation_id="task-conversation",
+            subject="Pipeline Deal",
+            body_text="FIRST_MARKER original body",
+            date_received=timezone.now(),
+        )
+        self.reply = Email.objects.create(
+            email_account=self.account,
+            graph_id="task-graph-2",
+            conversation_id="task-conversation",
+            subject="Re: Pipeline Deal",
+            body_text=(
+                "SECOND_MARKER reply\n\nOn Wed, Aug 5, 2026 at 8:00 AM Banker wrote:\n"
+                "FIRST_MARKER original body"
+            ),
+            date_received=timezone.now() + timedelta(minutes=5),
+        )
+
+    @patch("microsoft.tasks.chord")
+    @patch("deals.tasks._prepare_vdr_task_ids", return_value=([], MagicMock(), ["child-1", "child-2"], "callback"))
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_thread_analysis_queues_only_message_deltas(
+        self, create_log, _model, _log_event, _prepare, chord_mock
+    ):
+        audit = MagicMock()
+        audit.id = "00000000-0000-0000-0000-000000000001"
+        create_log.return_value = audit
+        chord_mock.return_value = MagicMock()
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.reply.id))
+
+        self.assertEqual(result["status"], "queued")
+        bodies = [item for item in audit.source_metadata["file_tree"] if item["is_body"]]
+        self.assertEqual([item["body_delta"] for item in bodies], [
+            "FIRST_MARKER original body",
+            "SECOND_MARKER reply",
+        ])
+        self.assertNotIn("FIRST_MARKER", bodies[1]["body_delta"])
+
+    @patch("microsoft.tasks.chord")
+    @patch("deals.tasks._prepare_vdr_task_ids", return_value=([], MagicMock(), ["children"], "callback"))
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_long_thread_queues_every_delta_and_distributed_attachment_once(
+        self, create_log, _model, _log_event, prepare, chord_mock
+    ):
+        self.first.from_email = "originator@example.test"
+        self.first.attachments = [{"id": "attachment-first", "name": "Teaser.pdf"}]
+        self.first.save(update_fields=["from_email", "attachments"])
+        self.reply.from_email = "other@example.test"
+        self.reply.attachments = [{"id": "attachment-second", "name": "MIS.xlsx"}]
+        self.reply.from_email = self.account.email
+        self.reply.save(update_fields=["from_email", "attachments"])
+        previous_contribution = "SECOND_MARKER reply"
+        for index in range(2, 100):
+            sender_label = "Originating banker" if index % 2 == 0 else "India Alternatives team"
+            contribution = (
+                f"Hello team,\n\n{sender_label} update {index + 1}: Project Banyan reached "
+                f"INR {50 + index} crore in monthly revenue and {2000 + index * 11} active merchants. "
+                f"The outstanding diligence question is customer cohort COHORT-{index:03d}.\n\n"
+                f"Regards,\nParticipant {index + 1}"
+            )
+            if index % 20 == 0:
+                subject = "Fwd: Pipeline Deal"
+                body = (
+                    f"Forward wave {index // 20} returned to our mailbox with external discussion.\n\n"
+                    f"---------- Original Message ----------\n{contribution}\n\n"
+                    f"From: Prior Participant <prior@example.test>\nSent: Wednesday\n"
+                    f"Subject: Re: Pipeline Deal\n\n{previous_contribution}"
+                )
+            else:
+                subject = "Re: Pipeline Deal"
+                body = (
+                    f"{contribution}\n\n"
+                    f"On Wed, Aug 5, 2026 at 9:{index:02d} AM Sender wrote:\n"
+                    f"{previous_contribution}"
+                )
+            Email.objects.create(
+                email_account=self.account,
+                graph_id=f"long-graph-{index}",
+                conversation_id="task-conversation",
+                subject=subject,
+                from_email=("originator@example.test" if index % 2 == 0 else self.account.email),
+                body_text=body,
+                attachments=([{"id": f"attachment-{index}", "name": f"File-{index}.pdf"}] if index % 20 == 0 else []),
+                date_received=timezone.now() + timedelta(minutes=index),
+            )
+            previous_contribution = contribution
+        audit = MagicMock(id="00000000-0000-0000-0000-000000000001", source_metadata={})
+        create_log.return_value = audit
+        chord_mock.return_value = MagicMock()
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.first.id))
+
+        self.assertEqual(result["status"], "queued")
+        bodies = [item for item in audit.source_metadata["file_tree"] if item["is_body"]]
+        attachments = [item for item in audit.source_metadata["file_tree"] if not item["is_body"]]
+        self.assertEqual(len(bodies), 100)
+        self.assertIn("FIRST_MARKER original body", bodies[0]["body_delta"])
+        self.assertIn("COHORT-050", bodies[50]["body_delta"])
+        self.assertIn("COHORT-099", bodies[-1]["body_delta"])
+        for index in (20, 40, 60, 80):
+            forwarded_email = Email.objects.get(graph_id=f"long-graph-{index}")
+            forwarded_body = next(
+                item for item in bodies if item["email_id"] == str(forwarded_email.id)
+            )
+            self.assertEqual(forwarded_body["delta_diagnostics"]["strategy"], "forward_reentry")
+            self.assertIn(f"Forward wave {index // 20}", forwarded_body["body_delta"])
+        self.assertEqual(
+            {item["id"] for item in attachments},
+            {"attachment-first", "attachment-second", "attachment-20", "attachment-40", "attachment-60", "attachment-80"},
+        )
+        self.assertEqual(audit.source_metadata["originator"]["address"], "originator@example.test")
+        worker_signatures, _callback = prepare.call_args.args
+        self.assertEqual(len(worker_signatures), 106)
+
+    @patch("microsoft.tasks.chord")
+    @patch("deals.tasks._prepare_vdr_task_ids", return_value=([], MagicMock(), ["child"], "callback"))
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_linked_thread_passes_deal_to_workers_and_finalizer(
+        self, create_log, _model, _log_event, prepare, chord_mock
+    ):
+        deal = Deal.objects.create(title="Existing Pipeline Deal")
+        self.reply.deal = deal
+        self.reply.save(update_fields=["deal"])
+        audit = MagicMock(id="00000000-0000-0000-0000-000000000001", source_metadata={})
+        create_log.return_value = audit
+        chord_mock.return_value = MagicMock()
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.first.id))
+
+        self.assertEqual(result["route"]["mode"], "ENRICH_EXISTING")
+        self.assertEqual(result["route"]["deal_id"], str(deal.id))
+        worker_signatures, callback = prepare.call_args.args
+        self.assertTrue(worker_signatures)
+        self.assertTrue(all(signature.args[1] == str(deal.id) for signature in worker_signatures))
+        self.assertEqual(callback.args[0], str(deal.id))
+
+    @patch("microsoft.tasks.chord")
+    @patch("ai_orchestrator.services.realtime.log_worker_event")
+    @patch("microsoft.tasks.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("microsoft.tasks.AIRuntimeService.create_audit_log")
+    def test_conflicting_thread_links_stop_before_synthesis(
+        self, create_log, _model, log_event, chord_mock
+    ):
+        first_deal = Deal.objects.create(title="First Deal")
+        second_deal = Deal.objects.create(title="Second Deal")
+        self.first.deal = first_deal
+        self.reply.deal = second_deal
+        self.first.save(update_fields=["deal"])
+        self.reply.save(update_fields=["deal"])
+        audit = MagicMock(id="00000000-0000-0000-0000-000000000001", source_metadata={})
+        create_log.return_value = audit
+
+        from microsoft.tasks import analyze_email_async
+        result = analyze_email_async.run(str(self.first.id))
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["route"]["mode"], "BLOCKED_AMBIGUOUS")
+        chord_mock.assert_not_called()
+        audit.save.assert_called_once_with(update_fields=["source_metadata", "error_message"])
+        self.assertEqual(audit.source_metadata["workflow_stage"], "routing_blocked")
+        self.assertEqual(log_event.call_args.kwargs["status"], "FAILED")
+
+    @patch("deals.tasks._persist_folder_analysis_document")
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
+    @patch("ai_orchestrator.services.document_processor.DocumentProcessorService")
+    @patch("ai_orchestrator.services.ai_processor.AIProcessorService")
+    def test_body_worker_preserves_delta_and_sends_it_to_normalization(self, ai_cls, _doc_cls, _embed_cls, persist):
+        ai = ai_cls.return_value
+        ai.process_content.return_value = {"facts": ["SECOND_MARKER reply"]}
+        persisted = MagicMock()
+        persisted.status = "passed"
+        persist.return_value = persisted
+
+        with patch("deals.tasks._analysis_document_to_result", return_value={"status": "passed"}):
+            from deals.tasks import process_single_thread_document_async
+            result = process_single_thread_document_async.run(
+                {
+                    "id": f"body_{self.reply.id}",
+                    "name": "Email Body",
+                    "email_id": str(self.reply.id),
+                    "is_body": True,
+                    "body_delta": "SECOND_MARKER reply",
+                },
+                None,
+                self.account.email,
+                "00000000-0000-0000-0000-000000000099",
+            )
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(ai.process_content.call_count, 1)
+        first_call = ai.process_content.call_args.kwargs
+        self.assertEqual(first_call["content"], "SECOND_MARKER reply")
+        self.assertEqual(first_call["skill_name"], "document_normalization")
+
+
+class T4EmailPipelineCommandTests(TestCase):
+    def test_long_body_is_split_into_bounded_non_overlapping_chunks(self):
+        from microsoft.management.commands.test_email_pipeline_t4 import Command
+
+        ai = MagicMock()
+        ai.process_content.side_effect = [
+            {"response": "chunk one"},
+            {"response": "chunk two"},
+            {"response": "chunk three"},
+        ]
+        text = "A" * 12000 + "B" * 12000 + "C" * 100
+
+        cleaned = Command._legacy_unroll(text, ai)
+
+        self.assertEqual(ai.process_content.call_count, 3)
+        contents = [call.kwargs["content"] for call in ai.process_content.call_args_list]
+        self.assertEqual([len(item) for item in contents], [12000, 12000, 100])
+        self.assertEqual("".join(contents), text)
+        self.assertEqual(ai.process_content.call_args_list[0].kwargs["metadata"]["request_timeout"], 120)
+        self.assertIn("chunk three", cleaned)
+
+    @patch("microsoft.management.commands.test_email_pipeline_t4.AIProcessorService")
+    @patch("microsoft.management.commands.test_email_pipeline_t4.VLLMProviderService")
+    def test_command_runs_selected_case_and_writes_sanitized_report(self, provider_cls, ai_cls):
+        provider_cls.return_value.health_check.return_value = True
+        provider_cls.return_value.get_available_models.return_value = ["test-model"]
+        ai_cls.return_value.process_content.side_effect = [
+            {"response": "SINGLE_UNIQUE_620 new investment memorandum cleaned"},
+            {"normalized_text": "SINGLE_UNIQUE_620 new investment memorandum cleaned"},
+        ]
+        report_path = "/tmp/email-pipeline-command-test.json"
+
+        with self.settings(VLLM_BASE_URL="http://secret:token@t4.example.test:8000/v1", VLLM_TEXT_MODEL="test-model"):
+            call_command("test_email_pipeline_t4", cases=["single"], report_json=report_path)
+
+        import json
+        from pathlib import Path
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["endpoint"], "http://t4.example.test:8000/v1")
+        self.assertNotIn("secret", json.dumps(report))
+        self.assertTrue(report["cases"][0]["passed"])
+
+    @patch("microsoft.management.commands.test_email_pipeline_t4.VLLMProviderService")
+    def test_command_fails_nonzero_when_t4_is_unavailable(self, provider_cls):
+        provider_cls.return_value.health_check.return_value = False
+
+        with self.assertRaisesMessage(CommandError, "health check failed"):
+            call_command("test_email_pipeline_t4", cases=["single"])

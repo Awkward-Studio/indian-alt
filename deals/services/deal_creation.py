@@ -2,6 +2,7 @@ import json
 import logging
 from copy import deepcopy
 from django.core.exceptions import ObjectDoesNotExist
+from django.db import transaction
 from deals.models import AnalysisKind, Deal, DealDocument, DocumentType
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ class DealCreationService:
     """
     
     @staticmethod
+    @transaction.atomic
     def process_deal_creation(deal: Deal, validated_data: dict, request_user=None):
         """
         Orchestrates the post-save creation hooks for a new Deal.
@@ -21,6 +23,7 @@ class DealCreationService:
         source_email_id = validated_data.get('source_email_id')
         contact_discovery = validated_data.get('contact_discovery')
         analysis_json = validated_data.get('analysis_json')
+        primary_contact_was_explicit = 'primary_contact' in validated_data
         
         # Parse strings to dicts if necessary
         if isinstance(contact_discovery, str):
@@ -38,7 +41,12 @@ class DealCreationService:
         DealCreationService._discover_and_link_contacts(deal, contact_discovery)
         
         # 3. Handle Email Linking & Threading
-        DealCreationService._link_email_thread(deal, source_email_id, request_user)
+        DealCreationService._link_email_thread(
+            deal,
+            source_email_id,
+            request_user,
+            prefer_originator=not primary_contact_was_explicit,
+        )
 
     @staticmethod
     def _get_analysis_model_data(analysis_json: dict | None) -> dict:
@@ -320,91 +328,84 @@ class DealCreationService:
     @staticmethod
     def _map_ambiguities(deal: Deal, analysis_json: dict):
         if analysis_json and 'metadata' in analysis_json:
-            try:
-                from deals.models import DealAnalysis
-                normalized_analysis = DealCreationService.normalize_analysis_payload(
-                    analysis_json,
-                    analysis_kind=AnalysisKind.INITIAL,
-                )
-                DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
-                ambiguities = normalized_analysis['metadata'].get('ambiguous_points', [])
-                thinking = analysis_json.get('thinking', '')
-                
-                # Create a DealAnalysis record
-                DealAnalysis.objects.create(
-                    deal=deal,
-                    version=1,
-                    analysis_kind=AnalysisKind.INITIAL,
-                    thinking=thinking,
-                    ambiguities=ambiguities,
-                    analysis_json=normalized_analysis
-                )
-                print(f"[ANALYSIS] Created initial DealAnalysis record for {deal.title}")
-            except Exception as e:
-                logger.error(f"Error mapping ambiguities: {str(e)}")
+            from deals.models import DealAnalysis
+            normalized_analysis = DealCreationService.normalize_analysis_payload(
+                analysis_json,
+                analysis_kind=AnalysisKind.INITIAL,
+            )
+            DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+            ambiguities = normalized_analysis['metadata'].get('ambiguous_points', [])
+            thinking = analysis_json.get('thinking', '')
+
+            DealAnalysis.objects.update_or_create(
+                deal=deal,
+                version=1,
+                defaults={
+                    "analysis_kind": AnalysisKind.INITIAL,
+                    "thinking": thinking,
+                    "ambiguities": ambiguities,
+                    "analysis_json": normalized_analysis,
+                },
+            )
 
     @staticmethod
     def _discover_and_link_contacts(deal: Deal, contact_discovery: dict):
         if not contact_discovery:
             return
             
-        try:
-            from banks.models import Bank
-            from contacts.models import Contact
-            from deals.services.contact_linking import sync_deal_contact_links
+        from banks.models import Bank
+        from contacts.models import Contact
+        from deals.services.contact_linking import sync_deal_contact_links
             
-            firm_name = contact_discovery.get('firm_name')
-            firm_domain = contact_discovery.get('firm_domain')
-            banker_name = contact_discovery.get('name')
-            banker_email = contact_discovery.get('email')
+        firm_name = contact_discovery.get('firm_name')
+        firm_domain = contact_discovery.get('firm_domain')
+        banker_name = contact_discovery.get('name')
+        banker_email = contact_discovery.get('email')
             
-            bank = None
-            if firm_domain:
-                bank = Bank.objects.filter(website_domain__iexact=firm_domain).first()
-            if not bank and firm_name:
-                bank = Bank.objects.filter(name__icontains=firm_name).first()
+        bank = None
+        if firm_domain:
+            bank = Bank.objects.filter(website_domain__iexact=firm_domain).first()
+        if not bank and firm_name:
+            bank = Bank.objects.filter(name__icontains=firm_name).first()
             
-            # Create Bank if not found
-            if not bank and firm_name:
-                bank = Bank.objects.create(name=firm_name, website_domain=firm_domain)
-            
-            if banker_name:
-                # Deduplication logic: try email first, then name + bank
-                contact = None
-                if banker_email:
-                    contact = Contact.objects.filter(email__iexact=banker_email).first()
-                
-                if not contact:
-                    contact = Contact.objects.filter(name__iexact=banker_name, bank=bank).first()
-                
-                if not contact:
-                    contact = Contact.objects.create(
-                        name=banker_name,
-                        bank=bank,
-                        email=banker_email,
-                        designation=contact_discovery.get('designation'),
-                        linkedin_url=contact_discovery.get('linkedin')
-                    )
-                else:
-                    # Update fields if they were missing
-                    updated_fields = []
-                    if not contact.email and banker_email:
-                        contact.email = banker_email
-                        updated_fields.append('email')
-                    if not contact.designation and contact_discovery.get('designation'):
-                        contact.designation = contact_discovery.get('designation')
-                        updated_fields.append('designation')
-                    if not contact.linkedin_url and contact_discovery.get('linkedin'):
-                        contact.linkedin_url = contact_discovery.get('linkedin')
-                        updated_fields.append('linkedin_url')
-                    if updated_fields:
-                        contact.save(update_fields=updated_fields)
+        if not bank and firm_name:
+            bank = Bank.objects.create(name=firm_name, website_domain=firm_domain)
 
+        if banker_name:
+            contact = None
+            if banker_email:
+                contact = Contact.objects.filter(email__iexact=banker_email).first()
+
+            if not contact:
+                contact = Contact.objects.filter(name__iexact=banker_name, bank=bank).first()
+
+            if not contact:
+                contact = Contact.objects.create(
+                    name=banker_name,
+                    bank=bank,
+                    email=banker_email,
+                    designation=contact_discovery.get('designation'),
+                    linkedin_url=contact_discovery.get('linkedin')
+                )
+            else:
+                updated_fields = []
+                if not contact.email and banker_email:
+                    contact.email = banker_email
+                    updated_fields.append('email')
+                if not contact.designation and contact_discovery.get('designation'):
+                    contact.designation = contact_discovery.get('designation')
+                    updated_fields.append('designation')
+                if not contact.linkedin_url and contact_discovery.get('linkedin'):
+                    contact.linkedin_url = contact_discovery.get('linkedin')
+                    updated_fields.append('linkedin_url')
+                if updated_fields:
+                    contact.save(update_fields=updated_fields)
+
+            is_new_link = deal.primary_contact_id is None
+            if is_new_link:
                 deal.primary_contact = contact
-                if bank: 
+                if bank:
                     deal.bank = bank
-                
-                # Increment source count for influencer tracking
                 contact.source_count += 1
                 contact.save(update_fields=['source_count'])
                 deal.save(update_fields=['primary_contact', 'bank'])
@@ -413,58 +414,96 @@ class DealCreationService:
                     primary_contact=contact,
                     primary_contact_provided=True,
                 )
-                print(f"[DISCOVERY] Linked {deal.title} to {banker_name} ({firm_name})")
-        except Exception as e:
-            logger.error(f"Discovery error: {str(e)}")
 
     @staticmethod
-    def _link_email_thread(deal: Deal, source_email_id: str, request_user=None):
+    def _link_email_thread(
+        deal: Deal,
+        source_email_id: str,
+        request_user=None,
+        *,
+        prefer_originator: bool = True,
+    ):
         if not source_email_id:
             return
             
-        try:
-            from microsoft.models import Email
-            from ai_orchestrator.services.embedding_processor import EmbeddingService
+        from microsoft.models import Email
+        from ai_orchestrator.services.embedding_processor import EmbeddingService
             
-            source_email = Email.objects.filter(id=source_email_id).first()
-            if not source_email:
-                return
+        source_email = Email.objects.filter(id=source_email_id).first()
+        if not source_email:
+            raise ValueError(f"Source email {source_email_id} does not exist")
                 
-            source_email.deal = deal
-            source_email.is_processed = True
-            source_email.save(update_fields=['deal', 'is_processed'])
+        source_email.deal = deal
+        source_email.is_processed = True
+        source_email.save(update_fields=['deal', 'is_processed'])
             
-            # LINK THE WHOLE THREAD (All replies/forwards in this conversation)
-            if source_email.conversation_id:
-                Email.objects.filter(
-                    conversation_id=source_email.conversation_id
-                ).update(deal=deal)
-                print(f"[THREADING] Linked entire thread {source_email.conversation_id} to deal")
+        thread = Email.objects.filter(id=source_email.id)
+        if source_email.conversation_id:
+            thread = Email.objects.filter(conversation_id=source_email.conversation_id)
+        thread_emails = list(thread.select_related("email_account"))
+        thread.update(deal=deal)
 
-            # Create DealDocument records for attachments
-            if source_email.attachments:
-                DealCreationService._extract_documents_from_email(deal, source_email, request_user)
+        if prefer_originator:
+            DealCreationService._link_originating_sender(deal, thread_emails)
 
-            # Copy extracted text to deal if empty
-            if not deal.extracted_text and source_email.extracted_text:
-                deal.extracted_text = source_email.extracted_text
-                deal.save(update_fields=['extracted_text'])
+        for thread_email in thread_emails:
+            if thread_email.attachments:
+                DealCreationService._extract_documents_from_email(deal, thread_email, request_user)
+
+        if not deal.extracted_text and source_email.extracted_text:
+            deal.extracted_text = source_email.extracted_text
+            deal.save(update_fields=['extracted_text'])
             
-            # Asynchronous vectorization
-            try:
-                embed_service = EmbeddingService()
-                embed_service.vectorize_deal(deal)
-                embed_service.vectorize_email(source_email)
-            except Exception as e:
-                logger.error(f"Vectorization failed: {str(e)}")
+        # Embedding is degradable and must not roll back otherwise valid evidence.
+        try:
+            embed_service = EmbeddingService()
+            embed_service.vectorize_deal(deal)
+            embed_service.vectorize_email(source_email)
         except Exception as e:
-            logger.error(f"Email linking failed: {str(e)}")
+            logger.error(f"Vectorization failed: {str(e)}")
+
+    @staticmethod
+    def _link_originating_sender(deal: Deal, thread_emails: list) -> None:
+        from contacts.models import Contact
+        from deals.services.contact_linking import sync_deal_contact_links
+        from microsoft.services.email_thread_originator import EmailThreadOriginatorResolver
+
+        originator = EmailThreadOriginatorResolver.resolve(thread_emails)
+        if not originator:
+            return
+
+        contact = Contact.objects.filter(email__iexact=originator.address).first()
+        if not contact:
+            contact = Contact.objects.create(
+                name=originator.address.split("@", 1)[0],
+                email=originator.address,
+                designation="Auto-created from originating email",
+            )
+
+        if deal.primary_contact_id == contact.id:
+            return
+
+        deal.primary_contact = contact
+        if contact.bank_id:
+            deal.bank = contact.bank
+        contact.source_count += 1
+        contact.save(update_fields=["source_count"])
+        deal.save(update_fields=["primary_contact", "bank"])
+        sync_deal_contact_links(
+            deal,
+            primary_contact=contact,
+            primary_contact_provided=True,
+        )
 
     @staticmethod
     def _extract_documents_from_email(deal: Deal, source_email, request_user=None):
         for att in source_email.attachments:
-            # Avoid duplicates
-            if not DealDocument.objects.filter(deal=deal, title=att.get('name')).exists():
+            attachment_id = att.get('id')
+            duplicate_filter = {"deal": deal, "onedrive_id": attachment_id} if attachment_id else {
+                "deal": deal,
+                "title": att.get('name'),
+            }
+            if not DealDocument.objects.filter(**duplicate_filter).exists():
                 # Determine type from filename
                 name = att.get('name', '').lower()
                 doc_type = DocumentType.OTHER

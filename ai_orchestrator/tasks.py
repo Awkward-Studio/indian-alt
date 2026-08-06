@@ -2,11 +2,14 @@ import logging
 import json
 import time
 import re
+from datetime import datetime, timezone
 from celery import shared_task
 from .models import AIAuditLog, AIMessage, AIConversation, AIPersonality, AISkill
 from .services.ai_processor import AIProcessorService
+from .services.chat_scope import internal_citation, normalize_web_citation
 from .services.universal_chat import UniversalChatService
 from .services.runtime import AIRuntimeService
+from .services.prompt_catalog import PromptCatalogService
 
 from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update
 
@@ -31,9 +34,12 @@ Use bullets or a small table only when it makes the answer easier to scan.
 If the context does not contain enough evidence, say what is missing instead of inventing facts.
 
 [VISUAL OUTPUT]
-When the user asks for a graph, chart, visual, infographic, timeline, KPI view, or comparison, include exactly one fenced deal_visual JSON block when the available evidence supports it.
+When the user asks for a graph, chart, visual, infographic, timeline, KPI view, comparison, or financial deep dive, include fenced deal_visual JSON blocks when the available evidence supports them.
+Return one visual for a singular request. Return up to three distinct visuals when the user asks for charts/graphs, multiple visuals, or a deep dive and the evidence supports materially different views.
+Put each visual in its own fenced deal_visual block. Do not repeat the same values in multiple visuals merely to reach the limit.
 Do not invent values for a visual. If the data is incomplete, explain what is missing instead of emitting a visual.
-The visual block must be valid JSON only, with no comments or trailing commas, in this shape:
+Copy every numeric value at the exact scale stated in the evidence: 214 must remain 214, not 21.4 or 2140. Never rescale, normalize, annualize, interpolate, or convert a value unless the evidence explicitly provides that converted value. Preserve the evidence's currency and unit at the top level or per KPI row.
+Each visual block must be valid JSON only, with no comments or trailing commas, in this shape:
 ```deal_visual
 {
   "version": 1,
@@ -49,10 +55,19 @@ The visual block must be valid JSON only, with no comments or trailing commas, i
 }
 ```
 Supported type values are: bar, line, area, pie, donut, kpi_strip, timeline, comparison_matrix.
+Choose the type from the shape of the evidence:
+- line: a chronological trend with at least two comparable numeric periods. When the labels are dates, fiscal years, quarters, or months for the same metric, use line rather than bar unless the user explicitly requests bars.
+- area: a chronological magnitude or cumulative trend with at least two comparable numeric periods.
+- bar: one comparable numeric measure across categories, companies, business units, or periods.
+- pie or donut: non-negative parts of one whole, all measured in the same unit. Do not use these for unrelated KPIs.
+- kpi_strip: a point-in-time snapshot of heterogeneous headline metrics with different units. Do not choose it when a trend, composition, or category comparison is available and more informative.
+- timeline: dated or sequential milestones, transactions, or risks.
+- comparison_matrix: several metrics compared across two or more companies, scenarios, or periods.
+For bar, line, area, pie, and donut, data rows must use {"label": "...", "value": 123.4}. Values must be JSON numbers without currency symbols, commas, percent signs, or unit suffixes. Put the shared unit in the top-level "unit" field.
 For kpi_strip data rows use {"label": "...", "value": "...", "unit": "...", "tone": "positive|neutral|negative"}.
 For timeline data rows use {"label": "...", "date": "...", "description": "...", "tone": "positive|neutral|negative"}.
 For comparison_matrix data rows use {"label": "...", "values": {"Company A": "...", "Company B": "..."}}.
-Wrap the visual with a short Markdown explanation before or after it.
+Use concise source_notes that identify the supporting document or context. Wrap every visual with a short Markdown explanation before or after it.
 """
 
 
@@ -290,6 +305,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "retrieved_chunk_count": 0,
                     "selected_chunk_count": 0,
                     "selected_sources": [],
+                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
                 }
             elif (metadata or {}).get("interactive_context_data"):
                 task_metadata = {
@@ -306,6 +323,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "retrieved_chunk_count": 0,
                     "selected_chunk_count": len(metadata.get("selected_sources") or []),
                     "selected_sources": metadata.get("selected_sources") or [],
+                    "selected_document_ids": metadata.get("selected_document_ids") or [],
+                    "selected_transcript_ids": metadata.get("selected_transcript_ids") or [],
+                    "web_search_enabled": False,
+                    "evidence_mode": metadata.get("evidence_mode", "internal"),
                 }
             else:
                 task_metadata = chat_service.process_single_deal_build_metadata(
@@ -329,6 +350,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
                 "selected_chunk_count": task_metadata.get("selected_chunk_count"),
                 "selected_sources": task_metadata.get("selected_sources"),
+                "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+                "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
@@ -359,10 +384,17 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         task_metadata['model_provider'] = (metadata or {}).get('model_provider', 'vllm')
         if skill_name == 'deal_chat':
             task_metadata['personality_only_system'] = True
-            task_metadata['prompt_template_override'] = DEAL_CHAT_CONVERSATIONAL_PROMPT
+            task_metadata['prompt_template_override'] = PromptCatalogService.get('deal_chat_conversational')
+            task_metadata['max_tokens'] = 4096
+            task_metadata['max_input_tokens'] = 11000
 
         full_text = ""
         full_thinking = ""
+        structured_citations = [
+            internal_citation(source)
+            for source in (task_metadata.get("selected_sources") or [])
+            if isinstance(source, dict)
+        ]
         last_save_time = time.time()
         last_stream_broadcast = 0.0
         pending_response_delta = ""
@@ -381,6 +413,11 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 chunk = json.loads(chunk_str)
                 response_delta = chunk.get("response", "")
                 thinking_delta = chunk.get("thinking", "")
+                retrieved_at = datetime.now(timezone.utc).isoformat()
+                for raw_citation in chunk.get("citations") or []:
+                    citation = normalize_web_citation(raw_citation, retrieved_at=retrieved_at)
+                    if citation and citation not in structured_citations:
+                        structured_citations.append(citation)
                 full_text += response_delta
                 full_thinking += thinking_delta
                 pending_response_delta += response_delta
@@ -429,14 +466,29 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 role='assistant',
                 content=full_text,
                 thinking=full_thinking,
-                applied_filters={"audit_log_id": audit_log_id}
+                data_points={"citations": structured_citations},
+                applied_filters={
+                    "audit_log_id": audit_log_id,
+                    "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
+                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                    "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+                }
             )
             # Finalize Audit Log
             audit_log.raw_response = full_text
             audit_log.raw_thinking = full_thinking
             audit_log.status = 'COMPLETED'
             audit_log.is_success = True
-            audit_log.save(update_fields=['raw_response', 'raw_thinking', 'status', 'is_success'])
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "citations": structured_citations,
+                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
+                "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
+                "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+            }
+            audit_log.save(update_fields=['raw_response', 'raw_thinking', 'status', 'is_success', 'source_metadata'])
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
             logger.info(f"Background chat response generated for Conv: {conversation_id}")

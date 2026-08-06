@@ -188,6 +188,7 @@ def _competitor_metadata_from_item(item: Any, *, include_cin: bool = True) -> di
         "ticker": "",
         "screener_url": "",
         "classification_source": "",
+        "evidence_urls": [],
     }
     if not isinstance(item, dict):
         return metadata
@@ -210,6 +211,15 @@ def _competitor_metadata_from_item(item: Any, *, include_cin: bool = True) -> di
     metadata["classification_source"] = str(
         item.get("classification_source") or item.get("listing_evidence") or item.get("source") or ""
     ).strip()
+    raw_evidence_urls = item.get("evidence_urls") or item.get("source_urls") or item.get("sources") or []
+    if isinstance(raw_evidence_urls, str):
+        raw_evidence_urls = [raw_evidence_urls]
+    if isinstance(raw_evidence_urls, list):
+        metadata["evidence_urls"] = list(dict.fromkeys(
+            str(value.get("url") if isinstance(value, dict) else value).strip()
+            for value in raw_evidence_urls
+            if str(value.get("url") if isinstance(value, dict) else value).strip()
+        ))[:5]
     if metadata["ticker"] or metadata["exchange"] or metadata["screener_url"]:
         metadata["company_type"] = "listed_public"
     return metadata

@@ -21,6 +21,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.postgres',
     
     # Third party
     'rest_framework',
@@ -38,6 +39,7 @@ INSTALLED_APPS = [
     'banks',
     'contacts',
     'deals',
+    'work_items',
     'meetings',
     'api_requests',
     'microsoft',
@@ -256,15 +258,26 @@ VLLM_TEXT_MODEL = config('VLLM_TEXT_MODEL', default='')
 VLLM_PLANNER_MODEL = config('VLLM_PLANNER_MODEL', default=VLLM_TEXT_MODEL)
 VLLM_VISION_MODEL = config('VLLM_VISION_MODEL', default='')
 VLLM_EMBEDDING_MODEL = config('VLLM_EMBEDDING_MODEL', default='')
+VLLM_CONNECT_TIMEOUT = config('VLLM_CONNECT_TIMEOUT', default=2, cast=float)
+VLLM_READ_TIMEOUT = config('VLLM_READ_TIMEOUT', default=600, cast=int)
+VLLM_STREAM_TIMEOUT = config('VLLM_STREAM_TIMEOUT', default=600, cast=int)
+VLLM_PLANNER_TIMEOUT = config('VLLM_PLANNER_TIMEOUT', default=600, cast=int)
+SEARXNG_BASE_URL = config('SEARXNG_BASE_URL', default='http://localhost:8081').rstrip('/')
+SEARXNG_TIMEOUT = config('SEARXNG_TIMEOUT', default=15, cast=float)
+SEARXNG_MAX_RESULTS = config('SEARXNG_MAX_RESULTS', default=30, cast=int)
+SEARXNG_SEARCH_WORKERS = config('SEARXNG_SEARCH_WORKERS', default=4, cast=int)
+SEARXNG_ENGINES = config('SEARXNG_ENGINES', default='', cast=Csv())
+SEARXNG_LANGUAGE = config('SEARXNG_LANGUAGE', default='en-IN')
+SEARXNG_PAGE_FETCH_LIMIT = config('SEARXNG_PAGE_FETCH_LIMIT', default=5, cast=int)
+SEARXNG_PAGE_FETCH_WORKERS = config('SEARXNG_PAGE_FETCH_WORKERS', default=3, cast=int)
+SEARXNG_PAGE_FETCH_TIMEOUT = config('SEARXNG_PAGE_FETCH_TIMEOUT', default=8, cast=float)
+SEARXNG_PAGE_FETCH_MAX_BYTES = config('SEARXNG_PAGE_FETCH_MAX_BYTES', default=1000000, cast=int)
+SEARXNG_PAGE_FETCH_MAX_CHARS = config('SEARXNG_PAGE_FETCH_MAX_CHARS', default=2500, cast=int)
+SEARXNG_EVIDENCE_MAX_CHARS = config('SEARXNG_EVIDENCE_MAX_CHARS', default=18000, cast=int)
 EMBEDDING_BASE_URL = config('EMBEDDING_BASE_URL', default=VLLM_EMBEDDING_URL).rstrip('/')
 EMBEDDING_API_KEY = config('EMBEDDING_API_KEY', default=VLLM_API_KEY)
 EMBEDDING_MODEL = config('EMBEDDING_MODEL', default=VLLM_EMBEDDING_MODEL)
 
-# Demo/local meeting signal analysis. LM Studio exposes an OpenAI-compatible
-# endpoint at http://localhost:1234/v1 by default.
-LM_STUDIO_BASE_URL = config('LM_STUDIO_BASE_URL', default='http://localhost:1234/v1')
-LM_STUDIO_MODEL = config('LM_STUDIO_MODEL', default='local-model')
-LM_STUDIO_API_KEY = config('LM_STUDIO_API_KEY', default='lm-studio')
 EMBEDDING_TIMEOUT = config('EMBEDDING_TIMEOUT', default=30, cast=int)
 RERANKER_BASE_URL = config('RERANKER_BASE_URL', default='').rstrip('/')
 RERANKER_API_KEY = config('RERANKER_API_KEY', default='')
@@ -282,7 +295,8 @@ DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 # Database Configuration
 # 
 # Railway-friendly setup:
-# - Local: Uses SQLite by default (no DATABASE_URL needed)
+# - Local: Uses PostgreSQL/pgvector. DATABASE_URL defaults to the local
+#   docker-compose database if it is not provided.
 # - Railway: Automatically uses PostgreSQL when DATABASE_URL is provided
 # 
 # To use PostgreSQL locally:
@@ -291,43 +305,30 @@ DOC_PROCESSOR_TIMEOUT = config('DOC_PROCESSOR_TIMEOUT', default=300, cast=int)
 #   3. Set DATABASE_URL in .env: postgresql://user:password@localhost:5432/dbname
 #
 # Railway automatically provides DATABASE_URL when you add a PostgreSQL service.
-DATABASE_URL = config('DATABASE_URL', default='')
+DATABASE_URL = config(
+    'DATABASE_URL',
+    default='postgresql://postgres:postgres@localhost:5432/indian_alt',
+)
 
-if DATABASE_URL:
-    # Use PostgreSQL (Railway or local if DATABASE_URL is set)
-    parsed_config = dj_database_url.parse(
-        DATABASE_URL,
-        conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
-        # Railway Postgres requires SSL, but allow override for local dev
-        ssl_require=config('DB_SSL_REQUIRE', default=True, cast=bool),
-    )
-    
-    # Add connection options for Railway Postgres
-    if 'OPTIONS' not in parsed_config:
-        parsed_config['OPTIONS'] = {}
-    
-    # Ensure proper SSL settings for Railway
-    if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
-        parsed_config['OPTIONS']['sslmode'] = 'require'
-    
-    DATABASES = {
-        'default': parsed_config,
-        'production': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
-        }
-    }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
-        },
-        'production': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': config('SQLITE_PATH_PROD', default=str(BASE_DIR / 'db_prod.sqlite3')),
-        }
-    }
+parsed_config = dj_database_url.parse(
+    DATABASE_URL,
+    conn_max_age=config('DB_CONN_MAX_AGE', default=600, cast=int),
+    # Railway Postgres requires SSL, but allow override for local dev.
+    ssl_require=config('DB_SSL_REQUIRE', default=False, cast=bool),
+)
+
+if parsed_config.get('ENGINE') != 'django.db.backends.postgresql':
+    raise RuntimeError('PostgreSQL with pgvector is required. Set DATABASE_URL to a PostgreSQL database.')
+
+if 'OPTIONS' not in parsed_config:
+    parsed_config['OPTIONS'] = {}
+
+if parsed_config.get('HOST') and 'railway.app' in str(parsed_config.get('HOST', '')):
+    parsed_config['OPTIONS']['sslmode'] = 'require'
+
+DATABASES = {
+    'default': parsed_config,
+}
 
 # Venture Intelligence API
 VENTURE_INTELLIGENCE_API_KEY = config('VENTURE_INTELLIGENCE_API_KEY', default='')

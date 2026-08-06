@@ -13,7 +13,11 @@ class AIPersonalityAdmin(admin.ModelAdmin):
 
 @admin.register(AISkill)
 class AISkillAdmin(admin.ModelAdmin):
-    list_display = ('name', 'description', 'created_at')
+    list_display = (
+        'name', 'status', 'version', 'is_industry_overview_eligible',
+        'owner', 'approved_by', 'created_at',
+    )
+    list_filter = ('status', 'skill_format', 'is_industry_overview_eligible')
     search_fields = ('name', 'description', 'prompt_template')
 
 @admin.register(AnalysisProtocol)
@@ -45,7 +49,10 @@ class AIMessageAdmin(admin.ModelAdmin):
 
 @admin.register(AIAuditLog)
 class AIAuditLogAdmin(admin.ModelAdmin):
-    list_display = ('context_label', 'source_type', 'status', 'is_success', 'model_used', 'created_at')
+    list_display = (
+        'context_label', 'source_type', 'status', 'is_success', 'skill',
+        'skill_version', 'requested_by', 'model_used', 'created_at',
+    )
     list_filter = ('status', 'is_success', 'source_type', 'model_used')
     search_fields = ('context_label', 'source_id', 'error_message')
     readonly_fields = ('created_at',)
@@ -82,4 +89,3 @@ class DealRetrievalProfileAdmin(admin.ModelAdmin):
 class AISystemSettingAdmin(admin.ModelAdmin):
     list_display = ('key', 'value', 'updated_at')
     search_fields = ('key', 'value', 'description')
-

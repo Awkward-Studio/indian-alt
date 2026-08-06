@@ -77,6 +77,9 @@ class VLLMProviderService:
         self.vision_url = getattr(settings, "VLLM_VISION_URL", self.base_url).rstrip("/")
         self.embedding_url = getattr(settings, "VLLM_EMBEDDING_URL", self.base_url).rstrip("/")
         self.api_key = getattr(settings, "VLLM_API_KEY", "")
+        self.connect_timeout = float(getattr(settings, "VLLM_CONNECT_TIMEOUT", 2.0) or 2.0)
+        self.read_timeout = int(getattr(settings, "VLLM_READ_TIMEOUT", 600) or 600)
+        self.stream_timeout = int(getattr(settings, "VLLM_STREAM_TIMEOUT", 600) or 600)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -132,12 +135,16 @@ class VLLMProviderService:
             headers=self._headers(),
             json=body,
             stream=True,
-            timeout=(1.0, 300.0),
+            timeout=(self.connect_timeout, self.stream_timeout),
         )
         response.raise_for_status()
 
+        current_event = ""
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line or raw_line.startswith(":"):
+                continue
+            if raw_line.startswith("event: "):
+                current_event = raw_line[7:].strip()
                 continue
             if raw_line.startswith("data: "):
                 raw_line = raw_line[6:]
@@ -150,6 +157,15 @@ class VLLMProviderService:
                 logger.warning("Skipping malformed vLLM stream chunk: %s", raw_line)
                 continue
 
+            if current_event == "error" or chunk.get("error"):
+                error_payload = chunk.get("error") or chunk
+                if isinstance(error_payload, dict):
+                    message = error_payload.get("message") or error_payload.get("detail") or json.dumps(error_payload)
+                else:
+                    message = str(error_payload)
+                raise RuntimeError(f"vLLM stream error: {message}")
+            current_event = ""
+
             choice = (chunk.get("choices") or [{}])[0]
             delta = choice.get("delta") or {}
             text = delta.get("content") or ""
@@ -159,11 +175,12 @@ class VLLMProviderService:
 
     def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
         body = self._build_chat_body(payload, stream=False)
+        effective_timeout = int(timeout or self.read_timeout)
         response = requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
-            timeout=(1.0, timeout),
+            timeout=(self.connect_timeout, effective_timeout),
         )
         try:
             response.raise_for_status()
@@ -193,7 +210,7 @@ class VLLMProviderService:
             f"{url}/embeddings",
             headers=self._headers(),
             json={"model": model, "input": text},
-            timeout=(1.0, timeout),
+            timeout=(self.connect_timeout, timeout),
         )
         response.raise_for_status()
         data = response.json()
@@ -233,6 +250,7 @@ class VLLMProviderService:
             elif isinstance(content, list):
                 content.append({"type": "text", "text": "/no_think"})
         messages.append({"role": "user", "content": content})
+        self._apply_no_think_marker(messages, payload)
 
         body: dict[str, Any] = {
             "model": model,
@@ -243,6 +261,8 @@ class VLLMProviderService:
 
         if template_kwargs:
             body["chat_template_kwargs"] = template_kwargs
+            if template_kwargs.get("enable_thinking") is False:
+                body["thinking"] = False
 
         response_format = payload.get("response_format")
         if response_format:
@@ -259,6 +279,40 @@ class VLLMProviderService:
             body["max_tokens"] = max_tokens
 
         return body
+
+    def _apply_no_think_marker(self, messages: list[dict[str, Any]], payload: dict) -> None:
+        chat_template_kwargs = payload.get("chat_template_kwargs") or {}
+        if chat_template_kwargs.get("enable_thinking") is not False:
+            return
+
+        model = str(payload.get("model") or "").lower()
+        if "qwen" not in model:
+            return
+
+        marker = "/no_think"
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str) and marker in content:
+                return
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and marker in str(item.get("text") or ""):
+                        return
+
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{content.rstrip()}\n\n{marker}".strip()
+                return
+            if isinstance(content, list):
+                for item in reversed(content):
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        item["text"] = f"{str(item.get('text') or '').rstrip()}\n\n{marker}".strip()
+                        return
+                content.append({"type": "text", "text": marker})
+                return
 
     @staticmethod
     def _coerce_image_url(image: str) -> str:
@@ -499,7 +553,8 @@ class AnthropicProviderService:
         user_prompt = payload.get("prompt") or ""
         
         # Determine options
-        max_tokens = (payload.get("options") or {}).get("max_tokens") or 8192
+        options = payload.get("options") or {}
+        max_tokens = options.get("max_tokens") or 8192
 
         prompt_lower = user_prompt.lower()
         search_keywords = [
@@ -509,8 +564,13 @@ class AnthropicProviderService:
             "who is", "who are", "website", "competitors", "peers", "news",
             "founder", "ceo", "funding", "valuation", "revenue", "financials"
         ]
-        disable_search = (payload.get("options") or {}).get("disable_search", False)
-        has_search_intent = any(kw in prompt_lower for kw in search_keywords) and not disable_search
+        explicit_search = options.get("web_search_enabled")
+        disable_search = options.get("disable_search", False)
+        has_search_intent = (
+            bool(explicit_search)
+            if isinstance(explicit_search, bool)
+            else any(kw in prompt_lower for kw in search_keywords) and not disable_search
+        )
 
         tools = []
         if has_search_intent:
@@ -526,7 +586,6 @@ class AnthropicProviderService:
             
             # Attach the native web search tool for search-capable models
             if "haiku" not in model.lower():
-                options = payload.get("options") or {}
                 max_search_uses = options.get("max_search_uses", 2)
                 web_search_tool_type = options.get("web_search_tool_type") or "web_search_20250305"
                 if options.get("enable_dynamic_web_search"):
@@ -609,7 +668,32 @@ class AnthropicProviderService:
                 continue
 
             event_type = data.get("type")
-            if event_type == "content_block_delta":
+            if event_type == "content_block_start":
+                block = data.get("content_block") or {}
+                citations = []
+                if block.get("type") == "web_search_tool_result":
+                    result_content = block.get("content") or []
+                    if isinstance(result_content, dict):
+                        result_content = [result_content]
+                    citations.extend(
+                        item
+                        for item in result_content
+                        if isinstance(item, dict) and (item.get("url") or item.get("source_url"))
+                    )
+                block_citations = block.get("citations") or []
+                if isinstance(block_citations, dict):
+                    block_citations = [block_citations]
+                citations.extend(item for item in block_citations if isinstance(item, dict))
+                if citations:
+                    yield json.dumps(
+                        {
+                            "response": "",
+                            "thinking": "",
+                            "citations": citations,
+                            "done": False,
+                        }
+                    )
+            elif event_type == "content_block_delta":
                 delta = data.get("delta") or {}
                 delta_type = delta.get("type")
                 if delta_type == "text_delta":
@@ -618,6 +702,17 @@ class AnthropicProviderService:
                 elif delta_type == "thinking_delta":
                     thinking = delta.get("thinking") or ""
                     yield json.dumps({"response": "", "thinking": thinking, "done": False})
+                elif delta_type == "citations_delta":
+                    citation = delta.get("citation") or {}
+                    if citation:
+                        yield json.dumps(
+                            {
+                                "response": "",
+                                "thinking": "",
+                                "citations": [citation],
+                                "done": False,
+                            }
+                        )
             elif event_type in ("message_stop", "message_delta") or (
                 event_type == "message_delta" and (data.get("delta") or {}).get("stop_reason") is not None
             ):

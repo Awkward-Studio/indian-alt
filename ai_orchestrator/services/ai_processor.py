@@ -12,6 +12,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .runtime import AIRuntimeService
 from django.conf import settings
+from django.utils import timezone
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -97,12 +98,16 @@ class AIProcessorService:
         else:
             system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
         if model_provider == "anthropic":
+            web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
             system_instructions += (
                 "\n\n[PRIVACY & SEARCH DIRECTIVE]\n"
                 "You are routed through a secure privacy-preserving gateway.\n"
                 "You DO NOT have access to private database fields, uploaded files, financial details, internal metrics, or comments for any deals.\n"
-                "To answer the user's questions about deals, companies, markets, or news, you must autonomously use your native web search tool. "
-                "Ground your answers in public information and provide citations for your sources."
+                + (
+                    "Web search is explicitly enabled for this question. Use the native web search tool and ground material factual claims in cited public sources."
+                    if web_search_enabled
+                    else "Web search is explicitly disabled for this question. Do not invoke a web-search tool or imply that current public sources were checked."
+                )
             )
         prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
         response_mode = (metadata or {}).get("response_mode")
@@ -114,6 +119,12 @@ class AIProcessorService:
             )
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
+        if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
+            user_prompt = self._truncate_prompt_to_token_budget(
+                user_prompt,
+                system_instructions,
+                int(metadata["max_input_tokens"]),
+            )
 
         # Update Audit Log with the generated prompts
         audit_log.system_prompt = system_instructions
@@ -141,6 +152,12 @@ class AIProcessorService:
                 payload["chat_template_kwargs"] = metadata["chat_template_kwargs"]
             if "max_tokens" in metadata:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
+            if "request_timeout" in metadata:
+                payload["_request_timeout"] = metadata["request_timeout"]
+            if "web_search_enabled" in metadata:
+                payload["options"]["web_search_enabled"] = bool(metadata["web_search_enabled"])
+                payload["options"]["disable_search"] = not bool(metadata["web_search_enabled"])
+                payload["options"]["enable_dynamic_web_search"] = bool(metadata["web_search_enabled"])
 
         # Qwen's vLLM chat template otherwise emits its internal reasoning before
         # the answer. Callers can explicitly opt back in for a task that needs it.
@@ -156,6 +173,24 @@ class AIProcessorService:
         result = self._standard_response(payload, audit_log, response_mode)
         result["_full_context"] = cleaned_text
         return result
+
+    @staticmethod
+    def _estimated_tokens(value: str) -> int:
+        text = str(value or "")
+        lexical = len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
+        return max((len(text) + 2) // 3, int(lexical * 1.2))
+
+    @classmethod
+    def _truncate_prompt_to_token_budget(cls, prompt: str, system: str, max_input_tokens: int) -> str:
+        prompt = str(prompt or "")
+        available = max(1000, int(max_input_tokens) - cls._estimated_tokens(system))
+        if cls._estimated_tokens(prompt) <= available:
+            return prompt
+        marker = "\n\n... [EARLIER RETRIEVED CONTEXT TRUNCATED TO FIT VM CONTEXT WINDOW] ...\n\n"
+        max_chars = max(2000, available * 3 - len(marker))
+        head_chars = int(max_chars * 0.68)
+        tail_chars = max_chars - head_chars
+        return f"{prompt[:head_chars].rstrip()}{marker}{prompt[-tail_chars:].lstrip()}"
 
     def _setup_audit_log(
         self,
@@ -219,6 +254,7 @@ class AIProcessorService:
         try:
             full_response = ""
             full_thinking = ""
+            collected_citations = []
             chunk_counter = 0
 
             stream_iterator = self.current_provider.execute_stream(payload)
@@ -226,6 +262,9 @@ class AIProcessorService:
             for ui_chunk, thinking_delta, response_delta in ResponseParserService.parse_stream(stream_iterator):
                 full_thinking += thinking_delta
                 full_response += response_delta
+                for citation in ui_chunk.get("citations") or []:
+                    if citation not in collected_citations:
+                        collected_citations.append(citation)
                 
                 # Broadcast to WebSockets
                 if self.channel_layer:
@@ -239,6 +278,7 @@ class AIProcessorService:
                             "thinking": thinking_delta,
                             "response_delta": response_delta,
                             "thinking_delta": thinking_delta,
+                            "citations": ui_chunk.get("citations") or [],
                             "status": "processing",
                             "done": False
                         }
@@ -263,8 +303,14 @@ class AIProcessorService:
             audit_log.raw_thinking = full_thinking
             audit_log.is_success = True
             audit_log.status = 'COMPLETED'
+            audit_log.completed_at = timezone.now()
             audit_log.request_duration_ms = duration_ms
             audit_log.tokens_used = estimated_tokens
+            if collected_citations:
+                audit_log.source_metadata = {
+                    **(audit_log.source_metadata or {}),
+                    "provider_citations": collected_citations,
+                }
             audit_log.save()
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
             
@@ -287,6 +333,7 @@ class AIProcessorService:
             logger.error(f"Streaming failed: {str(e)}")
             audit_log.is_success = False
             audit_log.status = 'FAILED'
+            audit_log.completed_at = timezone.now()
             audit_log.error_message = str(e)
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             audit_log.save()
@@ -314,7 +361,11 @@ class AIProcessorService:
         """
         start_time = time.time()
         try:
-            data = self.current_provider.execute_standard(payload)
+            request_timeout = payload.pop("_request_timeout", None)
+            if request_timeout is None:
+                data = self.current_provider.execute_standard(payload)
+            else:
+                data = self.current_provider.execute_standard(payload, timeout=int(request_timeout))
             
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
@@ -380,6 +431,8 @@ class AIProcessorService:
             parsed_json = {"error": str(e)}
         finally:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
+            if audit_log.status in ['COMPLETED', 'FAILED']:
+                audit_log.completed_at = timezone.now()
             audit_log.save()
             broadcast_audit_log_update(
                 audit_log,

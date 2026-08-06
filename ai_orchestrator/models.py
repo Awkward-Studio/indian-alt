@@ -1,8 +1,10 @@
 import uuid
 from django.db import models
 from django.contrib.auth.models import User
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.utils.translation import gettext_lazy as _
-from pgvector.django import VectorField
+from pgvector.django import HnswIndex, VectorField
 
 class AIPersonality(models.Model):
     """
@@ -47,6 +49,15 @@ class AISkill(models.Model):
     """
     Stores specific 'skills' or task-based prompts (e.g., "Deal Extraction", "Summary Generation").
     """
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        APPROVED = "approved", "Approved"
+        RETIRED = "retired", "Retired"
+
+    class Format(models.TextChoices):
+        NATIVE_PROMPT_V1 = "native_prompt_v1", "Native prompt template v1"
+        CLAUDE_PROMPT_V1 = "claude_prompt_v1", "Claude prompt-only subset v1"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True, help_text="Unique name for this skill (e.g., deal_extraction)")
     description = models.TextField(blank=True)
@@ -54,6 +65,37 @@ class AISkill(models.Model):
     prompt_template = models.TextField(help_text="The task-specific prompt template")
     input_schema = models.JSONField(default=dict, blank=True, help_text="Expected JSON structure for input (optional)")
     output_schema = models.JSONField(default=dict, blank=True, help_text="Expected JSON structure for output (optional)")
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owned_ai_skills",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.APPROVED,
+        db_index=True,
+    )
+    approved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_ai_skills",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    skill_format = models.CharField(
+        max_length=30,
+        choices=Format.choices,
+        default=Format.NATIVE_PROMPT_V1,
+    )
+    is_industry_overview_eligible = models.BooleanField(
+        default=False,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -162,6 +204,14 @@ class AIAuditLog(models.Model):
     
     personality = models.ForeignKey(AIPersonality, on_delete=models.SET_NULL, null=True)
     skill = models.ForeignKey(AISkill, on_delete=models.SET_NULL, null=True)
+    requested_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_ai_runs",
+    )
+    skill_version = models.PositiveIntegerField(null=True, blank=True)
     
     model_provider = models.CharField(max_length=50, default='vllm')
     model_used = models.CharField(max_length=100)
@@ -198,6 +248,7 @@ class AIAuditLog(models.Model):
     )
     
     created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = "AI Audit Log"
@@ -292,6 +343,8 @@ class DocumentChunk(models.Model):
     
     # Content & Vector
     content = models.TextField()
+    search_text = models.TextField(blank=True, default="")
+    search_vector = SearchVectorField(null=True, blank=True)
     # Qwen/Qwen3-Embedding-0.6B returns 1024 dimensions.
     embedding = VectorField(dimensions=1024, null=True, blank=True)
     embedding_model = models.CharField(max_length=200, blank=True, default="")
@@ -309,7 +362,14 @@ class DocumentChunk(models.Model):
         indexes = [
             models.Index(fields=['deal', 'source_type']),
             models.Index(fields=['audit_log', 'source_type']),
-            # Vector search index is usually created via SQL, but pgvector supports it
+            GinIndex(fields=['search_vector'], name='docchunk_search_vector_gin'),
+            HnswIndex(
+                name='docchunk_embedding_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
         ]
 
     def __str__(self):
@@ -341,6 +401,13 @@ class DealRetrievalProfile(models.Model):
         indexes = [
             models.Index(fields=['deal']),
             models.Index(fields=['embedding_model']),
+            HnswIndex(
+                name='dealprofile_embedding_hnsw',
+                fields=['embedding'],
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_cosine_ops'],
+            ),
         ]
 
     def __str__(self):
@@ -364,4 +431,3 @@ class AISystemSetting(models.Model):
 
     def __str__(self):
         return f"{self.key}: {self.value}"
-

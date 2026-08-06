@@ -27,6 +27,7 @@ services:
       - ${VLLM_TEXT_MAX_MODEL_LEN:-32768}
       - --max-num-seqs
       - ${VLLM_TEXT_MAX_NUM_SEQS:-16}
+      - --enable-prefix-caching
       - --enable-chunked-prefill
       - --trust-remote-code
 
@@ -56,6 +57,7 @@ services:
       - ${VLLM_VISION_GPU_MEMORY_UTILIZATION:-0.22}
       - --max-model-len
       - ${VLLM_VISION_MAX_MODEL_LEN:-8192}
+      - --enable-prefix-caching
       - --trust-remote-code
 
 

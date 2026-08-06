@@ -59,24 +59,57 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         self.assertTrue(body["messages"][-1]["content"].endswith("/no_think"))
 
 
+class RetrievalFusionTests(SimpleTestCase):
+    def test_rrf_merge_marks_dense_sparse_and_hybrid_sources(self):
+        dense_only = DocumentChunk(id="00000000-0000-0000-0000-000000000001", content="dense")
+        hybrid_dense = DocumentChunk(id="00000000-0000-0000-0000-000000000002", content="hybrid")
+        sparse_only = DocumentChunk(id="00000000-0000-0000-0000-000000000003", content="sparse")
+        hybrid_sparse = DocumentChunk(id=hybrid_dense.id, content="hybrid")
+
+        merged = EmbeddingService._rrf_merge_chunks(
+            [dense_only, hybrid_dense],
+            [sparse_only, hybrid_sparse],
+            limit=3,
+        )
+
+        merged_by_id = {str(chunk.id): chunk for chunk in merged}
+        hybrid = merged_by_id[str(hybrid_dense.id)]
+        self.assertEqual(hybrid.retrieval_sources, ["dense", "sparse"])
+        self.assertGreater(hybrid.retrieval_rrf_score, merged_by_id[str(dense_only.id)].retrieval_rrf_score)
+
+
 class PromptSeedTests(TestCase):
-    def test_seeded_deal_synthesis_owns_client_analysis_structure(self):
+    def test_seeded_deal_synthesis_owns_internal_ic_structure(self):
         call_command("seed_ai_prompts", verbosity=0)
 
         personality = AIPersonality.objects.get(is_default=True)
         deal_synthesis = AISkill.objects.get(name="deal_synthesis")
+        document_evidence = AISkill.objects.get(name="document_evidence_extraction")
 
-        self.assertIn("Company Overview", deal_synthesis.prompt_template)
-        self.assertIn("Promoters and Their Background", deal_synthesis.prompt_template)
-        self.assertIn("Key Financial Highlights", deal_synthesis.prompt_template)
-        self.assertIn("DuPont analysis", deal_synthesis.prompt_template)
-        self.assertIn("Key Peers and Valuation Multiples", deal_synthesis.prompt_template)
+        self.assertIn("## Company Details", deal_synthesis.prompt_template)
+        self.assertIn("## Promoter and Management Details", deal_synthesis.prompt_template)
+        self.assertIn("## Industry Overview", deal_synthesis.prompt_template)
+        self.assertIn("## Transaction Details", deal_synthesis.prompt_template)
+        self.assertIn("## Key Financials", deal_synthesis.prompt_template)
+        self.assertIn("## Transaction / Trading Multiples", deal_synthesis.prompt_template)
+        self.assertIn("## Risk Factors", deal_synthesis.prompt_template)
+        self.assertIn("## Investment Rationale", deal_synthesis.prompt_template)
+        self.assertIn("## Exit Considerations", deal_synthesis.prompt_template)
+        self.assertIn("## Next Steps", deal_synthesis.prompt_template)
+        self.assertIn("source_relationships", deal_synthesis.prompt_template)
         self.assertIn("related_deal_context", deal_synthesis.prompt_template)
         self.assertIn("deal_specific_prompt", deal_synthesis.prompt_template)
         self.assertIn("markdown_document", deal_synthesis.prompt_template)
         self.assertIn("return only a Markdown document", deal_synthesis.prompt_template)
         self.assertIn("additional deal-level writing directive", deal_synthesis.prompt_template)
         self.assertIn("canonical_json", deal_synthesis.prompt_template)
+        self.assertIn("numeric_evidence", document_evidence.prompt_template)
+        self.assertIn("table_definitions", document_evidence.prompt_template)
+        self.assertIn("diligence_gaps", document_evidence.prompt_template)
+        self.assertIn("industry_overview", document_evidence.prompt_template)
+        self.assertIn("market_figures", document_evidence.prompt_template)
+        self.assertIn("supporting passage", document_evidence.system_template)
+        self.assertIn("industry_overview", document_evidence.output_schema)
         self.assertNotIn("Mandatory analyst_report structure", personality.system_instructions)
         self.assertNotIn("## Company Overview", personality.system_instructions)
 
@@ -86,10 +119,10 @@ class PromptSeedTests(TestCase):
         directive_skill = AISkill.objects.get(name="deal_helper_directive_document")
 
         self.assertIn("Follow the analyst's directive", directive_skill.system_template)
-        self.assertIn("Do not force the canonical deal synthesis 7-section structure", directive_skill.system_template)
+        self.assertIn("Do not force the canonical internal IC note structure", directive_skill.system_template)
         self.assertIn("{{ directive }}", directive_skill.prompt_template)
         self.assertIn("{{ document_title }}", directive_skill.prompt_template)
-        self.assertIn("Do not use the canonical deal synthesis 7-section Markdown structure", directive_skill.prompt_template)
+        self.assertIn("canonical 10-section internal IC note structure", directive_skill.prompt_template)
 
 
 class DealHelperAnalysisRoutingTests(TestCase):
@@ -289,6 +322,33 @@ class UniversalChatServiceTests(TestCase):
             flow_config=UniversalChatFlowService.build_default_config(),
             flow_version=None,
         )
+
+    def test_explicit_evidence_scope_routes_news_and_meetings_individually(self):
+        deal = MagicMock()
+        deal.meeting_notes.filter.return_value.values_list.return_value = ["meeting-1"]
+        deal.documents.filter.return_value.values_list.return_value = ["news-1"]
+
+        meetings = self.service._explicit_deal_evidence_scope(deal, "Use only the meeting notes")
+        news = self.service._explicit_deal_evidence_scope(deal, "Use the latest news")
+        both = self.service._explicit_deal_evidence_scope(deal, "Compare the meetings with the news")
+
+        self.assertEqual(meetings, {"source_ids": ["meeting-1"], "source_types": ["meeting_note"], "label": "meetings"})
+        self.assertEqual(news, {"source_ids": ["news-1"], "source_types": ["document"], "label": "news"})
+        self.assertEqual(both["source_ids"], ["meeting-1", "news-1"])
+        self.assertEqual(both["label"], "meetings_and_news")
+
+    def test_deal_chat_prompt_guard_preserves_query_tail(self):
+        prompt = "[CONTEXT]\n" + ("long evidence " * 20000) + "\n[USER MESSAGE]\nUse the latest news only"
+
+        trimmed = AIProcessorService._truncate_prompt_to_token_budget(
+            prompt,
+            "system",
+            11000,
+        )
+
+        self.assertLessEqual(AIProcessorService._estimated_tokens(trimmed), 11000)
+        self.assertIn("CONTEXT TRUNCATED", trimmed)
+        self.assertTrue(trimmed.endswith("Use the latest news only"))
 
     def test_saved_relationship_context_hydrates_selected_competitor_deals(self):
         active = Deal.objects.create(title="Active Co", industry="Consumer", sector="Beauty")
@@ -1153,14 +1213,27 @@ class UniversalChatServiceTests(TestCase):
             "user_query": "Which consumer or wellness deals mention a funding ask and strong repeat customer behavior?",
         }
 
-        with patch.object(self.service.embed_service, "search_global_chunks", return_value=[risk_chunk, summary_chunk]), \
-             patch.object(self.service.embed_service, "_rerank_chunks", side_effect=lambda chunks, query, limit: chunks), \
+        with patch.object(
+            self.service.embed_service,
+            "search_global_chunks",
+            return_value=[risk_chunk, summary_chunk],
+        ) as search_global_chunks, \
+             patch.object(self.service, "_rerank_candidate_chunks", side_effect=lambda chunks, query, plan: chunks), \
              patch.object(self.service, "_augment_with_deal_summary_candidates", side_effect=lambda chunks, deals: chunks), \
-             patch.object(self.service, "_compute_chunk_budgets", return_value=(10, 10)):
+             patch.object(self.service, "_compute_chunk_budgets", return_value=(10, 10)), \
+             patch.object(self.service, "_text_model_rerank") as text_model_rerank:
             selected, diagnostics = self.service._search_ranked_chunks(plan, [deal])
 
         self.assertEqual(selected[0]["chunk"], summary_chunk)
         self.assertEqual(diagnostics["selected_chunk_count"], 2)
+        self.assertEqual(
+            diagnostics["chunk_ranking_pipeline"],
+            "hybrid_search+bge_cross_encoder+heuristic_evidence_priors",
+        )
+        self.assertFalse(diagnostics["text_model_chunk_rerank_used"])
+        text_model_rerank.assert_not_called()
+        _, search_kwargs = search_global_chunks.call_args
+        self.assertFalse(search_kwargs["rerank"])
 
     def test_search_ranked_chunks_prefers_document_backed_evidence_for_single_deal_depth_first_queries(self):
         deal = MagicMock()
@@ -1205,7 +1278,7 @@ class UniversalChatServiceTests(TestCase):
         }
 
         with patch.object(self.service.embed_service, "search_global_chunks", return_value=[summary_chunk, document_chunk]), \
-             patch.object(self.service.embed_service, "_rerank_chunks", side_effect=lambda chunks, query, limit: chunks), \
+             patch.object(self.service, "_rerank_candidate_chunks", side_effect=lambda chunks, query, plan: chunks), \
              patch.object(self.service, "_augment_with_deal_summary_candidates", side_effect=lambda chunks, deals: chunks), \
              patch.object(self.service, "_compute_chunk_budgets", return_value=(8, 24)):
             selected, _ = self.service._search_ranked_chunks(plan, [deal])
@@ -1638,6 +1711,30 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["normalized_text"], "Local text")
         mock_local_extract.assert_called_once()
 
+    @patch.object(DocumentProcessorService, "extract_text_fallback", return_value="Native PDF text")
+    @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_vision_model", return_value="")
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_default_personality", return_value=None)
+    def test_missing_vision_model_uses_text_native_fallback(
+        self,
+        _mock_personality,
+        _mock_vision_model,
+        _mock_convert,
+        mock_text_fallback,
+    ):
+        service = DocumentProcessorService()
+
+        result = service.get_extraction_result(b"pdf-bytes", "example.pdf")
+
+        self.assertEqual(result["mode"], "fallback_text")
+        self.assertEqual(result["normalized_text"], "Native PDF text")
+        self.assertIn("vision_disabled", result["quality_flags"])
+        mock_text_fallback.assert_called_once_with(
+            b"pdf-bytes",
+            "example.pdf",
+            page_limit=None,
+        )
+
 
 class AnthropicIntegrationTests(TestCase):
     def setUp(self):
@@ -1701,6 +1798,9 @@ class AnthropicIntegrationTests(TestCase):
         self.assertEqual(res["gate_mode"], "privacy_bypass")
         self.assertIn("ACME Corporation", res["context_data"])
         self.assertEqual(res["deals_considered"], 1)
+        self.assertEqual(res["retrieved_chunk_count"], 0)
+        self.assertEqual(res["selected_chunk_count"], 0)
+        self.assertEqual(res["selected_sources"], [])
 
     def test_rag_bypass_deal_chat(self):
         from ai_orchestrator.services.universal_chat import UniversalChatService
@@ -1718,6 +1818,9 @@ class AnthropicIntegrationTests(TestCase):
         self.assertFalse(res["used_query_builder"])
         self.assertEqual(res["gate_mode"], "privacy_bypass")
         self.assertIn("ACME Corporation", res["context_data"])
+        self.assertEqual(res["retrieved_chunk_count"], 0)
+        self.assertEqual(res["selected_chunk_count"], 0)
+        self.assertEqual(res["selected_sources"], [])
 
     def test_deal_chat_privacy_bypass_includes_basic_deal_name(self):
         from ai_orchestrator.tasks import generate_chat_response_async
@@ -1758,6 +1861,12 @@ class AnthropicIntegrationTests(TestCase):
             _, process_kwargs = mock_processor_instance.process_content.call_args
             self.assertIn("deal_visual", process_kwargs["metadata"]["prompt_template_override"])
             self.assertIn("comparison_matrix", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("up to three distinct visuals", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("Do not choose it when a trend", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("214 must remain 214", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("use line rather than bar", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn('MUST include `"version": 1`', process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("Always emit `source_notes` as an array", process_kwargs["metadata"]["prompt_template_override"])
             
             # Verify correct mock execution
             self.assertEqual(res["status"], "success")

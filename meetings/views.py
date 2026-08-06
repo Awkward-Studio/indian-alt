@@ -135,7 +135,7 @@ class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
     @extend_schema(
         summary="Analyze meeting notes into red and green deal signals",
-        description="Demo pipeline that summarizes a deal's meeting notes using a local LM Studio OpenAI-compatible model.",
+        description="Summarize a deal's meeting notes using the configured VM text model.",
         tags=["Meeting Notes"],
         request={
             'application/json': {
@@ -179,7 +179,7 @@ class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 {
                     'error': 'Meeting signal analysis failed',
                     'details': str(exc),
-                    'provider': 'lm_studio',
+                    'provider': 'vllm',
                 },
                 status=status.HTTP_502_BAD_GATEWAY,
             )

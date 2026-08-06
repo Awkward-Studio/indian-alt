@@ -122,6 +122,35 @@ class GranolaMeetingEmailIngestionTests(TestCase):
         self.assertTrue(email.is_processed)
         self.assertEqual(email.processing_status, "completed")
 
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note")
+    def test_ambiguous_fuzzy_match_remains_unlinked_with_candidate_diagnostics(self, vectorize):
+        first = Deal.objects.create(title="Orion Foods")
+        second = Deal.objects.create(title="Orion Foods India")
+        email = self._email(
+            subject="Orion Foods meeting",
+            body=(
+                "Summary:\n"
+                "Management discussed distribution.\n\n"
+                "Transcript:\n"
+                "Speaker A: The north region grew."
+            ),
+        )
+
+        note = GranolaMeetingEmailIngestionService.process_email(email)
+
+        self.assertIsNone(note)
+        self.assertEqual(MeetingNote.objects.count(), 0)
+        vectorize.assert_not_called()
+        email.refresh_from_db()
+        self.assertIsNone(email.deal_id)
+        resolution = email.graph_metadata["meeting_deal_resolution"]
+        self.assertEqual(resolution["status"], "ambiguous")
+        self.assertEqual(
+            {item["deal_id"] for item in resolution["candidates"][:2]},
+            {str(first.id), str(second.id)},
+        )
+        self.assertIn("attach it manually", email.processing_error)
+
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.is_embedding_available", return_value=True)
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note", return_value=True)
     def test_repeat_ingest_keeps_existing_meeting_note_edits(self, vectorize, _available):

@@ -67,15 +67,24 @@ Edit `.env` with your database credentials and other settings.
 
 ### 5. Database Setup
 
-**Local Development (SQLite - Default):**
-- No setup needed! SQLite is used automatically when `DATABASE_URL` is not set
-- Database file will be created at `db.sqlite3`
+PostgreSQL with pgvector is required locally and in production. SQLite is not
+supported because retrieval depends on pgvector HNSW indexes and PostgreSQL
+full-text search.
 
-**Optional: Use PostgreSQL Locally**
-- Install PostgreSQL locally
-- Create a database: `CREATE DATABASE indian_alt;`
-- Set in `.env`: `DATABASE_URL=postgresql://user:password@localhost:5432/indian_alt`
-- Set: `DB_SSL_REQUIRE=false` (local PostgreSQL usually doesn't use SSL)
+**Recommended local database:**
+
+```bash
+docker compose up -d db redis
+```
+
+Set in `.env`:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/indian_alt
+DB_SSL_REQUIRE=false
+```
+
+The `db` service uses the `pgvector/pgvector:pg16` image.
 
 **Railway Production:**
 - See [RAILWAY_DEPLOY.md](./RAILWAY_DEPLOY.md) for detailed setup
@@ -87,6 +96,14 @@ Edit `.env` with your database credentials and other settings.
 ```bash
 python manage.py makemigrations
 python manage.py migrate
+python manage.py check_retrieval_stack
+```
+
+After deploying the hybrid retrieval migration, rebuild existing chunk embeddings
+with contextual headers:
+
+```bash
+python manage.py rebuild_contextual_chunk_embeddings --batch-size 50
 ```
 
 ### 7. Create Superuser (Optional)

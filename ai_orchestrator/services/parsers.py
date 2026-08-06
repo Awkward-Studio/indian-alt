@@ -413,6 +413,14 @@ class ResponseParserService:
             chunk = json.loads(line)
             raw_text = chunk.get("response") or ""
             raw_thinking = chunk.get("thinking") or ""
+            citations = chunk.get("citations") or []
+            if citations:
+                yield {
+                    "response": "",
+                    "thinking": "",
+                    "citations": citations,
+                    "done": False,
+                }, "", ""
             if raw_thinking:
                 yield {"response": "", "thinking": raw_thinking, "done": False}, raw_thinking, ""
             buffer += raw_text

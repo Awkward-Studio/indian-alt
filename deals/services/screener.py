@@ -2,7 +2,9 @@ import json
 import logging
 import re
 import requests
+import unicodedata
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 from django.db import transaction
@@ -167,7 +169,8 @@ def _extract_ticker_from_url(url: str) -> str:
 
 
 def _company_match_key(value: Any) -> str:
-    text = _clean_text(value, max_length=200).lower()
+    text = unicodedata.normalize("NFKD", _clean_text(value, max_length=200).lower())
+    text = "".join(character for character in text if not unicodedata.combining(character))
     text = text.replace("&", " and ")
     text = re.sub(
         r"\b(ltd|limited|india|pvt|private|plc|inc|corp|corporation|co|company)\b",
@@ -177,6 +180,12 @@ def _company_match_key(value: Any) -> str:
     )
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+_SCREENER_SEARCH_ALIASES = {
+    # Screener indexes this consumer-facing listed company by its legal name.
+    "nykaa": ("FSN E-Commerce Ventures",),
+}
 
 
 def _select_current_peer(peers: list[dict[str, Any]], *, company_name: str, ticker: str = "") -> dict[str, Any]:
@@ -401,6 +410,36 @@ def _screener_url_for(ticker: str = "", screener_url: str = "") -> str:
     return f"https://www.screener.in/company/{symbol}/consolidated/"
 
 
+def _normalize_screener_url(value: Any) -> str:
+    """
+    Return a canonical, fetch-safe Screener company URL.
+
+    Competitor candidates and the search fallback both contain externally
+    sourced URLs, so only the official HTTPS host and company-page paths are
+    accepted before requests.get() sees them.
+    """
+    raw_url = _clean_text(value, max_length=500)
+    if not raw_url:
+        return ""
+    try:
+        parsed = urlsplit(raw_url)
+        has_invalid_authority = bool(parsed.username or parsed.password or parsed.port)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() not in {"screener.in", "www.screener.in"}
+        or has_invalid_authority
+    ):
+        return ""
+
+    path = re.sub(r"/+", "/", parsed.path or "")
+    if not re.fullmatch(r"/company/[^/]+(?:/consolidated)?/?", path, flags=re.IGNORECASE):
+        return ""
+    canonical_path = f"{path.rstrip('/')}/"
+    return urlunsplit(("https", "www.screener.in", canonical_path, "", ""))
+
+
 def _parse_screener_number(value: Any) -> float | None:
     parsed = _number_from_value(value)
     return parsed
@@ -456,17 +495,164 @@ class ScreenerCompanyService:
     the existing company profile and relation tables.
     """
 
-    def fetch_public_company_snapshot(self, company_name: str, *, ticker: str = "", exchange: str = "") -> dict[str, Any]:
-        direct = self.fetch_screener_direct_snapshot(ticker=ticker)
-        if direct:
-            return direct
-
-        resolved = self.resolve_screener_url(company_name, ticker=ticker, exchange=exchange)
-        direct = self.fetch_screener_direct_snapshot(
-            ticker=resolved.get("ticker") or ticker,
-            screener_url=resolved.get("screener_url") or "",
+    def search_company(self, company_name: str, *, raise_on_error: bool = False) -> dict[str, Any]:
+        name_key = _company_match_key(company_name)
+        if not name_key:
+            return {}
+        known_aliases = _SCREENER_SEARCH_ALIASES.get(name_key, ())
+        parenthetical = re.findall(r"\(([^)]+)\)", company_name or "")
+        outer_name = re.sub(r"\s*\([^)]*\)\s*", " ", company_name or "").strip()
+        first_meaningful_token = next(
+            (
+                token for token in re.findall(r"[A-Za-z0-9]+", outer_name)
+                if len(token) >= 4 and token.casefold() not in {"india", "limited", "private"}
+            ),
+            "",
         )
-        if direct:
+        queries = list(dict.fromkeys(
+            value.strip()
+            for value in [
+                company_name,
+                *known_aliases,
+                *parenthetical,
+                outer_name,
+                first_meaningful_token,
+            ]
+            if value and value.strip()
+        ))[:4]
+
+        results = []
+        successful_requests = 0
+        last_error: Exception | None = None
+        for query in queries:
+            try:
+                response = requests.get(
+                    "https://www.screener.in/api/company/search/",
+                    params={"q": query},
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        )
+                    },
+                    timeout=12,
+                )
+                response.raise_for_status()
+                query_results = response.json()
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Direct Screener company search failed for %s: %s", query, exc)
+                continue
+            successful_requests += 1
+            if isinstance(query_results, list) and query_results:
+                results.extend(query_results)
+                break
+        if not successful_requests and last_error is not None and raise_on_error:
+            raise last_error
+        if not results:
+            return {}
+
+        matches = []
+        name_tokens = {
+            token for token in name_key.split()
+            if len(token) > 1 and token not in {"and", "the"}
+        }
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            result_key = _company_match_key(result.get("name"))
+            if not result_key:
+                continue
+            alias_keys = {_company_match_key(value) for value in known_aliases}
+            exact = result_key == name_key or result_key in alias_keys
+            result_tokens = {
+                token for token in result_key.split()
+                if len(token) > 1 and token not in {"and", "the"}
+            }
+            contained = (
+                len(name_tokens) >= 2
+                and len(result_tokens) >= 2
+                and (
+                name_key in result_key or result_key in name_key
+                )
+            )
+            overlap = len(name_tokens & result_tokens)
+            token_match = (
+                len(name_tokens) >= 2
+                and overlap >= 2
+                and overlap / min(len(name_tokens), len(result_tokens)) >= 0.6
+            )
+            if exact or contained or token_match:
+                matches.append((exact, overlap, result))
+        if not matches:
+            return {}
+
+        result = max(matches, key=lambda item: (item[0], item[1]))[2]
+        screener_url = _normalize_screener_url(
+            f"https://www.screener.in{result.get('url') or ''}"
+        )
+        if not screener_url:
+            return {}
+        return {
+            "company_name": _clean_text(result.get("name"), max_length=200),
+            "ticker": _extract_ticker_from_url(screener_url),
+            "screener_url": screener_url,
+            "warehouse_id": str(result.get("id") or ""),
+        }
+
+    def fetch_public_company_snapshot(
+        self,
+        company_name: str,
+        *,
+        ticker: str = "",
+        exchange: str = "",
+        screener_url: str = "",
+    ) -> dict[str, Any]:
+        supplied_url = _normalize_screener_url(screener_url)
+        attempted_urls = set()
+        if screener_url and not supplied_url:
+            logger.warning("Ignoring invalid Screener URL supplied for %s", company_name)
+
+        # A grounded URL is the cheapest and most precise path. A ticker-derived
+        # URL remains deterministic and requires no SearXNG request.
+        if supplied_url:
+            attempted_urls.add(supplied_url)
+            direct = self.fetch_screener_direct_snapshot(
+                ticker=ticker,
+                screener_url=supplied_url,
+            )
+            if direct.get("is_listed"):
+                return direct
+
+        if ticker:
+            symbol = _clean_text(ticker, max_length=40).upper()
+            attempted_urls.update({
+                f"https://www.screener.in/company/{symbol}/consolidated/",
+                f"https://www.screener.in/company/{symbol}/",
+            })
+            direct = self.fetch_screener_direct_snapshot(ticker=ticker)
+            if direct.get("is_listed"):
+                return direct
+
+        # Search is intentionally last: use it only when neither deterministic
+        # direct-fetch route produced a parseable listed-company snapshot.
+        resolved = self.resolve_screener_url(company_name, ticker=ticker, exchange=exchange)
+        resolved_url = _normalize_screener_url(resolved.get("screener_url"))
+        resolved_ticker = _clean_text(resolved.get("ticker"), max_length=40).upper()
+        original_ticker = _clean_text(ticker, max_length=40).upper()
+        retry_url = resolved_url if resolved_url not in attempted_urls else ""
+        has_new_ticker = bool(resolved_ticker and resolved_ticker != original_ticker)
+        should_retry_direct = bool(retry_url or has_new_ticker)
+        direct = (
+            self.fetch_screener_direct_snapshot(
+                ticker=resolved_ticker or original_ticker,
+                screener_url=retry_url,
+            )
+            if should_retry_direct
+            else {}
+        )
+        if direct.get("is_listed"):
             for key in ("ticker", "exchange", "industry", "sector", "website"):
                 if not direct.get(key) and resolved.get(key):
                     direct[key] = resolved.get(key)
@@ -483,47 +669,45 @@ class ScreenerCompanyService:
         }
 
     def resolve_screener_url(self, company_name: str, *, ticker: str = "", exchange: str = "") -> dict[str, Any]:
-        prompt = (
-            "Use web search only to find the official Screener.in page for this listed Indian company. "
-            "Do not extract or estimate any financial values. If no Screener page is found, return "
-            "{\"is_listed\": false}.\n\n"
-            f"Company: {company_name}\n"
-            f"Ticker hint: {ticker or 'N/A'}\n"
-            f"Exchange hint: {exchange or 'N/A'}\n\n"
-            "Return exactly one JSON object and no markdown:\n"
-            "{\n"
-            "  \"is_listed\": true,\n"
-            "  \"company_name\": \"Company Ltd\",\n"
-            "  \"registered_name\": \"Company Limited\",\n"
-            "  \"ticker\": \"COMPANY\",\n"
-            "  \"exchange\": \"NSE\",\n"
-            "  \"screener_url\": \"https://www.screener.in/company/COMPANY/\",\n"
-            "  \"website\": \"https://company.example\",\n"
-            "  \"industry\": \"Industry\",\n"
-            "  \"sector\": \"Sector\"\n"
-            "}"
+        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+        prompt = PromptCatalogService.render(
+            "screener_resolver",
+            company_name=company_name,
+            ticker=ticker or "N/A",
+            exchange=exchange or "N/A",
         )
-        service = AnthropicProviderService()
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+        search_query = f"{company_name} {ticker} screener.in profile"
+        search_context = SearXNGProviderService().search(search_query)
+
+        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
+
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        service = VLLMProviderService()
+        available_models = service.get_available_models()
+        model_name = available_models[0] if available_models else "local-model"
+
         result = service.execute_standard(
             {
-                "model": "default",
-                "system": "You find official Screener company URLs. Return only valid JSON.",
-                "prompt": prompt,
+                "model": model_name,
+                "system": PromptCatalogService.get("screener_resolver_system"),
+                "prompt": augmented_prompt,
                 "options": {
-                    "max_tokens": 800,
                     "temperature": 0.0,
-                    "max_search_uses": 3,
-                    "web_search_tool_type": "web_search_20250305",
                 },
             },
-            timeout=60,
+            timeout=600,
         )
         payload = _extract_json_object(result.get("response") or "")
         payload["raw_response"] = result.get("response") or ""
         return payload
 
     def fetch_screener_direct_snapshot(self, *, ticker: str = "", screener_url: str = "") -> dict[str, Any]:
-        url = _screener_url_for(ticker=ticker, screener_url=screener_url)
+        trusted_url = _normalize_screener_url(screener_url) if screener_url else ""
+        if screener_url and not trusted_url:
+            logger.warning("Ignoring invalid direct Screener URL")
+            return {}
+        url = _screener_url_for(ticker=ticker, screener_url=trusted_url)
         if not url:
             return {}
         candidate_urls = [url]
@@ -716,6 +900,7 @@ class ScreenerCompanyService:
                 name,
                 ticker=competitor.get("ticker") or "",
                 exchange=competitor.get("exchange") or "",
+                screener_url=competitor.get("screener_url") or "",
             ),
             fallback_name=name,
             fallback_ticker=competitor.get("ticker") or "",

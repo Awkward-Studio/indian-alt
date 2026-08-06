@@ -13,7 +13,7 @@ echo "Run as worker: ${RUN_AS_WORKER_NORMALIZED}"
 if [ -n "$DATABASE_URL" ]; then
     echo "DATABASE_URL: PRESENT (PostgreSQL)"
 else
-    echo "DATABASE_URL: MISSING (Will default to SQLite)"
+    echo "DATABASE_URL: MISSING (PostgreSQL with pgvector is required)"
     exit 1
 fi
 
@@ -24,6 +24,10 @@ python manage.py ensure_pgvector
 echo ""
 echo "=== RUNNING MIGRATIONS ==="
 python manage.py migrate --noinput
+
+echo ""
+echo "=== CHECKING RETRIEVAL STACK ==="
+python manage.py check_retrieval_stack
 
 echo ""
 echo "=== SEEDING AI SKILLS & PERSONALITIES ==="

@@ -7,6 +7,7 @@ from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -15,17 +16,36 @@ from rest_framework import status, viewsets
 from django.http import StreamingHttpResponse
 
 from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog, DocumentChunk
-from .serializers import AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer
+from .serializers import (
+    AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer,
+    AISkillSerializer,
+)
 from .services.ai_processor import AIProcessorService
+from .services.chat_scope import ChatScopeValidationError, internal_citation, parse_chat_scope
 from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
 from .services.runtime import AIRuntimeService
+from .services.prompt_catalog import PromptCatalogService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
+from meetings.models import MeetingNote
 
 logger = logging.getLogger(__name__)
+
+
+def _is_ai_admin(user):
+    return bool(
+        user
+        and user.is_authenticated
+        and (
+            user.is_superuser
+            or user.is_staff
+            or getattr(getattr(user, "profile", None), "is_admin", False)
+        )
+    )
+
 
 class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -140,9 +160,72 @@ class DealChatView(APIView):
             return Response({"error": "deal_id and message are required"}, status=400)
         try:
             deal = Deal.objects.get(id=deal_id)
-            ai_service = AIProcessorService()
+            try:
+                scope = parse_chat_scope(request.data)
+            except ChatScopeValidationError as exc:
+                return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            documents = list(
+                deal.documents.filter(id__in=scope.document_ids, is_indexed=True)
+            )
+            if len(documents) != len(scope.document_ids):
+                return Response(
+                    {"error": "One or more selected documents are unavailable, unauthorized, or not indexed."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            transcripts = list(
+                MeetingNote.objects.filter(
+                    deals=deal,
+                    id__in=scope.transcript_ids,
+                    is_indexed=True,
+                ).distinct()
+            )
+            if len(transcripts) != len(scope.transcript_ids):
+                return Response(
+                    {"error": "One or more selected transcripts are unavailable, unauthorized, or not indexed."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            interactive_context_data = ""
+            selected_sources: List[Dict[str, Any]] = []
+            scope_diagnostics: Dict[str, Any] = {}
+            if scope.has_private_scope:
+                chat_service = UniversalChatService(AIProcessorService())
+                query_plan = {
+                    "user_query": user_message,
+                    "selection_mode": "explicit_chat_scope",
+                    "deal_ids": [str(deal.id)],
+                }
+                if scope.document_ids:
+                    document_chunks, document_diagnostics = chat_service.chunks_for_selected_documents(
+                        plan=query_plan,
+                        deal_id=str(deal.id),
+                        document_ids=scope.document_ids,
+                    )
+                    selected_sources.extend(document_chunks)
+                    scope_diagnostics["documents"] = document_diagnostics
+                if scope.transcript_ids:
+                    transcript_chunks, transcript_diagnostics = chat_service.chunks_for_selected_transcripts(
+                        deal_id=str(deal.id),
+                        transcript_ids=scope.transcript_ids,
+                    )
+                    selected_sources.extend(transcript_chunks)
+                    scope_diagnostics["transcripts"] = transcript_diagnostics
+                if not selected_sources:
+                    return Response(
+                        {"error": "The selected scope has no retrievable indexed passages."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                interactive_context_data = chat_service.build_context_from_selection(
+                    plan=query_plan,
+                    deal_ids=[str(deal.id)],
+                    chunks=selected_sources,
+                    current_deal_id=str(deal.id),
+                )
+
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_chat').first()
+            citation_preview = [internal_citation(chunk) for chunk in selected_sources]
             
             # Create PENDING audit log for background tracking
             audit_log = AIRuntimeService.create_audit_log(
@@ -155,6 +238,15 @@ class DealChatView(APIView):
                 is_success=False,
                 system_prompt="Processing forensic query in background...",
                 user_prompt=user_message,
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "evidence_mode": scope.evidence_mode,
+                    "web_search_enabled": scope.web_search_enabled,
+                    "selected_document_ids": scope.document_ids,
+                    "selected_transcript_ids": scope.transcript_ids,
+                    "selected_sources": citation_preview,
+                    "scope_diagnostics": scope_diagnostics,
+                },
             )
 
             from .tasks import generate_chat_response_async
@@ -176,9 +268,20 @@ class DealChatView(APIView):
                 )
 
             # Save the user message to DB immediately (fixes Bug 1)
-            AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
+            AIMessage.objects.create(
+                conversation=conversation,
+                role='user',
+                content=user_message,
+                applied_filters={
+                    "audit_log_id": str(audit_log.id),
+                    "evidence_mode": scope.evidence_mode,
+                    "web_search_enabled": scope.web_search_enabled,
+                    "selected_document_ids": scope.document_ids,
+                    "selected_transcript_ids": scope.transcript_ids,
+                },
+            )
 
-            model_provider = request.data.get('model_provider', 'vllm')
+            model_provider = scope.model_provider
             if not isinstance(conversation.metadata, dict):
                 conversation.metadata = {}
             conversation.metadata['model_provider'] = model_provider
@@ -198,6 +301,12 @@ class DealChatView(APIView):
                         'metadata': {
                             'deal_id': str(deal.id),
                             'model_provider': model_provider,
+                            'web_search_enabled': scope.web_search_enabled,
+                            'evidence_mode': scope.evidence_mode,
+                            'selected_document_ids': scope.document_ids,
+                            'selected_transcript_ids': scope.transcript_ids,
+                            'interactive_context_data': interactive_context_data,
+                            'selected_sources': selected_sources,
                         },
                         'audit_log_id': str(audit_log.id)
                     }
@@ -212,8 +321,13 @@ class DealChatView(APIView):
                 "status": "queued",
                 "task_id": task_info.get("id"),
                 "audit_log_id": str(audit_log.id),
-                "conversation_id": str(conversation.id)
+                "conversation_id": str(conversation.id),
+                "evidence_mode": scope.evidence_mode,
+                "selected_document_ids": scope.document_ids,
+                "selected_transcript_ids": scope.transcript_ids,
             })
+        except Deal.DoesNotExist:
+            return Response({"error": "Deal not found."}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Deal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
@@ -995,6 +1109,24 @@ class AIConnectionStatusView(APIView):
         return Response(status_data)
 
 
+class ForexRateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .services.forex_service import ForexService
+
+        quote = ForexService().get_quote()
+        return Response({
+            **quote.as_dict(),
+            "canonical_currency": "INR",
+            "supported_units": {
+                "crore": 10_000_000,
+                "million": 1_000_000,
+            },
+            "supported_display_currencies": ["INR", "USD"],
+        })
+
+
 class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
@@ -1029,7 +1161,8 @@ class AISettingsView(APIView):
                 "vm_online": status_data.get("vm_online", False),
                 "vm_status": status_data.get("vm_status", "unknown"),
                 "live_rate": live_rate,
-                "claude_text_model": claude_text_model
+                "claude_text_model": claude_text_model,
+                "prompt_catalog": PromptCatalogService.serialize(),
             })
         except Exception as e: 
             return Response({"error": str(e)}, status=500)
@@ -1040,6 +1173,11 @@ class AISettingsView(APIView):
         """
         Update settings for personalities, skills, or protocols.
         """
+        if not _is_ai_admin(request.user):
+            return Response(
+                {"error": "AI settings can only be changed by an administrator."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             from .models import AnalysisProtocol
             
@@ -1062,6 +1200,16 @@ class AISettingsView(APIView):
                     return Response({"success": True})
                 return Response({"error": "Key and value are required"}, status=400)
 
+            if target_type == 'prompt':
+                try:
+                    if updates.get('action') == 'reset':
+                        PromptCatalogService.reset(str(target_id))
+                    else:
+                        PromptCatalogService.update(str(target_id), updates.get('value'))
+                except ValueError as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"success": True})
+
             if target_type == 'personality':
                 if target_id == 'new':
                     AIPersonality.objects.create(
@@ -1080,17 +1228,97 @@ class AISettingsView(APIView):
                     obj.save()
             elif target_type == 'skill':
                 if target_id == 'new':
-                    AISkill.objects.create(
-                        name=f"{updates.get('name', 'New Skill')} {rand_suffix()}",
-                        description=updates.get('description', ''),
-                        prompt_template=updates.get('prompt_template', '')
-                    )
-                elif action == 'delete':
-                    AISkill.objects.get(id=target_id).delete()
+                    requested_name = str(updates.get('name', 'New Skill')).strip()
+                    skill_name = requested_name
+                    if AISkill.objects.filter(name=skill_name).exists():
+                        skill_name = f"{requested_name} {rand_suffix()}"
+                    serializer = AISkillSerializer(data={
+                        "name": skill_name,
+                        "description": updates.get('description', ''),
+                        "system_template": updates.get('system_template', ''),
+                        "prompt_template": updates.get('prompt_template', ''),
+                        "input_schema": updates.get('input_schema', {}),
+                        "output_schema": updates.get('output_schema', {}),
+                        "skill_format": updates.get(
+                            'skill_format',
+                            AISkill.Format.NATIVE_PROMPT_V1,
+                        ),
+                        "is_industry_overview_eligible": bool(
+                            updates.get('is_industry_overview_eligible', False)
+                        ),
+                        "status": AISkill.Status.DRAFT,
+                    })
+                    if not serializer.is_valid():
+                        return Response(
+                            serializer.errors,
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    serializer.save(owner=request.user)
+                elif action == 'approve':
+                    obj = AISkill.objects.get(id=target_id)
+                    if not obj.prompt_template.strip():
+                        return Response(
+                            {"error": "A non-empty prompt template is required for approval."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    obj.status = AISkill.Status.APPROVED
+                    obj.approved_by = request.user
+                    obj.approved_at = timezone.now()
+                    obj.save(update_fields=[
+                        'status', 'approved_by', 'approved_at', 'updated_at',
+                    ])
+                elif action in {'retire', 'delete'}:
+                    obj = AISkill.objects.get(id=target_id)
+                    obj.status = AISkill.Status.RETIRED
+                    obj.is_industry_overview_eligible = False
+                    obj.save(update_fields=[
+                        'status', 'is_industry_overview_eligible', 'updated_at',
+                    ])
                 else:
                     obj = AISkill.objects.get(id=target_id)
-                    for k, v in updates.items(): setattr(obj, k, v)
-                    obj.save()
+                    editable_fields = {
+                        'name', 'description', 'system_template', 'prompt_template',
+                        'input_schema', 'output_schema', 'skill_format',
+                        'is_industry_overview_eligible',
+                    }
+                    unknown_fields = set(updates) - editable_fields
+                    if unknown_fields:
+                        return Response(
+                            {
+                                "error": "Unsupported skill fields: "
+                                + ", ".join(sorted(unknown_fields))
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    serializer = AISkillSerializer(
+                        obj,
+                        data=updates,
+                        partial=True,
+                    )
+                    if not serializer.is_valid():
+                        return Response(
+                            serializer.errors,
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    versioned_fields = {
+                        'system_template', 'prompt_template', 'input_schema',
+                        'output_schema', 'skill_format',
+                    }
+                    prompt_changed = any(
+                        field in serializer.validated_data
+                        and serializer.validated_data[field] != getattr(obj, field)
+                        for field in versioned_fields
+                    )
+                    saved = serializer.save()
+                    if prompt_changed:
+                        saved.version += 1
+                        saved.status = AISkill.Status.DRAFT
+                        saved.approved_by = None
+                        saved.approved_at = None
+                        saved.save(update_fields=[
+                            'version', 'status', 'approved_by', 'approved_at',
+                            'updated_at',
+                        ])
             elif target_type == 'protocol':
                 if target_id == 'new':
                     AnalysisProtocol.objects.create(
@@ -1148,8 +1376,184 @@ class AISettingsView(APIView):
 
 class AISkillsView(APIView):
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
+        skills = AISkill.objects.all().order_by('name')
+        if not _is_ai_admin(request.user):
+            skills = skills.filter(
+                status=AISkill.Status.APPROVED,
+                is_industry_overview_eligible=True,
+            )
+        elif request.query_params.get("industry_overview") == "true":
+            skills = skills.filter(is_industry_overview_eligible=True)
+        return Response({
+            "skills": AISkillSerializer(skills, many=True).data,
+            "compatibility": {
+                "format": AISkill.Format.CLAUDE_PROMPT_V1,
+                "kind": "prompt_only",
+                "allowed": [
+                    "name", "description", "system_template", "prompt_template",
+                    "input_schema", "output_schema",
+                ],
+                "forbidden": [
+                    "code", "scripts", "executables", "tool definitions",
+                    "network actions", "file actions",
+                ],
+            },
+        })
+
+    def post(self, request):
+        skill_id = request.data.get("skill_id")
+        deal_id = request.data.get("deal_id")
+        if not skill_id or not deal_id:
+            return Response(
+                {"error": "skill_id and deal_id are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            skills = AISkill.objects.all().order_by('name')
-            return Response([{"id": str(s.id), "name": s.name, "description": s.description, "prompt_template": s.prompt_template, "system_template": s.system_template} for s in skills])
-        except Exception as e: return Response({"error": str(e)}, status=500)
+            skill = AISkill.objects.filter(id=skill_id).first()
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "skill_id must be a valid UUID."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if (
+            not skill
+            or skill.status != AISkill.Status.APPROVED
+            or not skill.is_industry_overview_eligible
+        ):
+            return Response(
+                {"error": "The selected skill is not approved for Industry Overview."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            deal = Deal.objects.filter(id=deal_id).first()
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "deal_id must be a valid UUID."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not deal:
+            return Response(
+                {"error": "Deal not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            inputs = AIRuntimeService.validate_skill_inputs(
+                skill,
+                request.data.get("inputs", {}),
+            )
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        document_ids = request.data.get("source_document_ids", [])
+        if not isinstance(document_ids, list) or len(document_ids) > 20:
+            return Response(
+                {"error": "source_document_ids must be a list of at most 20 IDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            documents = list(
+                DealDocument.objects.filter(
+                    deal=deal,
+                    id__in=document_ids,
+                ).order_by('created_at')
+            )
+        except (DjangoValidationError, ValueError):
+            return Response(
+                {"error": "source_document_ids must contain valid UUIDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(documents) != len(set(str(value) for value in document_ids)):
+            return Response(
+                {"error": "Every source document must belong to the selected deal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        source_metadata = {
+            "run_kind": "industry_skill",
+            "skill_version": skill.version,
+            "input_scope": {
+                "deal_id": str(deal.id),
+                "input_keys": sorted(inputs),
+                "source_document_ids": [str(document.id) for document in documents],
+            },
+            "sources": [
+                {
+                    "document_id": str(document.id),
+                    "title": document.title,
+                    "document_type": document.document_type,
+                }
+                for document in documents
+            ],
+        }
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="industry_skill",
+            source_id=str(deal.id),
+            context_label=f"Industry skill: {skill.name} — {deal.title}",
+            skill=skill,
+            status="PENDING",
+            is_success=False,
+            requested_by=request.user,
+            skill_version=skill.version,
+            source_metadata=source_metadata,
+        )
+        content = AIRuntimeService.build_industry_skill_context(
+            deal,
+            inputs,
+            documents,
+        )
+        try:
+            result = AIProcessorService().process_content(
+                content=content,
+                skill_name=skill.name,
+                metadata={
+                    **inputs,
+                    "audit_log_id": str(audit_log.id),
+                    "_source_metadata": source_metadata,
+                    "context_label": audit_log.context_label,
+                },
+                source_id=str(deal.id),
+                source_type="industry_skill",
+            )
+        except Exception as exc:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(exc)
+            audit_log.completed_at = timezone.now()
+            audit_log.save(update_fields=[
+                'status', 'is_success', 'error_message', 'completed_at',
+            ])
+            return Response(
+                {
+                    "audit_log_id": str(audit_log.id),
+                    "status": "FAILED",
+                    "error": "Skill execution failed.",
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        audit_log.refresh_from_db()
+        response_status = (
+            status.HTTP_200_OK
+            if audit_log.status == "COMPLETED"
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        return Response(
+            {
+                "audit_log_id": str(audit_log.id),
+                "status": audit_log.status,
+                "skill_id": str(skill.id),
+                "skill_version": audit_log.skill_version,
+                "output": audit_log.raw_response,
+                "parsed_output": audit_log.parsed_json,
+                "sources": source_metadata["sources"],
+                "result": result,
+            },
+            status=response_status,
+        )

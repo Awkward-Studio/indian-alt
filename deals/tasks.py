@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery import shared_task, chord
 from django.core.cache import cache
@@ -1414,7 +1415,10 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
         if is_body:
             # OPTIMIZED PATH: Extract text directly from DB/HTML (Zero Loss)
             email = Email.objects.get(id=email_id)
-            raw_body = email.body_html or email.body_text or email.body_preview or ""
+            raw_body = file_info.get("body_delta")
+            body_was_preprocessed = raw_body is not None
+            if raw_body is None:
+                raw_body = email.body_html or email.body_text or email.body_preview or ""
             
             # Pre-clean HTML to save tokens and prevent model confusion
             import re
@@ -1426,11 +1430,18 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
             
             clean_body = fast_strip_html(raw_body)
             
-            # CHUNKING LOGIC: If body is massive (> 40k chars), chunk it
-            MAX_BODY_CHARS = 40000
-            if len(clean_body) > MAX_BODY_CHARS:
+            if body_was_preprocessed:
+                # EmailThreadUnfolder already removed quoted history. Preserve
+                # the exact delta; another model pass can drop terse facts or
+                # truncate long messages while echoing their content.
+                raw_markdown = clean_body
+                log_worker_event(audit_log, f"Using deterministic reply delta: {file_name}", status='PROCESSING')
+            elif len(clean_body) > 12000:
+                # Legacy callers without a deterministic delta retain a bounded
+                # cleanup fallback.
+                MAX_BODY_CHARS = 12000
                 log_worker_event(audit_log, f"Email body is massive ({len(clean_body)} chars). Chunking...", status='PROCESSING')
-                chunks = [clean_body[i:i + 35000] for i in range(0, len(clean_body), 30000)]
+                chunks = [clean_body[i:i + MAX_BODY_CHARS] for i in range(0, len(clean_body), MAX_BODY_CHARS)]
                 unrolled_parts = []
                 for idx, chunk in enumerate(chunks):
                     log_worker_event(audit_log, f"Unrolling chunk {idx+1}/{len(chunks)}...", status='PROCESSING')
@@ -1438,7 +1449,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
                         content=chunk, 
                         skill_name="email_unroll", 
                         source_type="email",
-                        metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                        metadata={
+                            "chat_template_kwargs": {"enable_thinking": False},
+                            "max_tokens": 768,
+                            "request_timeout": 120,
+                        }
                     )
                     unrolled_parts.append(chunk_res.get('response') or chunk_res.get('text') or "")
                 raw_markdown = "\n\n--- THREAD CONTINUATION ---\n\n".join(unrolled_parts)
@@ -1448,7 +1463,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
                     content=clean_body, 
                     skill_name="email_unroll", 
                     source_type="email",
-                    metadata={"chat_template_kwargs": {"enable_thinking": False}}
+                    metadata={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "max_tokens": 768,
+                        "request_timeout": 120,
+                    }
                 )
                 raw_markdown = unroll_result.get('response') or unroll_result.get('text') or ""
             
@@ -1484,7 +1503,11 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
             content=raw_markdown,
             skill_name="document_normalization",
             source_type="normalization",
-            metadata={"chat_template_kwargs": {"enable_thinking": False}}
+            metadata={
+                "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": 2048,
+                "request_timeout": 180,
+            }
         )
         
         # FIX: result is already the parsed JSON dict
@@ -1517,11 +1540,19 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     """
     from ai_orchestrator.models import AIAuditLog
     from ai_orchestrator.services.ai_processor import AIProcessorService
-    from deals.models import Deal
+    from deals.models import Deal, DealAnalysis
     from deals.services.deal_creation import DealCreationService
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
     deal = Deal.objects.filter(id=deal_id).first() if deal_id else None
+    prior_analysis_id = (audit_log.source_metadata or {}).get("deal_analysis_id")
+    if deal and prior_analysis_id and DealAnalysis.objects.filter(id=prior_analysis_id, deal=deal).exists():
+        return {
+            "status": "success",
+            "deal_id": str(deal.id),
+            "deal_analysis_id": str(prior_analysis_id),
+            "idempotent_replay": True,
+        }
     ai_service = AIProcessorService()
     
     passed_results = [r for r in results if r.get("status") == "passed"]
@@ -1709,21 +1740,94 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     analysis = result
     
     if analysis and "error" not in analysis:
+        # Some constrained local models return a valid evidence-rich context
+        # but omit the optional analyst_report field. Never persist a blank
+        # visible report when the synthesis response contains usable prose.
+        if not str(analysis.get("analyst_report") or "").strip():
+            fallback_report = next(
+                (
+                    str(analysis.get(key) or "").strip()
+                    for key in ("_full_context", "response", "_raw_response")
+                    if str(analysis.get(key) or "").strip()
+                ),
+                "",
+            )
+            if fallback_report:
+                analysis = dict(analysis)
+                analysis["analyst_report"] = fallback_report
+
         # Ensure deal_model_data has title if deal is missing
         if not analysis.get("deal_model_data", {}).get("title"):
             analysis.setdefault("deal_model_data", {})["title"] = proposed_intel.get("company_name")
 
         # Apply the synthesis to the actual Deal object if it exists
+        existing_canonical_snapshot = (
+            ((deal.current_analysis or {}).get("canonical_snapshot") or {})
+            if deal and hasattr(deal, "current_analysis")
+            else {}
+        )
+        analysis_kind = AnalysisKind.SUPPLEMENTAL if deal else AnalysisKind.INITIAL
+        document_evidence = [
+            item.get("normalized_json") or item.get("document_artifact") or {}
+            for item in passed_results
+            if item.get("normalized_json") or item.get("document_artifact")
+        ]
         normalized_analysis = _normalize_synthesis_result(
             analysis,
-            analysis_kind=AnalysisKind.INITIAL,
-            document_evidence=[], 
+            previous_snapshot=existing_canonical_snapshot,
+            analysis_kind=analysis_kind,
+            document_evidence=document_evidence,
             analysis_input_files=[{"file_name": r["file_name"]} for r in passed_results],
             failed_files=[r for r in results if r.get("status") != "passed"],
         )
+        normalized_analysis.setdefault("metadata", {})["audit_log_id"] = audit_log_id
         
         if deal:
-            DealCreationService.apply_analysis_to_deal(deal, normalized_analysis)
+            with transaction.atomic():
+                deal = Deal.objects.select_for_update().get(id=deal.id)
+                latest_analysis = deal.analyses.order_by("-version", "-created_at").first()
+                next_version = latest_analysis.version + 1 if latest_analysis else 1
+                deal_analysis = DealAnalysis.objects.create(
+                    deal=deal,
+                    version=next_version,
+                    analysis_kind=AnalysisKind.SUPPLEMENTAL,
+                    thinking=result.get("thinking", "") if isinstance(result, dict) else "",
+                    ambiguities=normalized_analysis.get("metadata", {}).get("ambiguous_points", []),
+                    analysis_json=normalized_analysis,
+                )
+                DealCreationService.apply_analysis_to_deal(
+                    deal,
+                    normalized_analysis,
+                    overwrite=False,
+                    overwrite_themes=False,
+                )
+
+                for item in passed_results:
+                    source_file_id = str(item.get("file_id") or "")
+                    if not source_file_id or source_file_id.startswith("body_"):
+                        continue
+                    artifact = item.get("normalized_json") or item.get("document_artifact") or {}
+                    DealDocument.objects.update_or_create(
+                        deal=deal,
+                        onedrive_id=source_file_id,
+                        defaults={
+                            "title": item.get("file_name") or "Email attachment",
+                            "document_type": item.get("document_type") or artifact.get("document_type") or DocumentType.OTHER,
+                            "extracted_text": item.get("extracted_text") or item.get("normalized_text") or "",
+                            "normalized_text": item.get("normalized_text") or "",
+                            "evidence_json": artifact,
+                            "source_map_json": artifact.get("source_map", {}) if isinstance(artifact, dict) else {},
+                            "table_json": artifact.get("tables_summary", []) if isinstance(artifact, dict) else [],
+                            "key_metrics_json": artifact.get("metrics", []) if isinstance(artifact, dict) else [],
+                            "reasoning": item.get("document_reasoning") or "",
+                            "is_ai_analyzed": True,
+                            "transcription_status": TranscriptionStatus.COMPLETE,
+                        },
+                    )
+                source_meta = audit_log.source_metadata or {}
+                source_meta["deal_analysis_id"] = str(deal_analysis.id)
+                source_meta["deal_analysis_version"] = next_version
+                audit_log.source_metadata = source_meta
         
         audit_log.parsed_json = normalized_analysis
         audit_log.status = 'COMPLETED'
@@ -1740,7 +1844,11 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         audit_log.save(update_fields=['parsed_json', 'status', 'is_success', 'source_metadata'])
         log_worker_event(audit_log, "Deal intelligence synthesized successfully.", status='COMPLETED', done=True)
         
-        return {"status": "success", "deal_id": str(deal.id) if deal else None}
+        return {
+            "status": "success",
+            "deal_id": str(deal.id) if deal else None,
+            "deal_analysis_id": str(deal_analysis.id) if deal else None,
+        }
     else:
         error_msg = analysis.get("error", "AI model returned an empty or unparseable response.")
         log_worker_event(audit_log, f"Synthesis failed: {error_msg}", status='FAILED', done=True)
@@ -1781,6 +1889,11 @@ def _format_competitor_items_report(competitors: list[dict], *, title: str) -> s
             lines.append(f"- Region: {region}")
         if notes:
             lines.append(f"- Notes: {notes}")
+        evidence_urls = competitor.get("evidence_urls") or []
+        if evidence_urls:
+            lines.append("- Sources:")
+            for url in evidence_urls[:3]:
+                lines.append(f"  - {url}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -1973,10 +2086,46 @@ def _company_news_cards(research: dict) -> list[dict]:
     return cards
 
 
+def _ground_company_news_cards(research: dict, search_results: list[dict]) -> list[dict]:
+    """Keep only cards that can be tied to an actual SearXNG result URL."""
+    allowed = {
+        str(item.get("url") or "").strip().rstrip("/").casefold(): item
+        for item in search_results
+        if str(item.get("url") or "").strip()
+    }
+    grounded = []
+    for raw_card in _company_news_list(research.get("news_cards")):
+        if not isinstance(raw_card, dict):
+            continue
+        card = dict(raw_card)
+        requested_url = str(card.get("url") or "").strip()
+        match = allowed.get(requested_url.rstrip("/").casefold()) if requested_url else None
+        if match is None:
+            card_text = " ".join(str(card.get(key) or "") for key in ("title", "summary", "source")).casefold()
+            scored = []
+            for result in search_results:
+                result_text = " ".join(str(result.get(key) or "") for key in ("title", "snippet")).casefold()
+                scored.append((SequenceMatcher(None, card_text, result_text).ratio(), result))
+            if scored:
+                score, candidate = max(scored, key=lambda item: item[0])
+                if score >= 0.18:
+                    match = candidate
+        if match is None:
+            continue
+        card["url"] = str(match.get("url") or "").strip()
+        card["source"] = card.get("source") or match.get("title") or match.get("engine") or "Web source"
+        sentiment = str(card.get("sentiment") or "neutral").strip().casefold()
+        card["sentiment"] = {"positive": "green", "negative": "red"}.get(sentiment, sentiment)
+        if card["sentiment"] not in {"red", "green", "neutral"}:
+            card["sentiment"] = "neutral"
+        grounded.append(card)
+    return grounded[:5]
+
+
 @shared_task(queue='high_priority')
 def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_news: list[dict] | None = None) -> dict:
     """
-    Runs Claude native web search for public-domain company/promoter news,
+    Runs SearXNG-grounded VM research for public-domain company/promoter news,
     persists each run as a dated memo document, and vectorizes it for retrieval.
     """
     try:
@@ -2000,39 +2149,35 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             if isinstance(item, dict) and str(item.get("title") or "").strip()
         ][:30]
 
-        prompt = (
-            f"You are a sophisticated investment research assistant.\n"
-            f"{search_directive}\n\n"
-            f"Context details of the target company:\n"
-            f"- Target Company: {deal.title}\n"
-            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
-            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Existing findings to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
-            f"Prioritize only the biggest 1-5 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
-            f"major awards/partnerships, or other material red/green flags.\n\n"
-            f"Return exactly one JSON object and no markdown. Use this shape:\n"
-            f"{{\n"
-            f"  \"overview\": \"2 sentence base summary of the public-domain signal\",\n"
-            f"  \"executive_summary\": \"same as overview\",\n"
-            f"  \"news_cards\": [\n"
-            f"    {{\"title\": \"...\", \"summary\": \"one short sentence\", \"category\": \"funding|litigation|founder|award|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}}\n"
-            f"  ],\n"
-            f"  \"sources\": [{{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}}]\n"
-            f"}}\n"
-            f"Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
-            f"Every card must be based on a source URL. Do not invent facts."
+        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+        prompt = PromptCatalogService.render(
+            "public_news_research",
+            search_directive=search_directive,
+            deal_title=deal.title,
+            sector=deal.sector or "N/A",
+            industry=deal.industry or "N/A",
+            location=f"{deal.city or 'N/A'}, {deal.country or 'N/A'}",
+            existing_findings=", ".join(existing_names) if existing_names else "None",
         )
 
-        from ai_orchestrator.services.llm_providers import AnthropicProviderService
-        service = AnthropicProviderService()
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+        search_query = instruction if instruction else f"{deal.title} public news latest"
+        search_service = SearXNGProviderService()
+        search_results = search_service.search_results(search_query, num_results=8)
+        search_context = search_service.format_context(search_results)
+
+        augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
+
+        from ai_orchestrator.services.llm_providers import VLLMProviderService
+        from ai_orchestrator.services.runtime import AIRuntimeService
+        service = VLLMProviderService()
         result = service.execute_standard({
-            "model": "default",
-            "system": "You are a careful investment diligence researcher. Use web search and cite public-domain sources.",
-            "prompt": prompt,
+            "model": AIRuntimeService.get_text_model(),
+            "system": PromptCatalogService.get("public_news_research_system"),
+            "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 4000,
-                "temperature": 0.1,
-                "max_search_uses": 1,
+                "temperature": 0.0,
             },
         }, timeout=180)
 
@@ -2056,7 +2201,25 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
 
         if not research.get("executive_summary") and research.get("overview"):
             research["executive_summary"] = research.get("overview")
-        news_cards = _company_news_cards(research)
+        news_cards = _ground_company_news_cards(research, search_results)
+        research["sources"] = [
+            str(item.get("url") or "").strip()
+            for item in search_results
+            if str(item.get("url") or "").strip()
+        ]
+        warnings = []
+        if not search_results:
+            warnings.append(
+                "SearXNG returned no web results for this company query. Try a more specific company name, location, or website domain."
+            )
+        if not news_cards:
+            explanation = str(
+                research.get("executive_summary") or research.get("overview") or ""
+            ).strip()
+            warning = "No grounded company news cards were found in the returned search evidence."
+            if explanation:
+                warning = f"{warning} VM explanation: {explanation}"
+            warnings.append(warning)
         
         # Merge new findings with existing ones, avoiding duplicates
         if existing_news:
@@ -2076,10 +2239,13 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             generated_at=generated_at,
         )
         source_map = {
-            "source": "anthropic_web_search",
+            "source": "searxng_vm_web_research",
+            "search_provider": "searxng",
+            "inference_provider": "vllm",
             "generated_at": generated_at.isoformat(),
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
+            "warnings": warnings,
         }
         title = f"Public Domain News Research - {generated_at.date().isoformat()}"
 
@@ -2091,7 +2257,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             normalized_text=markdown_report,
             evidence_json={},
             source_map_json=source_map,
-            reasoning="Public-domain company news research generated by Claude native web search.",
+            reasoning="Public-domain company news research grounded in SearXNG evidence and synthesized by the configured VM model.",
             is_indexed=False,
             is_ai_analyzed=False,
             transcription_status=TranscriptionStatus.COMPLETE,
@@ -2117,7 +2283,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "risks": _company_news_list(research.get("litigation")) + _company_news_list(research.get("red_flags")),
             "open_questions": [],
             "citations": _company_news_list(research.get("sources")),
-            "reasoning": "Claude native web-search research; verify material findings against primary sources during diligence.",
+            "reasoning": "SearXNG-grounded VM research; verify material findings against primary sources during diligence.",
             "quality_flags": ["public_domain_news_research"],
             "normalized_text": markdown_report,
             "source_map": source_map,
@@ -2136,6 +2302,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "research": research,
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
+            "warnings": warnings,
             "preview_items": _company_news_preview_items(research),
             "counts": {
                 "red_flags": len([card for card in news_cards if str(card.get("sentiment")).lower() == "red"]),
@@ -2160,10 +2327,9 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
 @shared_task(queue='high_priority')
 def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
-    Asynchronously executes Claude web search for competitor discovery only.
-    Does not fall back to pre-trained static knowledge; runs strictly on live web tools.
-    CIN resolution and Venture Intelligence enrichment are intentionally deferred
-    to the selected-competitor save flow.
+    Execute one public and one private aggregated SearXNG search, enrich evidence
+    from selected pages, and extract grounded competitors with the local model.
+    CIN/VI enrichment remains deferred until the user selects candidates.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -2177,87 +2343,18 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             for item in existing_competitors
             if _competitor_result_key(item) not in {"name:", "cin:"}
         }
-        existing_names = [
-            str(item.get("name") or item.get("company_name") or "").strip()
-            for item in existing_competitors
-            if isinstance(item, dict) and str(item.get("name") or item.get("company_name") or "").strip()
-        ][:30]
+        from .services.competitor_web_research import CompetitorWebResearchService
 
-        search_directive = (
-            f"Follow this user instruction exactly: {instruction}\n"
-            f"Use web search to find additional competitor candidates that satisfy the instruction. "
-            f"This can include regional peers, direct named companies, or companies outside India."
-        ) if instruction else (
-            f"Run a concise web search to identify the top 10 competitors or peer companies for '{deal.title}'."
+        research = CompetitorWebResearchService().research(
+            company_name=deal.title,
+            sector=deal.sector or "",
+            industry=deal.industry or "",
+            location=", ".join(value for value in [deal.city, deal.country] if value),
+            business_summary=deal.deal_summary or "",
+            instruction=instruction,
+            existing_competitors=existing_competitors,
         )
-        count_instruction = (
-            "Return up to 8 net-new companies unless the user asked for a specific named company."
-            if instruction
-            else "List exactly 10 companies."
-        )
-
-        prompt = (
-            f"You are a sophisticated investment research assistant.\n"
-            f"{search_directive}\n"
-            f"Context details of the target company:\n"
-            f"- Target Company: {deal.title}\n"
-            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
-            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Business Summary: {(deal.deal_summary or 'N/A')[:1200]}\n"
-            f"- Existing candidates to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
-            f"Prioritize speed. This pass is ONLY for identifying competitor names and short rationales. "
-            f"Also classify every competitor as either a listed public company or a private/unlisted company using obvious public-market evidence. "
-            f"Do not search MCA records and do not perform detailed financial extraction in this pass. "
-            f"CIN resolution, Venture Intelligence checks, and Screener financial extraction happen later only for competitors selected by the user.\n"
-            f"Return exactly one JSON object and no markdown. Use this shape:\n"
-            f"{{\n"
-            f"  \"competitors\": [\n"
-            f"    {{\n"
-            f"      \"company_name\": \"Exact company or brand name\",\n"
-            f"      \"core_business\": \"Short phrase only\",\n"
-            f"      \"nature_of_competition\": \"Short phrase only\",\n"
-            f"      \"country_or_region\": \"Primary country or region, if relevant\",\n"
-            f"      \"company_type\": \"listed_public | private\",\n"
-            f"      \"classification_confidence\": 0.85,\n"
-            f"      \"exchange\": \"NSE/BSE or blank\",\n"
-            f"      \"ticker\": \"Listed ticker/symbol or blank\",\n"
-            f"      \"screener_url\": \"Screener URL if confidently known, else blank\",\n"
-            f"      \"classification_source\": \"Short reason for public/private classification\"\n"
-            f"    }}\n"
-            f"  ]\n"
-            f"}}\n"
-            f"{count_instruction} Do not search for or return MCA identifiers, tax identifiers, or Venture Intelligence identifiers. "
-            f"Return a CIN only if it is already obvious from a trusted search result; otherwise leave it blank. "
-            f"If listing status is uncertain, choose the most likely route and set classification_confidence below 0.6 with the uncertainty in classification_source. "
-            f"Focus only on accurate competitor discovery and concise rationale. "
-            f"Keep every text field short so the full JSON response fits in the answer. "
-            f"Do not duplicate existing candidates. Do not include long descriptions, citations, tables, or explanatory text."
-        )
-
-        from ai_orchestrator.services.llm_providers import AnthropicProviderService
-        service = AnthropicProviderService()
-        payload = {
-            "model": "default",
-            "system": "You are a helpful investment analyst assistant who conducts thorough peer and competitor research.",
-            "prompt": prompt,
-            "options": {
-                "max_tokens": 2200,
-                "temperature": 0.1,
-                "max_search_uses": 3,
-                "web_search_tool_type": "web_search_20250305",
-            }
-        }
-        
-        logger.info("Triggering active web search competitor research...")
-        result = service.execute_standard(payload, timeout=45)
-        response_text = result.get("response") or ""
-        from .services.competitor_intelligence import competitor_names_from_payload
-        try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError:
-            parsed = {}
-
-        raw_competitors = competitor_names_from_payload(parsed or response_text, limit=10, include_cin=False)
+        raw_competitors = research.get("competitors", [])
         competitors = []
         seen_keys = set(existing_keys)
         for competitor in raw_competitors:
@@ -2271,13 +2368,15 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         report = _format_competitor_items_report(competitors, title=report_title)
         if not competitors:
             return {
-                "error": "Live web search completed but returned no parseable competitors. Try a more specific company name or sector.",
-                "response": response_text,
+                "message": research.get("message", "Live web search returned no grounded competitors."),
+                "response": research.get("response", ""),
                 "competitors": [],
+                "diagnostics": research.get("diagnostics", {}),
             }
         return {
-            "response": report or response_text,
+            "response": report or research.get("response", ""),
             "competitors": competitors,
+            "diagnostics": research.get("diagnostics", {}),
         }
             
     except Exception as e:
@@ -2365,12 +2464,27 @@ def enrich_competitors_vi_async_task(deal_id: str, competitors: list[dict], limi
 
 
 @shared_task(queue='high_priority')
-def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin: str | None = None, relation_type: str = "target", raw_data: dict | None = None) -> dict:
+def enrich_deal_vi_async_task(
+    deal_id: str,
+    company_name: str | None = None,
+    cin: str | None = None,
+    relation_type: str = "target",
+    raw_data: dict | None = None,
+    audit_log_id: str | None = None,
+) -> dict:
     """
     Enrich a deal target or competitor VI profile in the Celery worker.
     """
+    from ai_orchestrator.models import AIAuditLog
+
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first() if audit_log_id else None
     try:
         from deals.services.venture_intelligence import VentureIntelligenceService
+
+        if audit_log:
+            audit_log.status = "PROCESSING"
+            audit_log.save(update_fields=["status"])
+            broadcast_audit_log_update(audit_log)
 
         profile = VentureIntelligenceService().enrich_deal(
             deal_id=deal_id,
@@ -2379,13 +2493,180 @@ def enrich_deal_vi_async_task(deal_id: str, company_name: str | None = None, cin
             relation_type=relation_type,
             raw_data=raw_data,
         )
+        if audit_log:
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.raw_response = (
+                f"Linked {relation_type} Venture Intelligence profile "
+                f"{profile.name or profile.cin} to the deal."
+            )
+            audit_log.parsed_json = {
+                "status": "SUCCESS",
+                "profile_id": str(profile.id),
+                "deal_id": deal_id,
+                "relation_type": relation_type,
+            }
+            audit_log.save(
+                update_fields=["status", "is_success", "raw_response", "parsed_json"]
+            )
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
             "status": "SUCCESS",
             "profile_id": str(profile.id),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
         }
     except Exception as e:
         logger.error(f"Async deal VI enrichment failed: {str(e)}")
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(e)
+            audit_log.save(update_fields=["status", "is_success", "error_message"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
             "status": "FAILURE",
             "error": str(e),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
         }
+
+
+@shared_task(queue="high_priority")
+def discover_sector_reports_task(deal_id: str, run_id: str | None = None) -> dict:
+    """Discover public research metadata for a deal without attaching files."""
+    from ai_orchestrator.models import AIAuditLog
+    from .models import SectorResearchDiscoveryRun
+    from .services.research_discovery import ResearchDiscoveryService
+
+    run = None
+    audit_log = None
+    try:
+        if run_id:
+            run = SectorResearchDiscoveryRun.objects.select_related("deal").get(
+                id=run_id,
+                deal_id=deal_id,
+            )
+            if run.status not in {
+                SectorResearchDiscoveryRun.Status.QUEUED,
+                SectorResearchDiscoveryRun.Status.RUNNING,
+            }:
+                return {
+                    "status": run.status,
+                    "run_id": str(run.id),
+                    "result_count": run.recommendations.count(),
+                }
+            run.status = SectorResearchDiscoveryRun.Status.RUNNING
+            run.started_at = run.started_at or timezone.now()
+            run.error = ""
+            run.save(
+                update_fields=["status", "started_at", "error", "updated_at"]
+            )
+            audit_log = AIAuditLog.objects.filter(id=run.audit_log_id).first()
+            if audit_log:
+                audit_log.status = "PROCESSING"
+                audit_log.save(update_fields=["status"])
+                broadcast_audit_log_update(audit_log)
+
+        deal = Deal.objects.prefetch_related("vi_relations__company_profile").get(
+            id=deal_id
+        )
+        target_relation = next(
+            (
+                relation
+                for relation in deal.vi_relations.all()
+                if relation.relation_type == "target"
+            ),
+            None,
+        )
+        cin = (
+            str(target_relation.company_profile.cin or "").strip()
+            if target_relation
+            else ""
+        )
+        service = ResearchDiscoveryService()
+        payload = service.discover(deal=deal, cin=cin)
+        if run:
+            persisted = service.persist_recommendations(
+                deal=deal,
+                run=run,
+                payload=payload,
+            )
+            run.status = SectorResearchDiscoveryRun.Status.COMPLETED
+            run.queries = payload.get("queries", [])
+            run.completed_at = timezone.now()
+            run.save(
+                update_fields=[
+                    "status", "queries", "completed_at", "updated_at",
+                ]
+            )
+            payload["run_id"] = str(run.id)
+            payload["persisted_count"] = len(persisted)
+            if audit_log:
+                audit_log.status = "COMPLETED"
+                audit_log.is_success = True
+                audit_log.completed_at = timezone.now()
+                audit_log.raw_response = (
+                    f"Discovered and ranked {len(persisted)} public research sources."
+                )
+                audit_log.parsed_json = {
+                    "status": "COMPLETED",
+                    "run_id": str(run.id),
+                    "result_count": len(persisted),
+                    "queries": payload.get("queries", []),
+                }
+                audit_log.source_metadata = {
+                    **(audit_log.source_metadata or {}),
+                    "result_count": len(persisted),
+                    "document_types": sorted(
+                        {item.document_type for item in persisted}
+                    ),
+                }
+                audit_log.save(
+                    update_fields=[
+                        "status", "is_success", "raw_response", "parsed_json",
+                        "source_metadata", "completed_at",
+                    ]
+                )
+                broadcast_audit_log_update(
+                    audit_log,
+                    event_type="terminal",
+                    done=True,
+                )
+        return payload
+    except Deal.DoesNotExist:
+        payload = {
+            "status": "FAILED",
+            "error": "Deal not found.",
+            "recommendations": [],
+        }
+    except SectorResearchDiscoveryRun.DoesNotExist:
+        payload = {
+            "status": "FAILED",
+            "error": "Research discovery run not found.",
+            "recommendations": [],
+        }
+    except Exception as exc:
+        logger.exception("Sector research discovery failed for deal %s", deal_id)
+        payload = {
+            "status": "FAILED",
+            "error": str(exc),
+            "recommendations": [],
+        }
+    if run:
+        run.status = SectorResearchDiscoveryRun.Status.FAILED
+        run.error = payload["error"]
+        run.completed_at = timezone.now()
+        run.save(
+            update_fields=["status", "error", "completed_at", "updated_at"]
+        )
+    if audit_log:
+        audit_log.status = "FAILED"
+        audit_log.is_success = False
+        audit_log.completed_at = timezone.now()
+        audit_log.error_message = payload["error"]
+        audit_log.save(
+            update_fields=[
+                "status", "is_success", "error_message", "completed_at",
+            ]
+        )
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+    return payload

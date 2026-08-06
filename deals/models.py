@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from banks.models import Bank
 from contacts.models import Contact
@@ -107,6 +108,12 @@ class Deal(models.Model):
     )
     rejection_stage_id = models.IntegerField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True, null=True)
+    received_at = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='Business date on which the fund received the deal.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     deal_summary = models.TextField(blank=True, null=True)
     funding_ask = models.TextField(blank=True, null=True)
@@ -226,7 +233,7 @@ class Deal(models.Model):
 
     class Meta:
         db_table = 'deal'
-        ordering = ['-created_at', 'title']
+        ordering = ['-received_at', '-created_at', 'title']
         verbose_name = 'Deal'
         verbose_name_plural = 'Deals'
         indexes = [
@@ -366,6 +373,74 @@ class DealAnalysis(models.Model):
 
     def __str__(self):
         return f"Analysis v{self.version} for {self.deal.title}"
+
+
+class DealContradiction(models.Model):
+    class ReviewStatus(models.TextChoices):
+        UNREVIEWED = "UNREVIEWED", "Unreviewed"
+        CONFIRMED = "CONFIRMED", "Confirmed"
+        DISMISSED = "DISMISSED", "Dismissed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name="contradictions",
+    )
+    fingerprint = models.CharField(max_length=64)
+    subject = models.TextField()
+    metric = models.CharField(max_length=80)
+    period = models.CharField(max_length=80, blank=True, default="")
+    unit = models.CharField(max_length=80, blank=True, default="")
+    classification = models.CharField(max_length=40, db_index=True)
+    confidence = models.FloatField(default=0)
+    materiality = models.CharField(max_length=20, default="unknown")
+    rationale = models.TextField()
+    left_claim = models.JSONField(default=dict)
+    right_claim = models.JSONField(default=dict)
+    classifier_version = models.CharField(max_length=40, default="1")
+    model_used = models.CharField(max_length=200, blank=True, default="")
+    audit_log = models.ForeignKey(
+        "ai_orchestrator.AIAuditLog",
+        on_delete=models.SET_NULL,
+        related_name="detected_contradictions",
+        null=True,
+        blank=True,
+    )
+    review_status = models.CharField(
+        max_length=20,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.UNREVIEWED,
+        db_index=True,
+    )
+    analyst_comment = models.TextField(blank=True, default="")
+    reviewed_by = models.ForeignKey(
+        "accounts.Profile",
+        on_delete=models.SET_NULL,
+        related_name="reviewed_contradictions",
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    detected_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "deal_contradiction"
+        ordering = ["-detected_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deal", "fingerprint"],
+                name="unique_deal_contradiction_fingerprint",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deal", "review_status"]),
+            models.Index(fields=["deal", "classification"]),
+        ]
+
+    def __str__(self):
+        return f"{self.deal}: {self.metric} ({self.classification})"
 
 
 class DealRelationshipContext(models.Model):
@@ -981,3 +1056,133 @@ class VentureIntelligenceCompanyRelation(models.Model):
 
     def __str__(self):
         return f"{self.deal.title} -> {self.company_profile.name} ({self.relation_type})"
+
+
+class SectorResearchDiscoveryRun(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Running"
+        COMPLETED = "COMPLETED", "Completed"
+        PARTIAL = "PARTIAL", "Partially completed"
+        FAILED = "FAILED", "Failed"
+
+    class Trigger(models.TextChoices):
+        AUTO_CREATE = "AUTO_CREATE", "Deal created"
+        AUTO_CONTEXT_CHANGE = "AUTO_CONTEXT_CHANGE", "Deal context changed"
+        MANUAL = "MANUAL", "Manual refresh"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name="research_discovery_runs",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.QUEUED,
+        db_index=True,
+    )
+    trigger = models.CharField(
+        max_length=30,
+        choices=Trigger.choices,
+        default=Trigger.MANUAL,
+    )
+    context_hash = models.CharField(max_length=64, db_index=True)
+    celery_task_id = models.CharField(max_length=255, blank=True)
+    audit_log_id = models.UUIDField(null=True, blank=True)
+    queries = models.JSONField(default=list, blank=True)
+    error = models.TextField(blank=True)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sector_research_discovery_runs",
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "sector_research_discovery_run"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["deal", "-created_at"]),
+            models.Index(fields=["deal", "context_hash", "status"]),
+        ]
+
+
+class SectorResearchRecommendation(models.Model):
+    class DocumentType(models.TextChoices):
+        INDUSTRY_REPORT = "INDUSTRY_REPORT", "Industry report"
+        ANNUAL_REPORT = "ANNUAL_REPORT", "Annual report"
+        STATUTORY_FILING = "STATUTORY_FILING", "Statutory filing"
+        BROKERAGE_RESEARCH = "BROKERAGE_RESEARCH", "Brokerage research"
+        OTHER_RESEARCH = "OTHER_RESEARCH", "Other research"
+
+    class Accessibility(models.TextChoices):
+        AVAILABLE = "AVAILABLE", "Available"
+        RESTRICTED = "RESTRICTED", "Restricted"
+        UNAVAILABLE = "UNAVAILABLE", "Unavailable"
+        UNVERIFIED = "UNVERIFIED", "Unverified"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name="research_recommendations",
+    )
+    run = models.ForeignKey(
+        SectorResearchDiscoveryRun,
+        on_delete=models.CASCADE,
+        related_name="recommendations",
+    )
+    canonical_url = models.URLField(max_length=2000)
+    url = models.URLField(max_length=2000)
+    title = models.CharField(max_length=500)
+    publisher = models.CharField(max_length=255, blank=True)
+    publisher_domain = models.CharField(max_length=255, blank=True, db_index=True)
+    publication_date = models.DateField(null=True, blank=True)
+    document_type = models.CharField(
+        max_length=30,
+        choices=DocumentType.choices,
+        default=DocumentType.OTHER_RESEARCH,
+        db_index=True,
+    )
+    reason = models.TextField(blank=True)
+    snippet = models.TextField(blank=True)
+    source_query = models.TextField(blank=True)
+    accessibility = models.CharField(
+        max_length=20,
+        choices=Accessibility.choices,
+        default=Accessibility.UNVERIFIED,
+        db_index=True,
+    )
+    content_type = models.CharField(max_length=255, blank=True)
+    preferred_source = models.BooleanField(default=False)
+    relevance_score = models.FloatField(default=0)
+    credibility_score = models.FloatField(default=0)
+    freshness_score = models.FloatField(default=0)
+    accessibility_score = models.FloatField(default=0)
+    total_score = models.FloatField(default=0, db_index=True)
+    score_explanation = models.JSONField(default=dict, blank=True)
+    retrieved_at = models.DateTimeField()
+    last_verified_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "sector_research_recommendation"
+        ordering = ["-total_score", "-publication_date", "title"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deal", "canonical_url"],
+                name="unique_research_recommendation_per_deal_url",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deal", "-total_score"]),
+            models.Index(fields=["deal", "document_type"]),
+        ]

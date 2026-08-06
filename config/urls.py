@@ -39,6 +39,7 @@ urlpatterns = [
     path('api/banks/', include('banks.urls')),
     path('api/contacts/', include('contacts.urls')),
     path('api/deals/', include('deals.urls')),
+    path('api/tasks/', include('work_items.urls')),
     path('api/requests/', include('api_requests.urls')),
     path('api/meetings/', include('meetings.urls')),
     path('api/core/', include('core.urls')),
