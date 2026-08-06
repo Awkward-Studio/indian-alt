@@ -3,6 +3,7 @@ use_default_settings:
     keep_only:
       - duckduckgo
       - bing
+      - brave
 
 general:
   debug: false
@@ -40,5 +41,8 @@ engines:
     disabled: false
     timeout: 6.0
   - name: bing
+    disabled: false
+    timeout: 6.0
+  - name: brave
     disabled: false
     timeout: 6.0
