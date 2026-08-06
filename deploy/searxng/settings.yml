@@ -1,0 +1,44 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - bing
+
+general:
+  debug: false
+  instance_name: "SearXNG"
+  enable_metrics: true
+
+search:
+  safe_search: 0
+  default_lang: "en-IN"
+  formats:
+    - html
+    - json
+  ban_time_on_fail: 5
+  max_ban_time_on_fail: 120
+
+server:
+  bind_address: "0.0.0.0"
+  limiter: false
+  public_instance: false
+  secret_key: "change-me-via-SEARXNG_SECRET"
+  image_proxy: false
+  method: "GET"
+
+valkey:
+  url: false
+
+outgoing:
+  request_timeout: 5.0
+  pool_connections: 50
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  - name: duckduckgo
+    disabled: false
+    timeout: 6.0
+  - name: bing
+    disabled: false
+    timeout: 6.0
