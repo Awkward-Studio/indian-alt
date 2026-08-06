@@ -1,5 +1,4 @@
-from django.contrib.postgres.search import SearchVectorField
-from django.db import migrations, models
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
@@ -10,14 +9,14 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="documentchunk",
-            name="search_text",
-            field=models.TextField(blank=True, default=""),
-        ),
-        migrations.AddField(
-            model_name="documentchunk",
-            name="search_vector",
-            field=SearchVectorField(blank=True, null=True),
+        migrations.RunSQL(
+            sql="""
+                ALTER TABLE ai_orchestrator_documentchunk 
+                ADD COLUMN IF NOT EXISTS search_text text DEFAULT '';
+                
+                ALTER TABLE ai_orchestrator_documentchunk 
+                ADD COLUMN IF NOT EXISTS search_vector tsvector;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]
