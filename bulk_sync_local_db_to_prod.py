@@ -1834,6 +1834,22 @@ def sync_single_deal(
         print(f"[DEAL] {local_deal.title or local_deal.id}: upserting deal row", flush=True)
         prod_deal = upsert_deal(local_deal, bank_map, contact_map, dry_run=False, verbose=verbose)
         rewrite_children = True
+        
+        # Check if deal is completely intact in production (children count check)
+        if existing_prod_deal and not prompt_child_overwrite_enabled:
+            prod_doc_count = DealDocument.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
+            prod_chunk_count = DocumentChunk.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
+            prod_analysis_count = DealAnalysis.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
+            
+            local_doc_count = local_deal.documents.using(SOURCE_DB).count()
+            local_chunk_count = local_deal.chunks.using(SOURCE_DB).count()
+            local_analysis_count = local_deal.analyses.using(SOURCE_DB).count()
+            
+            if (local_doc_count == 0 or prod_doc_count >= local_doc_count) and \
+               (local_chunk_count == 0 or prod_chunk_count >= local_chunk_count) and \
+               (local_analysis_count == 0 or prod_analysis_count >= local_analysis_count):
+                rewrite_children = False
+
         differences = deal_state_differences(local_deal, existing_prod_deal, bank_map, contact_map)
         link_only_changes = bool(differences) and set(differences).issubset(
             {"bank", "primary_contact", "additional_contacts"}
@@ -1920,6 +1936,7 @@ def sync_single_deal(
         "vi_records": vi_records if 'vi_records' in locals() else sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True),
         "tasks": deal_tasks["tasks"],
         "task_suggestions": deal_tasks["task_suggestions"],
+        "rewritten": rewrite_children,
     }
 
 
