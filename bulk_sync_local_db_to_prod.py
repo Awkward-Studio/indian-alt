@@ -23,6 +23,8 @@ from api_requests.models import Request
 from banks.models import Bank
 from contacts.models import Contact
 from deals.models import Deal, DealAnalysis, DealDocument, DealPhaseLog, FolderAnalysisDocument
+from work_items.models import Task, TaskSuggestion
+
 
 
 SOURCE_DB = "default"
@@ -354,6 +356,7 @@ def deal_state_differences(
         "source_email_id": local_deal.source_email_id,
         "processing_status": local_deal.processing_status,
         "processing_error": local_deal.processing_error,
+        "received_at": getattr(local_deal, "received_at", None),
     }
 
     differences: list[str] = []
@@ -1092,6 +1095,7 @@ def upsert_deal(
         "source_email_id": local_deal.source_email_id,
         "processing_status": local_deal.processing_status,
         "processing_error": local_deal.processing_error,
+        "received_at": getattr(local_deal, "received_at", None),
         "request": prod_deal.request if prod_deal else None,
     }
 
@@ -1711,6 +1715,73 @@ def sync_deal_venture_intelligence(local_deal: Deal, prod_deal: Deal, dry_run: b
     return len(relations)
 
 
+def replace_deal_tasks(local_deal: Deal, prod_deal: Deal, dry_run: bool = False) -> dict:
+    if dry_run:
+        return {
+            "tasks": Task.objects.using(SOURCE_DB).filter(deal=local_deal).count(),
+            "task_suggestions": TaskSuggestion.objects.using(SOURCE_DB).filter(deal=local_deal).count(),
+        }
+
+    tasks = list(Task.objects.using(SOURCE_DB).filter(deal=local_deal))
+    Task.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    if tasks:
+        Task.objects.using(TARGET_DB).bulk_create(
+            [
+                Task(
+                    id=t.id,
+                    deal=prod_deal,
+                    title=t.title,
+                    description=t.description,
+                    status=t.status,
+                    priority=t.priority,
+                    due_date=t.due_date,
+                    assignee=None,
+                    created_by=None,
+                    origin=t.origin,
+                    fingerprint=t.fingerprint,
+                    completed_at=t.completed_at,
+                    created_at=t.created_at,
+                    updated_at=t.updated_at,
+                )
+                for t in tasks
+            ],
+            batch_size=200,
+        )
+
+    suggestions = list(TaskSuggestion.objects.using(SOURCE_DB).filter(deal=local_deal))
+    TaskSuggestion.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    if suggestions:
+        TaskSuggestion.objects.using(TARGET_DB).bulk_create(
+            [
+                TaskSuggestion(
+                    id=s.id,
+                    deal=prod_deal,
+                    analysis=None,
+                    task=None,
+                    analysis_version=s.analysis_version,
+                    report_hash=s.report_hash,
+                    fingerprint=s.fingerprint,
+                    category=s.category,
+                    title=s.title,
+                    source_section=s.source_section,
+                    source_table_kind=s.source_table_kind,
+                    source_owner=s.source_owner,
+                    source_assignee=s.source_assignee,
+                    source_status=s.source_status,
+                    source_priority=s.source_priority,
+                    source_references=list(s.source_references or []),
+                    state=s.state,
+                    created_at=s.created_at,
+                    updated_at=s.updated_at,
+                )
+                for s in suggestions
+            ],
+            batch_size=200,
+        )
+
+    return {"tasks": len(tasks), "task_suggestions": len(suggestions)}
+
+
 def sync_single_deal(
     local_deal: Deal,
     bank_map: dict[str, Bank],
@@ -1820,6 +1891,8 @@ def sync_single_deal(
             profile = replace_retrieval_profile(local_deal, prod_deal, dry_run=False)
             print(f"[DEAL] {local_deal.title or local_deal.id}: syncing Venture Intelligence records", flush=True)
             vi_records = sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=False)
+            print(f"[DEAL] {local_deal.title or local_deal.id}: syncing tasks and task suggestions", flush=True)
+            deal_tasks = replace_deal_tasks(local_deal, prod_deal, dry_run=False)
         else:
             print(
                 f"[DEAL] {local_deal.title or local_deal.id}: keeping production analyses/documents/chunks/profile",
@@ -1833,6 +1906,7 @@ def sync_single_deal(
             analysis_docs = {"audit_logs": 0, "analysis_documents": 0}
             from deals.models import VentureIntelligenceCompanyRelation
             vi_records = VentureIntelligenceCompanyRelation.objects.using(TARGET_DB).filter(deal=prod_deal).count()
+            deal_tasks = replace_deal_tasks(local_deal, prod_deal, dry_run=True)
 
     return {
         "deal": prod_deal.title,
@@ -1844,6 +1918,8 @@ def sync_single_deal(
         "audit_logs": analysis_docs["audit_logs"],
         "analysis_documents": analysis_docs["analysis_documents"],
         "vi_records": vi_records if 'vi_records' in locals() else sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True),
+        "tasks": deal_tasks["tasks"],
+        "task_suggestions": deal_tasks["task_suggestions"],
     }
 
 
