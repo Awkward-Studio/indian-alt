@@ -119,6 +119,12 @@ class AIProcessorService:
             )
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
+        if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
+            user_prompt = self._truncate_prompt_to_token_budget(
+                user_prompt,
+                system_instructions,
+                int(metadata["max_input_tokens"]),
+            )
 
         # Update Audit Log with the generated prompts
         audit_log.system_prompt = system_instructions
@@ -167,6 +173,24 @@ class AIProcessorService:
         result = self._standard_response(payload, audit_log, response_mode)
         result["_full_context"] = cleaned_text
         return result
+
+    @staticmethod
+    def _estimated_tokens(value: str) -> int:
+        text = str(value or "")
+        lexical = len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
+        return max((len(text) + 2) // 3, int(lexical * 1.2))
+
+    @classmethod
+    def _truncate_prompt_to_token_budget(cls, prompt: str, system: str, max_input_tokens: int) -> str:
+        prompt = str(prompt or "")
+        available = max(1000, int(max_input_tokens) - cls._estimated_tokens(system))
+        if cls._estimated_tokens(prompt) <= available:
+            return prompt
+        marker = "\n\n... [EARLIER RETRIEVED CONTEXT TRUNCATED TO FIT VM CONTEXT WINDOW] ...\n\n"
+        max_chars = max(2000, available * 3 - len(marker))
+        head_chars = int(max_chars * 0.68)
+        tail_chars = max_chars - head_chars
+        return f"{prompt[:head_chars].rstrip()}{marker}{prompt[-tail_chars:].lstrip()}"
 
     def _setup_audit_log(
         self,

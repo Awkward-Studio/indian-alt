@@ -669,25 +669,12 @@ class ScreenerCompanyService:
         }
 
     def resolve_screener_url(self, company_name: str, *, ticker: str = "", exchange: str = "") -> dict[str, Any]:
-        prompt = (
-            "Use web search only to find the official Screener.in page for this listed Indian company. "
-            "Do not extract or estimate any financial values. If no Screener page is found, return "
-            "{\"is_listed\": false}.\n\n"
-            f"Company: {company_name}\n"
-            f"Ticker hint: {ticker or 'N/A'}\n"
-            f"Exchange hint: {exchange or 'N/A'}\n\n"
-            "Return exactly one JSON object and no markdown:\n"
-            "{\n"
-            "  \"is_listed\": true,\n"
-            "  \"company_name\": \"Company Ltd\",\n"
-            "  \"registered_name\": \"Company Limited\",\n"
-            "  \"ticker\": \"COMPANY\",\n"
-            "  \"exchange\": \"NSE\",\n"
-            "  \"screener_url\": \"https://www.screener.in/company/COMPANY/\",\n"
-            "  \"website\": \"https://company.example\",\n"
-            "  \"industry\": \"Industry\",\n"
-            "  \"sector\": \"Sector\"\n"
-            "}"
+        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+        prompt = PromptCatalogService.render(
+            "screener_resolver",
+            company_name=company_name,
+            ticker=ticker or "N/A",
+            exchange=exchange or "N/A",
         )
         from ai_orchestrator.services.search_provider import SearXNGProviderService
         search_query = f"{company_name} {ticker} screener.in profile"
@@ -703,7 +690,7 @@ class ScreenerCompanyService:
         result = service.execute_standard(
             {
                 "model": model_name,
-                "system": "You find official Screener company URLs based on web search context. Return only valid JSON.",
+                "system": PromptCatalogService.get("screener_resolver_system"),
                 "prompt": augmented_prompt,
                 "options": {
                     "temperature": 0.0,

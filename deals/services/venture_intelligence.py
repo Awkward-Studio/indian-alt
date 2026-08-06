@@ -183,20 +183,8 @@ class VentureIntelligenceService:
         ai_service.model_provider = "anthropic"
         ai_service.current_provider = ai_service.anthropic_provider
         
-        prompt = (
-            f"Search the web to find ranked official 21-character Corporate Identity Number (CIN) candidates "
-            f"issued by the Ministry of Corporate Affairs (MCA) in India for the company or brand: \"{company_name}\".\n"
-            f"Use official MCA/company registry evidence when available. If the company has multiple Indian legal entities, return each plausible Indian legal entity.\n"
-            f"Prefer the operating company most likely to match a Venture Intelligence company profile, but do not collapse multiple entities into one answer.\n"
-            f"Return ONLY a JSON object in this format:\n"
-            f"{{\n  \"cin\": \"U74999KA2012PTC066107\",\n  \"entity_name\": \"Flipkart Private Limited\",\n  \"confidence\": 0.95\n}}\n"
-            f"Better format when multiple entities exist:\n"
-            f"{{\n  \"candidates\": [\n"
-            f"    {{\"cin\": \"U51909KA2011PTC060489\", \"entity_name\": \"FLIPKART INDIA PRIVATE LIMITED\", \"confidence\": 0.95, \"rationale\": \"Indian operating entity\"}},\n"
-            f"    {{\"cin\": \"U51109KA2007PTC041957\", \"entity_name\": \"FLIPKART INTERNET PRIVATE LIMITED\", \"confidence\": 0.85, \"rationale\": \"Related ecommerce marketplace entity\"}}\n"
-            f"  ]\n}}\n"
-            f"Do not return any markdown code blocks, explanations, or extra text."
-        )
+        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+        prompt = PromptCatalogService.render("cin_resolution", company_name=company_name)
 
         try:
             result = ai_service.process_content(

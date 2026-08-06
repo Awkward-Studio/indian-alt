@@ -86,6 +86,8 @@ class DealPagination(PageNumberPagination):
 class DealFilterSet(django_filters.FilterSet):
     sector = django_filters.CharFilter(lookup_expr='icontains')
     city = django_filters.CharFilter(lookup_expr='icontains')
+    bank_name = django_filters.CharFilter(field_name='bank__name', lookup_expr='icontains')
+    banker_name = django_filters.CharFilter(field_name='primary_contact__name', lookup_expr='icontains')
     has_analysis = django_filters.BooleanFilter(field_name='has_analysis')
     has_vi_data = django_filters.BooleanFilter(field_name='has_vi_data')
     has_competitors = django_filters.BooleanFilter(
@@ -111,6 +113,7 @@ class DealFilterSet(django_filters.FilterSet):
             'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
             'current_phase', 'sector', 'city', 'primary_contact',
+            'bank_name', 'banker_name',
             'has_analysis', 'has_vi_data', 'has_competitors',
         ]
 
@@ -305,7 +308,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
         'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
-        'is_female_led', 'has_analysis', 'has_vi_data',
+        'is_female_led', 'has_analysis', 'has_vi_data', 'bank__name',
+        'primary_contact__name',
     ]
     ordering = ['-received_at', '-created_at']
     @staticmethod
@@ -872,8 +876,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def rewrite_analysis_section(self, request, pk=None):
         """
-        Generate a preview rewrite for one analysis report section.
-        The rewritten markdown is returned to the caller and is not persisted.
+        Preview one analysis report section rewrite, then persist only after a
+        separate signed confirmation request.
         """
         deal = self.get_object()
         section_markdown = request.data.get('section_markdown')
@@ -907,66 +911,72 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
-        prompt = f"""
-You are editing one section of a private equity analysis report.
-
-Rewrite only the selected section according to the analyst instruction. Use the full report only for context and consistency.
-
-Rules:
-- Return Markdown only.
-- Preserve the selected section heading unless the analyst explicitly asks to rename it.
-- Do not add commentary, JSON, code fences, or explanations.
-- Do not invent new facts. If the instruction asks for emphasis, reframe using facts already present in the selected section or full report.
-- Keep tables as valid Markdown tables when the source section contains tables.
-
-[DEAL]
-{deal.title}
-
-[SELECTED SECTION TITLE]
-{section_title}
-
-[ANALYST INSTRUCTION]
-{instruction}
-
-[SELECTED SECTION MARKDOWN]
-{section_markdown}
-
-[FULL REPORT CONTEXT]
-{full_report}
-""".strip()
-
         try:
-            from ai_orchestrator.services.ai_processor import AIProcessorService
+            import hashlib
+            from django.core import signing
+            from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
 
-            ai_service = AIProcessorService()
-            result = ai_service.process_content(
-                content=prompt,
-                skill_name=None,
-                source_type="analysis_section_rewrite",
-                source_id=str(deal.id),
-                metadata={
-                    "model_provider": "vllm",
-                    "response_mode": "markdown",
-                    "personality_only_system": True,
+            rewrite_service = AnalysisSectionRewriteService()
+            confirmation_token = request.data.get("confirmation_token")
+            if confirmation_token:
+                try:
+                    confirmation = signing.loads(
+                        confirmation_token,
+                        salt="analysis-section-rewrite",
+                        max_age=3600,
+                    )
+                except signing.BadSignature:
+                    return Response(
+                        {"error": "The rewrite confirmation is invalid or expired."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                expected = {
                     "deal_id": str(deal.id),
+                    "version": str(version or ""),
                     "section_title": section_title,
-                    "analysis_version": version,
-                },
+                    "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+                }
+                if any(confirmation.get(key) != value for key, value in expected.items()):
+                    return Response(
+                        {"error": "The report or section changed after the preview. Generate a new rewrite preview."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                rewritten = str(confirmation.get("section_markdown") or "").strip()
+                updated_report = rewrite_service.replace_section(full_report, section_title, rewritten)
+                rewrite_service.persist(deal=deal, full_report=updated_report, version=version)
+                return Response({
+                    "section_markdown": rewritten,
+                    "full_report": updated_report,
+                    "persisted": True,
+                    "confirmation_required": False,
+                })
+
+            rewritten = rewrite_service.rewrite(
+                deal=deal,
+                section_title=section_title,
+                section_markdown=section_markdown,
+                instruction=instruction,
+                full_report=full_report,
+                version=version,
             )
-            if isinstance(result, dict):
-                rewritten = (
-                    result.get('response')
-                    or result.get('_raw_response')
-                    or result.get('content')
-                    or ""
-                ).strip()
-            else:
-                rewritten = str(result or "").strip()
-
-            if not rewritten:
-                return Response({"error": "AI did not return a rewritten section"}, status=502)
-
-            return Response({"section_markdown": rewritten})
+            token = signing.dumps(
+                {
+                    "deal_id": str(deal.id),
+                    "version": str(version or ""),
+                    "section_title": section_title,
+                    "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+                    "section_markdown": rewritten,
+                },
+                salt="analysis-section-rewrite",
+                compress=True,
+            )
+            return Response({
+                "section_markdown": rewritten,
+                "full_report": full_report,
+                "persisted": False,
+                "confirmation_required": True,
+                "confirmation_token": token,
+            })
         except Exception as exc:
             logger.exception("Failed to rewrite analysis section for deal %s", deal.id)
             return Response({"error": str(exc)}, status=500)

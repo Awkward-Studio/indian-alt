@@ -23,6 +23,7 @@ from .embedding_processor import EmbeddingService
 from .flow_config import UniversalChatFlowService
 from .parsers import ResponseParserService
 from .prompts import PromptBuilderService
+from .prompt_catalog import PromptCatalogService
 from .runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
@@ -573,6 +574,11 @@ class UniversalChatService:
 
         plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
         plan["deal_limit"] = 1
+        evidence_scope = self._explicit_deal_evidence_scope(deal, user_message)
+        if evidence_scope:
+            plan["_evidence_source_ids"] = evidence_scope["source_ids"]
+            plan["_evidence_source_types"] = evidence_scope["source_types"]
+            plan["evidence_scope"] = evidence_scope["label"]
 
         deals = [deal]
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
@@ -629,6 +635,41 @@ class UniversalChatService:
                 f"{chunk['deal']}|{chunk.get('source_title') or chunk['source_type']}"
                 for chunk in serialized_chunks
             ],
+            "evidence_scope": plan.get("evidence_scope", "all_indexed_deal_evidence"),
+        }
+
+    @staticmethod
+    def _explicit_deal_evidence_scope(deal: Deal, user_message: str) -> Dict[str, Any] | None:
+        text = str(user_message or "").casefold()
+        wants_meetings = bool(re.search(r"\b(meeting|meetings|meeting notes?|management call|management calls)\b", text))
+        wants_news = bool(re.search(r"\b(news|web research|public domain|public-domain|press coverage|media coverage)\b", text))
+        if not (wants_meetings or wants_news):
+            return None
+
+        source_ids: List[str] = []
+        source_types: List[str] = []
+        labels: List[str] = []
+        if wants_meetings:
+            source_ids.extend(
+                str(value)
+                for value in deal.meeting_notes.filter(is_indexed=True).values_list("id", flat=True)
+            )
+            source_types.append("meeting_note")
+            labels.append("meetings")
+        if wants_news:
+            source_ids.extend(
+                str(value)
+                for value in deal.documents.filter(
+                    is_indexed=True,
+                    title__istartswith="Public Domain News Research",
+                ).values_list("id", flat=True)
+            )
+            source_types.append("document")
+            labels.append("news")
+        return {
+            "source_ids": list(dict.fromkeys(source_ids)),
+            "source_types": source_types,
+            "label": "_and_".join(labels),
         }
 
     def _saved_relationship_context_for_deal(self, deal: Deal) -> str:
@@ -952,23 +993,12 @@ class UniversalChatService:
                 "base_score": candidate.get("base_score"),
             })
 
-        prompt = (
-            f"You are reranking {label} suggestions for an active deal workflow.\n\n"
-            f"Active deal context:\n{self._truncate_for_prompt(active_context, 8000) or 'None'}\n\n"
-            f"User query or planner intent:\n{self._truncate_for_prompt(query, 2000) or 'None'}\n\n"
-            "Candidate list:\n"
-            f"{json.dumps(preview, default=str, ensure_ascii=True, indent=2)}\n\n"
-            "Task:\n"
-            "Score each candidate from 0 to 100 for relevance to the active deal and the user intent.\n"
-            "Use the active deal as the comparison anchor.\n"
-            "Prefer candidates that improve the comparison, evidence quality, or deal-specific specificity.\n"
-            "Return exactly one JSON object with this shape:\n"
-            "{\n"
-            '  "results": [\n'
-            '    {"index": 0, "relevance_score": 0, "suggested": true, "reason": "short reason", "compare_to_active_deal": "short comparison"}\n'
-            "  ]\n"
-            "}\n"
-            "Do not include any extra text."
+        prompt = PromptCatalogService.render(
+            "deal_helper_rerank",
+            label=label,
+            active_context=self._truncate_for_prompt(active_context, 8000) or "None",
+            query=self._truncate_for_prompt(query, 2000) or "None",
+            candidates=json.dumps(preview, default=str, ensure_ascii=True, indent=2),
         )
 
         try:
@@ -1774,7 +1804,7 @@ class UniversalChatService:
         payload = {
             "model": AIRuntimeService.get_planner_model(),
             "prompt": planner_prompt,
-            "system": "Return exactly one valid JSON object. Do not include markdown, comments, prose, or thinking.",
+            "system": PromptCatalogService.get("query_planner_system"),
             "response_format": QUERY_PLANNER_RESPONSE_FORMAT,
             "chat_template_kwargs": {"enable_thinking": False},
             "options": {
@@ -3126,7 +3156,9 @@ class UniversalChatService:
         deal_ids = [str(deal.id) for deal in scoped_deals]
         
         # Use provided document_ids to restrict semantic search if available
-        search_source_ids = None
+        evidence_scope_active = "_evidence_source_ids" in plan
+        search_source_ids = plan.get("_evidence_source_ids") or None
+        evidence_source_types = set(plan.get("_evidence_source_types") or [])
         if document_ids:
             # Normalize and resolve potential OneDrive IDs or titles if needed, 
             # but usually source_id is the primary UUID or specific identifier.
@@ -3140,6 +3172,8 @@ class UniversalChatService:
             semantic_queries = semantic_queries[:HARD_MAX_SEMANTIC_QUERIES]
         
         for semantic_query in semantic_queries:
+            if evidence_scope_active and not search_source_ids:
+                break
             self._trace_chunks("semantic_search_start", query=str(semantic_query)[:80])
             query_matches = self.embed_service.search_global_chunks(
                 semantic_query,
@@ -3148,10 +3182,12 @@ class UniversalChatService:
                 source_ids=search_source_ids,
                 rerank=False,
             )
+            if evidence_source_types:
+                query_matches = [chunk for chunk in query_matches if chunk.source_type in evidence_source_types]
             candidate_chunks = self._merge_chunk_pool(candidate_chunks, query_matches)
             self._trace_chunks("semantic_search_done", query_matches=len(query_matches), candidate_chunks=len(candidate_chunks))
         self._trace_chunks("synthesis_augment_start", candidate_chunks=len(candidate_chunks))
-        synthesis_document_candidates = self._augment_with_synthesis_document_candidates(candidate_chunks, scoped_deals, plan)
+        synthesis_document_candidates = [] if evidence_source_types else self._augment_with_synthesis_document_candidates(candidate_chunks, scoped_deals, plan)
         candidate_chunks = self._merge_chunk_pool(candidate_chunks, synthesis_document_candidates)
         self._trace_chunks(
             "synthesis_augment_done",
@@ -3159,12 +3195,19 @@ class UniversalChatService:
             candidate_chunks=len(candidate_chunks),
         )
         self._trace_chunks("deal_summary_augment_start", candidate_chunks=len(candidate_chunks))
-        candidate_chunks = self._augment_with_deal_summary_candidates(candidate_chunks, scoped_deals)
+        if not evidence_source_types:
+            candidate_chunks = self._augment_with_deal_summary_candidates(candidate_chunks, scoped_deals)
         self._trace_chunks("deal_summary_augment_done", candidate_chunks=len(candidate_chunks))
         if not candidate_chunks:
             queryset = DocumentChunk.objects.all().select_related("deal")
+            if evidence_scope_active and not search_source_ids:
+                queryset = queryset.none()
             if scoped_deals:
                 queryset = queryset.filter(deal__in=scoped_deals)
+            if search_source_ids:
+                queryset = queryset.filter(source_id__in=search_source_ids)
+            if evidence_source_types:
+                queryset = queryset.filter(source_type__in=evidence_source_types)
             fallback_limit = self._cap(
                 int(retrieval_settings.get("fallback_candidate_limit") or 120),
                 HARD_MAX_FALLBACK_CANDIDATES,

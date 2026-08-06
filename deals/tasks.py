@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery import shared_task, chord
 from django.core.cache import cache
@@ -2085,10 +2086,46 @@ def _company_news_cards(research: dict) -> list[dict]:
     return cards
 
 
+def _ground_company_news_cards(research: dict, search_results: list[dict]) -> list[dict]:
+    """Keep only cards that can be tied to an actual SearXNG result URL."""
+    allowed = {
+        str(item.get("url") or "").strip().rstrip("/").casefold(): item
+        for item in search_results
+        if str(item.get("url") or "").strip()
+    }
+    grounded = []
+    for raw_card in _company_news_list(research.get("news_cards")):
+        if not isinstance(raw_card, dict):
+            continue
+        card = dict(raw_card)
+        requested_url = str(card.get("url") or "").strip()
+        match = allowed.get(requested_url.rstrip("/").casefold()) if requested_url else None
+        if match is None:
+            card_text = " ".join(str(card.get(key) or "") for key in ("title", "summary", "source")).casefold()
+            scored = []
+            for result in search_results:
+                result_text = " ".join(str(result.get(key) or "") for key in ("title", "snippet")).casefold()
+                scored.append((SequenceMatcher(None, card_text, result_text).ratio(), result))
+            if scored:
+                score, candidate = max(scored, key=lambda item: item[0])
+                if score >= 0.18:
+                    match = candidate
+        if match is None:
+            continue
+        card["url"] = str(match.get("url") or "").strip()
+        card["source"] = card.get("source") or match.get("title") or match.get("engine") or "Web source"
+        sentiment = str(card.get("sentiment") or "neutral").strip().casefold()
+        card["sentiment"] = {"positive": "green", "negative": "red"}.get(sentiment, sentiment)
+        if card["sentiment"] not in {"red", "green", "neutral"}:
+            card["sentiment"] = "neutral"
+        grounded.append(card)
+    return grounded[:5]
+
+
 @shared_task(queue='high_priority')
 def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_news: list[dict] | None = None) -> dict:
     """
-    Runs Claude native web search for public-domain company/promoter news,
+    Runs SearXNG-grounded VM research for public-domain company/promoter news,
     persists each run as a dated memo document, and vectorizes it for retrieval.
     """
     try:
@@ -2112,40 +2149,31 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             if isinstance(item, dict) and str(item.get("title") or "").strip()
         ][:30]
 
-        prompt = (
-            f"You are a sophisticated investment research assistant.\n"
-            f"{search_directive}\n\n"
-            f"Context details of the target company:\n"
-            f"- Target Company: {deal.title}\n"
-            f"- Industry/Sector: {deal.sector or 'N/A'} / {deal.industry or 'N/A'}\n"
-            f"- Location: {deal.city or 'N/A'}, {deal.country or 'N/A'}\n"
-            f"- Existing findings to avoid duplicating: {', '.join(existing_names) if existing_names else 'None'}\n\n"
-            f"Prioritize only the biggest 1-5 sourced items: funding, litigation/regulatory issues, founder/promoter background, "
-            f"major awards/partnerships, or other material red/green flags.\n\n"
-            f"Return exactly one JSON object and no markdown. Use this shape:\n"
-            f"{{\n"
-            f"  \"overview\": \"2 sentence base summary of the public-domain signal\",\n"
-            f"  \"executive_summary\": \"same as overview\",\n"
-            f"  \"news_cards\": [\n"
-            f"    {{\"title\": \"...\", \"summary\": \"one short sentence\", \"category\": \"funding|litigation|founder|award|red_flag|green_flag|news\", \"sentiment\": \"red|green|neutral\", \"date\": \"YYYY-MM-DD or unknown\", \"source\": \"publisher\", \"url\": \"https://...\"}}\n"
-            f"  ],\n"
-            f"  \"sources\": [{{\"title\": \"...\", \"publisher\": \"...\", \"date\": \"...\", \"url\": \"...\"}}]\n"
-            f"}}\n"
-            f"Return at most 5 news_cards. If there is little reliable public news, return fewer cards and say that in overview. "
-            f"Every card must be based on a source URL. Do not invent facts."
+        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+        prompt = PromptCatalogService.render(
+            "public_news_research",
+            search_directive=search_directive,
+            deal_title=deal.title,
+            sector=deal.sector or "N/A",
+            industry=deal.industry or "N/A",
+            location=f"{deal.city or 'N/A'}, {deal.country or 'N/A'}",
+            existing_findings=", ".join(existing_names) if existing_names else "None",
         )
 
         from ai_orchestrator.services.search_provider import SearXNGProviderService
         search_query = instruction if instruction else f"{deal.title} public news latest"
-        search_context = SearXNGProviderService().search(search_query)
+        search_service = SearXNGProviderService()
+        search_results = search_service.search_results(search_query, num_results=8)
+        search_context = search_service.format_context(search_results)
 
         augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
 
         from ai_orchestrator.services.llm_providers import VLLMProviderService
+        from ai_orchestrator.services.runtime import AIRuntimeService
         service = VLLMProviderService()
         result = service.execute_standard({
-            "model": "local-model",
-            "system": "You are a careful investment diligence researcher. Cite public-domain sources from the provided context.",
+            "model": AIRuntimeService.get_text_model(),
+            "system": PromptCatalogService.get("public_news_research_system"),
             "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 4000,
@@ -2173,7 +2201,25 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
 
         if not research.get("executive_summary") and research.get("overview"):
             research["executive_summary"] = research.get("overview")
-        news_cards = _company_news_cards(research)
+        news_cards = _ground_company_news_cards(research, search_results)
+        research["sources"] = [
+            str(item.get("url") or "").strip()
+            for item in search_results
+            if str(item.get("url") or "").strip()
+        ]
+        warnings = []
+        if not search_results:
+            warnings.append(
+                "SearXNG returned no web results for this company query. Try a more specific company name, location, or website domain."
+            )
+        if not news_cards:
+            explanation = str(
+                research.get("executive_summary") or research.get("overview") or ""
+            ).strip()
+            warning = "No grounded company news cards were found in the returned search evidence."
+            if explanation:
+                warning = f"{warning} VM explanation: {explanation}"
+            warnings.append(warning)
         
         # Merge new findings with existing ones, avoiding duplicates
         if existing_news:
@@ -2193,10 +2239,13 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             generated_at=generated_at,
         )
         source_map = {
-            "source": "anthropic_web_search",
+            "source": "searxng_vm_web_research",
+            "search_provider": "searxng",
+            "inference_provider": "vllm",
             "generated_at": generated_at.isoformat(),
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
+            "warnings": warnings,
         }
         title = f"Public Domain News Research - {generated_at.date().isoformat()}"
 
@@ -2208,7 +2257,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             normalized_text=markdown_report,
             evidence_json={},
             source_map_json=source_map,
-            reasoning="Public-domain company news research generated by Claude native web search.",
+            reasoning="Public-domain company news research grounded in SearXNG evidence and synthesized by the configured VM model.",
             is_indexed=False,
             is_ai_analyzed=False,
             transcription_status=TranscriptionStatus.COMPLETE,
@@ -2234,7 +2283,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "risks": _company_news_list(research.get("litigation")) + _company_news_list(research.get("red_flags")),
             "open_questions": [],
             "citations": _company_news_list(research.get("sources")),
-            "reasoning": "Claude native web-search research; verify material findings against primary sources during diligence.",
+            "reasoning": "SearXNG-grounded VM research; verify material findings against primary sources during diligence.",
             "quality_flags": ["public_domain_news_research"],
             "normalized_text": markdown_report,
             "source_map": source_map,
@@ -2253,6 +2302,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "research": research,
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
+            "warnings": warnings,
             "preview_items": _company_news_preview_items(research),
             "counts": {
                 "red_flags": len([card for card in news_cards if str(card.get("sentiment")).lower() == "red"]),

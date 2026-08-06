@@ -20,14 +20,15 @@ class MeetingSignalAnalysisAuditTests(SimpleTestCase):
         )
 
     @patch("meetings.services.meeting_signal_analysis.AIAuditLog.objects.create")
-    def test_success_persists_completed_ai_history_entry(self, create_audit_log):
+    @patch("meetings.services.meeting_signal_analysis.PromptCatalogService.get", return_value="system")
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService.execute_standard")
+    def test_success_persists_completed_ai_history_entry(self, vm_execute, _prompt, create_audit_log):
         audit_log = MagicMock(
             id=uuid4(),
             source_metadata={"workflow": "cross_meeting_signal_analysis"},
         )
         create_audit_log.return_value = audit_log
         service = MeetingSignalAnalysisService()
-        service.base_urls = ["http://lm-studio.test/v1"]
         service._broadcast_audit = MagicMock()
         raw_result = {
             "executive_summary": "Growth is positive, with concentration risk.",
@@ -35,11 +36,7 @@ class MeetingSignalAnalysisAuditTests(SimpleTestCase):
             "red_signals": [],
             "open_questions": ["Provide concentration data."],
         }
-        service._post_chat_completion = MagicMock(
-            return_value={
-                "choices": [{"message": {"content": json.dumps(raw_result)}}],
-            }
-        )
+        vm_execute.return_value = {"response": json.dumps(raw_result)}
 
         result = service.analyze_deal(self.deal, [self.note])
 
@@ -55,18 +52,18 @@ class MeetingSignalAnalysisAuditTests(SimpleTestCase):
         service._broadcast_audit.assert_called_with(audit_log, done=True)
 
     @patch("meetings.services.meeting_signal_analysis.AIAuditLog.objects.create")
-    def test_failure_persists_failed_ai_history_entry(self, create_audit_log):
+    @patch("meetings.services.meeting_signal_analysis.PromptCatalogService.get", return_value="system")
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService.execute_standard", side_effect=RuntimeError("vm offline"))
+    def test_failure_persists_failed_ai_history_entry(self, _vm, _prompt, create_audit_log):
         audit_log = MagicMock(
             id=uuid4(),
             source_metadata={"workflow": "cross_meeting_signal_analysis"},
         )
         create_audit_log.return_value = audit_log
         service = MeetingSignalAnalysisService()
-        service.base_urls = ["http://lm-studio.test/v1"]
         service._broadcast_audit = MagicMock()
-        service._post_chat_completion = MagicMock(side_effect=RuntimeError("offline"))
 
-        with self.assertRaisesRegex(RuntimeError, "LM Studio analysis failed"):
+        with self.assertRaisesRegex(RuntimeError, "VM meeting signal analysis failed"):
             service.analyze_deal(self.deal, [self.note])
 
         self.assertEqual(audit_log.status, "FAILED")

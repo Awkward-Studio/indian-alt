@@ -8,6 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.services.prompt_catalog import PromptCatalogService
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from banks.models import Bank
 from contacts.models import Contact, WorkplaceVerificationSuggestion
@@ -67,10 +68,7 @@ class WorkplaceVerificationService:
             requested_by=requested_by,
             model_provider='local_search',
             model_used='searxng',
-            system_prompt=(
-                'Search public professional sources without scraping social-network '
-                'profiles. Return evidence for human review; never update a contact automatically.'
-            ),
+            system_prompt=PromptCatalogService.get('workplace_verification_policy'),
             user_prompt='\n'.join(queries),
             raw_response=json.dumps(eligible, ensure_ascii=False, default=str),
             parsed_json=proposal or {'status': 'NO_SUGGESTION'},

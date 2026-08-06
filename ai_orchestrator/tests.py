@@ -323,6 +323,33 @@ class UniversalChatServiceTests(TestCase):
             flow_version=None,
         )
 
+    def test_explicit_evidence_scope_routes_news_and_meetings_individually(self):
+        deal = MagicMock()
+        deal.meeting_notes.filter.return_value.values_list.return_value = ["meeting-1"]
+        deal.documents.filter.return_value.values_list.return_value = ["news-1"]
+
+        meetings = self.service._explicit_deal_evidence_scope(deal, "Use only the meeting notes")
+        news = self.service._explicit_deal_evidence_scope(deal, "Use the latest news")
+        both = self.service._explicit_deal_evidence_scope(deal, "Compare the meetings with the news")
+
+        self.assertEqual(meetings, {"source_ids": ["meeting-1"], "source_types": ["meeting_note"], "label": "meetings"})
+        self.assertEqual(news, {"source_ids": ["news-1"], "source_types": ["document"], "label": "news"})
+        self.assertEqual(both["source_ids"], ["meeting-1", "news-1"])
+        self.assertEqual(both["label"], "meetings_and_news")
+
+    def test_deal_chat_prompt_guard_preserves_query_tail(self):
+        prompt = "[CONTEXT]\n" + ("long evidence " * 20000) + "\n[USER MESSAGE]\nUse the latest news only"
+
+        trimmed = AIProcessorService._truncate_prompt_to_token_budget(
+            prompt,
+            "system",
+            11000,
+        )
+
+        self.assertLessEqual(AIProcessorService._estimated_tokens(trimmed), 11000)
+        self.assertIn("CONTEXT TRUNCATED", trimmed)
+        self.assertTrue(trimmed.endswith("Use the latest news only"))
+
     def test_saved_relationship_context_hydrates_selected_competitor_deals(self):
         active = Deal.objects.create(title="Active Co", industry="Consumer", sector="Beauty")
         competitor = Deal.objects.create(
@@ -1834,6 +1861,12 @@ class AnthropicIntegrationTests(TestCase):
             _, process_kwargs = mock_processor_instance.process_content.call_args
             self.assertIn("deal_visual", process_kwargs["metadata"]["prompt_template_override"])
             self.assertIn("comparison_matrix", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("up to three distinct visuals", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("Do not choose it when a trend", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("214 must remain 214", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("use line rather than bar", process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn('MUST include `"version": 1`', process_kwargs["metadata"]["prompt_template_override"])
+            self.assertIn("Always emit `source_notes` as an array", process_kwargs["metadata"]["prompt_template_override"])
             
             # Verify correct mock execution
             self.assertEqual(res["status"], "success")

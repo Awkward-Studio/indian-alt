@@ -4,7 +4,7 @@ services:
   vllm-text:
     image: ${VLLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
     container_name: vllm-text-t4
-    restart: unless-stopped
+    restart: always
     ipc: host
     shm_size: 8g
     ports:
@@ -23,9 +23,9 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - -hf
-      - ${LLAMA_MODEL_SOURCE:-bartowski/gemma-4-12B-it-GGUF:Q5_K_M}
+      - ${LLAMA_MODEL_SOURCE:-bartowski/gemma-4-12B-it-GGUF:Q8_0}
       - --alias
-      - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q5}
+      - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q8}
       - --host
       - 0.0.0.0
       - --port
@@ -33,7 +33,7 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --ctx-size
-      - ${LLAMA_CONTEXT_SIZE:-32768}
+      - ${LLAMA_CONTEXT_SIZE:-16384}
       - --parallel
       - ${LLAMA_PARALLEL_SEQUENCES:-1}
       - --n-gpu-layers
@@ -46,6 +46,10 @@ services:
       - ${LLAMA_CACHE_TYPE_K:-q8_0}
       - --cache-type-v
       - ${LLAMA_CACHE_TYPE_V:-q8_0}
+      - --log-verbosity
+      - ${LLAMA_LOG_VERBOSITY:-4}
+      - --log-timestamps
+      - --log-prefix
       - --no-webui
 
   tei-embedding:
@@ -56,7 +60,7 @@ services:
     # mistakes it for an old driver and prepends incompatible cuda-compat-12-9.
     entrypoint:
       - /usr/local/bin/text-embeddings-router
-    restart: unless-stopped
+    restart: always
     shm_size: 1g
     ports:
       - "${EMBEDDING_PORT:-8081}:80"
@@ -103,7 +107,7 @@ services:
     container_name: tei-reranker-t4
     entrypoint:
       - /usr/local/bin/text-embeddings-router
-    restart: unless-stopped
+    restart: always
     shm_size: 1g
     ports:
       - "${RERANKER_PORT:-8082}:80"

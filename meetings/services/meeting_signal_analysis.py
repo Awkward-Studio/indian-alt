@@ -4,10 +4,11 @@ import re
 import time
 from typing import Any
 
-import requests
 from django.conf import settings
 
 from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+from ai_orchestrator.services.runtime import AIRuntimeService
 from ai_orchestrator.services.realtime import broadcast_audit_log_update
 from deals.models import Deal
 from meetings.models import MeetingNote
@@ -16,21 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class MeetingSignalAnalysisService:
-    """Demo-oriented meeting signal extraction using an LM Studio local model."""
-
-    DEFAULT_MODEL = "local-model"
+    """Cross-meeting signal extraction using the configured VM text model."""
 
     def __init__(self):
-        self.base_urls = self._candidate_base_urls()
-        self.model = getattr(settings, "LM_STUDIO_MODEL", "") or self.DEFAULT_MODEL
-        self.api_key = getattr(settings, "LM_STUDIO_API_KEY", "") or "lm-studio"
+        self.base_url = getattr(settings, "VLLM_BASE_URL", "").rstrip("/")
+        self.model = AIRuntimeService.get_text_model()
 
     def analyze_deal(self, deal: Deal, notes: list[MeetingNote]) -> dict[str, Any]:
         if not notes:
             return {
                 "deal_id": str(deal.id),
                 "deal_title": deal.title,
-                "provider": "lm_studio",
+                "provider": "vllm",
                 "model": self.model,
                 "notes_analyzed": 0,
                 "green_signals": [],
@@ -40,37 +38,13 @@ class MeetingSignalAnalysisService:
             }
 
         prompt = self._build_prompt(deal, notes)
-        system_prompt = (
-            "You are an investment diligence analyst. Extract concrete red and green signals "
-            "from meeting notes. Use only the supplied notes. Return valid JSON only. "
-            "Do not think step by step. Do not include reasoning."
-        )
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {"role": "user", "content": f"/no_think\n{prompt}"},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 16000,
-            "response_format": self._response_format(),
-            # Not part of LM Studio's documented OpenAI-compatible params, but
-            # some Qwen-serving backends accept one of these switches. If LM
-            # Studio rejects them, _post_chat_completion retries without them.
-            "thinking": False,
-            "enable_thinking": False,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "reasoning": {"effort": "none"},
-        }
+        system_prompt = PromptCatalogService.get("meeting_signal_system")
         started_at = time.monotonic()
         audit_log = AIAuditLog.objects.create(
             source_type="meeting_signal_analysis",
             source_id=str(deal.id),
             context_label=f"Cross-meeting signals: {deal.title}",
-            model_provider="lm_studio",
+            model_provider="vllm",
             model_used=self.model,
             system_prompt=system_prompt,
             user_prompt=prompt,
@@ -87,68 +61,66 @@ class MeetingSignalAnalysisService:
         )
         self._broadcast_audit(audit_log)
 
-        last_error = None
-        errors = []
-        for base_url in self.base_urls:
-            try:
-                data = self._post_chat_completion(base_url, payload)
-                choice = (data.get("choices") or [{}])[0]
-                message = choice.get("message") or {}
-                content = message.get("content") or ""
-                if not content.strip():
-                    finish_reason = choice.get("finish_reason")
-                    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
-                    raise ValueError(
-                        "LM Studio returned no final content. "
-                        f"finish_reason={finish_reason!r}; "
-                        f"reasoning_chars={len(str(reasoning))}. "
-                        "For Qwen reasoning models, enable /no_think support or use a non-reasoning instruct model."
-                    )
-                parsed = self._parse_json(content)
-                parsed = self._normalize_result(parsed)
-                result = {
-                    "deal_id": str(deal.id),
-                    "deal_title": deal.title,
-                    "provider": "lm_studio",
+        def complete(content: str, *, provider: str, base_url: str, model: str) -> dict[str, Any]:
+            parsed = self._normalize_result(self._parse_json(content))
+            result = {
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+                "provider": provider,
+                "model": model,
+                "base_url": base_url,
+                "audit_log_id": str(audit_log.id),
+                "notes_analyzed": len(notes),
+                **parsed,
+            }
+            audit_log.raw_response = content
+            audit_log.parsed_json = result
+            audit_log.model_provider = provider
+            audit_log.model_used = model
+            audit_log.request_duration_ms = round((time.monotonic() - started_at) * 1000)
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.error_message = ""
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "base_url": base_url,
+            }
+            audit_log.save(
+                update_fields=[
+                    "raw_response", "parsed_json", "model_provider", "model_used",
+                    "request_duration_ms", "status", "is_success", "error_message",
+                    "source_metadata",
+                ]
+            )
+            self._broadcast_audit(audit_log, done=True)
+            return result
+
+        try:
+            from ai_orchestrator.services.llm_providers import VLLMProviderService
+
+            vm_result = VLLMProviderService().execute_standard(
+                {
                     "model": self.model,
-                    "base_url": base_url,
-                    "audit_log_id": str(audit_log.id),
-                    "notes_analyzed": len(notes),
-                    **parsed,
-                }
-                audit_log.raw_response = content
-                audit_log.parsed_json = result
-                audit_log.request_duration_ms = round((time.monotonic() - started_at) * 1000)
-                audit_log.status = "COMPLETED"
-                audit_log.is_success = True
-                audit_log.error_message = ""
-                audit_log.source_metadata = {
-                    **(audit_log.source_metadata or {}),
-                    "base_url": base_url,
-                }
-                audit_log.save(
-                    update_fields=[
-                        "raw_response",
-                        "parsed_json",
-                        "request_duration_ms",
-                        "status",
-                        "is_success",
-                        "error_message",
-                        "source_metadata",
-                    ]
-                )
-                self._broadcast_audit(audit_log, done=True)
-                return result
-            except Exception as exc:
-                last_error = exc
-                errors.append(f"{base_url}: {exc}")
-                logger.warning("LM Studio meeting signal analysis failed via %s: %s", base_url, exc)
+                    "system": system_prompt,
+                    "prompt": f"/no_think\n{prompt}",
+                    "response_format": self._response_format(),
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "options": {"temperature": 0.1, "max_tokens": 16000},
+                },
+                timeout=300,
+            )
+            content = str(vm_result.get("response") or "")
+            if not content.strip():
+                raise ValueError("The VM returned no final meeting-analysis content.")
+            return complete(content, provider="vllm", base_url=self.base_url, model=self.model)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("VM meeting signal analysis failed: %s", exc)
 
         error_message = (
-            "LM Studio analysis failed. "
-            f"Tried {len(self.base_urls)} URL(s). "
-            f"Last error: {last_error}. "
-            f"All errors: {' | '.join(errors)}"
+            "VM meeting signal analysis failed. "
+            f"Endpoint: {self.base_url or 'not configured'}. "
+            f"Error: {last_error}."
         )
         audit_log.status = "FAILED"
         audit_log.is_success = False
@@ -166,61 +138,6 @@ class MeetingSignalAnalysisService:
         except Exception as exc:
             logger.warning("Meeting signal audit broadcast failed: %s", exc)
 
-    def _candidate_base_urls(self) -> list[str]:
-        configured = getattr(settings, "LM_STUDIO_BASE_URL", "") or ""
-        if configured.strip():
-            normalized = configured.strip().rstrip("/")
-            if not normalized.endswith("/v1"):
-                normalized = f"{normalized}/v1"
-            return [normalized]
-
-        candidates = [
-            "http://host.docker.internal:1234/v1",
-            "http://localhost:1234/v1",
-            "http://127.0.0.1:1234/v1",
-        ]
-        seen = set()
-        urls = []
-        for url in candidates:
-            normalized = str(url or "").strip().rstrip("/")
-            if not normalized:
-                continue
-            if not normalized.endswith("/v1"):
-                normalized = f"{normalized}/v1"
-            if normalized not in seen:
-                seen.add(normalized)
-                urls.append(normalized)
-        return urls
-
-    def _post_chat_completion(self, base_url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        response = self._post(base_url, headers, payload)
-        if response.status_code == 400:
-            fallback_payload = dict(payload)
-            for key in ("thinking", "enable_thinking", "chat_template_kwargs", "reasoning", "response_format"):
-                fallback_payload.pop(key, None)
-            fallback_response = self._post(base_url, headers, fallback_payload)
-            if fallback_response.status_code < 400:
-                response = fallback_response
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            detail = (response.text or "").strip()
-            if len(detail) > 1000:
-                detail = f"{detail[:1000]}..."
-            raise requests.HTTPError(f"{exc}. Response body: {detail}", response=response) from exc
-        return response.json()
-
-    def _post(self, base_url: str, headers: dict[str, str], payload: dict[str, Any]) -> requests.Response:
-        return requests.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=(2.0, 180.0),
-        )
-
     def _build_prompt(self, deal: Deal, notes: list[MeetingNote]) -> str:
         note_blocks = []
         for index, note in enumerate(notes, start=1):
@@ -236,52 +153,16 @@ class MeetingSignalAnalysisService:
             )
             note_blocks.append(f"[NOTE {index} | id={note.id}]\n{note_text}")
 
-        return f"""
-Deal: {deal.title}
-
-Analyze the meeting notes below and produce an investment signal summary for the deal page.
-
-Return JSON with this exact shape:
-{{
-  "executive_summary": "3-5 sentence synthesis across all meetings",
-  "green_signals": [
-    {{
-      "title": "short signal title",
-      "detail": "specific fact pattern with numbers where available",
-      "evidence": ["note title or note id references"],
-      "confidence": "high|medium|low"
-    }}
-  ],
-  "red_signals": [
-    {{
-      "title": "short signal title",
-      "detail": "specific risk or concern with numbers where available",
-      "evidence": ["note title or note id references"],
-      "confidence": "high|medium|low"
-    }}
-  ],
-  "open_questions": [
-    "specific diligence question or missing data request"
-  ]
-}}
-
-Rules:
-- Use only the meeting notes.
-- Prefer concrete metrics and repeated points across meetings.
-- Return complete signals with concise but specific detail.
-- Return at most 8 green signals and at most 8 red signals.
-- Put positive diligence findings under green_signals.
-- Put risks, contradictions, missing evidence, and diligence gaps under red_signals.
-- Do not include markdown fences.
-
-Meeting notes:
-{chr(10).join(note_blocks)}
-""".strip()
+        return PromptCatalogService.render(
+            "meeting_signal_user",
+            deal_title=deal.title,
+            meeting_notes="\n".join(note_blocks),
+        ).strip()
 
     def _parse_json(self, content: str) -> dict[str, Any]:
         raw = (content or "").strip()
         if not raw:
-            raise ValueError("LM Studio returned an empty response.")
+            raise ValueError("The VM returned an empty response.")
         try:
             return json.loads(raw)
         except json.JSONDecodeError:

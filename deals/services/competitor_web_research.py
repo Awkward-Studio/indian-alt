@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from django.conf import settings
 
 from ai_orchestrator.services.llm_providers import VLLMProviderService
+from ai_orchestrator.services.prompt_catalog import PromptCatalogService
 from ai_orchestrator.services.runtime import AIRuntimeService
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from deals.services.competitor_intelligence import competitor_names_from_payload
@@ -26,7 +27,6 @@ class CompetitorWebResearchService:
         self.llm_service = llm_service or VLLMProviderService()
         self.model = (
             AIRuntimeService.get_text_model()
-            or getattr(settings, "LM_STUDIO_MODEL", "")
             or "local-model"
         )
         self.page_fetch_limit = int(getattr(settings, "SEARXNG_PAGE_FETCH_LIMIT", 6) or 6)
@@ -55,7 +55,7 @@ class CompetitorWebResearchService:
         ][:30]
 
         candidate_groups = {"public": [], "private": []}
-        research_queries = self._research_queries(
+        fallback_queries = self._research_queries(
             company_name=company_name,
             sector=sector,
             industry=industry,
@@ -63,6 +63,15 @@ class CompetitorWebResearchService:
             business_summary=business_summary,
             instruction=instruction,
             candidate_groups=candidate_groups,
+        )
+        research_queries, query_plan_diagnostics = self._plan_research_queries(
+            company_name=company_name,
+            sector=sector,
+            industry=industry,
+            location=location,
+            business_summary=business_summary,
+            instruction=instruction,
+            fallback_queries=fallback_queries,
         )
         evidence_results = self._search_balanced_evidence(research_queries)
         if not evidence_results:
@@ -72,6 +81,7 @@ class CompetitorWebResearchService:
                 "message": "The public/private SearXNG queries returned no competitor evidence.",
                 "diagnostics": {
                     "search_queries": research_queries,
+                    "query_plan": query_plan_diagnostics,
                     "search_requests": len(research_queries),
                     "search_sources": 0,
                     "discovery_queries": list(research_queries.values()),
@@ -155,6 +165,7 @@ class CompetitorWebResearchService:
                 "diagnostics": {
                     "model": self.model,
                     "search_queries": research_queries,
+                    "query_plan": query_plan_diagnostics,
                     "search_requests": len(research_queries),
                     "search_sources": search_source_count,
                     "evidence_sources": len(evidence_results),
@@ -172,6 +183,10 @@ class CompetitorWebResearchService:
         )
         grounded = self._confirm_screener_listings(grounded)
         grounded = self._balance_company_types(self._deduplicate(grounded), limit=10)
+        classification_counts = {
+            company_type: sum(item.get("company_type") == company_type for item in grounded)
+            for company_type in ("listed_public", "private", "unknown")
+        }
 
         return {
             "competitors": grounded,
@@ -180,6 +195,7 @@ class CompetitorWebResearchService:
                 "model": self.model,
                 "candidate_groups": candidate_groups,
                 "search_queries": research_queries,
+                "query_plan": query_plan_diagnostics,
                 "search_requests": len(research_queries),
                 "search_sources": search_source_count,
                 "evidence_sources": len(evidence_results),
@@ -190,8 +206,82 @@ class CompetitorWebResearchService:
                 "page_fetches": fetched_pages,
                 "discovered_candidates": len(extracted),
                 "verified_candidates": len(grounded),
+                "classification_counts": classification_counts,
+                "minimum_target": {"listed_public": 4, "private": 4},
+                "minimum_target_met": (
+                    classification_counts["listed_public"] >= 4
+                    and classification_counts["private"] >= 4
+                ),
             },
         }
+
+    def _plan_research_queries(
+        self,
+        *,
+        company_name: str,
+        sector: str,
+        industry: str,
+        location: str,
+        business_summary: str,
+        instruction: str,
+        fallback_queries: dict[str, str],
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        prompt = PromptCatalogService.render(
+            "competitor_search_query_planner",
+            company_name=company_name,
+            sector=sector or "N/A",
+            industry=industry or "N/A",
+            location=location or "N/A",
+            business_summary=(business_summary or "N/A")[:2400],
+            instruction=instruction or "N/A",
+        )
+        payload = {
+            "model": self.model,
+            "system": "Return valid JSON only. Do not include markdown or reasoning.",
+            "prompt": prompt,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "competitor_search_queries",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "public_query": {"type": "string"},
+                            "private_query": {"type": "string"},
+                            "inferred_category": {"type": "string"},
+                        },
+                        "required": ["public_query", "private_query", "inferred_category"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "chat_template_kwargs": {"enable_thinking": False},
+            "options": {"temperature": 0.0, "max_tokens": 500},
+        }
+        try:
+            result = self.llm_service.execute_standard(payload, timeout=180)
+            raw = str(result.get("response") or "").strip()
+            match = re.search(r"\{[\s\S]*\}", raw)
+            parsed = json.loads(match.group(0) if match else raw)
+            public_query = re.sub(r"\s+", " ", str(parsed.get("public_query") or "")).strip()[:350]
+            private_query = re.sub(r"\s+", " ", str(parsed.get("private_query") or "")).strip()[:350]
+            if not public_query or not private_query:
+                raise ValueError("VM query planner returned empty queries")
+            return {
+                "public": public_query,
+                "private": private_query,
+            }, {
+                "source": "vm",
+                "model": self.model,
+                "inferred_category": str(parsed.get("inferred_category") or "").strip(),
+            }
+        except Exception as exc:
+            return fallback_queries, {
+                "source": "deterministic_fallback",
+                "model": self.model,
+                "error": str(exc)[:300],
+            }
 
     def _search_balanced_evidence(self, queries: dict[str, str]) -> list[dict]:
         results_by_route: dict[str, list[dict]] = {}
@@ -473,6 +563,7 @@ class CompetitorWebResearchService:
     ) -> dict[str, str]:
         market = " ".join(value for value in [sector, industry] if value).strip()
         place = location or "India"
+        business_focus = re.sub(r"\s+", " ", str(business_summary or "")).strip()[:180]
         candidate_groups = candidate_groups or {}
         public_names = " OR ".join(f'"{name}"' for name in candidate_groups.get("public", []))
         private_names = " OR ".join(f'"{name}"' for name in candidate_groups.get("private", []))
@@ -484,8 +575,8 @@ class CompetitorWebResearchService:
                     f'({public_names}) {market} {place} NSE BSE listed ticker competitors'
                     if public_names
                     else (
-                        f"{market} India listed companies NSE BSE ticker "
-                        "public stocks sector peers market comparables"
+                        f"{place} listed companies NSE BSE ticker public stocks closest market "
+                        f"comparables for this business: {business_focus or market}"
                     )
                 ),
             ).strip()[:350],
@@ -495,10 +586,14 @@ class CompetitorWebResearchService:
                 (
                     f'({private_names}) {market} {place} private unlisted D2C competitors'
                     if private_names
-                    else f'"{company_name}" competitors {market} {place} private unlisted D2C brands startups'
+                    else (
+                        f'"{company_name}" competitors {business_focus or market} {place} '
+                        "private unlisted brands companies startups"
+                    )
                 ),
             ).strip()[:350],
         }
+
 
     @staticmethod
     def _category_hint(*, company_name: str, sector: str, industry: str) -> str:
@@ -548,8 +643,8 @@ Rules:
 - Never invent a ticker, exchange, ownership relationship, or Screener URL.
 - Merge brands or aliases that refer to the same competitor.
 - Copy 1-3 supporting URLs exactly from the evidence.
-- Target 12 direct competitors: 6 listed_public and 6 private, so validation and target removal can still leave 10.
-- If one group has fewer than 6 evidence-backed companies, use additional evidence-backed companies from the other group.
+- Target at least 6 listed_public and 6 private candidates before validation, so the final set can retain at least 4 of each.
+- If one group has fewer than 4 evidence-backed companies, do not relabel unknown companies to manufacture the quota.
 - Prefer direct competitors over broad conglomerates and return at most 12 companies.
 - Never return the target company, its parent/owner, a source name, or a descriptive group as a competitor.
 - Return one JSON object and no markdown:
@@ -862,11 +957,13 @@ Return one JSON object and no markdown:
         private = [item for item in candidates if item.get("company_type") == "private"]
         unknown = [item for item in candidates if item.get("company_type") not in {"listed_public", "private"}]
 
-        selected = [*public[:5], *private[:5]]
+        # Reserve four slots for each verified route. Fill the remaining slots
+        # evenly from verified candidates before including unverified results.
+        selected = [*public[:4], *private[:4]]
         selected_ids = {id(item) for item in selected}
         remaining = [
             item
-            for item in [*public[5:], *private[5:], *unknown]
+            for item in [*public[4:5], *private[4:5], *public[5:], *private[5:], *unknown]
             if id(item) not in selected_ids
         ]
         return [*selected, *remaining][:limit]

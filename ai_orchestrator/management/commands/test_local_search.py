@@ -19,7 +19,7 @@ class Command(BaseCommand):
         parser.add_argument("--random", action="store_true", help="Test five random deals from the database")
         parser.add_argument(
             "--lm-url",
-            default=getattr(settings, "VLLM_BASE_URL", "http://localhost:1234/v1"),
+            default=getattr(settings, "VLLM_BASE_URL", "http://localhost:8000/v1"),
             help="Override the OpenAI-compatible local model URL",
         )
         parser.add_argument(

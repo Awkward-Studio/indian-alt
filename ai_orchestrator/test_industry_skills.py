@@ -4,7 +4,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from ai_orchestrator.models import AIAuditLog, AISkill
+from ai_orchestrator.models import AIAuditLog, AISkill, AISystemSetting
+from ai_orchestrator.services.prompt_catalog import PROMPTS, PromptCatalogService
 from ai_orchestrator.services.prompts import PromptBuilderService
 from deals.models import Deal, DealDocument
 
@@ -90,6 +91,63 @@ class IndustrySkillApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.skill.refresh_from_db()
         self.assertEqual(self.skill.description, "Review margin structure")
+
+    def test_admin_can_edit_and_reset_every_runtime_prompt(self):
+        for definition in PROMPTS:
+            custom_value = f"Custom {definition.key} prompt"
+            response = self.admin_client.post(
+                "/api/ai/settings/",
+                {
+                    "type": "prompt",
+                    "id": definition.key,
+                    "updates": {"value": custom_value},
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200, definition.key)
+            self.assertEqual(PromptCatalogService.get(definition.key), custom_value)
+
+            response = self.admin_client.post(
+                "/api/ai/settings/",
+                {
+                    "type": "prompt",
+                    "id": definition.key,
+                    "updates": {"action": "reset"},
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200, definition.key)
+            self.assertEqual(PromptCatalogService.get(definition.key), definition.default)
+
+        self.assertFalse(AISystemSetting.objects.filter(key__startswith="AI_PROMPT__").exists())
+
+    def test_runtime_prompt_render_uses_persisted_override(self):
+        PromptCatalogService.update(
+            "analysis_section_rewrite",
+            "Rewrite {{ section_title }} for {{ deal_title }}: {{ instruction }}",
+        )
+
+        rendered = PromptCatalogService.render(
+            "analysis_section_rewrite",
+            section_title="Risks",
+            deal_title="Acme",
+            instruction="Be concise",
+        )
+
+        self.assertEqual(rendered, "Rewrite Risks for Acme: Be concise")
+
+    def test_unknown_or_empty_runtime_prompt_is_rejected(self):
+        for prompt_id, value in (("missing", "x"), ("deal_chat_conversational", "  ")):
+            response = self.admin_client.post(
+                "/api/ai/settings/",
+                {
+                    "type": "prompt",
+                    "id": prompt_id,
+                    "updates": {"value": value},
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 400)
 
     def test_admin_can_create_governed_skill_draft(self):
         response = self.admin_client.post(

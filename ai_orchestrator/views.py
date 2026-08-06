@@ -26,6 +26,7 @@ from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
 from .services.runtime import AIRuntimeService
+from .services.prompt_catalog import PromptCatalogService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
@@ -1160,7 +1161,8 @@ class AISettingsView(APIView):
                 "vm_online": status_data.get("vm_online", False),
                 "vm_status": status_data.get("vm_status", "unknown"),
                 "live_rate": live_rate,
-                "claude_text_model": claude_text_model
+                "claude_text_model": claude_text_model,
+                "prompt_catalog": PromptCatalogService.serialize(),
             })
         except Exception as e: 
             return Response({"error": str(e)}, status=500)
@@ -1197,6 +1199,16 @@ class AISettingsView(APIView):
                     setting.save()
                     return Response({"success": True})
                 return Response({"error": "Key and value are required"}, status=400)
+
+            if target_type == 'prompt':
+                try:
+                    if updates.get('action') == 'reset':
+                        PromptCatalogService.reset(str(target_id))
+                    else:
+                        PromptCatalogService.update(str(target_id), updates.get('value'))
+                except ValueError as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"success": True})
 
             if target_type == 'personality':
                 if target_id == 'new':

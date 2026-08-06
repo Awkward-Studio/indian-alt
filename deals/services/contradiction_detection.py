@@ -659,7 +659,6 @@ class DiscrepancyClassifier:
         self.model = (
             model
             or AIRuntimeService.get_text_model()
-            or getattr(settings, "LM_STUDIO_MODEL", "")
             or "local-model"
         )
 

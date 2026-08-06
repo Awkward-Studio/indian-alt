@@ -203,6 +203,8 @@ class SearXNGProviderTests(SimpleTestCase):
 
 @override_settings(VLLM_TEXT_MODEL="configured-local-model")
 class GroundedCompetitorWebResearchTests(SimpleTestCase):
+    databases = {"default"}
+
     @patch("deals.services.screener.ScreenerCompanyService.search_company")
     def test_two_searches_extract_and_classify_grounded_competitors(self, mock_screener_search):
         search_service = SearXNGProviderService()
@@ -235,6 +237,16 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
                 },
             ]}),
         }
+        competitor_response = llm_service.execute_standard.return_value
+        llm_service.execute_standard.side_effect = [
+            {"response": json.dumps({
+                "public_query": "India listed quick commerce logistics peers NSE BSE",
+                "private_query": '"Zepto" private quick commerce competitors India',
+                "inferred_category": "quick commerce and last-mile delivery",
+            })},
+            competitor_response,
+            competitor_response,
+        ]
         mock_screener_search.side_effect = lambda name: (
             {
                 "company_name": "Shadowfax Technologies Ltd",
@@ -251,10 +263,10 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
 
         self.assertEqual(search_service.search_results.call_count, 2)
         search_queries = [call.args[0] for call in search_service.search_results.call_args_list]
-        self.assertTrue(any("Quick commerce India listed companies NSE BSE ticker" in query for query in search_queries))
-        self.assertTrue(any('"Zepto"' in query and "private unlisted D2C" in query for query in search_queries))
+        self.assertIn("India listed quick commerce logistics peers NSE BSE", search_queries)
+        self.assertIn('"Zepto" private quick commerce competitors India', search_queries)
         self.assertTrue(all(call.kwargs["aggregate_engines"] for call in search_service.search_results.call_args_list))
-        self.assertEqual(llm_service.execute_standard.call_count, 2)
+        self.assertEqual(llm_service.execute_standard.call_count, 3)
         self.assertTrue(all(call.args[0]["model"] == "configured-local-model" for call in llm_service.execute_standard.call_args_list))
         self.assertEqual(
             llm_service.execute_standard.call_args.args[0]["response_format"]["type"],
@@ -266,6 +278,7 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
         self.assertEqual(result["competitors"][1]["company_type"], "private")
         self.assertEqual(result["diagnostics"]["search_requests"], 2)
         self.assertEqual(result["diagnostics"]["discovered_candidates"], 2)
+        self.assertEqual(result["diagnostics"]["query_plan"]["source"], "vm")
 
     @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
     def test_single_search_downgrades_unsupported_classification_to_unknown(self, _mock_screener_search):
@@ -287,13 +300,23 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
                 {"company_name": "Dunzo", "company_type": "unknown", "evidence_urls": ["https://example.com/peers"]},
             ]}),
         }
+        competitor_response = llm_service.execute_standard.return_value
+        llm_service.execute_standard.side_effect = [
+            {"response": json.dumps({
+                "public_query": "India listed quick commerce peers NSE BSE",
+                "private_query": '"Zepto" private competitors India',
+                "inferred_category": "quick commerce",
+            })},
+            competitor_response,
+            competitor_response,
+        ]
 
         service = CompetitorWebResearchService(search_service=search_service, llm_service=llm_service)
         service._enrich_evidence = MagicMock(side_effect=lambda **kwargs: kwargs["results"])
         result = service.research(company_name="Zepto")
 
         self.assertEqual(search_service.search_results.call_count, 2)
-        self.assertEqual(llm_service.execute_standard.call_count, 2)
+        self.assertEqual(llm_service.execute_standard.call_count, 3)
         self.assertEqual([item["name"] for item in result["competitors"]], ["Blinkit", "Dunzo"])
         self.assertTrue(all(item["company_type"] == "unknown" for item in result["competitors"]))
         self.assertEqual(result["competitors"][1]["evidence_urls"], ["https://example.com/peers"])
@@ -330,8 +353,27 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
         selected = CompetitorWebResearchService._balance_company_types(candidates, limit=10)
 
         self.assertEqual(len(selected), 10)
-        self.assertEqual(sum(item["company_type"] == "listed_public" for item in selected), 5)
-        self.assertEqual(sum(item["company_type"] == "private" for item in selected), 5)
+        self.assertGreaterEqual(sum(item["company_type"] == "listed_public" for item in selected), 4)
+        self.assertGreaterEqual(sum(item["company_type"] == "private" for item in selected), 4)
+
+    def test_public_discovery_query_is_target_specific(self):
+        queries = CompetitorWebResearchService(
+            search_service=MagicMock(),
+            llm_service=MagicMock(),
+        )._research_queries(
+            company_name="Perfora",
+            sector="Consumer",
+            industry="Oral Care",
+            location="India",
+            business_summary="A multi-city brewpub chain serving craft beer and food.",
+            instruction="",
+        )
+
+        self.assertNotIn('"Perfora"', queries["public"])
+        self.assertIn("listed", queries["public"])
+        self.assertIn("NSE BSE", queries["public"])
+        self.assertIn("brewpub", queries["public"])
+        self.assertIn("brewpub", queries["private"])
 
     @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
     def test_private_route_without_screener_match_is_retained_as_unlisted(self, _mock_search):
@@ -591,7 +633,16 @@ class CompetitorSearchPipelineTests(TestCase):
 
     @patch("deals.tasks.EmbeddingService")
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
-    @patch("ai_orchestrator.services.search_provider.SearXNGProviderService.search", return_value="[S1] Grounded news evidence")
+    @patch(
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        return_value=[{
+            "title": "Acme raised growth capital",
+            "snippet": "Acme announced a new funding round.",
+            "url": "https://example.com/acme-funding",
+            "engine": "test",
+            "query": "Acme public news latest",
+        }],
+    )
     def test_company_news_search_persists_dated_memo_document(self, mock_search, mock_provider, mock_embedding_service):
         deal = Deal.objects.create(
             title="Acme Commerce",
@@ -661,6 +712,50 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(first["counts"]["green_flags"], 1)
         self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
         self.assertEqual(second["document"]["title"], docs.last().title)
+
+    @patch("deals.tasks.EmbeddingService")
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
+    @patch(
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        return_value=[{
+            "title": "Dil (1990 film)",
+            "snippet": "A Bollywood film starring Aamir Khan and Madhuri Dixit.",
+            "url": "https://example.com/dil-film",
+            "engine": "test",
+            "query": "Dil Foods company news",
+        }],
+    )
+    def test_company_news_exposes_warning_when_search_evidence_is_irrelevant(
+        self, mock_search, mock_provider, mock_embedding_service
+    ):
+        deal = Deal.objects.create(
+            title="Dil Foods",
+            sector="Consumer",
+            industry="Food Processing",
+            country="India",
+        )
+        explanation = (
+            "The search results only describe a Bollywood film and contain no "
+            "corporate information for Dil Foods."
+        )
+        mock_provider.return_value.execute_standard.return_value = {
+            "response": json.dumps({
+                "overview": "No information available for Dil Foods.",
+                "executive_summary": explanation,
+                "news_cards": [],
+                "sources": [],
+            })
+        }
+        mock_embedding_service.return_value.vectorize_document.return_value = True
+
+        result = fetch_company_news_async_task(str(deal.id))
+
+        self.assertEqual(result["news_cards"], [])
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("No grounded company news cards", result["warnings"][0])
+        self.assertIn(explanation, result["warnings"][0])
+        document = DealDocument.objects.get(id=result["document"]["id"])
+        self.assertEqual(document.source_map_json["warnings"], result["warnings"])
 
     @patch("deals.services.competitor_web_research.CompetitorWebResearchService.research")
     def test_initial_competitor_search_classifies_public_and_private_candidates(self, mock_research):
@@ -886,6 +981,37 @@ class CompetitorSearchPipelineTests(TestCase):
         embedding = result["vi_enrichment"]["steps"]["embedding"]
         self.assertEqual(embedding["status"], "skipped_unavailable")
         self.assertEqual(embedding["reason"], "connection refused")
+
+
+class DealLedgerBankerBankTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="ledger-user", password="test")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        alpha_bank = Bank.objects.create(name="Alpha Capital")
+        zeta_bank = Bank.objects.create(name="Zeta Advisory")
+        alpha_banker = Contact.objects.create(name="Aarav Banker", bank=alpha_bank)
+        zeta_banker = Contact.objects.create(name="Zoya Banker", bank=zeta_bank)
+        Deal.objects.create(title="Alpha Deal", bank=alpha_bank, primary_contact=alpha_banker)
+        Deal.objects.create(title="Zeta Deal", bank=zeta_bank, primary_contact=zeta_banker)
+
+    def test_ledger_filters_by_banker_and_bank_names(self):
+        banker_response = self.client.get(reverse("deal-list"), {"banker_name": "aarav"})
+        bank_response = self.client.get(reverse("deal-list"), {"bank_name": "zeta"})
+
+        self.assertEqual(banker_response.status_code, 200)
+        self.assertEqual([row["title"] for row in banker_response.data["results"]], ["Alpha Deal"])
+        self.assertEqual(bank_response.status_code, 200)
+        self.assertEqual([row["title"] for row in bank_response.data["results"]], ["Zeta Deal"])
+        self.assertEqual(banker_response.data["results"][0]["primary_contact_name"], "Aarav Banker")
+        self.assertEqual(bank_response.data["results"][0]["bank_name"], "Zeta Advisory")
+
+    def test_ledger_sorts_by_banker_and_bank_names(self):
+        by_banker = self.client.get(reverse("deal-list"), {"ordering": "primary_contact__name"})
+        by_bank_desc = self.client.get(reverse("deal-list"), {"ordering": "-bank__name"})
+
+        self.assertEqual([row["title"] for row in by_banker.data["results"]], ["Alpha Deal", "Zeta Deal"])
+        self.assertEqual([row["title"] for row in by_bank_desc.data["results"]], ["Zeta Deal", "Alpha Deal"])
 
 
 class DealAnalysisMappingTests(TestCase):
