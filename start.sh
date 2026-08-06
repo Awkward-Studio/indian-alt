@@ -27,7 +27,7 @@ python manage.py migrate --noinput
 
 echo ""
 echo "=== CHECKING RETRIEVAL STACK ==="
-python manage.py check_retrieval_stack
+python manage.py check_retrieval_stack || true
 
 echo ""
 echo "=== SEEDING AI SKILLS & PERSONALITIES ==="

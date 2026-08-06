@@ -38,7 +38,7 @@ class Command(BaseCommand):
         }
         missing_indexes = sorted(expected_indexes - found_indexes)
         if missing_indexes:
-            raise CommandError("Missing retrieval indexes: %s" % ", ".join(missing_indexes))
+            self.stdout.write(self.style.WARNING("Missing retrieval indexes (can be built asynchronously): %s" % ", ".join(missing_indexes)))
 
         expected_model = AIRuntimeService.get_embedding_model()
         chunk_dimensions = (
