@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.db import transaction
 from .graph_service import GraphAPIService
 from .granola_meeting_ingestion import GranolaMeetingEmailIngestionService
+from .email_html_sanitizer import EmailHtmlSanitizer
 from ..models import EmailAccount, Email
 from contacts.models import Contact
 
@@ -60,7 +61,7 @@ class EmailReaderService:
             body: Body object from Graph API
             
         Returns:
-            Tuple of (body_text, body_html)
+            Tuple of (body_text, sanitized_body_html, sanitizer_policy_version)
         """
         if not body:
             return '', ''
@@ -68,14 +69,11 @@ class EmailReaderService:
         content = body.get('content', '')
         content_type = body.get('contentType', 'text')
         
-        if content_type == 'html':
-            # Strip HTML tags to produce a plain-text version for body_text
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
-            plain_text = soup.get_text(separator='\n', strip=True)
-            return plain_text, content
+        if str(content_type).casefold() == 'html':
+            sanitized = EmailHtmlSanitizer.sanitize(content)
+            return sanitized.text, sanitized.html, sanitized.policy_version
         else:
-            return content, ''
+            return content, '', None
 
     def _convert_graph_email_to_model(
         self,
@@ -99,7 +97,7 @@ class EmailReaderService:
             from_email = from_data
         
         # Parse body
-        body_text, body_html = self._parse_email_body(graph_email.get('body', {}))
+        body_text, body_html, sanitizer_version = self._parse_email_body(graph_email.get('body', {}))
         
         # Parse dates
         date_received = None
@@ -151,6 +149,8 @@ class EmailReaderService:
             'bcc_emails': bcc_emails,
             'body_text': body_text,
             'body_html': body_html,
+            'body_html_sanitizer_version': sanitizer_version,
+            'body_html_sanitized_at': timezone.now() if sanitizer_version else None,
             'body_preview': graph_email.get('bodyPreview', ''),
             'date_received': date_received,
             'date_sent': date_sent,
@@ -455,4 +455,3 @@ class EmailReaderService:
         )
         
         return results
-

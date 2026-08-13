@@ -8,13 +8,90 @@ from django.utils import timezone
 
 from deals.models import Deal
 from microsoft.models import Email, EmailAccount
+from microsoft.serializers import EmailListSerializer, EmailSerializer
 from microsoft.services.email_reader import EmailReaderService
+from microsoft.services.email_html_sanitizer import (
+    EMAIL_HTML_SANITIZER_VERSION,
+    EmailHtmlSanitizer,
+)
 from microsoft.services.email_thread_unfolder import EmailThreadUnfolder
 from microsoft.services.email_thread_router import (
     EmailThreadRouteMode,
     EmailThreadRouter,
 )
 from microsoft.services.email_thread_originator import EmailThreadOriginatorResolver
+
+
+class EmailHtmlSanitizerTests(TestCase):
+    def test_removes_active_content_unsafe_urls_css_and_remote_resources(self):
+        result = EmailHtmlSanitizer.sanitize(
+            """
+            <style>body { background: url(https://tracker.test/style) }</style>
+            <script>window.stolen = true</script>
+            <svg><script>alert(1)</script></svg>
+            <form action="https://attacker.test"><input name="token"></form>
+            <iframe src="https://attacker.test"></iframe>
+            <object data="https://attacker.test"></object>
+            <img src="https://tracker.test/pixel.gif" width="1" height="1">
+            <p class="external" style="background:url(javascript:alert(1))" onclick="alert(1)">Safe note</p>
+            <a href="javascript:alert(1)">Unsafe link</a>
+            <a href="data:text/html,boom">Data link</a>
+            <a href="https://example.test/deal">Safe link</a>
+            """
+        )
+
+        lowered = result.html.casefold()
+        for marker in (
+            "<script", "<style", "<svg", "<form", "<iframe", "<object",
+            "<img", "onclick", "javascript:", "data:text", "tracker.test",
+        ):
+            self.assertNotIn(marker, lowered)
+        self.assertIn("<p>Safe note</p>", result.html)
+        self.assertIn('href="https://example.test/deal"', result.html)
+        self.assertIn('rel="nofollow noopener noreferrer"', result.html)
+        self.assertIn('target="_blank"', result.html)
+        self.assertNotIn("window.stolen", result.text)
+        self.assertEqual(result.policy_version, EMAIL_HTML_SANITIZER_VERSION)
+
+    def test_preserves_readable_business_email_structure_and_is_idempotent(self):
+        source = (
+            '<h2>Investment memo</h2><p><strong>Revenue</strong>: INR 80 Cr</p>'
+            '<table style="color:red"><tr><th scope="col">Year</th><th>Value</th></tr>'
+            '<tr><td rowspan="2">FY26</td><td>80</td></tr></table>'
+            '<blockquote>Quoted context</blockquote><ul><li>First</li></ul>'
+        )
+
+        first = EmailHtmlSanitizer.sanitize(source)
+        second = EmailHtmlSanitizer.sanitize(first.html)
+
+        self.assertEqual(second.html, first.html)
+        self.assertIn("<h2>Investment memo</h2>", first.html)
+        self.assertIn("<table>", first.html)
+        self.assertIn('scope="col"', first.html)
+        self.assertIn('rowspan="2"', first.html)
+        self.assertNotIn("style=", first.html)
+
+    def test_reprocessing_command_is_bounded_explicit_and_idempotent(self):
+        account = EmailAccount.objects.create(email="legacy@example.test")
+        email = Email.objects.create(
+            email_account=account,
+            graph_id="legacy-html",
+            body_html='<p onclick="steal()">Legacy</p><img src="https://tracker.test/pixel">',
+        )
+
+        call_command("resanitize_email_html", limit=1)
+        email.refresh_from_db()
+        self.assertIsNone(email.body_html_sanitizer_version)
+
+        call_command("resanitize_email_html", apply=True, limit=1)
+        email.refresh_from_db()
+        self.assertEqual(email.body_html, "<p>Legacy</p>")
+        self.assertEqual(email.body_html_sanitizer_version, EMAIL_HTML_SANITIZER_VERSION)
+        self.assertIsNotNone(email.body_html_sanitized_at)
+
+        call_command("resanitize_email_html", apply=True, limit=1)
+        email.refresh_from_db()
+        self.assertEqual(email.body_html, "<p>Legacy</p>")
 
 
 class EmailThreadRouterTests(TestCase):
@@ -340,6 +417,44 @@ class EmailReaderPipelineTests(TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(Email.objects.count(), 0)
         self.assertIn("Graph unavailable", result["errors"][0])
+
+    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
+    @patch("microsoft.services.email_reader.GraphAPIService")
+    def test_html_graph_body_is_sanitized_before_persistence(self, graph_cls, _process_email):
+        message = self._graph_message(
+            "graph-html",
+            "unused",
+            "2026-08-05T08:00:00Z",
+        )
+        message["body"] = {
+            "contentType": "HTML",
+            "content": (
+                '<p onclick="steal()">Visible evidence</p>'
+                '<img src="https://tracker.test/pixel">'
+                '<script>hidden attack</script>'
+            ),
+        }
+        graph_cls.return_value.get_messages.side_effect = [
+            {"value": [message]},
+            {"value": []},
+        ]
+
+        result = EmailReaderService().fetch_emails_for_account(self.account)
+
+        self.assertTrue(result["success"])
+        stored = Email.objects.get(graph_id="graph-html")
+        self.assertEqual(stored.body_html, "<p>Visible evidence</p>")
+        self.assertEqual(stored.body_text, "Visible evidence")
+        self.assertEqual(stored.body_html_sanitizer_version, EMAIL_HTML_SANITIZER_VERSION)
+        self.assertIsNotNone(stored.body_html_sanitized_at)
+        self.assertEqual(
+            EmailListSerializer(stored).data["sanitizer_version"],
+            EMAIL_HTML_SANITIZER_VERSION,
+        )
+        self.assertEqual(
+            EmailSerializer(stored).data["sanitizer_version"],
+            EMAIL_HTML_SANITIZER_VERSION,
+        )
 
 
 class ThreadTaskPayloadTests(TestCase):

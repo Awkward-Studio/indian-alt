@@ -46,6 +46,10 @@ class EmailSerializer(serializers.ModelSerializer):
         read_only=True
     )
     is_meeting_note_email = serializers.SerializerMethodField()
+    sanitizer_version = serializers.IntegerField(
+        source='body_html_sanitizer_version',
+        read_only=True,
+    )
 
     def get_is_meeting_note_email(self, obj):
         return GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
@@ -68,6 +72,10 @@ class EmailListSerializer(serializers.ModelSerializer):
     )
     deal_title = serializers.CharField(source='deal.title', read_only=True)
     is_meeting_note_email = serializers.SerializerMethodField()
+    sanitizer_version = serializers.IntegerField(
+        source='body_html_sanitizer_version',
+        read_only=True,
+    )
 
     def get_is_meeting_note_email(self, obj):
         return GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
@@ -77,7 +85,7 @@ class EmailListSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'email_account', 'email_account_email', 'subject',
             'from_email', 'to_emails', 'cc_emails', 'bcc_emails',
-            'body_text', 'body_html', 'date_received', 'date_sent', 
+            'body_text', 'body_html', 'sanitizer_version', 'date_received', 'date_sent',
             'importance', 'is_read', 'has_attachments', 'body_preview', 
             'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id',
             'deal_title', 'is_meeting_note_email'

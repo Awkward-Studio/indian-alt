@@ -107,6 +107,16 @@ class Email(models.Model):
     # Email body
     body_text = models.TextField(blank=True, null=True, help_text='Plain text email body')
     body_html = models.TextField(blank=True, null=True, help_text='HTML email body')
+    body_html_sanitizer_version = models.PositiveSmallIntegerField(
+        blank=True,
+        null=True,
+        help_text='Version of the allowlist policy applied to body_html',
+    )
+    body_html_sanitized_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text='When body_html was last processed by the email sanitizer',
+    )
     body_preview = models.TextField(
         blank=True,
         null=True,
