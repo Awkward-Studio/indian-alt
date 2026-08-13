@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from contacts.models import Contact
 
@@ -94,6 +95,83 @@ class MeetingNote(models.Model):
 
     def __str__(self):
         return self.title or f'Meeting Note {self.id}'
+
+
+class MeetingSignalFlag(models.Model):
+    class Kind(models.TextChoices):
+        RED = 'RED', 'Red flag'
+        GREEN = 'GREEN', 'Green signal'
+        QUESTION = 'QUESTION', 'Open question'
+
+    class ReviewStatus(models.TextChoices):
+        UNREVIEWED = 'UNREVIEWED', 'Unreviewed'
+        CONFIRMED = 'CONFIRMED', 'Confirmed'
+        DISMISSED = 'DISMISSED', 'Dismissed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        'deals.Deal',
+        on_delete=models.CASCADE,
+        related_name='meeting_signal_flags',
+    )
+    fingerprint = models.CharField(max_length=64)
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    title = models.CharField(max_length=500)
+    detail = models.TextField()
+    confidence = models.CharField(max_length=20, default='medium')
+    evidence = models.JSONField(default=list)
+    source_note_ids = models.JSONField(default=list)
+    first_audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='first_detected_meeting_signals',
+    )
+    latest_audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='latest_detected_meeting_signals',
+    )
+    detection_count = models.PositiveIntegerField(default=1)
+    review_status = models.CharField(
+        max_length=20,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.UNREVIEWED,
+        db_index=True,
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_meeting_signals',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_comment = models.TextField(blank=True)
+    first_detected_at = models.DateTimeField(auto_now_add=True)
+    last_detected_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'meeting_signal_flag'
+        ordering = ['-last_detected_at', 'kind', 'title']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['deal', 'fingerprint'],
+                name='unique_meeting_signal_fingerprint_per_deal',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(reviewer__isnull=True, reviewed_at__isnull=True)
+                    | models.Q(reviewer__isnull=False, reviewed_at__isnull=False)
+                ),
+                name='meeting_signal_reviewer_fields_paired',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['deal', 'review_status']),
+            models.Index(fields=['deal', 'kind']),
+        ]
 
 
 class MeetingContact(models.Model):

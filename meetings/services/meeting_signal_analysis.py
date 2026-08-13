@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import re
 import time
@@ -11,7 +12,11 @@ from ai_orchestrator.services.prompt_catalog import PromptCatalogService
 from ai_orchestrator.services.runtime import AIRuntimeService
 from ai_orchestrator.services.realtime import broadcast_audit_log_update
 from deals.models import Deal
-from meetings.models import MeetingNote
+from django.db import transaction
+from django.db.models import F
+from django.utils import timezone
+
+from meetings.models import MeetingNote, MeetingSignalFlag
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,14 @@ class MeetingSignalAnalysisService:
                     "source_metadata",
                 ]
             )
+            result["signals"] = self.persist_signals(
+                deal=deal,
+                notes=notes,
+                audit_log=audit_log,
+                result=result,
+            )
+            audit_log.parsed_json = result
+            audit_log.save(update_fields=["parsed_json"])
             self._broadcast_audit(audit_log, done=True)
             return result
 
@@ -131,6 +144,100 @@ class MeetingSignalAnalysisService:
         )
         self._broadcast_audit(audit_log, done=True)
         raise RuntimeError(error_message)
+
+    @staticmethod
+    def _normalized_text(value: Any) -> str:
+        return " ".join(str(value or "").casefold().split())
+
+    @classmethod
+    def fingerprint(cls, *, kind: str, title: str, detail: str, evidence: list, source_note_ids: list[str]) -> str:
+        payload = {
+            "kind": kind,
+            "title": cls._normalized_text(title),
+            "detail": cls._normalized_text(detail),
+            "evidence": sorted(cls._normalized_text(item.get("passage")) for item in evidence),
+            "source_note_ids": sorted(str(value) for value in source_note_ids),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @classmethod
+    @transaction.atomic
+    def persist_signals(cls, *, deal: Deal, notes: list[MeetingNote], audit_log: AIAuditLog, result: dict[str, Any]) -> list[dict[str, Any]]:
+        source_note_ids = sorted(str(note.id) for note in notes)
+        candidates = []
+        for key, kind in (
+            ("red_signals", MeetingSignalFlag.Kind.RED),
+            ("green_signals", MeetingSignalFlag.Kind.GREEN),
+        ):
+            for item in result.get(key) or []:
+                passages = [str(value).strip() for value in item.get("evidence", []) if str(value).strip()]
+                evidence = [
+                    {"passage": passage, "source_note_ids": source_note_ids}
+                    for passage in passages
+                ]
+                candidates.append((kind, item["title"], item["detail"], item.get("confidence") or "medium", evidence))
+        for question in result.get("open_questions") or []:
+            text = str(question).strip()
+            if text:
+                candidates.append((MeetingSignalFlag.Kind.QUESTION, text[:500], text, "medium", []))
+
+        persisted = []
+        for kind, title, detail, confidence, evidence in candidates:
+            fingerprint = cls.fingerprint(
+                kind=kind,
+                title=title,
+                detail=detail,
+                evidence=evidence,
+                source_note_ids=source_note_ids,
+            )
+            flag, created = MeetingSignalFlag.objects.get_or_create(
+                deal=deal,
+                fingerprint=fingerprint,
+                defaults={
+                    "kind": kind,
+                    "title": title,
+                    "detail": detail,
+                    "confidence": confidence,
+                    "evidence": evidence,
+                    "source_note_ids": source_note_ids,
+                    "first_audit_log": audit_log,
+                    "latest_audit_log": audit_log,
+                },
+            )
+            if not created:
+                MeetingSignalFlag.objects.filter(pk=flag.pk).update(
+                    latest_audit_log=audit_log,
+                    detection_count=F("detection_count") + 1,
+                    last_detected_at=timezone.now(),
+                )
+                flag.refresh_from_db()
+            persisted.append(cls.serialize_flag(flag))
+        return persisted
+
+    @staticmethod
+    def serialize_flag(flag: MeetingSignalFlag) -> dict[str, Any]:
+        reviewer = flag.reviewer
+        profile = getattr(reviewer, "profile", None) if reviewer else None
+        return {
+            "id": str(flag.id),
+            "deal_id": str(flag.deal_id),
+            "fingerprint": flag.fingerprint,
+            "kind": flag.kind,
+            "title": flag.title,
+            "detail": flag.detail,
+            "confidence": flag.confidence,
+            "evidence": flag.evidence,
+            "source_note_ids": flag.source_note_ids,
+            "first_audit_log_id": str(flag.first_audit_log_id) if flag.first_audit_log_id else None,
+            "latest_audit_log_id": str(flag.latest_audit_log_id) if flag.latest_audit_log_id else None,
+            "detection_count": flag.detection_count,
+            "review_status": flag.review_status,
+            "review_comment": flag.review_comment,
+            "reviewed_at": flag.reviewed_at.isoformat() if flag.reviewed_at else None,
+            "reviewer": ({"id": reviewer.id, "name": getattr(profile, "name", None) or reviewer.get_username()} if reviewer else None),
+            "first_detected_at": flag.first_detected_at.isoformat(),
+            "last_detected_at": flag.last_detected_at.isoformat(),
+        }
 
     def _broadcast_audit(self, audit_log: AIAuditLog, *, done: bool = False) -> None:
         try:
