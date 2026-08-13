@@ -4,7 +4,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from ai_orchestrator.models import AIAuditLog, AISkill, AISystemSetting
+from accounts.models import Profile
+from ai_orchestrator.models import (
+    AIAuditLog, AISkill, AISystemSetting, DealIndustrySkillAssignment,
+)
 from ai_orchestrator.services.prompt_catalog import PROMPTS, PromptCatalogService
 from ai_orchestrator.services.prompts import PromptBuilderService
 from deals.models import Deal, DealDocument
@@ -395,3 +398,125 @@ class IndustrySkillApiTests(TestCase):
             prompt,
             "Review market growth.\n\nGoverned deal context",
         )
+
+    def test_admin_assigns_canonical_skill_and_lists_deal_state(self):
+        response = self.admin_client.put(
+            f"/api/ai/skills/deals/{self.deal.id}/{self.skill.id}/",
+            {
+                "enabled": True,
+                "auto_run": False,
+                "inputs": {"focus": "market growth"},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        assignment = DealIndustrySkillAssignment.objects.get(deal=self.deal)
+        self.assertEqual(assignment.skill, self.skill)
+        self.assertEqual(assignment.configured_by, self.admin)
+        listed = self.admin_client.get(f"/api/ai/skills/deals/{self.deal.id}/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(listed.data["can_manage"])
+        self.assertEqual(listed.data["assignments"][0]["skill"]["version"], 3)
+
+    @patch("ai_orchestrator.tasks.run_industry_skill_assignment_task.delay")
+    def test_automatic_assignment_queues_once_per_context_and_version(self, delay):
+        assignment = DealIndustrySkillAssignment.objects.create(
+            deal=self.deal,
+            skill=self.skill,
+            enabled=True,
+            auto_run=True,
+            inputs={"focus": "market growth"},
+            configured_by=self.admin,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            first = self.admin_client.get(f"/api/ai/skills/deals/{self.deal.id}/")
+        with self.captureOnCommitCallbacks(execute=True):
+            second = self.admin_client.get(f"/api/ai/skills/deals/{self.deal.id}/")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        delay.assert_called_once_with(str(assignment.id))
+
+        self.skill.version += 1
+        self.skill.save(update_fields=["version"])
+        with self.captureOnCommitCallbacks(execute=True):
+            self.admin_client.get(f"/api/ai/skills/deals/{self.deal.id}/")
+        self.assertEqual(delay.call_count, 2)
+
+    def test_unassigned_analyst_cannot_configure_deal_skill(self):
+        Profile.objects.create(
+            user=self.analyst,
+            email="analyst@example.com",
+            name="Analyst",
+        )
+        response = self.analyst_client.put(
+            f"/api/ai/skills/deals/{self.deal.id}/{self.skill.id}/",
+            {
+                "inputs": {"focus": "market growth"},
+                "enabled": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(DealIndustrySkillAssignment.objects.exists())
+
+    @patch("ai_orchestrator.services.industry_skills.AIProcessorService")
+    def test_manual_assignment_run_is_attributable_and_source_grounded(self, processor):
+        document = DealDocument.objects.create(
+            deal=self.deal,
+            title="Market report",
+            normalized_text="The market grew 10%.",
+        )
+        assignment = DealIndustrySkillAssignment.objects.create(
+            deal=self.deal,
+            skill=self.skill,
+            inputs={"focus": "market growth"},
+            source_document_ids=[str(document.id)],
+            configured_by=self.admin,
+        )
+
+        def complete(*, metadata, **kwargs):
+            audit = AIAuditLog.objects.get(id=metadata["audit_log_id"])
+            audit.status = "COMPLETED"
+            audit.is_success = True
+            audit.raw_response = "Market growth was 10%."
+            audit.completed_at = timezone.now()
+            audit.save()
+            return {"finding": "Market growth was 10%."}
+
+        processor.return_value.process_content.side_effect = complete
+        response = self.admin_client.post(
+            f"/api/ai/skills/deals/{self.deal.id}/{self.skill.id}/run/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        run = response.data["assignment"]["latest_run"]
+        self.assertEqual(run["trigger"], "manual")
+        self.assertEqual(run["skill_version"], 3)
+        self.assertEqual(run["sources"][0]["document_id"], str(document.id))
+        self.assertEqual(AIAuditLog.objects.get(id=run["audit_log_id"]).requested_by, self.admin)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.last_run_status, "COMPLETED")
+
+    def test_retired_assignment_cannot_run(self):
+        DealIndustrySkillAssignment.objects.create(
+            deal=self.deal,
+            skill=self.skill,
+            inputs={"focus": "market growth"},
+        )
+        self.skill.status = AISkill.Status.RETIRED
+        self.skill.save(update_fields=["status"])
+
+        response = self.admin_client.post(
+            f"/api/ai/skills/deals/{self.deal.id}/{self.skill.id}/run/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(AIAuditLog.objects.exists())

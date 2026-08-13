@@ -108,6 +108,69 @@ class AISkill(models.Model):
         return self.name
 
 
+class DealIndustrySkillAssignment(models.Model):
+    class RunStatus(models.TextChoices):
+        IDLE = "IDLE", "Idle"
+        QUEUED = "QUEUED", "Queued"
+        PROCESSING = "PROCESSING", "Processing"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        "deals.Deal",
+        on_delete=models.CASCADE,
+        related_name="industry_skill_assignments",
+    )
+    skill = models.ForeignKey(
+        AISkill,
+        on_delete=models.PROTECT,
+        related_name="deal_assignments",
+    )
+    enabled = models.BooleanField(default=True)
+    auto_run = models.BooleanField(default=False)
+    inputs = models.JSONField(default=dict, blank=True)
+    source_document_ids = models.JSONField(default=list, blank=True)
+    last_context_hash = models.CharField(max_length=64, blank=True, default="")
+    last_run_status = models.CharField(
+        max_length=20,
+        choices=RunStatus.choices,
+        default=RunStatus.IDLE,
+    )
+    last_run_trigger = models.CharField(max_length=20, blank=True, default="")
+    last_audit_log = models.ForeignKey(
+        "AIAuditLog",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="industry_skill_assignments",
+    )
+    configured_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="configured_industry_skills",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["skill__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deal", "skill"],
+                name="unique_deal_industry_skill_assignment",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["deal", "enabled", "auto_run"]),
+        ]
+
+    def __str__(self):
+        return f"{self.deal_id}: {self.skill.name}"
+
+
 class AnalysisProtocol(models.Model):
     """
     Stores institutional rules for deal analysis. 

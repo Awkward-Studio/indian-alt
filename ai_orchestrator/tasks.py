@@ -885,3 +885,20 @@ def check_local_ai_connection_task(self):
     cache.set("local_ai_connection_status", result, timeout=300)
     logger.info("Background local AI connection probe completed: %s", result)
     return result
+
+
+@shared_task(bind=True, autoretry_for=(), max_retries=0)
+def run_industry_skill_assignment_task(self, assignment_id):
+    """Execute one idempotently queued Industry Overview skill assignment."""
+    from .services.industry_skills import IndustrySkillService
+
+    audit_log = IndustrySkillService.run(
+        assignment_id,
+        requested_by=None,
+        trigger="automatic",
+    )
+    return {
+        "assignment_id": str(assignment_id),
+        "audit_log_id": str(audit_log.id) if audit_log else None,
+        "status": audit_log.status if audit_log else "SKIPPED",
+    }

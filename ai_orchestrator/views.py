@@ -15,7 +15,10 @@ from rest_framework.decorators import action
 from rest_framework import status, viewsets
 from django.http import StreamingHttpResponse
 
-from .models import AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog, DocumentChunk
+from .models import (
+    AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog,
+    DealIndustrySkillAssignment, DocumentChunk,
+)
 from .serializers import (
     AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer,
     AISkillSerializer,
@@ -26,6 +29,7 @@ from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
 from .services.runtime import AIRuntimeService
+from .services.industry_skills import IndustrySkillService
 from .services.prompt_catalog import PromptCatalogService
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
@@ -1555,5 +1559,166 @@ class AISkillsView(APIView):
                 "sources": source_metadata["sources"],
                 "result": result,
             },
+            status=response_status,
+        )
+
+
+def _can_manage_deal_industry_skills(user, deal):
+    if user.is_superuser or user.is_staff:
+        return True
+    profile = getattr(user, "profile", None)
+    return bool(
+        profile
+        and not profile.is_disabled
+        and (profile.is_admin or deal.responsibility.filter(id=profile.id).exists())
+    )
+
+
+class DealIndustrySkillsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _deal(deal_id):
+        return Deal.objects.filter(id=deal_id).first()
+
+    def get(self, request, deal_id):
+        deal = self._deal(deal_id)
+        if not deal:
+            return Response({"error": "Deal not found."}, status=404)
+        assignments = list(
+            DealIndustrySkillAssignment.objects.filter(deal=deal)
+            .select_related("skill", "last_audit_log")
+            .order_by("skill__name")
+        )
+        for assignment in assignments:
+            IndustrySkillService.enqueue_automatic(assignment)
+        assignments = list(
+            DealIndustrySkillAssignment.objects.filter(deal=deal)
+            .select_related("skill", "last_audit_log")
+            .order_by("skill__name")
+        )
+        skills = AISkill.objects.filter(
+            status=AISkill.Status.APPROVED,
+            is_industry_overview_eligible=True,
+        ).order_by("name")
+        return Response({
+            "can_manage": _can_manage_deal_industry_skills(request.user, deal),
+            "eligible_skills": AISkillSerializer(skills, many=True).data,
+            "assignments": [IndustrySkillService.serialize(item) for item in assignments],
+        })
+
+
+class DealIndustrySkillAssignmentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _resolve(self, deal_id, skill_id):
+        deal = Deal.objects.filter(id=deal_id).first()
+        skill = AISkill.objects.filter(id=skill_id).first()
+        return deal, skill
+
+    def put(self, request, deal_id, skill_id):
+        deal, skill = self._resolve(deal_id, skill_id)
+        if not deal:
+            return Response({"error": "Deal not found."}, status=404)
+        if not _can_manage_deal_industry_skills(request.user, deal):
+            return Response({"error": "You do not have permission to manage this deal."}, status=403)
+        if (
+            not skill
+            or skill.status != AISkill.Status.APPROVED
+            or not skill.is_industry_overview_eligible
+        ):
+            return Response(
+                {"error": "The selected skill is not approved for Industry Overview."},
+                status=403,
+            )
+        inputs = request.data.get("inputs", {})
+        try:
+            inputs = AIRuntimeService.validate_skill_inputs(skill, inputs)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
+        document_ids = request.data.get("source_document_ids", [])
+        if not isinstance(document_ids, list) or len(document_ids) > 20:
+            return Response(
+                {"error": "source_document_ids must be a list of at most 20 IDs."},
+                status=400,
+            )
+        try:
+            valid_count = DealDocument.objects.filter(
+                deal=deal, id__in=document_ids
+            ).count()
+        except (DjangoValidationError, ValueError):
+            return Response({"error": "source_document_ids must contain valid UUIDs."}, status=400)
+        if valid_count != len(set(str(value) for value in document_ids)):
+            return Response(
+                {"error": "Every source document must belong to the selected deal."},
+                status=400,
+            )
+        assignment, _created = DealIndustrySkillAssignment.objects.update_or_create(
+            deal=deal,
+            skill=skill,
+            defaults={
+                "enabled": bool(request.data.get("enabled", True)),
+                "auto_run": bool(request.data.get("auto_run", False)),
+                "inputs": inputs,
+                "source_document_ids": [str(value) for value in document_ids],
+                "configured_by": request.user,
+            },
+        )
+        assignment = DealIndustrySkillAssignment.objects.select_related(
+            "skill", "last_audit_log", "deal"
+        ).get(id=assignment.id)
+        queued = IndustrySkillService.enqueue_automatic(assignment)
+        assignment.refresh_from_db()
+        return Response({
+            "queued": queued,
+            "assignment": IndustrySkillService.serialize(assignment),
+        })
+
+    def delete(self, request, deal_id, skill_id):
+        deal, _skill = self._resolve(deal_id, skill_id)
+        if not deal:
+            return Response({"error": "Deal not found."}, status=404)
+        if not _can_manage_deal_industry_skills(request.user, deal):
+            return Response({"error": "You do not have permission to manage this deal."}, status=403)
+        assignment = DealIndustrySkillAssignment.objects.filter(
+            deal=deal, skill_id=skill_id
+        ).first()
+        if not assignment:
+            return Response({"error": "Assignment not found."}, status=404)
+        assignment.enabled = False
+        assignment.auto_run = False
+        assignment.configured_by = request.user
+        assignment.save(update_fields=["enabled", "auto_run", "configured_by", "updated_at"])
+        return Response(status=204)
+
+
+class DealIndustrySkillRunView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, deal_id, skill_id):
+        deal = Deal.objects.filter(id=deal_id).first()
+        if not deal:
+            return Response({"error": "Deal not found."}, status=404)
+        if not _can_manage_deal_industry_skills(request.user, deal):
+            return Response({"error": "You do not have permission to run skills for this deal."}, status=403)
+        assignment = DealIndustrySkillAssignment.objects.filter(
+            deal=deal, skill_id=skill_id
+        ).select_related("deal", "skill", "last_audit_log").first()
+        if not assignment:
+            return Response({"error": "Assignment not found."}, status=404)
+        try:
+            audit_log = IndustrySkillService.run(
+                assignment.id,
+                requested_by=request.user,
+                trigger="manual",
+            )
+        except PermissionError as exc:
+            return Response({"error": str(exc)}, status=403)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
+        assignment.refresh_from_db()
+        response_status = 200 if audit_log.status == "COMPLETED" else 502
+        return Response(
+            {"assignment": IndustrySkillService.serialize(assignment)},
             status=response_status,
         )
