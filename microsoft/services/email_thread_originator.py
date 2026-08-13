@@ -19,12 +19,16 @@ class EmailThreadOriginatorResolver:
 
     @classmethod
     def resolve(cls, messages: Iterable[object]) -> EmailThreadOriginator | None:
-        ordered = sorted(messages, key=cls._sort_key)
+        ordered = sorted(list(messages), key=cls._sort_key)
+        mailbox_addresses = {
+            str(getattr(getattr(message, "email_account", None), "email", None) or "").strip().casefold()
+            for message in ordered
+        }
+        mailbox_addresses.discard("")
+
         for position, message in enumerate(ordered):
             address = str(getattr(message, "from_email", None) or "").strip().casefold()
-            account = getattr(message, "email_account", None)
-            mailbox = str(getattr(account, "email", None) or "").strip().casefold()
-            if address and address != mailbox:
+            if address and address not in mailbox_addresses:
                 return EmailThreadOriginator(
                     email_id=str(getattr(message, "id", "")),
                     address=address,

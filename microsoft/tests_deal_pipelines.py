@@ -159,6 +159,31 @@ class NewDealEmailPipelineTests(TestCase):
         )
         self.assertEqual(DealDocument.objects.filter(deal=deal).count(), 5)
 
+    @patch("deals.services.deal_creation.DealCreationService._extract_documents_from_email")
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
+    def test_explicit_primary_contact_is_not_replaced_by_thread_originator(
+        self, _embedding, _extract_documents
+    ):
+        curated_contact = Contact.objects.create(
+            name="Curated Banker",
+            email="curated@example.test",
+        )
+        self.first.from_email = "originator@example.test"
+        self.first.save(update_fields=["from_email"])
+        deal = Deal.objects.create(title="Acme", primary_contact=curated_contact)
+
+        DealCreationService.process_deal_creation(
+            deal,
+            {
+                "source_email_id": str(self.first.id),
+                "primary_contact": curated_contact,
+            },
+        )
+
+        deal.refresh_from_db()
+        self.assertEqual(deal.primary_contact_id, curated_contact.id)
+        self.assertFalse(Contact.objects.filter(email="originator@example.test").exists())
+
 
 class ExistingDealEmailPipelineTests(TestCase):
     def setUp(self):

@@ -245,6 +245,31 @@ class EmailThreadOriginatorTests(TestCase):
         self.assertEqual(originator.address, "banker@one.test")
         self.assertEqual(originator.position, 1)
 
+    def test_excludes_every_known_mailbox_address_in_cross_mailbox_thread(self):
+        first_account = SimpleNamespace(email="pipeline@example.test")
+        second_account = SimpleNamespace(email="secondary@example.test")
+        now = timezone.now()
+        messages = [
+            SimpleNamespace(
+                id="cross-mailbox",
+                from_email=second_account.email,
+                email_account=first_account,
+                date_received=now,
+            ),
+            SimpleNamespace(
+                id="external",
+                from_email="banker@example.test",
+                email_account=second_account,
+                date_received=now + timedelta(minutes=1),
+            ),
+        ]
+
+        originator = EmailThreadOriginatorResolver.resolve(messages)
+
+        self.assertEqual(originator.email_id, "external")
+        self.assertEqual(originator.address, "banker@example.test")
+        self.assertEqual(originator.position, 1)
+
 
 class EmailReaderPipelineTests(TestCase):
     def setUp(self):

@@ -52,6 +52,13 @@ class DealCreationService:
     def _get_analysis_model_data(analysis_json: dict | None) -> dict:
         if not isinstance(analysis_json, dict):
             return {}
+
+        portable = analysis_json.get('portable_deal_data')
+        if isinstance(portable, dict):
+            portable_model_data = portable.get('deal_model_data')
+            if isinstance(portable_model_data, dict):
+                return portable_model_data
+
         model_data = analysis_json.get('deal_model_data')
         return model_data if isinstance(model_data, dict) else {}
 
@@ -160,34 +167,6 @@ class DealCreationService:
             analysis_kind=analysis_kind,
         )
         return normalized
-
-    @staticmethod
-    def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):
-        if not isinstance(analysis_json, dict):
-            return
-
-        model_data = DealCreationService._get_analysis_model_data(analysis_json)
-        analyst_report = analysis_json.get('analyst_report')
-        changed_fields = []
-
-    @staticmethod
-    def _get_analysis_model_data(analysis_json: dict) -> dict:
-        """
-        Helper to extract deal_model_data from various possible JSON structures.
-        """
-        if not isinstance(analysis_json, dict):
-            return {}
-
-        # 1. Check portable_deal_data (Phase 3 Synthesis format)
-        portable = analysis_json.get("portable_deal_data")
-        if isinstance(portable, dict) and "deal_model_data" in portable:
-            return portable["deal_model_data"]
-
-        # 2. Check direct deal_model_data (Standard extraction format)
-        if "deal_model_data" in analysis_json:
-            return analysis_json["deal_model_data"]
-
-        return analysis_json
 
     @staticmethod
     def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):

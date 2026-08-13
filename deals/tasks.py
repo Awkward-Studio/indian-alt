@@ -1282,7 +1282,13 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
             audit_log.save(update_fields=['status', 'error_message', 'source_metadata'])
             return {"error": "No text extracted"}
 
-        existing_canonical_snapshot = ((deal.current_analysis or {}).get("canonical_snapshot") or {}) if hasattr(deal, "current_analysis") else {}
+        latest_existing_analysis = deal.analyses.order_by("-version", "-created_at").first()
+        latest_existing_payload = (
+            latest_existing_analysis.analysis_json
+            if latest_existing_analysis and isinstance(latest_existing_analysis.analysis_json, dict)
+            else {}
+        )
+        existing_canonical_snapshot = latest_existing_payload.get("canonical_snapshot") or {}
         existing_summary = (existing_canonical_snapshot.get("analyst_report") or deal.deal_summary or "")
         
         # Calculate next version from existing analyses
@@ -1761,11 +1767,17 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
             analysis.setdefault("deal_model_data", {})["title"] = proposed_intel.get("company_name")
 
         # Apply the synthesis to the actual Deal object if it exists
-        existing_canonical_snapshot = (
-            ((deal.current_analysis or {}).get("canonical_snapshot") or {})
-            if deal and hasattr(deal, "current_analysis")
+        latest_existing_analysis = (
+            deal.analyses.order_by("-version", "-created_at").first()
+            if deal
+            else None
+        )
+        latest_existing_payload = (
+            latest_existing_analysis.analysis_json
+            if latest_existing_analysis and isinstance(latest_existing_analysis.analysis_json, dict)
             else {}
         )
+        existing_canonical_snapshot = latest_existing_payload.get("canonical_snapshot") or {}
         analysis_kind = AnalysisKind.SUPPLEMENTAL if deal else AnalysisKind.INITIAL
         document_evidence = [
             item.get("normalized_json") or item.get("document_artifact") or {}
