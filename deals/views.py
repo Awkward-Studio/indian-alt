@@ -13,12 +13,13 @@ from django.db import transaction
 from django.db.models import CharField, Exists, F, OuterRef, Q, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
     Deal, DealAnalysis, DealContradiction, DealDocument, DealPhase, DealPhaseLog,
     DealPassReasonRemediationAudit,
+    DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
     DealRelationshipContext, SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
@@ -34,6 +35,7 @@ from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
 from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
+from .services.receipt_date_evidence import ReceiptDateEvidenceService
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
@@ -301,6 +303,24 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             DealRelationshipContext.objects.filter(
                 deal_id=OuterRef('pk'),
                 relationship_type='competitor',
+            )
+        ),
+        has_receipt_date_suggestions=Exists(
+            DealReceiptDateSuggestion.objects.filter(
+                deal_id=OuterRef('pk'),
+                status__in=['PENDING', 'CONFLICT'],
+            )
+        ),
+        has_receipt_date_conflicts=Exists(
+            DealReceiptDateSuggestion.objects.filter(
+                deal_id=OuterRef('pk'),
+                status='CONFLICT',
+            )
+        ),
+        has_receipt_date_rejections=Exists(
+            DealReceiptDateSuggestion.objects.filter(
+                deal_id=OuterRef('pk'),
+                status='REJECTED',
             )
         ),
     )
@@ -673,6 +693,196 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if profile is None or profile.is_disabled:
             return False
         return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @staticmethod
+    def _receipt_date_state(deal):
+        if deal.received_at:
+            return 'CANONICAL'
+        suggestions = list(deal.receipt_date_suggestions.all())
+        active = [item for item in suggestions if item.status in {'PENDING', 'CONFLICT'}]
+        if len({item.proposed_date for item in active}) > 1 or any(item.status == 'CONFLICT' for item in active):
+            return 'CONFLICTING'
+        if active:
+            return 'SUGGESTED'
+        if suggestions and all(item.status == 'REJECTED' for item in suggestions):
+            return 'REJECTED'
+        return 'UNKNOWN'
+
+    @staticmethod
+    def _serialize_receipt_suggestion(suggestion):
+        reviewer = suggestion.reviewed_by
+        reviewer_profile = getattr(reviewer, 'profile', None) if reviewer else None
+        return {
+            'id': str(suggestion.id),
+            'proposed_date': suggestion.proposed_date.isoformat(),
+            'source_type': suggestion.source_type,
+            'source_id': suggestion.source_id,
+            'evidence': suggestion.evidence,
+            'confidence': suggestion.confidence,
+            'status': suggestion.status,
+            'review_note': suggestion.review_note,
+            'reviewed_at': suggestion.reviewed_at.isoformat() if suggestion.reviewed_at else None,
+            'reviewed_by': ({
+                'id': reviewer.id,
+                'name': getattr(reviewer_profile, 'name', None) or reviewer.get_username(),
+            } if reviewer else None),
+            'created_at': suggestion.created_at.isoformat(),
+        }
+
+    def _serialize_receipt_remediation(self, deal):
+        return {
+            'id': str(deal.id),
+            'title': deal.title,
+            'fund': deal.fund,
+            'received_at': deal.received_at.isoformat() if deal.received_at else None,
+            'updated_at': deal.updated_at.isoformat(),
+            'date_state': self._receipt_date_state(deal),
+            'suggestions': [
+                self._serialize_receipt_suggestion(item)
+                for item in deal.receipt_date_suggestions.all()
+            ],
+        }
+
+    @action(detail=False, methods=['get'], url_path='receipt-date-remediation')
+    def receipt_date_remediation_list(self, request):
+        queryset = Deal.objects.filter(received_at__isnull=True).prefetch_related(
+            'receipt_date_suggestions__reviewed_by__profile'
+        )
+        fund = request.query_params.get('fund')
+        if fund:
+            if fund not in {'FUND1', 'FUND2', 'FUND3'}:
+                return Response({'error': 'fund must be FUND1, FUND2, or FUND3.'}, status=400)
+            queryset = queryset.filter(fund=fund)
+        search = str(request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(title__icontains=search)
+        profile = getattr(request.user, 'profile', None)
+        if not (request.user.is_superuser or request.user.is_staff or (profile and profile.is_admin)):
+            if profile is None or profile.is_disabled:
+                return Response({'error': 'An active analyst profile is required.'}, status=403)
+            queryset = queryset.filter(responsibility=profile)
+        rows = [self._serialize_receipt_remediation(deal) for deal in queryset.order_by('fund', 'title', 'id')]
+        state_filter = request.query_params.get('status')
+        if state_filter:
+            valid = {'SUGGESTED', 'CONFLICTING', 'REJECTED', 'UNKNOWN'}
+            if state_filter not in valid:
+                return Response({'error': f'status must be one of {", ".join(sorted(valid))}.'}, status=400)
+            rows = [row for row in rows if row['date_state'] == state_filter]
+        counts = {
+            state: sum(1 for row in rows if row['date_state'] == state)
+            for state in ('SUGGESTED', 'CONFLICTING', 'REJECTED', 'UNKNOWN')
+        }
+        fund_counts = {
+            value: sum(1 for row in rows if row['fund'] == value)
+            for value in ('FUND1', 'FUND2', 'FUND3')
+        }
+        page = self.paginate_queryset(rows)
+        response = self.get_paginated_response(page) if page is not None else Response({'count': len(rows), 'results': rows})
+        response.data['counts'] = counts
+        response.data['fund_counts'] = fund_counts
+        return response
+
+    @action(detail=True, methods=['post'], url_path='receipt-date-suggestions')
+    def receipt_date_suggestions(self, request, pk=None):
+        deal = self.get_object()
+        if not self._can_review_contradictions(request, deal):
+            return Response({'error': 'Only deal-responsible analysts or administrators can add date evidence.'}, status=403)
+        if deal.received_at:
+            return Response({'error': 'This deal already has a canonical receipt date.'}, status=409)
+        source_type = str(request.data.get('source_type') or 'ANALYST').upper()
+        if source_type == 'SOURCE_EMAIL':
+            suggestion, created = ReceiptDateEvidenceService.propose_from_linked_email(deal)
+            if suggestion is None:
+                return Response({'error': 'No linked source email with a received timestamp was found.'}, status=400)
+        else:
+            proposed_date = parse_date(str(request.data.get('proposed_date') or ''))
+            evidence_text = str(request.data.get('evidence') or '').strip()
+            source_id = str(request.data.get('source_id') or '').strip()
+            if proposed_date is None or not evidence_text or not source_id:
+                return Response({'error': 'proposed_date, source_id, and evidence are required.'}, status=400)
+            try:
+                suggestion, created = ReceiptDateEvidenceService.propose(
+                    deal=deal,
+                    proposed_date=proposed_date,
+                    source_type=source_type,
+                    source_id=source_id,
+                    evidence={'description': evidence_text, 'entered_by': request.user.id},
+                    confidence=float(request.data.get('confidence', 1.0)),
+                )
+            except (TypeError, ValueError) as error:
+                return Response({'error': str(error)}, status=400)
+        return Response(
+            {'created': created, 'suggestion': self._serialize_receipt_suggestion(suggestion)},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(
+        detail=True,
+        methods=['patch'],
+        url_path=r'receipt-date-suggestions/(?P<suggestion_id>[^/.]+)',
+    )
+    def review_receipt_date_suggestion(self, request, pk=None, suggestion_id=None):
+        decision = str(request.data.get('decision') or '').upper()
+        if decision not in {'ACCEPT', 'REJECT'}:
+            return Response({'error': 'decision must be ACCEPT or REJECT.'}, status=400)
+        expected_updated_at = parse_datetime(str(request.data.get('expected_updated_at') or ''))
+        if expected_updated_at is None:
+            return Response({'error': 'expected_updated_at must be a valid ISO-8601 datetime.'}, status=400)
+        with transaction.atomic():
+            deal = Deal.objects.select_for_update().filter(pk=pk).first()
+            if deal is None:
+                return Response({'error': 'Deal was not found.'}, status=404)
+            if not self._can_review_contradictions(request, deal):
+                return Response({'error': 'Only deal-responsible analysts or administrators can review date evidence.'}, status=403)
+            if deal.updated_at != expected_updated_at:
+                return Response({'error': 'The deal changed after this evidence was loaded.', 'current_updated_at': deal.updated_at.isoformat()}, status=409)
+            suggestion = DealReceiptDateSuggestion.objects.select_for_update().filter(
+                id=suggestion_id,
+                deal=deal,
+            ).first()
+            if suggestion is None:
+                return Response({'error': 'Suggestion was not found for this deal.'}, status=404)
+            if suggestion.status in {'ACCEPTED', 'REJECTED'}:
+                return Response({'error': 'This suggestion has already been reviewed.'}, status=409)
+            now = timezone.now()
+            note = str(request.data.get('note') or '').strip()
+            if decision == 'ACCEPT':
+                if deal.received_at:
+                    return Response({'error': 'This deal already has a canonical receipt date.'}, status=409)
+                conflicts = DealReceiptDateSuggestion.objects.select_for_update().filter(
+                    deal=deal,
+                    status__in=['PENDING', 'CONFLICT'],
+                ).exclude(proposed_date=suggestion.proposed_date)
+                if conflicts.exists() and request.data.get('resolve_conflict') is not True:
+                    return Response({'error': 'Conflicting candidate dates require explicit conflict resolution.'}, status=409)
+                previous_date = deal.received_at
+                deal.received_at = suggestion.proposed_date
+                deal.save(update_fields=['received_at', 'updated_at'])
+                suggestion.status = 'ACCEPTED'
+                suggestion.reviewed_by = request.user
+                suggestion.reviewed_at = now
+                suggestion.review_note = note
+                suggestion.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'review_note', 'updated_at'])
+                conflicts.update(status='REJECTED', reviewed_by=request.user, reviewed_at=now, review_note='Rejected during explicit conflict resolution.')
+                audit = DealReceiptDateAudit.objects.create(
+                    deal=deal,
+                    suggestion=suggestion,
+                    previous_date=previous_date,
+                    new_date=suggestion.proposed_date,
+                    source_type=suggestion.source_type,
+                    source_id=suggestion.source_id,
+                    evidence=suggestion.evidence,
+                    reviewer=request.user,
+                )
+                return Response({'deal': self._serialize_receipt_remediation(deal), 'audit_id': str(audit.id)})
+            suggestion.status = 'REJECTED'
+            suggestion.reviewed_by = request.user
+            suggestion.reviewed_at = now
+            suggestion.review_note = note
+            suggestion.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'review_note', 'updated_at'])
+            remaining = DealReceiptDateSuggestion.objects.filter(deal=deal, status__in=['PENDING', 'CONFLICT'])
+            remaining.update(status=('CONFLICT' if remaining.values('proposed_date').distinct().count() > 1 else 'PENDING'))
+        return Response({'deal': self._serialize_receipt_remediation(deal)})
 
     @action(detail=False, methods=['get'], url_path='fund-classification-summary')
     def fund_classification_summary(self, request):

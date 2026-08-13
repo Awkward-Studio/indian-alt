@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from accounts.models import Profile
 from contacts.models import Contact
 from deals.models import Deal, FundClassificationSourceType, FundClassificationState
+from deals.services.receipt_date_evidence import ReceiptDateEvidenceService
 
 
 DEFAULT_WORKBOOKS = (
@@ -250,6 +251,7 @@ class Command(BaseCommand):
             changes = {}
             contact_ids_to_add = set()
             profile_ids_to_add = set()
+            receipt_date_suggestion = None
 
             workbook_source_id = f'{source["workbook"]}:row:{source["row"]}'
             if (
@@ -266,8 +268,20 @@ class Command(BaseCommand):
 
             source_date = source["received_at"]
             if source_date and deal.received_at is None:
-                changes["received_at"] = source_date
-                stats["dates_to_backfill"] += 1
+                receipt_date_suggestion = {
+                    'proposed_date': source_date,
+                    'source_type': 'WORKBOOK',
+                    'source_id': workbook_source_id,
+                    'evidence': {
+                        'workbook': source['workbook'],
+                        'row': source['row'],
+                        'fund': deal.fund,
+                        'deal_title': source['title'],
+                        'date_of_receipt': source_date.isoformat(),
+                    },
+                    'confidence': 1.0,
+                }
+                stats["date_suggestions_to_create"] += 1
             elif source_date and deal.received_at != source_date:
                 stats["date_conflicts_preserved"] += 1
                 if len(examples["date_conflicts"]) < 10:
@@ -381,14 +395,14 @@ class Command(BaseCommand):
             elif not expected_status and source["status"]:
                 stats["unmapped_workbook_statuses"] += 1
 
-            if changes or contact_ids_to_add or profile_ids_to_add:
+            if changes or contact_ids_to_add or profile_ids_to_add or receipt_date_suggestion:
                 pending.append(
-                    (deal, changes, contact_ids_to_add, profile_ids_to_add)
+                    (deal, changes, contact_ids_to_add, profile_ids_to_add, receipt_date_suggestion)
                 )
 
         if options["apply"]:
             with transaction.atomic():
-                for deal, changes, contact_ids, profile_ids in pending:
+                for deal, changes, contact_ids, profile_ids, receipt_suggestion in pending:
                     for field, value in changes.items():
                         setattr(deal, field, value)
                     if changes:
@@ -397,6 +411,12 @@ class Command(BaseCommand):
                         deal.additional_contacts.add(*contact_ids)
                     if profile_ids:
                         deal.responsibility.add(*profile_ids)
+                    if receipt_suggestion:
+                        _suggestion, created = ReceiptDateEvidenceService.propose(
+                            deal=deal,
+                            **receipt_suggestion,
+                        )
+                        stats['date_suggestions_created'] += int(created)
                     stats["deals_updated"] += 1
 
         report = {

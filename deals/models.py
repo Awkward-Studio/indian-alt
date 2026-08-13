@@ -380,6 +380,7 @@ class DealPassReasonRemediationAudit(models.Model):
         ordering = ['-created_at']
         indexes = [models.Index(fields=['deal', '-created_at'])]
 
+
     @staticmethod
     def _normalize_analysis_record(analysis):
         if not analysis:
@@ -448,6 +449,87 @@ class DealPassReasonRemediationAudit(models.Model):
     def analysis_history(self):
         analyses = self.analyses.order_by('version', 'created_at')
         return [self._normalize_analysis_record(analysis) for analysis in analyses]
+
+
+class DealReceiptDateSuggestion(models.Model):
+    class SourceType(models.TextChoices):
+        WORKBOOK = 'WORKBOOK', 'Approved workbook'
+        SOURCE_EMAIL = 'SOURCE_EMAIL', 'Linked source email'
+        ANALYST = 'ANALYST', 'Analyst evidence'
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending review'
+        CONFLICT = 'CONFLICT', 'Conflicting evidence'
+        ACCEPTED = 'ACCEPTED', 'Accepted'
+        REJECTED = 'REJECTED', 'Rejected'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='receipt_date_suggestions')
+    proposed_date = models.DateField()
+    source_type = models.CharField(max_length=20, choices=SourceType.choices)
+    source_id = models.CharField(max_length=1000)
+    evidence = models.JSONField(default=dict)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_receipt_date_suggestions',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'deal_receipt_date_suggestion'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['deal', 'proposed_date', 'source_type', 'source_id'],
+                name='unique_deal_receipt_date_source_suggestion',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(reviewed_by__isnull=True, reviewed_at__isnull=True)
+                    | models.Q(reviewed_by__isnull=False, reviewed_at__isnull=False)
+                ),
+                name='receipt_suggestion_reviewer_fields_paired',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['deal', 'status']),
+            models.Index(fields=['status', 'proposed_date']),
+        ]
+
+
+class DealReceiptDateAudit(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='receipt_date_audits')
+    suggestion = models.ForeignKey(
+        DealReceiptDateSuggestion,
+        on_delete=models.PROTECT,
+        related_name='acceptance_audits',
+    )
+    previous_date = models.DateField(null=True, blank=True)
+    new_date = models.DateField()
+    source_type = models.CharField(max_length=20)
+    source_id = models.CharField(max_length=1000)
+    evidence = models.JSONField(default=dict)
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='deal_receipt_date_audits',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_receipt_date_audit'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['deal', '-created_at'])]
 
 
 class AnalysisKind(models.TextChoices):

@@ -626,6 +626,11 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 class DealListSerializer(serializers.ModelSerializer):
     days_since_sourcing = serializers.SerializerMethodField()
+    receipt_date_state = serializers.SerializerMethodField()
+    receipt_date_has_evidence = serializers.BooleanField(
+        source='has_receipt_date_suggestions',
+        read_only=True,
+    )
     has_analysis = serializers.BooleanField(read_only=True)
     has_vi_data = serializers.BooleanField(read_only=True)
     has_competitors = serializers.SerializerMethodField()
@@ -644,12 +649,24 @@ class DealListSerializer(serializers.ModelSerializer):
         return bool(obj.competitor_candidates) or bool(
             getattr(obj, 'has_vi_competitors', False)
         ) or bool(getattr(obj, 'has_relationship_competitors', False))
+
+    def get_receipt_date_state(self, obj):
+        if obj.received_at:
+            return 'CANONICAL'
+        if getattr(obj, 'has_receipt_date_conflicts', False):
+            return 'CONFLICTING'
+        if getattr(obj, 'has_receipt_date_suggestions', False):
+            return 'SUGGESTED'
+        if getattr(obj, 'has_receipt_date_rejections', False):
+            return 'REJECTED'
+        return 'UNKNOWN'
     
     class Meta:
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
-            'received_at', 'days_since_sourcing', 'created_at', 'updated_at',
+            'received_at', 'days_since_sourcing', 'receipt_date_state',
+            'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',

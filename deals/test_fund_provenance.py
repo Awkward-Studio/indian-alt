@@ -10,7 +10,12 @@ from rest_framework.test import APIClient
 
 from accounts.models import Profile
 from deals.management.commands.reconcile_fund_workbooks import WORKBOOK_FIELDS
-from deals.models import Deal, FundClassificationSourceType, FundClassificationState
+from deals.models import (
+    Deal,
+    DealReceiptDateSuggestion,
+    FundClassificationSourceType,
+    FundClassificationState,
+)
 
 
 class FundClassificationProvenanceTests(TestCase):
@@ -68,7 +73,11 @@ class FundClassificationProvenanceTests(TestCase):
             sheet = workbook.active
             sheet.append(headers)
             values = {header: '' for header in headers}
-            values.update({'Deal Name': 'Evidence Co', 'Fund': 'FUND3'})
+            values.update({
+                'Deal Name': 'Evidence Co',
+                'Fund': 'FUND3',
+                'Date of Receipt': '2026-07-09',
+            })
             sheet.append([values[header] for header in headers])
             workbook.save(Path(directory) / '3. Fund III.xlsx')
 
@@ -84,6 +93,11 @@ class FundClassificationProvenanceTests(TestCase):
         self.assertEqual(deal.fund_classification_state, FundClassificationState.EXPLICIT)
         self.assertEqual(deal.fund_classification_source_type, FundClassificationSourceType.WORKBOOK)
         self.assertEqual(deal.fund_classification_source_id, '3. Fund III.xlsx:row:2')
+        self.assertIsNone(deal.received_at)
+        suggestion = DealReceiptDateSuggestion.objects.get(deal=deal)
+        self.assertEqual(suggestion.proposed_date.isoformat(), '2026-07-09')
+        self.assertEqual(suggestion.source_type, DealReceiptDateSuggestion.SourceType.WORKBOOK)
+        self.assertEqual(suggestion.evidence['workbook'], '3. Fund III.xlsx')
 
     def test_state_filter_and_summary_are_queryable(self):
         explicit = Deal.objects.create(
