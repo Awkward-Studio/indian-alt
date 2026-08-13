@@ -9,10 +9,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from deals.models import Deal
-from .models import Task, TaskPriority, TaskStatus, TaskSuggestion, TaskSuggestionState
+from .models import Task, TaskActivity, TaskPriority, TaskStatus, TaskSuggestion, TaskSuggestionState
 from .permissions import IsActiveProfile
-from .serializers import TaskSerializer, TaskSuggestionSerializer
-from .services import accepted_task_defaults, ensure_latest_suggestions
+from .serializers import TaskActivitySerializer, TaskSerializer, TaskSuggestionSerializer
+from .services import (
+    accepted_task_defaults, ensure_latest_suggestions, record_task_activity,
+    task_activity_snapshot,
+)
 
 
 class TaskPagination(PageNumberPagination):
@@ -56,11 +59,41 @@ class TaskViewSet(viewsets.ModelViewSet):
             queryset = queryset.exclude(status=TaskStatus.DONE).filter(due_date__range=(today, today + timedelta(days=7)))
         return queryset
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user.profile, origin=Task.Origin.MANUAL, fingerprint="")
+        task = serializer.save(created_by=self.request.user.profile, origin=Task.Origin.MANUAL, fingerprint="")
+        record_task_activity(
+            task,
+            actor=self.request.user.profile,
+            action=TaskActivity.Action.CREATED,
+            source_context={"origin": Task.Origin.MANUAL},
+        )
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        locked = Task.objects.select_for_update().get(pk=serializer.instance.pk)
+        before = task_activity_snapshot(locked)
+        serializer.instance = locked
+        task = serializer.save()
+        record_task_activity(
+            task,
+            actor=self.request.user.profile,
+            before=before,
+        )
+
+    @transaction.atomic
     def perform_destroy(self, instance):
+        instance = Task.objects.select_for_update().select_related("deal").get(pk=instance.pk)
+        before = task_activity_snapshot(instance)
         instance.source_suggestions.update(state=TaskSuggestionState.DISMISSED, task=None)
+        record_task_activity(
+            instance,
+            actor=self.request.user.profile,
+            action=TaskActivity.Action.DELETED,
+            before=before,
+            after={},
+            source_context={"retention": "task_deleted"},
+        )
         instance.delete()
 
     @action(detail=False, methods=["get"])
@@ -124,6 +157,18 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
             suggestion.task = task
             suggestion.state = TaskSuggestionState.ACCEPTED
             suggestion.save(update_fields=["task", "state", "updated_at"])
+            record_task_activity(
+                task,
+                actor=request.user.profile,
+                action=TaskActivity.Action.SUGGESTION_ACCEPTED,
+                source_context={
+                    "origin": Task.Origin.ANALYSIS,
+                    "suggestion_id": str(suggestion.id),
+                    "analysis_id": str(suggestion.analysis_id) if suggestion.analysis_id else None,
+                    "analysis_version": suggestion.analysis_version,
+                    "source_section": suggestion.source_section[:500],
+                },
+            )
         return Response(TaskSerializer(task, context={"request": request}).data, status=status.HTTP_201_CREATED if not existing else status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
@@ -144,3 +189,25 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
             suggestion.state = TaskSuggestionState.PENDING
         suggestion.save(update_fields=["state", "updated_at"])
         return Response(self.get_serializer(suggestion).data)
+
+
+class TaskActivityViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = TaskActivitySerializer
+    permission_classes = [IsActiveProfile]
+    pagination_class = TaskPagination
+    filter_backends = [filters.OrderingFilter]
+    ordering_fields = ["created_at", "action", "task_title"]
+    ordering = ["-created_at"]
+
+    def get_queryset(self):
+        queryset = TaskActivity.objects.select_related("deal", "actor", "task")
+        params = self.request.query_params
+        if params.get("deal"):
+            queryset = queryset.filter(deal_id=params["deal"])
+        if params.get("task"):
+            queryset = queryset.filter(task_id_snapshot=params["task"])
+        if params.get("action"):
+            queryset = queryset.filter(
+                action__in=[item for item in params["action"].split(",") if item]
+            )
+        return queryset

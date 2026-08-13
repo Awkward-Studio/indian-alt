@@ -9,10 +9,81 @@ from django.db import transaction
 
 from deals.models import Deal, DealAnalysis
 from deals.services.analysis_next_steps import inspect_analysis_next_steps
-from .models import Task, TaskPriority, TaskSuggestion, TaskSuggestionState
+from .models import Task, TaskActivity, TaskPriority, TaskStatus, TaskSuggestion, TaskSuggestionState
 
 
 MATCH_THRESHOLD = 0.72
+
+TASK_ACTIVITY_FIELDS = (
+    "title", "description", "status", "priority", "due_date", "assignee_id",
+)
+
+
+def _bounded_activity_value(value, limit=1000):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    text = str(value)
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def task_activity_snapshot(task: Task) -> dict:
+    return {
+        "title": _bounded_activity_value(task.title, 500),
+        "description": _bounded_activity_value(task.description, 1000),
+        "status": task.status,
+        "priority": task.priority,
+        "due_date": _bounded_activity_value(task.due_date),
+        "assignee_id": str(task.assignee_id) if task.assignee_id else None,
+    }
+
+
+def task_activity_action(before: dict, after: dict) -> str:
+    changed = {key for key in TASK_ACTIVITY_FIELDS if before.get(key) != after.get(key)}
+    if changed == {"status"}:
+        if after.get("status") == TaskStatus.DONE:
+            return TaskActivity.Action.COMPLETED
+        if before.get("status") == TaskStatus.DONE:
+            return TaskActivity.Action.REOPENED
+    if changed == {"assignee_id"}:
+        return TaskActivity.Action.ASSIGNED
+    if changed == {"priority"}:
+        return TaskActivity.Action.PRIORITIZED
+    if changed == {"due_date"}:
+        return TaskActivity.Action.DUE_DATE_CHANGED
+    return TaskActivity.Action.UPDATED
+
+
+def record_task_activity(
+    task: Task,
+    *,
+    actor,
+    action=None,
+    before=None,
+    after=None,
+    source_context=None,
+):
+    before = before or {}
+    after = after if after is not None else task_activity_snapshot(task)
+    changed_fields = [
+        field for field in TASK_ACTIVITY_FIELDS if before.get(field) != after.get(field)
+    ]
+    resolved_action = action or task_activity_action(before, after)
+    if resolved_action == TaskActivity.Action.UPDATED and not changed_fields:
+        return None
+    return TaskActivity.objects.create(
+        task=task if task.pk and Task.objects.filter(pk=task.pk).exists() else None,
+        task_id_snapshot=task.id,
+        task_title=_bounded_activity_value(task.title, 500),
+        deal=task.deal,
+        actor=actor,
+        action=resolved_action,
+        changed_fields=changed_fields,
+        before={key: before.get(key) for key in changed_fields},
+        after={key: after.get(key) for key in changed_fields},
+        source_context=source_context or {},
+    )
 
 
 def analysis_report(analysis: DealAnalysis | None, deal: Deal | None = None) -> str:

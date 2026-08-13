@@ -2,7 +2,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import Profile
-from .models import Task, TaskStatus, TaskSuggestion
+from .models import Task, TaskActivity, TaskStatus, TaskSuggestion
 
 
 class CompactProfileSerializer(serializers.ModelSerializer):
@@ -75,6 +75,20 @@ class TaskSuggestionSerializer(serializers.ModelSerializer):
             "category", "title", "task_title", "description", "source_section", "source_table_kind", "source_owner",
             "source_assignee", "source_status", "source_priority", "source_references", "state",
             "created_at", "updated_at",
+        )
+        read_only_fields = fields
+
+
+class TaskActivitySerializer(serializers.ModelSerializer):
+    actor = CompactProfileSerializer(read_only=True)
+    deal_title = serializers.CharField(source="deal.title", read_only=True)
+
+    class Meta:
+        model = TaskActivity
+        fields = (
+            "id", "task", "task_id_snapshot", "task_title", "deal", "deal_title",
+            "actor", "action", "changed_fields", "before", "after",
+            "source_context", "created_at",
         )
         read_only_fields = fields
 
