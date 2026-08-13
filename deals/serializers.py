@@ -433,7 +433,7 @@ class DealSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = '__all__'
-        read_only_fields = ('id',)
+        read_only_fields = ('id', 'created_at', 'updated_at')
 
 
 class VentureIntelligenceFinancialStatementSerializer(serializers.ModelSerializer):
@@ -624,7 +624,7 @@ class DealListSerializer(serializers.ModelSerializer):
         model = Deal
         fields = (
             'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
-            'received_at', 'days_since_sourcing', 'created_at',
+            'received_at', 'days_since_sourcing', 'created_at', 'updated_at',
             'has_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'fund', 'themes', 'responsibility',
@@ -632,4 +632,4 @@ class DealListSerializer(serializers.ModelSerializer):
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
             'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
         )
-        read_only_fields = ('id', 'created_at', 'days_since_sourcing')
+        read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')

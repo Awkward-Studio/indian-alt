@@ -10,11 +10,14 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
-from django.db.models import Exists, F, OuterRef, Q
+from django.db.models import CharField, Exists, F, OuterRef, Q, Value
+from django.db.models.functions import Coalesce, Trim
+from django.utils.dateparse import parse_datetime
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
-    Deal, DealAnalysis, DealContradiction, DealDocument, DealPhaseLog,
+    Deal, DealAnalysis, DealContradiction, DealDocument, DealPhase, DealPhaseLog,
+    DealPassReasonRemediationAudit,
     DealRelationshipContext, SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
     VentureIntelligenceCompanyRelation,
@@ -664,6 +667,167 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if profile is None or profile.is_disabled:
             return False
         return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @staticmethod
+    def _pass_reason_remediation_queryset(user):
+        queryset = Deal.objects.filter(current_phase=DealPhase.PASSED).annotate(
+            normalized_pass_reason=Trim(
+                Coalesce('reasons_for_passing', Value(''), output_field=CharField())
+            )
+        ).filter(normalized_pass_reason='')
+        if user.is_superuser or user.is_staff:
+            return queryset
+        profile = getattr(user, 'profile', None)
+        if profile is None or profile.is_disabled:
+            return queryset.none()
+        if profile.is_admin:
+            return queryset
+        return queryset.filter(responsibility=profile)
+
+    @staticmethod
+    def _serialize_pass_reason_remediation(deal):
+        latest_audit = deal.pass_reason_remediation_audits.select_related(
+            'actor', 'actor__profile'
+        ).first()
+        actor = None
+        if latest_audit and latest_audit.actor:
+            profile = getattr(latest_audit.actor, 'profile', None)
+            actor = {
+                'id': latest_audit.actor_id,
+                'name': getattr(profile, 'name', None) or latest_audit.actor.get_username(),
+                'email': getattr(profile, 'email', None) or latest_audit.actor.email,
+            }
+        return {
+            'id': str(deal.id),
+            'title': deal.title,
+            'fund': deal.fund,
+            'current_phase': deal.current_phase,
+            'reasons_for_passing': deal.reasons_for_passing,
+            'updated_at': deal.updated_at.isoformat(),
+            'last_remediation': ({
+                'actor': actor,
+                'created_at': latest_audit.created_at.isoformat(),
+            } if latest_audit else None),
+        }
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='pass-reason-remediation',
+        url_name='pass-reason-remediation-list',
+    )
+    def pass_reason_remediation_list(self, request):
+        queryset = self._pass_reason_remediation_queryset(request.user)
+        fund = request.query_params.get('fund')
+        if fund and fund not in {'FUND1', 'FUND2'}:
+            return Response(
+                {'error': 'fund must be FUND1 or FUND2.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        queryset = queryset.filter(fund__in=['FUND1', 'FUND2'])
+        counts = {
+            'FUND1': queryset.filter(fund='FUND1').count(),
+            'FUND2': queryset.filter(fund='FUND2').count(),
+        }
+        counts['total'] = counts['FUND1'] + counts['FUND2']
+        if fund:
+            queryset = queryset.filter(fund=fund)
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(title__icontains=search)
+        queryset = queryset.order_by('fund', 'title', 'id')
+        page = self.paginate_queryset(queryset)
+        rows = [
+            self._serialize_pass_reason_remediation(deal)
+            for deal in (page if page is not None else queryset)
+        ]
+        if page is None:
+            return Response({'count': len(rows), 'results': rows, 'counts': counts})
+        response = self.get_paginated_response(rows)
+        response.data['counts'] = counts
+        return response
+
+    @action(
+        detail=True,
+        methods=['patch'],
+        url_path='pass-reason-remediation',
+        url_name='pass-reason-remediation-detail',
+    )
+    def pass_reason_remediation(self, request, pk=None):
+        reason = str(request.data.get('reason') or '').strip()
+        if not reason:
+            return Response(
+                {'error': 'A non-whitespace reason is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        expected_raw = request.data.get('expected_updated_at')
+        expected_updated_at = parse_datetime(str(expected_raw or ''))
+        if expected_updated_at is None:
+            return Response(
+                {'error': 'expected_updated_at must be a valid ISO-8601 datetime.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            deal = Deal.objects.select_for_update().filter(pk=pk).first()
+            if deal is None:
+                return Response(
+                    {'error': 'Deal was not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            allowed = self._pass_reason_remediation_queryset(request.user).filter(pk=deal.pk).exists()
+            if not allowed:
+                profile = getattr(request.user, 'profile', None)
+                can_access = (
+                    request.user.is_superuser
+                    or request.user.is_staff
+                    or bool(profile and not profile.is_disabled and (
+                        profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+                    ))
+                )
+                if not can_access:
+                    return Response(
+                        {'error': 'You do not have permission to remediate this deal.'},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                return Response(
+                    {'error': 'This deal is no longer eligible for pass-reason remediation.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if deal.updated_at != expected_updated_at:
+                return Response(
+                    {
+                        'error': 'The deal changed after this queue entry was loaded.',
+                        'current_updated_at': deal.updated_at.isoformat(),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            previous_reason = deal.reasons_for_passing
+            serializer = DealSerializer(
+                deal,
+                data={'reasons_for_passing': reason},
+                partial=True,
+                context={'request': request},
+            )
+            serializer.is_valid(raise_exception=True)
+            updated = serializer.save()
+            audit = DealPassReasonRemediationAudit.objects.create(
+                deal=updated,
+                actor=request.user,
+                previous_reason=previous_reason,
+                new_reason=reason,
+                deal_updated_at=updated.updated_at,
+            )
+
+        return Response({
+            'deal': self._serialize_pass_reason_remediation(updated),
+            'audit': {
+                'id': str(audit.id),
+                'actor_id': audit.actor_id,
+                'created_at': audit.created_at.isoformat(),
+            },
+        })
 
     @action(detail=True, methods=["get", "post"])
     def research_discovery(self, request, pk=None):

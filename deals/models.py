@@ -115,6 +115,7 @@ class Deal(models.Model):
         help_text='Business date on which the fund received the deal.',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     deal_summary = models.TextField(blank=True, null=True)
     funding_ask = models.TextField(blank=True, null=True)
     industry = models.TextField(blank=True, null=True)
@@ -273,6 +274,32 @@ class Deal(models.Model):
     def analysis_json(self):
         analysis = self.latest_analysis
         return analysis.analysis_json if analysis else {}
+
+
+class DealPassReasonRemediationAudit(models.Model):
+    """Append-only provenance for human remediation of legacy pass reasons."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='pass_reason_remediation_audits',
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='deal_pass_reason_remediations',
+    )
+    previous_reason = models.TextField(blank=True, null=True)
+    new_reason = models.TextField()
+    deal_updated_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_pass_reason_remediation_audit'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['deal', '-created_at'])]
 
     @staticmethod
     def _normalize_analysis_record(analysis):
