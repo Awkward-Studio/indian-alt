@@ -1374,3 +1374,62 @@ class SectorResearchRecommendation(models.Model):
             models.Index(fields=["deal", "-total_score"]),
             models.Index(fields=["deal", "document_type"]),
         ]
+
+
+class SectorResearchAcquisition(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "QUEUED", "Queued"
+        DOWNLOADING = "DOWNLOADING", "Downloading"
+        ATTACHED = "ATTACHED", "Attached"
+        EXTRACTING = "EXTRACTING", "Extracting"
+        COMPLETED = "COMPLETED", "Completed"
+        PARTIAL = "PARTIAL", "Partially completed"
+        FAILED = "FAILED", "Failed"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name="research_acquisitions")
+    recommendation = models.OneToOneField(
+        SectorResearchRecommendation,
+        on_delete=models.PROTECT,
+        related_name="acquisition",
+    )
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED, db_index=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="approved_research_acquisitions",
+    )
+    audit_log = models.ForeignKey(
+        'ai_orchestrator.AIAuditLog',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="research_acquisitions",
+    )
+    document = models.OneToOneField(
+        DealDocument,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="research_acquisition",
+    )
+    source_url = models.URLField(max_length=2000)
+    final_url = models.URLField(max_length=2000, blank=True)
+    content_type = models.CharField(max_length=255, blank=True)
+    content_length = models.PositiveBigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    access_evidence = models.JSONField(default=dict, blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    error_code = models.CharField(max_length=100, blank=True)
+    error_detail = models.TextField(blank=True)
+    celery_task_id = models.CharField(max_length=255, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "sector_research_acquisition"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["deal", "status"])]

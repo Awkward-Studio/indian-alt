@@ -5,7 +5,7 @@ from datetime import timedelta
 from .models import (
     Deal, DealContradiction, DealDocument, DealGeneratedDocument, DealPhaseLog,
     InitialAnalysisStatus,
-    SectorResearchDiscoveryRun, SectorResearchRecommendation,
+    SectorResearchAcquisition, SectorResearchDiscoveryRun, SectorResearchRecommendation,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
@@ -88,9 +88,14 @@ class DealContradictionSerializer(serializers.ModelSerializer):
 
 class SectorResearchRecommendationSerializer(serializers.ModelSerializer):
     is_stale = serializers.SerializerMethodField()
+    acquisition = serializers.SerializerMethodField()
 
     def get_is_stale(self, obj):
         return obj.last_verified_at < timezone.now() - timedelta(days=30)
+
+    def get_acquisition(self, obj):
+        acquisition = getattr(obj, "acquisition", None)
+        return SectorResearchAcquisitionSerializer(acquisition).data if acquisition else None
 
     class Meta:
         model = SectorResearchRecommendation
@@ -101,7 +106,22 @@ class SectorResearchRecommendationSerializer(serializers.ModelSerializer):
             "content_type", "preferred_source", "relevance_score",
             "credibility_score", "freshness_score", "accessibility_score",
             "total_score", "score_explanation", "retrieved_at",
-            "last_verified_at", "is_stale",
+            "last_verified_at", "is_stale", "acquisition",
+        )
+
+
+class SectorResearchAcquisitionSerializer(serializers.ModelSerializer):
+    document_title = serializers.CharField(source="document.title", read_only=True)
+    audit_log_id = serializers.UUIDField(source="audit_log.id", read_only=True)
+
+    class Meta:
+        model = SectorResearchAcquisition
+        fields = (
+            "id", "status", "source_url", "final_url", "content_type",
+            "content_length", "checksum_sha256", "access_evidence", "citations",
+            "error_code", "error_detail", "celery_task_id", "document",
+            "document_title", "audit_log_id", "started_at", "completed_at",
+            "created_at", "updated_at",
         )
 
 

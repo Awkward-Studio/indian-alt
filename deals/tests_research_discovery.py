@@ -11,14 +11,58 @@ from ai_orchestrator.models import AIAuditLog
 from deals.serializers import DealSerializer
 from deals.models import (
     Deal,
+    DealDocument,
+    SectorResearchAcquisition,
     SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
 )
+from deals.services.research_acquisition import ResearchAcquisitionError, ResearchAcquisitionService
 from deals.services.research_discovery import (
     ResearchDiscoveryCoordinator,
     ResearchDiscoveryService,
 )
 from deals.tasks import discover_sector_reports_task
+
+
+class ResearchAcquisitionSecurityTests(SimpleTestCase):
+    def _response(self, *, status=200, content_type="application/pdf", content=b"pdf", location=None, length=None):
+        response = MagicMock(status_code=status)
+        response.headers = {"Content-Type": content_type}
+        if location:
+            response.headers["Location"] = location
+        if length is not None:
+            response.headers["Content-Length"] = str(length)
+        response.iter_content.return_value = [content]
+        return response
+
+    @patch("deals.services.research_discovery.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 443))])
+    def test_private_dns_resolution_is_rejected(self, _dns):
+        self.assertFalse(ResearchDiscoveryService.is_safe_public_url("https://publisher.example/report.pdf"))
+
+    @patch.object(ResearchDiscoveryService, "is_safe_public_url", return_value=True)
+    def test_redirects_are_revalidated_and_download_is_bounded(self, safe):
+        http = MagicMock()
+        http.get.side_effect = [
+            self._response(status=302, location="https://cdn.example/report.pdf"),
+            self._response(content=b"verified-pdf", length=12),
+        ]
+        content, access = ResearchAcquisitionService(http_session=http).download("https://publisher.example/report")
+        self.assertEqual(content, b"verified-pdf")
+        self.assertEqual(access["final_url"], "https://cdn.example/report.pdf")
+        self.assertEqual(safe.call_count, 2)
+
+    @patch.object(ResearchDiscoveryService, "is_safe_public_url", return_value=True)
+    def test_mime_and_stream_size_policies_fail_deterministically(self, _safe):
+        http = MagicMock()
+        http.get.return_value = self._response(content_type="application/zip")
+        with self.assertRaisesRegex(ResearchAcquisitionError, "not permitted"):
+            ResearchAcquisitionService(http_session=http).download("https://publisher.example/archive")
+
+        http.get.return_value = self._response(content=b"12345")
+        service = ResearchAcquisitionService(http_session=http)
+        service.max_bytes = 4
+        with self.assertRaisesRegex(ResearchAcquisitionError, "exceeded"):
+            service.download("https://publisher.example/report.pdf")
 
 
 class ResearchDiscoveryServiceTests(SimpleTestCase):
@@ -385,3 +429,110 @@ class ResearchDiscoveryApiTests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, 401)
+
+
+class ResearchAcquisitionWorkflowTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("acquisition-analyst")
+        self.profile = Profile.objects.create(
+            user=self.user,
+            name="Acquisition Analyst",
+            email="acquisition@example.com",
+        )
+        self.deal = Deal.objects.create(title="Acquisition Company", sector="Logistics")
+        self.deal.responsibility.add(self.profile)
+        self.run = SectorResearchDiscoveryRun.objects.create(
+            deal=self.deal,
+            context_hash=ResearchDiscoveryCoordinator.context_hash(self.deal),
+            status="COMPLETED",
+        )
+        self.recommendation = SectorResearchRecommendation.objects.create(
+            deal=self.deal,
+            run=self.run,
+            canonical_url="https://ibef.org/logistics.pdf",
+            url="https://ibef.org/logistics.pdf",
+            title="Logistics report",
+            accessibility="AVAILABLE",
+            content_type="application/pdf",
+            retrieved_at=timezone.now(),
+            last_verified_at=timezone.now(),
+        )
+        self.audit = AIAuditLog.objects.create(
+            source_type="sector_research_acquisition",
+            source_id=str(self.recommendation.id),
+            model_used="runtime",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.acquire_url = f"/api/deals/{self.deal.id}/research-acquisition/{self.recommendation.id}/acquire/"
+
+    @patch("deals.tasks.acquire_sector_research_task.delay")
+    @patch("ai_orchestrator.services.runtime.AIRuntimeService.create_audit_log")
+    def test_explicit_approval_queues_once_with_actor_and_audit(self, create_audit, delay):
+        create_audit.return_value = self.audit
+        delay.return_value.id = "task-1"
+        denied = self.client.post(self.acquire_url, {}, format="json")
+        queued = self.client.post(self.acquire_url, {"approved": True}, format="json")
+        duplicate = self.client.post(self.acquire_url, {"approved": True}, format="json")
+
+        self.assertEqual(denied.status_code, 400)
+        self.assertEqual(queued.status_code, 202)
+        self.assertEqual(duplicate.status_code, 200)
+        acquisition = SectorResearchAcquisition.objects.get(recommendation=self.recommendation)
+        self.assertEqual(acquisition.approved_by, self.user)
+        self.assertEqual(acquisition.audit_log, self.audit)
+        delay.assert_called_once_with(str(acquisition.id))
+
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document", return_value=True)
+    @patch("deals.services.document_artifacts.DocumentArtifactService.build_document_artifact")
+    @patch("ai_orchestrator.services.document_processor.DocumentProcessorService.get_extraction_result")
+    def test_attachment_is_provenance_linked_and_checksum_deduplicated(self, extract, artifact, vectorize):
+        extract.return_value = {"normalized_text": "Grounded research text", "mode": "fallback_text"}
+        artifact.return_value = {
+            "normalized_text": "Grounded research text",
+            "source_map": {"claim-1": {"page": 1}},
+            "citations": [{"label": "p.1", "page": 1}],
+        }
+        acquisition = SectorResearchAcquisition.objects.create(
+            deal=self.deal,
+            recommendation=self.recommendation,
+            approved_by=self.user,
+            audit_log=self.audit,
+            source_url=self.recommendation.canonical_url,
+        )
+        service = ResearchAcquisitionService()
+        access = {
+            "final_url": self.recommendation.url,
+            "content_type": "application/pdf",
+            "content_length": 9,
+            "redirects": [],
+            "verified_at": timezone.now().isoformat(),
+        }
+        document = service.attach(acquisition, b"pdf-bytes", access)
+
+        acquisition.refresh_from_db()
+        self.assertEqual(acquisition.status, "COMPLETED")
+        self.assertEqual(acquisition.document, document)
+        self.assertEqual(document.file_url, self.recommendation.url)
+        self.assertEqual(document.evidence_json["citations"][0]["page"], 1)
+        self.assertEqual(acquisition.citations[0]["label"], "p.1")
+
+    @patch.object(ResearchAcquisitionService, "download", side_effect=ResearchAcquisitionError("UNSAFE_URL", "blocked"))
+    def test_terminal_failure_never_creates_a_document(self, _download):
+        acquisition = SectorResearchAcquisition.objects.create(
+            deal=self.deal,
+            recommendation=self.recommendation,
+            approved_by=self.user,
+            audit_log=self.audit,
+            source_url=self.recommendation.canonical_url,
+        )
+        with self.assertRaises(ResearchAcquisitionError):
+            ResearchAcquisitionService().execute(acquisition)
+        acquisition.refresh_from_db()
+        self.assertEqual(acquisition.status, "FAILED")
+        self.assertEqual(acquisition.error_code, "UNSAFE_URL")
+        self.assertIsNone(acquisition.document)
+        self.assertFalse(DealDocument.objects.filter(deal=self.deal).exists())

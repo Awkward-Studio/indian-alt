@@ -2670,3 +2670,59 @@ def discover_sector_reports_task(deal_id: str, run_id: str | None = None) -> dic
         )
         broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
     return payload
+
+
+@shared_task(queue="high_priority")
+def acquire_sector_research_task(acquisition_id: str) -> dict:
+    from ai_orchestrator.services.realtime import broadcast_audit_log_update
+    from .models import SectorResearchAcquisition
+    from .services.research_acquisition import ResearchAcquisitionService
+
+    with transaction.atomic():
+        acquisition = SectorResearchAcquisition.objects.select_for_update().select_related(
+            "deal", "recommendation", "audit_log"
+        ).get(id=acquisition_id)
+        if acquisition.status != SectorResearchAcquisition.Status.QUEUED:
+            return {"status": acquisition.status, "acquisition_id": acquisition_id}
+        acquisition.status = SectorResearchAcquisition.Status.DOWNLOADING
+        acquisition.started_at = acquisition.started_at or timezone.now()
+        acquisition.save(update_fields=["status", "started_at", "updated_at"])
+    audit = acquisition.audit_log
+    try:
+        if audit:
+            audit.status = "PROCESSING"
+            audit.save(update_fields=["status"])
+            broadcast_audit_log_update(audit)
+        document = ResearchAcquisitionService().execute(acquisition)
+        acquisition.refresh_from_db()
+        if audit:
+            audit.status = "COMPLETED"
+            audit.is_success = acquisition.status == SectorResearchAcquisition.Status.COMPLETED
+            audit.parsed_json = {
+                "acquisition_id": str(acquisition.id),
+                "status": acquisition.status,
+                "document_id": str(document.id),
+                "source_url": acquisition.source_url,
+                "final_url": acquisition.final_url,
+                "checksum_sha256": acquisition.checksum_sha256,
+                "citations": acquisition.citations,
+            }
+            audit.error_message = acquisition.error_detail
+            audit.save(update_fields=["status", "is_success", "parsed_json", "error_message"])
+            broadcast_audit_log_update(audit, event_type="terminal", done=True)
+        return {"status": acquisition.status, "acquisition_id": str(acquisition.id), "document_id": str(document.id)}
+    except Exception as error:
+        acquisition.refresh_from_db()
+        if audit:
+            audit.status = "FAILED"
+            audit.is_success = False
+            audit.error_message = str(error)
+            audit.parsed_json = {
+                "acquisition_id": str(acquisition.id),
+                "status": acquisition.status,
+                "error_code": acquisition.error_code,
+                "error_detail": acquisition.error_detail,
+            }
+            audit.save(update_fields=["status", "is_success", "error_message", "parsed_json"])
+            broadcast_audit_log_update(audit, event_type="terminal", done=True)
+        raise

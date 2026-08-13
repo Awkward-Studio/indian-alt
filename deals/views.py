@@ -21,14 +21,14 @@ from .models import (
     DealPassReasonRemediationAudit,
     DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
-    DealRelationshipContext, SectorResearchDiscoveryRun,
+    DealRelationshipContext, SectorResearchAcquisition, SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
     VentureIntelligenceCompanyRelation,
 )
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer,
     DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
-    DealHeavyFieldsSerializer, SectorResearchDiscoveryRunSerializer,
+    DealHeavyFieldsSerializer, SectorResearchAcquisitionSerializer, SectorResearchDiscoveryRunSerializer,
     SectorResearchRecommendationSerializer,
 )
 from .services.deal_creation import DealCreationService
@@ -1201,6 +1201,110 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 ).data,
             }
         )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"research-acquisition/(?P<recommendation_id>[^/.]+)/acquire",
+    )
+    def acquire_research(self, request, pk=None, recommendation_id=None):
+        deal = self.get_object()
+        if not self._can_review_contradictions(request, deal):
+            return Response({"error": "Only deal-responsible analysts or administrators can acquire research."}, status=403)
+        if request.data.get("approved") is not True:
+            return Response({"error": "Explicit approval is required before network and storage work begins."}, status=400)
+        recommendation = SectorResearchRecommendation.objects.filter(
+            id=recommendation_id,
+            deal=deal,
+        ).first()
+        if recommendation is None:
+            return Response({"error": "Research recommendation was not found for this deal."}, status=404)
+        if recommendation.accessibility != SectorResearchRecommendation.Accessibility.AVAILABLE:
+            return Response({"error": "Only currently verified public recommendations can be acquired."}, status=409)
+        with transaction.atomic():
+            acquisition, created = SectorResearchAcquisition.objects.select_for_update().get_or_create(
+                recommendation=recommendation,
+                defaults={
+                    "deal": deal,
+                    "approved_by": request.user,
+                    "source_url": recommendation.canonical_url,
+                },
+            )
+            active = {
+                SectorResearchAcquisition.Status.QUEUED,
+                SectorResearchAcquisition.Status.DOWNLOADING,
+                SectorResearchAcquisition.Status.ATTACHED,
+                SectorResearchAcquisition.Status.EXTRACTING,
+            }
+            if not created and acquisition.status in active | {
+                SectorResearchAcquisition.Status.COMPLETED,
+                SectorResearchAcquisition.Status.PARTIAL,
+            }:
+                return Response({"created": False, "acquisition": SectorResearchAcquisitionSerializer(acquisition).data})
+            from ai_orchestrator.services.runtime import AIRuntimeService
+            audit = AIRuntimeService.create_audit_log(
+                source_type="sector_research_acquisition",
+                source_id=str(recommendation.id),
+                context_label=f"Approved research acquisition — {recommendation.title}",
+                status="PENDING",
+                is_success=False,
+                requested_by=request.user,
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "recommendation_id": str(recommendation.id),
+                    "source_url": recommendation.canonical_url,
+                    "explicit_approval": True,
+                },
+            )
+            acquisition.status = SectorResearchAcquisition.Status.QUEUED
+            acquisition.approved_by = request.user
+            acquisition.audit_log = audit
+            acquisition.document = None
+            acquisition.error_code = ""
+            acquisition.error_detail = ""
+            acquisition.completed_at = None
+            acquisition.save()
+        from .tasks import acquire_sector_research_task
+        try:
+            queued = acquire_sector_research_task.delay(str(acquisition.id))
+            acquisition.celery_task_id = str(queued.id or "")
+            acquisition.save(update_fields=["celery_task_id", "updated_at"])
+        except Exception as error:
+            acquisition.status = SectorResearchAcquisition.Status.FAILED
+            acquisition.error_code = "QUEUE_FAILED"
+            acquisition.error_detail = str(error)
+            acquisition.completed_at = timezone.now()
+            acquisition.save()
+        return Response(
+            {"created": True, "acquisition": SectorResearchAcquisitionSerializer(acquisition).data},
+            status=202 if acquisition.status == SectorResearchAcquisition.Status.QUEUED else 503,
+        )
+
+    @action(
+        detail=True,
+        methods=["get", "patch"],
+        url_path=r"research-acquisitions/(?P<acquisition_id>[^/.]+)",
+    )
+    def research_acquisition(self, request, pk=None, acquisition_id=None):
+        deal = self.get_object()
+        if not self._can_review_contradictions(request, deal):
+            return Response({"error": "Only deal-responsible analysts or administrators can inspect acquisitions."}, status=403)
+        acquisition = SectorResearchAcquisition.objects.select_related("document", "audit_log").filter(
+            id=acquisition_id,
+            deal=deal,
+        ).first()
+        if acquisition is None:
+            return Response({"error": "Research acquisition was not found for this deal."}, status=404)
+        if request.method == "PATCH":
+            with transaction.atomic():
+                acquisition = SectorResearchAcquisition.objects.select_for_update().get(pk=acquisition.pk)
+                action_name = str(request.data.get("action") or "").upper()
+                if action_name != "CANCEL" or acquisition.status != SectorResearchAcquisition.Status.QUEUED:
+                    return Response({"error": "Only a queued acquisition can be cancelled."}, status=409)
+                acquisition.status = SectorResearchAcquisition.Status.CANCELLED
+                acquisition.completed_at = timezone.now()
+                acquisition.save(update_fields=["status", "completed_at", "updated_at"])
+        return Response(SectorResearchAcquisitionSerializer(acquisition).data)
 
     @action(detail=True, methods=["get", "patch"])
     def contradictions(self, request, pk=None):
