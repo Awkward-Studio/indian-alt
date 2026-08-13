@@ -12,12 +12,14 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.db.models import CharField, Exists, F, OuterRef, Q, Value
 from django.db.models.functions import Coalesce, Trim
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
     Deal, DealAnalysis, DealContradiction, DealDocument, DealPhase, DealPhaseLog,
     DealPassReasonRemediationAudit,
+    FundClassificationSourceType, FundClassificationState,
     DealRelationshipContext, SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
     VentureIntelligenceCompanyRelation,
@@ -91,6 +93,9 @@ class DealFilterSet(django_filters.FilterSet):
     city = django_filters.CharFilter(lookup_expr='icontains')
     bank_name = django_filters.CharFilter(field_name='bank__name', lookup_expr='icontains')
     banker_name = django_filters.CharFilter(field_name='primary_contact__name', lookup_expr='icontains')
+    fund_classification_state = django_filters.ChoiceFilter(
+        choices=FundClassificationState.choices
+    )
     has_analysis = django_filters.BooleanFilter(field_name='has_analysis')
     has_vi_data = django_filters.BooleanFilter(field_name='has_vi_data')
     has_competitors = django_filters.BooleanFilter(
@@ -117,6 +122,7 @@ class DealFilterSet(django_filters.FilterSet):
             'management_meeting', 'business_proposal_stage', 'ic_stage',
             'current_phase', 'sector', 'city', 'primary_contact',
             'bank_name', 'banker_name',
+            'fund_classification_state',
             'has_analysis', 'has_vi_data', 'has_competitors',
         ]
 
@@ -667,6 +673,81 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if profile is None or profile.is_disabled:
             return False
         return profile.is_admin or deal.responsibility.filter(id=profile.id).exists()
+
+    @action(detail=False, methods=['get'], url_path='fund-classification-summary')
+    def fund_classification_summary(self, request):
+        queryset = Deal.objects.all()
+        user = request.user
+        if not (user.is_superuser or user.is_staff):
+            profile = getattr(user, 'profile', None)
+            if profile is None or profile.is_disabled:
+                return Response(
+                    {'error': 'An active analyst profile is required.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if not profile.is_admin:
+                queryset = queryset.filter(responsibility=profile)
+        fund = request.query_params.get('fund')
+        if fund:
+            if fund not in {'FUND1', 'FUND2', 'FUND3'}:
+                return Response(
+                    {'error': 'fund must be FUND1, FUND2, or FUND3.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            queryset = queryset.filter(fund=fund)
+        counts = {
+            state: queryset.filter(fund_classification_state=state).count()
+            for state in FundClassificationState.values
+        }
+        counts['total'] = sum(counts.values())
+        return Response({'counts': counts, 'fund': fund})
+
+    @action(detail=True, methods=['patch'], url_path='fund-classification')
+    def fund_classification(self, request, pk=None):
+        target_fund = str(request.data.get('fund') or '').upper()
+        if target_fund not in {'FUND1', 'FUND2', 'FUND3'}:
+            return Response(
+                {'error': 'fund must be FUND1, FUND2, or FUND3.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        expected_updated_at = parse_datetime(str(request.data.get('expected_updated_at') or ''))
+        if expected_updated_at is None:
+            return Response(
+                {'error': 'expected_updated_at must be a valid ISO-8601 datetime.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        source_id = str(request.data.get('source_id') or '').strip()
+
+        with transaction.atomic():
+            deal = Deal.objects.select_for_update().filter(pk=pk).first()
+            if deal is None:
+                return Response({'error': 'Deal was not found.'}, status=status.HTTP_404_NOT_FOUND)
+            if not self._can_review_contradictions(request, deal):
+                return Response(
+                    {'error': 'Only deal-responsible analysts or administrators can review fund classification.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if deal.updated_at != expected_updated_at:
+                return Response(
+                    {
+                        'error': 'The deal changed after this classification was loaded.',
+                        'current_updated_at': deal.updated_at.isoformat(),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            deal.fund = target_fund
+            deal.fund_classification_state = FundClassificationState.EXPLICIT
+            deal.fund_classification_source_type = FundClassificationSourceType.ANALYST_REVIEW
+            deal.fund_classification_source_id = source_id or f'analyst-review:{deal.id}'
+            deal.fund_classification_reviewed_by = request.user
+            deal.fund_classification_reviewed_at = timezone.now()
+            deal.save(update_fields=[
+                'fund', 'fund_classification_state',
+                'fund_classification_source_type', 'fund_classification_source_id',
+                'fund_classification_reviewed_by', 'fund_classification_reviewed_at',
+                'updated_at',
+            ])
+        return Response(DealListSerializer(deal, context={'request': request}).data)
 
     @staticmethod
     def _pass_reason_remediation_queryset(user):

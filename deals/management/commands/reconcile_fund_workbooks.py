@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 
 from accounts.models import Profile
 from contacts.models import Contact
-from deals.models import Deal
+from deals.models import Deal, FundClassificationSourceType, FundClassificationState
 
 
 DEFAULT_WORKBOOKS = (
@@ -218,6 +218,8 @@ class Command(BaseCommand):
             "deal_summary", "deal_details", "company_details", "comments",
             "is_female_led", "management_meeting", "business_proposal_stage",
             "ic_stage", "primary_contact",
+            "fund_classification_state", "fund_classification_source_type",
+            "fund_classification_source_id",
         ):
             database_deals[(clean(deal.fund).upper(), normalized_title(deal.title))].append(deal)
             stats["database_deals"] += 1
@@ -248,6 +250,19 @@ class Command(BaseCommand):
             changes = {}
             contact_ids_to_add = set()
             profile_ids_to_add = set()
+
+            workbook_source_id = f'{source["workbook"]}:row:{source["row"]}'
+            if (
+                deal.fund_classification_state != FundClassificationState.EXPLICIT
+                or deal.fund_classification_source_type != FundClassificationSourceType.WORKBOOK
+                or deal.fund_classification_source_id != workbook_source_id
+            ):
+                changes.update({
+                    'fund_classification_state': FundClassificationState.EXPLICIT,
+                    'fund_classification_source_type': FundClassificationSourceType.WORKBOOK,
+                    'fund_classification_source_id': workbook_source_id,
+                })
+                stats['fund_provenance_to_backfill'] += 1
 
             source_date = source["received_at"]
             if source_date and deal.received_at is None:

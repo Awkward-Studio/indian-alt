@@ -69,6 +69,20 @@ class DealPhase(models.TextChoices):
     EXECUTION = 'Execution', 'Execution'
 
 
+class FundClassificationState(models.TextChoices):
+    EXPLICIT = 'EXPLICIT', 'Explicit'
+    DEFAULTED = 'DEFAULTED', 'Defaulted'
+    UNCERTAIN = 'UNCERTAIN', 'Uncertain'
+
+
+class FundClassificationSourceType(models.TextChoices):
+    WORKBOOK = 'WORKBOOK', 'Fund workbook'
+    ANALYST_REVIEW = 'ANALYST_REVIEW', 'Analyst review'
+    USER_INPUT = 'USER_INPUT', 'User input'
+    LEGACY_IMPORT = 'LEGACY_IMPORT', 'Legacy import'
+    SYSTEM_DEFAULT = 'SYSTEM_DEFAULT', 'System default'
+
+
 class Deal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.TextField(blank=True, null=True)
@@ -173,6 +187,29 @@ class Deal(models.Model):
         help_text='Additional contacts linked to this deal beyond the primary contact'
     )
     fund = models.TextField(default='FUND3')
+    fund_classification_state = models.CharField(
+        max_length=20,
+        choices=FundClassificationState.choices,
+        default=FundClassificationState.DEFAULTED,
+        db_index=True,
+    )
+    fund_classification_source_type = models.CharField(
+        max_length=30,
+        choices=FundClassificationSourceType.choices,
+        default=FundClassificationSourceType.SYSTEM_DEFAULT,
+    )
+    fund_classification_source_id = models.CharField(
+        max_length=500,
+        default='default:FUND3',
+    )
+    fund_classification_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_deal_fund_classifications',
+    )
+    fund_classification_reviewed_at = models.DateTimeField(null=True, blank=True)
     legacy_investment_bank = models.TextField(blank=True, null=True)
     priority_rationale = models.TextField(blank=True, null=True)
     # Originally: ArrayField(models.TextField(), ...) for Postgres.
@@ -242,6 +279,48 @@ class Deal(models.Model):
             models.Index(fields=['priority']),
             models.Index(fields=['deal_status']),
             models.Index(fields=['bank']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    fund_classification_state__in=[
+                        FundClassificationState.EXPLICIT,
+                        FundClassificationState.DEFAULTED,
+                        FundClassificationState.UNCERTAIN,
+                    ]
+                ),
+                name='deal_valid_fund_classification_state',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(fund_classification_state__in=[
+                        FundClassificationState.DEFAULTED,
+                        FundClassificationState.UNCERTAIN,
+                    ])
+                    | (
+                        ~models.Q(fund_classification_source_type='')
+                        & ~models.Q(fund_classification_source_id='')
+                    )
+                    | (
+                        models.Q(fund_classification_reviewed_by__isnull=False)
+                        & models.Q(fund_classification_reviewed_at__isnull=False)
+                    )
+                ),
+                name='deal_explicit_fund_has_provenance',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        fund_classification_reviewed_by__isnull=True,
+                        fund_classification_reviewed_at__isnull=True,
+                    )
+                    | models.Q(
+                        fund_classification_reviewed_by__isnull=False,
+                        fund_classification_reviewed_at__isnull=False,
+                    )
+                ),
+                name='deal_fund_reviewer_fields_paired',
+            ),
         ]
 
     def __str__(self):

@@ -347,6 +347,16 @@ class DealSerializer(serializers.ModelSerializer):
         # Pop fields that are not on the Deal model anymore
         # Use a copy to ensure they remain available for perform_create hooks
         model_data = validated_data.copy()
+        if 'fund' in model_data:
+            requested_by = getattr(self.context.get('request'), 'user', None)
+            model_data.update({
+                'fund_classification_state': 'EXPLICIT',
+                'fund_classification_source_type': 'USER_INPUT',
+                'fund_classification_source_id': 'api:create',
+            })
+            if getattr(requested_by, 'is_authenticated', False):
+                model_data['fund_classification_reviewed_by'] = requested_by
+                model_data['fund_classification_reviewed_at'] = timezone.now()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
         deal_status = model_data.get('deal_status')
@@ -387,6 +397,16 @@ class DealSerializer(serializers.ModelSerializer):
             for field in ("title", "sector", "industry")
         )
         model_data = validated_data.copy()
+        if 'fund' in model_data and model_data['fund'] != instance.fund:
+            requested_by = getattr(self.context.get('request'), 'user', None)
+            model_data.update({
+                'fund_classification_state': 'EXPLICIT',
+                'fund_classification_source_type': 'USER_INPUT',
+                'fund_classification_source_id': 'api:update',
+            })
+            if getattr(requested_by, 'is_authenticated', False):
+                model_data['fund_classification_reviewed_by'] = requested_by
+                model_data['fund_classification_reviewed_at'] = timezone.now()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
         if 'deal_status' in model_data or 'current_phase' in model_data:
@@ -433,7 +453,12 @@ class DealSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = '__all__'
-        read_only_fields = ('id', 'created_at', 'updated_at')
+        read_only_fields = (
+            'id', 'created_at', 'updated_at',
+            'fund_classification_state', 'fund_classification_source_type',
+            'fund_classification_source_id', 'fund_classification_reviewed_by',
+            'fund_classification_reviewed_at',
+        )
 
 
 class VentureIntelligenceFinancialStatementSerializer(serializers.ModelSerializer):
@@ -630,6 +655,9 @@ class DealListSerializer(serializers.ModelSerializer):
             'primary_contact_name', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'rejection_stage_id', 'rejection_reason', 'reasons_for_passing'
+            'rejection_stage_id', 'rejection_reason', 'reasons_for_passing',
+            'fund_classification_state', 'fund_classification_source_type',
+            'fund_classification_source_id', 'fund_classification_reviewed_by',
+            'fund_classification_reviewed_at',
         )
         read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')
