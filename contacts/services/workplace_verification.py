@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from ai_orchestrator.models import AIAuditLog
-from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from banks.models import Bank
 from contacts.models import Contact, WorkplaceVerificationSuggestion
@@ -45,11 +45,17 @@ class WorkplaceVerificationService:
             raise ValueError('A banker name is required before workplace verification.')
 
         current_bank = (contact.bank.name if contact.bank else '').strip()
-        query_context = f' {current_bank}' if current_bank else ' investment banker'
-        queries = [
-            f'"{name}"{query_context} current role',
-            f'"{name}" banker current employer designation',
-        ]
+        policy_system, _, policy_stage = PipelineRegistryService.render_prompt_stage(
+            'workplace_verification', 'policy'
+        )
+        if not policy_system:
+            policy_system = policy_stage.prompt_revision.user_template
+        _, rendered_queries, query_stage = PipelineRegistryService.render_prompt_stage(
+            'workplace_verification', 'queries',
+            name=name,
+            current_bank=f' {current_bank}' if current_bank else ' investment banker',
+        )
+        queries = [line.strip() for line in rendered_queries.splitlines() if line.strip()]
         results = self.search_service.search_many(
             queries,
             results_per_query=5,
@@ -68,7 +74,7 @@ class WorkplaceVerificationService:
             requested_by=requested_by,
             model_provider='local_search',
             model_used='searxng',
-            system_prompt=PromptCatalogService.get('workplace_verification_policy'),
+            system_prompt=policy_system,
             user_prompt='\n'.join(queries),
             raw_response=json.dumps(eligible, ensure_ascii=False, default=str),
             parsed_json=proposal or {'status': 'NO_SUGGESTION'},
@@ -82,6 +88,9 @@ class WorkplaceVerificationService:
             is_success=True,
             status='COMPLETED',
             completed_at=timezone.now(),
+            pipeline=policy_stage.pipeline,
+            pipeline_stage=query_stage.stage,
+            prompt_revision=query_stage.prompt_revision,
         )
 
         if not proposal:

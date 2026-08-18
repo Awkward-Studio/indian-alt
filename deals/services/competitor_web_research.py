@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from django.conf import settings
 
 from ai_orchestrator.services.llm_providers import VLLMProviderService
-from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.runtime import AIRuntimeService
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from deals.services.competitor_intelligence import competitor_names_from_payload
@@ -125,22 +125,20 @@ class CompetitorWebResearchService:
                 "Return up to 8 direct private or unlisted competitor companies or brands. "
                 "Exclude the target's parent, subsidiaries, sister brands, and aliases."
             )
-            research_prompt = self._research_prompt(
+            system, research_prompt, _ = PipelineRegistryService.render_prompt_stage(
+                "competitor_research",
+                "extract",
                 company_name=company_name,
-                sector=sector,
-                industry=industry,
-                location=location,
-                business_summary=business_summary,
-                instruction=f"{instruction}\n{route_instruction}",
-                existing_names=existing_names,
+                sector=sector or "N/A",
+                industry=industry or "N/A",
+                location=location or "N/A",
+                business_summary=(business_summary or "N/A")[:1200],
+                instruction=f"{instruction}\n{route_instruction}" or "Find direct competitors and close market peers",
+                existing_names=", ".join(existing_names) or "None",
                 evidence_context=evidence_context,
             )
             route_response = self._infer(
-                system=(
-                    f"Extract {route} competitor companies only from supplied search evidence. "
-                    "Never invent a company, ownership relationship, exchange, or ticker. "
-                    "Return valid JSON without markdown."
-                ),
+                system=system,
                 prompt=research_prompt,
                 max_tokens=1800,
             )
@@ -226,8 +224,9 @@ class CompetitorWebResearchService:
         instruction: str,
         fallback_queries: dict[str, str],
     ) -> tuple[dict[str, str], dict[str, Any]]:
-        prompt = PromptCatalogService.render(
-            "competitor_search_query_planner",
+        system, prompt, _ = PipelineRegistryService.render_prompt_stage(
+            "competitor_research",
+            "query_planner",
             company_name=company_name,
             sector=sector or "N/A",
             industry=industry or "N/A",
@@ -237,7 +236,8 @@ class CompetitorWebResearchService:
         )
         payload = {
             "model": self.model,
-            "system": "Return valid JSON only. Do not include markdown or reasoning.",
+            # JSON transport constraints are an immutable provider boundary.
+            "system": system or "Return valid JSON only. Do not include markdown or reasoning.",
             "prompt": prompt,
             "response_format": {
                 "type": "json_schema",

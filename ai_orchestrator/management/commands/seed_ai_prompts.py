@@ -81,10 +81,7 @@ class Command(BaseCommand):
         ]
 
         for p_data in personalities:
-            AIPersonality.objects.update_or_create(
-                name=p_data["name"],
-                defaults=p_data
-            )
+            AIPersonality.objects.get_or_create(name=p_data["name"], defaults=p_data)
         self.stdout.write(self.style.SUCCESS(f'Successfully seeded {len(personalities)} personalities.'))
 
         # 2. Seed Skills
@@ -125,6 +122,13 @@ class Command(BaseCommand):
             {
                 "name": "document_evidence_extraction",
                 "description": "Extracts structured evidence from a single document before final deal synthesis.",
+                "system_template": DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE,
+                "prompt_template": DOCUMENT_EVIDENCE_PROMPT_TEMPLATE,
+                "output_schema": {key: "required" for key in PHASE2_ARTIFACT_KEYS}
+            },
+            {
+                "name": "document_analysis",
+                "description": "Analyzes an individual OneDrive document into structured deal evidence.",
                 "system_template": DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE,
                 "prompt_template": DOCUMENT_EVIDENCE_PROMPT_TEMPLATE,
                 "output_schema": {key: "required" for key in PHASE2_ARTIFACT_KEYS}
@@ -178,8 +182,7 @@ class Command(BaseCommand):
         ]
 
         for s_data in skills:
-            AISkill.objects.update_or_create(
-                name=s_data["name"],
-                defaults=s_data
-            )
+            AISkill.objects.get_or_create(name=s_data["name"], defaults=s_data)
+        from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+        PipelineRegistryService.sync_legacy_defaults()
         self.stdout.write(self.style.SUCCESS(f'Successfully seeded {len(skills)} skills.'))

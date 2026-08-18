@@ -11,6 +11,7 @@ from .parsers import ResponseParserService
 from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .runtime import AIRuntimeService
+from .pipeline_registry import PipelineRegistryService, RegistryValidationError
 from django.conf import settings
 from django.utils import timezone
 
@@ -18,6 +19,22 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 logger = logging.getLogger(__name__)
+
+CORE_SKILL_STAGE_BINDINGS = {
+    "deal_chat": ("deal_chat", "answer"),
+    "universal_chat": ("universal_chat", "answer"),
+    "deal_synthesis": ("deal_ingestion", "synthesis"),
+    "deal_extraction": ("deal_ingestion", "extraction"),
+    "deal_helper_directive_document": ("deal_helper", "directive_document"),
+    "document_normalization": ("deal_ingestion", "normalization"),
+    "document_evidence_extraction": ("deal_ingestion", "evidence"),
+    "vdr_incremental_analysis": ("deal_ingestion", "incremental_analysis"),
+    "deal_routing": ("email_ingestion", "routing"),
+    "email_unroll": ("email_ingestion", "unroll"),
+    "email_intermediate_fusion": ("email_ingestion", "fusion"),
+    "email_thread_synthesis": ("email_ingestion", "synthesis"),
+    "document_analysis": ("onedrive_analysis", "document_analysis"),
+}
 
 class AIProcessorService:
     """
@@ -64,6 +81,16 @@ class AIProcessorService:
             
         personality = AIRuntimeService.get_personality(personality_name)
         skill = AIRuntimeService.get_skill(skill_name)
+        resolved_stage = None
+        pipeline_key = (metadata or {}).get("pipeline_key")
+        stage_key = (metadata or {}).get("stage_key")
+        if not pipeline_key and not stage_key and skill_name in CORE_SKILL_STAGE_BINDINGS:
+            pipeline_key, stage_key = CORE_SKILL_STAGE_BINDINGS[skill_name]
+        if pipeline_key or stage_key:
+            if not pipeline_key or not stage_key:
+                raise RegistryValidationError("pipeline_key and stage_key must be supplied together.")
+            resolved_stage = PipelineRegistryService.resolve_stage(pipeline_key, stage_key)
+            skill = resolved_stage.stage.skill or skill
         vision_model = AIRuntimeService.get_vision_model(personality)
         resolved_text_model = model_override or AIRuntimeService.get_text_model(personality)
         if model_provider == "anthropic":
@@ -83,6 +110,14 @@ class AIProcessorService:
             source_type, source_id, personality, skill, 
             "", "", metadata, resolved_model=resolved_text_model
         )
+        if resolved_stage:
+            audit_log.pipeline = resolved_stage.pipeline
+            audit_log.pipeline_stage = resolved_stage.stage
+            audit_log.prompt_revision = resolved_stage.prompt_revision
+            audit_log.skill_revision = resolved_stage.skill_revision
+            audit_log.save(update_fields=[
+                "pipeline", "pipeline_stage", "prompt_revision", "skill_revision",
+            ])
 
         # PHASE 1: OCR (Optional, delegated to OCRService)
         if images and skill_name == "deal_extraction":
@@ -93,7 +128,11 @@ class AIProcessorService:
 
         # PHASE 2: REASONING SETUP (Delegated to PromptBuilderService)
         log_worker_event(audit_log, f"Preparing prompt for {resolved_text_model}.")
-        if metadata and metadata.get("personality_only_system"):
+        if resolved_stage and resolved_stage.skill_revision and resolved_stage.skill_revision.system_template:
+            system_instructions = resolved_stage.skill_revision.system_template
+        elif resolved_stage and resolved_stage.prompt_revision and resolved_stage.prompt_revision.system_template:
+            system_instructions = resolved_stage.prompt_revision.system_template
+        elif metadata and metadata.get("personality_only_system"):
             system_instructions = getattr(personality, "system_instructions", None) or "You are a professional PE analyst."
         else:
             system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
@@ -109,7 +148,12 @@ class AIProcessorService:
                     else "Web search is explicitly disabled for this question. Do not invoke a web-search tool or imply that current public sources were checked."
                 )
             )
-        prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
+        if resolved_stage and resolved_stage.prompt_revision:
+            prompt_template = resolved_stage.prompt_revision.user_template
+        elif resolved_stage and resolved_stage.skill_revision:
+            prompt_template = resolved_stage.skill_revision.prompt_template
+        else:
+            prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
         response_mode = (metadata or {}).get("response_mode")
         if response_mode == "markdown":
             system_instructions = re.sub(

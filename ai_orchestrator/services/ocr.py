@@ -2,6 +2,7 @@ import logging
 from typing import List
 from .llm_providers import VLLMProviderService
 from .runtime import AIRuntimeService
+from .pipeline_registry import PipelineRegistryService
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class OCRService:
         """Specialized OCR using visual model."""
         if not images: return ""
         model = model or AIRuntimeService.get_vision_model()
+        _, prompt, _ = PipelineRegistryService.render_prompt_stage("document_ocr", "transcribe")
         
         print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via {model}...")
         transcription = ""
@@ -26,7 +28,7 @@ class OCRService:
             print(f"    [AI-PIPELINE] Phase 1: Transcribing page {i+1} of {len(images)} via {model}...")
             payload = {
                 "model": model,
-                "prompt": "Extract all text and tabular data from this document page exactly. Output Markdown.",
+                "prompt": prompt,
                 "images": [img],
                 "stream": False,
                 "keep_alive": "1m"

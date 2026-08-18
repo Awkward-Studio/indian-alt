@@ -12,6 +12,7 @@ from pptx import Presentation
 
 from .llm_providers import VLLMProviderService
 from .runtime import AIRuntimeService
+from .pipeline_registry import PipelineRegistryService
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,9 @@ class DocumentProcessorService:
         allow_local_fallback: bool = True,
         hint: str | None = None,
     ) -> dict:
+        _, ocr_prompt, _ = PipelineRegistryService.render_prompt_stage("document_ocr", "transcribe")
         if self.docproc_url:
-            remote_result = self._remote_extract(file_content, filename, page_limit=page_limit, hint=hint)
+            remote_result = self._remote_extract(file_content, filename, page_limit=page_limit, hint=hint, prompt=ocr_prompt)
             if remote_result:
                 return remote_result
             if not allow_local_fallback:
@@ -57,7 +59,7 @@ class DocumentProcessorService:
                     "error": f"Remote docproc unavailable for {filename}",
                 }
             logger.warning("[DOC-PROC] Remote docproc unavailable for %s. Falling back locally.", filename)
-        return self._local_extract(file_content, filename, page_limit=page_limit, hint=hint)
+        return self._local_extract(file_content, filename, page_limit=page_limit, hint=hint, prompt=ocr_prompt)
 
     def transcribe_document(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> str:
         result = self.get_extraction_result(file_content, filename, page_limit=page_limit, hint=hint)
@@ -66,13 +68,14 @@ class DocumentProcessorService:
             return text
         return f"[No readable content extracted for: {filename}]"
 
-    def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> dict | None:
+    def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict | None:
         try:
             payload = {
                 "filename": filename,
                 "page_limit": page_limit,
                 "content_base64": base64.b64encode(file_content).decode("utf-8"),
                 "hint": hint,
+                "prompt": prompt,
             }
             headers = {"Content-Type": "application/json"}
             if self.docproc_api_key:
@@ -114,7 +117,7 @@ class DocumentProcessorService:
             result["error"] = data["error"]
         return result
 
-    def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None) -> dict:
+    def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict:
         ext = os.path.splitext(filename)[1].lower()
         images_b64 = self._convert_to_images(file_content, filename, page_limit)
 
@@ -193,7 +196,7 @@ class DocumentProcessorService:
 
         for i, img in enumerate(images_b64):
             try:
-                base_prompt = "Extract all text and tabular data from this document exactly. Output Markdown."
+                base_prompt = prompt
                 final_prompt = f"{hint}\n\n{base_prompt}" if hint else base_prompt
 
                 payload = {

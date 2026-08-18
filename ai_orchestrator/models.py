@@ -254,6 +254,139 @@ class AIFlowVersion(models.Model):
         return f"{self.flow.key} v{self.version} ({self.status})"
 
 
+class AIPromptDefinition(models.Model):
+    """Stable identity and editable contract for one production prompt."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.CharField(max_length=150, unique=True)
+    name = models.CharField(max_length=200)
+    category = models.CharField(max_length=100, blank=True, default="")
+    description = models.TextField(blank=True, default="")
+    variables = models.JSONField(default=list, blank=True)
+    is_guardrail = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category", "name"]
+
+    def __str__(self):
+        return self.key
+
+
+class AIPromptRevision(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+        ARCHIVED = "archived", "Archived"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    definition = models.ForeignKey(
+        AIPromptDefinition, on_delete=models.CASCADE, related_name="revisions"
+    )
+    revision = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    system_template = models.TextField(blank=True, default="")
+    user_template = models.TextField(blank=True, default="")
+    input_schema = models.JSONField(default=dict, blank=True)
+    output_schema = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_ai_prompt_revisions",
+    )
+    published_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="published_ai_prompt_revisions",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-revision"]
+        constraints = [
+            models.UniqueConstraint(fields=["definition", "revision"], name="unique_ai_prompt_revision"),
+        ]
+
+    def __str__(self):
+        return f"{self.definition.key} r{self.revision} ({self.status})"
+
+
+class AISkillRevision(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+        ARCHIVED = "archived", "Archived"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    skill = models.ForeignKey(AISkill, on_delete=models.CASCADE, related_name="revisions")
+    revision = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    system_template = models.TextField(blank=True, default="")
+    prompt_template = models.TextField(blank=True, default="")
+    input_schema = models.JSONField(default=dict, blank=True)
+    output_schema = models.JSONField(default=dict, blank=True)
+    skill_format = models.CharField(max_length=30, choices=AISkill.Format.choices, default=AISkill.Format.NATIVE_PROMPT_V1)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_ai_skill_revisions")
+    published_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="published_ai_skill_revisions")
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-revision"]
+        constraints = [
+            models.UniqueConstraint(fields=["skill", "revision"], name="unique_ai_skill_revision"),
+        ]
+
+    def __str__(self):
+        return f"{self.skill.name} r{self.revision} ({self.status})"
+
+
+class AIPipelineDefinition(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.CharField(max_length=150, unique=True)
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.key
+
+
+class AIPipelineStage(models.Model):
+    class Kind(models.TextChoices):
+        PROMPT = "prompt", "Prompt"
+        SKILL = "skill", "Skill"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pipeline = models.ForeignKey(AIPipelineDefinition, on_delete=models.CASCADE, related_name="stages")
+    key = models.CharField(max_length=150)
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    position = models.PositiveIntegerField(default=0)
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    prompt_definition = models.ForeignKey(AIPromptDefinition, on_delete=models.PROTECT, null=True, blank=True, related_name="stages")
+    skill = models.ForeignKey(AISkill, on_delete=models.PROTECT, null=True, blank=True, related_name="pipeline_stages")
+    required_variables = models.JSONField(default=list, blank=True)
+    is_required = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["pipeline__name", "position", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["pipeline", "key"], name="unique_ai_pipeline_stage_key"),
+        ]
+
+    def __str__(self):
+        return f"{self.pipeline.key}.{self.key}"
+
+
 class AIAuditLog(models.Model):
     """
     Logs every interaction with the LLM for transparency and debugging.
@@ -275,6 +408,10 @@ class AIAuditLog(models.Model):
         related_name="requested_ai_runs",
     )
     skill_version = models.PositiveIntegerField(null=True, blank=True)
+    pipeline = models.ForeignKey(AIPipelineDefinition, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_logs")
+    pipeline_stage = models.ForeignKey(AIPipelineStage, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_logs")
+    prompt_revision = models.ForeignKey(AIPromptRevision, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_logs")
+    skill_revision = models.ForeignKey(AISkillRevision, on_delete=models.SET_NULL, null=True, blank=True, related_name="audit_logs")
     
     model_provider = models.CharField(max_length=50, default='vllm')
     model_used = models.CharField(max_length=100)

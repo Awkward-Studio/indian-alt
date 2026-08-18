@@ -183,16 +183,20 @@ class VentureIntelligenceService:
         ai_service.model_provider = "anthropic"
         ai_service.current_provider = ai_service.anthropic_provider
         
-        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
-        prompt = PromptCatalogService.render("cin_resolution", company_name=company_name)
-
         try:
             result = ai_service.process_content(
-                content=prompt,
-                skill_name="universal_chat",
+                content="",
+                skill_name=None,
                 source_type="deal_enrichment",
                 source_id="cin_resolution",
-                metadata={"model_provider": "anthropic", "temperature": 0.0},
+                metadata={
+                    "model_provider": "anthropic",
+                    "temperature": 0.0,
+                    "pipeline_key": "company_enrichment",
+                    "stage_key": "cin_resolve",
+                    "company_name": company_name,
+                    "web_search_enabled": True,
+                },
                 stream=False
             )
             response_text = result.get("response", "").strip()

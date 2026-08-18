@@ -17,7 +17,8 @@ from django.http import StreamingHttpResponse
 
 from .models import (
     AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog,
-    DealIndustrySkillAssignment, DocumentChunk,
+    DealIndustrySkillAssignment, DocumentChunk, AIPipelineDefinition,
+    AIPromptRevision, AISkillRevision,
 )
 from .serializers import (
     AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer,
@@ -31,6 +32,7 @@ from .services.realtime import broadcast_audit_log_update
 from .services.runtime import AIRuntimeService
 from .services.industry_skills import IndustrySkillService
 from .services.prompt_catalog import PromptCatalogService
+from .services.pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .services.universal_chat import UniversalChatService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
@@ -1131,9 +1133,72 @@ class ForexRateView(APIView):
         })
 
 
+def _pipeline_inventory() -> list[dict]:
+    """Small, UI-oriented representation of the published pipeline registry."""
+    pipelines = AIPipelineDefinition.objects.filter(is_active=True).prefetch_related(
+        "stages__prompt_definition__revisions", "stages__skill__revisions"
+    ).order_by("name")
+    result = []
+    for pipeline in pipelines:
+        stages = []
+        for stage in pipeline.stages.all().order_by("position", "name"):
+            if stage.prompt_definition_id:
+                revisions = list(stage.prompt_definition.revisions.order_by("-revision"))
+                active = next((row for row in revisions if row.status == AIPromptRevision.Status.PUBLISHED), None)
+                stages.append({
+                    "id": str(stage.id), "key": stage.key, "name": stage.name,
+                    "kind": "prompt", "required_variables": stage.required_variables,
+                    "definition_key": stage.prompt_definition.key,
+                    "description": stage.prompt_definition.description,
+                    "is_guardrail": stage.prompt_definition.is_guardrail,
+                    "active_revision": _serialize_prompt_revision(active),
+                    "revisions": [_serialize_prompt_revision(row) for row in revisions[:20]],
+                })
+            elif stage.skill_id:
+                revisions = list(stage.skill.revisions.order_by("-revision"))
+                active = next((row for row in revisions if row.status == AISkillRevision.Status.PUBLISHED), None)
+                stages.append({
+                    "id": str(stage.id), "key": stage.key, "name": stage.name,
+                    "kind": "skill", "required_variables": stage.required_variables,
+                    "skill_id": str(stage.skill_id), "skill_name": stage.skill.name,
+                    "description": stage.skill.description,
+                    "active_revision": _serialize_skill_revision(active),
+                    "revisions": [_serialize_skill_revision(row) for row in revisions[:20]],
+                })
+        result.append({"key": pipeline.key, "name": pipeline.name, "description": pipeline.description, "stages": stages})
+    return result
+
+
+def _serialize_prompt_revision(revision):
+    if not revision:
+        return None
+    return {
+        "id": str(revision.id), "revision": revision.revision, "status": revision.status,
+        "system_template": revision.system_template, "user_template": revision.user_template,
+        "input_schema": revision.input_schema, "output_schema": revision.output_schema,
+        "created_at": revision.created_at, "published_at": revision.published_at,
+    }
+
+
+def _serialize_skill_revision(revision):
+    if not revision:
+        return None
+    return {
+        "id": str(revision.id), "revision": revision.revision, "status": revision.status,
+        "system_template": revision.system_template, "prompt_template": revision.prompt_template,
+        "input_schema": revision.input_schema, "output_schema": revision.output_schema,
+        "created_at": revision.created_at, "published_at": revision.published_at,
+    }
+
+
 class AISettingsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
+        if not _is_ai_admin(request.user):
+            return Response(
+                {"error": "AI settings are only available to administrators."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             from django.conf import settings
             from .models import AnalysisProtocol, AISystemSetting
@@ -1143,6 +1208,7 @@ class AISettingsView(APIView):
             skills = AISkill.objects.all()
             protocols = AnalysisProtocol.objects.all()
             flow_state = UniversalChatFlowService.serialize_state()
+            PipelineRegistryService.sync_legacy_defaults()
             
             status_data = trigger_background_check(force=False)
 
@@ -1167,6 +1233,7 @@ class AISettingsView(APIView):
                 "live_rate": live_rate,
                 "claude_text_model": claude_text_model,
                 "prompt_catalog": PromptCatalogService.serialize(),
+                "pipelines": _pipeline_inventory(),
             })
         except Exception as e: 
             return Response({"error": str(e)}, status=500)
@@ -1213,6 +1280,70 @@ class AISettingsView(APIView):
                 except ValueError as exc:
                     return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
                 return Response({"success": True})
+
+            if target_type == 'pipeline_prompt':
+                try:
+                    stage = PipelineRegistryService.resolve_stage(*str(target_id).split('.', 1)).stage
+                    if stage.kind != stage.Kind.PROMPT:
+                        raise RegistryValidationError("This pipeline stage is backed by a skill.")
+                    if action == 'publish':
+                        revision = AIPromptRevision.objects.get(
+                            id=updates.get('revision_id'), definition=stage.prompt_definition,
+                        )
+                        PipelineRegistryService.publish_prompt(revision, published_by=request.user)
+                    elif action == 'rollback':
+                        source = AIPromptRevision.objects.get(
+                            id=updates.get('revision_id'), definition=stage.prompt_definition,
+                        )
+                        revision = PipelineRegistryService.create_prompt_draft(
+                            stage.prompt_definition,
+                            user_template=source.user_template,
+                            system_template=source.system_template,
+                            input_schema=source.input_schema,
+                            output_schema=source.output_schema,
+                            created_by=request.user,
+                        )
+                        PipelineRegistryService.publish_prompt(revision, published_by=request.user)
+                    else:
+                        revision = PipelineRegistryService.create_prompt_draft(
+                            stage.prompt_definition,
+                            user_template=str(updates.get('user_template') or ''),
+                            system_template=str(updates.get('system_template') or ''),
+                            input_schema=updates.get('input_schema'),
+                            output_schema=updates.get('output_schema'),
+                            created_by=request.user,
+                        )
+                    return Response({"success": True, "revision": _serialize_prompt_revision(revision)})
+                except (ValueError, AIPromptRevision.DoesNotExist, RegistryValidationError) as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            if target_type == 'pipeline_skill':
+                try:
+                    stage = PipelineRegistryService.resolve_stage(*str(target_id).split('.', 1)).stage
+                    if stage.kind != stage.Kind.SKILL:
+                        raise RegistryValidationError("This pipeline stage is backed by a prompt.")
+                    if action == 'publish':
+                        revision = AISkillRevision.objects.get(id=updates.get('revision_id'), skill=stage.skill)
+                        PipelineRegistryService.publish_skill(revision, published_by=request.user)
+                    elif action == 'rollback':
+                        source = AISkillRevision.objects.get(id=updates.get('revision_id'), skill=stage.skill)
+                        revision = PipelineRegistryService.create_skill_draft(
+                            stage.skill, system_template=source.system_template,
+                            prompt_template=source.prompt_template, input_schema=source.input_schema,
+                            output_schema=source.output_schema, created_by=request.user,
+                        )
+                        PipelineRegistryService.publish_skill(revision, published_by=request.user)
+                    else:
+                        revision = PipelineRegistryService.create_skill_draft(
+                            stage.skill,
+                            system_template=str(updates.get('system_template') or ''),
+                            prompt_template=str(updates.get('prompt_template') or ''),
+                            input_schema=updates.get('input_schema'), output_schema=updates.get('output_schema'),
+                            created_by=request.user,
+                        )
+                    return Response({"success": True, "revision": _serialize_skill_revision(revision)})
+                except (ValueError, AISkillRevision.DoesNotExist, RegistryValidationError) as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
             if target_type == 'personality':
                 if target_id == 'new':

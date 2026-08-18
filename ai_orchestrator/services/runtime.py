@@ -5,7 +5,10 @@ from typing import Any, Optional
 
 from django.conf import settings
 
-from ..models import AIAuditLog, AIPersonality, AISkill
+from ..models import (
+    AIAuditLog, AIPersonality, AISkill, AIPipelineDefinition,
+    AIPipelineStage, AIPromptRevision, AISkillRevision,
+)
 
 
 class AIRuntimeService:
@@ -194,6 +197,10 @@ class AIRuntimeService:
         celery_task_id: Optional[str] = None,
         requested_by=None,
         skill_version: Optional[int] = None,
+        pipeline: Optional[AIPipelineDefinition] = None,
+        pipeline_stage: Optional[AIPipelineStage] = None,
+        prompt_revision: Optional[AIPromptRevision] = None,
+        skill_revision: Optional[AISkillRevision] = None,
     ) -> AIAuditLog:
         personality = personality or cls.get_default_personality()
         return AIAuditLog.objects.create(
@@ -204,6 +211,10 @@ class AIRuntimeService:
             skill=skill,
             requested_by=requested_by,
             skill_version=skill_version or getattr(skill, "version", None),
+            pipeline=pipeline,
+            pipeline_stage=pipeline_stage,
+            prompt_revision=prompt_revision,
+            skill_revision=skill_revision,
             model_provider=cls.get_provider(personality),
             model_used=model_used or cls.get_text_model(personality),
             status=status,

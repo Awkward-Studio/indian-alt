@@ -669,13 +669,19 @@ class ScreenerCompanyService:
         }
 
     def resolve_screener_url(self, company_name: str, *, ticker: str = "", exchange: str = "") -> dict[str, Any]:
-        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
-        prompt = PromptCatalogService.render(
-            "screener_resolver",
+        from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+        _, prompt, _ = PipelineRegistryService.render_prompt_stage(
+            "company_enrichment",
+            "screener_resolve",
             company_name=company_name,
             ticker=ticker or "N/A",
             exchange=exchange or "N/A",
         )
+        system_prompt, _, system_stage = PipelineRegistryService.render_prompt_stage(
+            "company_enrichment", "screener_system"
+        )
+        if not system_prompt:
+            system_prompt = system_stage.prompt_revision.user_template
         from ai_orchestrator.services.search_provider import SearXNGProviderService
         search_query = f"{company_name} {ticker} screener.in profile"
         search_context = SearXNGProviderService().search(search_query)
@@ -690,7 +696,7 @@ class ScreenerCompanyService:
         result = service.execute_standard(
             {
                 "model": model_name,
-                "system": PromptCatalogService.get("screener_resolver_system"),
+                "system": system_prompt,
                 "prompt": augmented_prompt,
                 "options": {
                     "temperature": 0.0,

@@ -8,7 +8,7 @@ from typing import Any
 from django.conf import settings
 
 from ai_orchestrator.models import AIAuditLog
-from ai_orchestrator.services.prompt_catalog import PromptCatalogService
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.runtime import AIRuntimeService
 from ai_orchestrator.services.realtime import broadcast_audit_log_update
 from deals.models import Deal
@@ -42,8 +42,13 @@ class MeetingSignalAnalysisService:
                 "executive_summary": "No meeting notes are available for this deal.",
             }
 
-        prompt = self._build_prompt(deal, notes)
-        system_prompt = PromptCatalogService.get("meeting_signal_system")
+        system_prompt, _, system_stage = PipelineRegistryService.render_prompt_stage(
+            "meeting_analysis", "system"
+        )
+        # Catalog system prompts are stored as the editable stage body.
+        if not system_prompt:
+            system_prompt = system_stage.prompt_revision.user_template
+        prompt, user_stage = self._build_prompt(deal, notes)
         started_at = time.monotonic()
         audit_log = AIAuditLog.objects.create(
             source_type="meeting_signal_analysis",
@@ -56,6 +61,9 @@ class MeetingSignalAnalysisService:
             raw_response="",
             status="PROCESSING",
             is_success=False,
+            pipeline=system_stage.pipeline,
+            pipeline_stage=user_stage.stage,
+            prompt_revision=user_stage.prompt_revision,
             source_metadata={
                 "deal_id": str(deal.id),
                 "deal_title": deal.title,
@@ -245,7 +253,7 @@ class MeetingSignalAnalysisService:
         except Exception as exc:
             logger.warning("Meeting signal audit broadcast failed: %s", exc)
 
-    def _build_prompt(self, deal: Deal, notes: list[MeetingNote]) -> str:
+    def _build_prompt(self, deal: Deal, notes: list[MeetingNote]):
         note_blocks = []
         for index, note in enumerate(notes, start=1):
             note_text = "\n".join(
@@ -260,11 +268,13 @@ class MeetingSignalAnalysisService:
             )
             note_blocks.append(f"[NOTE {index} | id={note.id}]\n{note_text}")
 
-        return PromptCatalogService.render(
-            "meeting_signal_user",
+        _, prompt, stage = PipelineRegistryService.render_prompt_stage(
+            "meeting_analysis",
+            "extract",
             deal_title=deal.title,
             meeting_notes="\n".join(note_blocks),
-        ).strip()
+        )
+        return prompt.strip(), stage
 
     def _parse_json(self, content: str) -> dict[str, Any]:
         raw = (content or "").strip()

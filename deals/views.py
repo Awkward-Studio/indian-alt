@@ -229,12 +229,21 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             )
 
             ai_service = AIProcessorService()
-            prompt = f"Using the following institutional documents as context, answer: {query}\n\nCONTEXT:\n{context}"
+            from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+            stage = PipelineRegistryService.resolve_stage(
+                "analysis_support", "global_document_search"
+            )
             
             result = ai_service.process_content(
-                content=prompt,
+                content="",
                 skill_name=None,
-                source_type="global_search"
+                source_type="global_search",
+                metadata={
+                    "pipeline_key": stage.pipeline.key,
+                    "stage_key": stage.stage.key,
+                    "query": query,
+                    "context": context,
+                },
             )
             
             return Response({

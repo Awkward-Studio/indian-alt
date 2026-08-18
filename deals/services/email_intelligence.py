@@ -50,39 +50,23 @@ class EmailIntelligenceService:
             logger.warning(f"No thread context found for email {email_id}")
             return {"company_name": root_email.subject or "Unknown Deal"}
 
-        routing_prompt = f"Analyze this thread and propose deal routing metadata:\n{thread_context[:10000]}"
-
-        # 3. Direct Provider Call (No Audit Log)
-        from ai_orchestrator.services.llm_providers import VLLMProviderService
-        from ai_orchestrator.services.parsers import ResponseParserService
-        from ai_orchestrator.models import AISkill, AIPersonality
-        from ai_orchestrator.services.runtime import AIRuntimeService
-        
-        provider = VLLMProviderService()
-        skill = AISkill.objects.filter(name="deal_routing").first()
-        personality = AIPersonality.objects.filter(is_default=True).first()
-        active_model = AIRuntimeService.get_text_model(personality)
-        
-        payload = {
-            "model": active_model,
-            "messages": [
-                {"role": "system", "content": skill.system_template if skill else "Return exactly one valid JSON object."},
-                {"role": "user", "content": routing_prompt}
-            ],
-            "temperature": 0.0,
-            "chat_template_kwargs": {"enable_thinking": False}, # Disable thinking for speed
-            "response_format": {"type": "json_object"}
-        }
-
+        # Route through the governed AI processor so the stored task prompt,
+        # published skill revision, and audit record remain in sync.
         try:
-            data = provider.execute_standard(payload)
-            raw_response = data.get("response") or ""
-            
-            # Robust extraction of JSON from response (handling thinking blocks)
-            parsed_json, success, _, _ = ResponseParserService.parse_standard_response(
-                raw_response, "", is_extraction_skill=True
+            result = AIProcessorService().process_content(
+                content=thread_context[:10000],
+                skill_name="deal_routing",
+                source_type="email_routing",
+                source_id=str(root_email.id),
+                metadata={
+                    "temperature": 0.0,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "response_format": {"type": "json_object"},
+                    "response_mode": "json",
+                },
             )
-            extraction = parsed_json if success else {}
+            extraction = (result.get("parsed_json") or result) if isinstance(result, dict) else {}
+            extraction = extraction if isinstance(extraction, dict) else {}
         except Exception as e:
             logger.error(f"Routing extraction failed: {e}")
             extraction = {}

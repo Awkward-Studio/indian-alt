@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 
 from ai_orchestrator.services.ai_processor import AIProcessorService
-from ai_orchestrator.services.prompt_catalog import PromptCatalogService
 
 
 class AnalysisSectionRewriteService:
@@ -61,18 +60,8 @@ class AnalysisSectionRewriteService:
             deal=deal,
             query=f"{section_title}\n{instruction}",
         ) if evidence_scope in {"all", "news", "meetings_and_news"} else ""
-        prompt = PromptCatalogService.render(
-            "analysis_section_rewrite",
-            deal_title=deal.title,
-            section_title=section_title,
-            instruction=instruction,
-            section_markdown=section_markdown,
-            full_report=self._report_context(full_report, section_title),
-            meeting_context=meeting_context or "No indexed meeting evidence matched this rewrite.",
-            news_context=news_context or "No indexed company-news evidence matched this rewrite.",
-        ).strip()
         result = self.ai_service.process_content(
-            content=prompt,
+            content="",
             skill_name=None,
             source_type="analysis_section_rewrite",
             source_id=str(deal.id),
@@ -85,6 +74,14 @@ class AnalysisSectionRewriteService:
                 "analysis_version": version,
                 "max_tokens": 4096,
                 "max_input_tokens": 11000,
+                "pipeline_key": "analysis_support",
+                "stage_key": "section_rewrite",
+                "deal_title": deal.title,
+                "instruction": instruction,
+                "section_markdown": section_markdown,
+                "full_report": self._report_context(full_report, section_title),
+                "meeting_context": meeting_context or "No indexed meeting evidence matched this rewrite.",
+                "news_context": news_context or "No indexed company-news evidence matched this rewrite.",
             },
         )
         if isinstance(result, dict):

@@ -2161,9 +2161,10 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             if isinstance(item, dict) and str(item.get("title") or "").strip()
         ][:30]
 
-        from ai_orchestrator.services.prompt_catalog import PromptCatalogService
-        prompt = PromptCatalogService.render(
+        from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+        _, prompt, _ = PipelineRegistryService.render_prompt_stage(
             "public_news_research",
+            "research",
             search_directive=search_directive,
             deal_title=deal.title,
             sector=deal.sector or "N/A",
@@ -2171,6 +2172,11 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             location=f"{deal.city or 'N/A'}, {deal.country or 'N/A'}",
             existing_findings=", ".join(existing_names) if existing_names else "None",
         )
+        system_prompt, _, system_stage = PipelineRegistryService.render_prompt_stage(
+            "public_news_research", "system"
+        )
+        if not system_prompt:
+            system_prompt = system_stage.prompt_revision.user_template
 
         from ai_orchestrator.services.search_provider import SearXNGProviderService
         search_query = instruction if instruction else f"{deal.title} public news latest"
@@ -2185,7 +2191,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         service = VLLMProviderService()
         result = service.execute_standard({
             "model": AIRuntimeService.get_text_model(),
-            "system": PromptCatalogService.get("public_news_research_system"),
+            "system": system_prompt,
             "prompt": augmented_prompt,
             "options": {
                 "max_tokens": 4000,
