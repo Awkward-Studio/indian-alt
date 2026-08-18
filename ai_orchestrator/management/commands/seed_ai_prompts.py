@@ -6,6 +6,8 @@ from ai_orchestrator.prompt_contracts import (
     DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
     DOCUMENT_EVIDENCE_PROMPT_TEMPLATE,
     DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE,
+    DOCUMENT_NORMALIZATION_PROMPT_TEMPLATE,
+    DOCUMENT_NORMALIZATION_SYSTEM_TEMPLATE,
     PHASE2_ARTIFACT_KEYS,
     REPORT_FORMAT_REQUIREMENTS,
     SOURCE_RELATIONSHIPS_SCHEMA,
@@ -94,9 +96,9 @@ class Command(BaseCommand):
             },
             {
                 "name": "deal_extraction",
-                "description": "Forensic deal extraction from folders and emails.",
+                "description": "Initial institutional deal extraction from uploaded files.",
                 "system_template": DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
-                "prompt_template": "Analyze the provided documents and extract the initial institutional deal record.\n\n[INPUT DATA]\n{{ content }}\n\nUse the Phase 3 internal IC deal synthesis contract. Return exactly one valid JSON object and nothing else. Include `deal_model_data`, `source_relationships`, `metadata`, `analyst_report`, `document_evidence`, `cross_document_conflicts`, and `missing_information_requests`.\n\n" + REPORT_FORMAT_REQUIREMENTS + "\nRules:\n- `funding_ask` must be a string in INR Cr when supported by evidence.\n- Populate `source_relationships` with external bank/advisor and banker details. Ignore @india-alt.com and @india-alternatives.com internal staff.\n- Use only supplied evidence. Mark unsupported facts as [VERIFY] or External diligence required.\n- Every material claim in `analyst_report` must cite or name a source document when possible.",
+                "prompt_template": DEAL_SYNTHESIS_PROMPT_TEMPLATE,
                 "output_schema": DEAL_SYNTHESIS_JSON_SCHEMA
             },
             {
@@ -135,9 +137,9 @@ class Command(BaseCommand):
             },
             {
                 "name": "document_normalization",
-                "description": "Normalizes raw document text into high-fidelity structured JSON.",
-                "system_template": DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE,
-                "prompt_template": DOCUMENT_EVIDENCE_PROMPT_TEMPLATE
+                "description": "Normalizes raw OCR and document text into structured Markdown tables and text.",
+                "system_template": DOCUMENT_NORMALIZATION_SYSTEM_TEMPLATE,
+                "prompt_template": DOCUMENT_NORMALIZATION_PROMPT_TEMPLATE
             },
             {
                 "name": "email_intermediate_fusion",

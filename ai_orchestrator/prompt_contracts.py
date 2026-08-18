@@ -320,6 +320,26 @@ Rules:
 - If unrelated documents are present, explicitly flag them as excluded or low relevance.
 - Do not invent values absent from evidence; use N/A, [VERIFY], or External diligence required and add missing-information requests where the output mode supports them."""
 
+DOCUMENT_NORMALIZATION_SYSTEM_TEMPLATE = """### DOCUMENT NORMALIZATION CONTRACT
+Clean and standardize raw extracted document text, PDF transcription chunks, and spreadsheet data into high-fidelity Markdown tables and text.
+- Preserve all financial line items, formulas, metrics, currency units (INR Cr, Lakhs, USD, %), and historical/projected periods.
+- Standardize fragmented tables into clean Markdown tables with header rows.
+- Remove OCR artifacts, scanning noise, and page breaks without modifying factual or numeric data.
+- Return Markdown only."""
+
+DOCUMENT_NORMALIZATION_PROMPT_TEMPLATE = """Normalize this raw extracted document text into clean, structured Markdown.
+
+[DOCUMENT NAME]
+{{ document_name }}
+
+[RAW EXTRACTED CONTENT]
+{{ content }}
+
+Rules:
+- Preserve all numbers, line items, and units exactly as stated.
+- Format all financial statements, cap tables, and schedules as clean Markdown tables.
+- Strip page artifacts, headers, footers, and redundant line breaks."""
+
 DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE = """### PHASE 2 DOCUMENT EVIDENCE OUTPUT CONTRACT
 - Return exactly one JSON object and nothing else.
 - Use the Phase 2 artifact field names expected by downstream Phase 3 synthesis.

@@ -1308,16 +1308,19 @@ class AISettingsView(APIView):
                         active = PipelineRegistryService.resolve_stage(
                             stage.pipeline.key, stage.key
                         ).prompt_revision
-                        proposed_template = PipelineRegistryService.compose_business_edit(
-                            active.user_template,
-                            str(updates.get('business_template') or ''),
-                        )
+                        if updates.get('user_template') is not None:
+                            proposed_template = str(updates.get('user_template'))
+                            system_template = str(updates.get('system_template', active.system_template))
+                        else:
+                            proposed_template = PipelineRegistryService.compose_business_edit(
+                                active.user_template,
+                                str(updates.get('business_template') or ''),
+                            )
+                            system_template = active.system_template
                         revision = PipelineRegistryService.create_prompt_draft(
                             stage.prompt_definition,
                             user_template=proposed_template,
-                            # Operational/system rules and response contracts are
-                            # source-controlled. Only the business task is editable.
-                            system_template=active.system_template,
+                            system_template=system_template,
                             input_schema=active.input_schema,
                             output_schema=active.output_schema,
                             created_by=request.user,
@@ -1346,21 +1349,34 @@ class AISettingsView(APIView):
                         active = PipelineRegistryService.resolve_stage(
                             stage.pipeline.key, stage.key
                         ).skill_revision
-                        proposed_template = PipelineRegistryService.compose_business_edit(
-                            active.prompt_template,
-                            str(updates.get('business_template') or ''),
-                        )
+                        if updates.get('prompt_template') is not None:
+                            proposed_template = str(updates.get('prompt_template'))
+                            system_template = str(updates.get('system_template', active.system_template))
+                        else:
+                            proposed_template = PipelineRegistryService.compose_business_edit(
+                                active.prompt_template,
+                                str(updates.get('business_template') or ''),
+                            )
+                            system_template = active.system_template
                         revision = PipelineRegistryService.create_skill_draft(
                             stage.skill,
-                            # The model/system and JSON contracts are locked to
-                            # preserve executable pipeline behavior.
-                            system_template=active.system_template,
+                            system_template=system_template,
                             prompt_template=proposed_template,
                             input_schema=active.input_schema, output_schema=active.output_schema,
                             created_by=request.user,
                         )
                     return Response({"success": True, "revision": _serialize_skill_revision(revision)})
                 except (ValueError, AISkillRevision.DoesNotExist, RegistryValidationError) as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            if target_type == 'simulate_prompt':
+                template = str(updates.get('template', ''))
+                variables = updates.get('variables', {}) or {}
+                required_vars = updates.get('required_variables', []) or []
+                try:
+                    rendered = PipelineRegistryService.render(template, variables, required_vars)
+                    return Response({"success": True, "rendered_prompt": rendered})
+                except Exception as exc:
                     return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
             if target_type == 'personality':
