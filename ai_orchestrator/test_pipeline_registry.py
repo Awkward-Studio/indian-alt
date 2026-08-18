@@ -23,6 +23,24 @@ class PromptRenderingTests(SimpleTestCase):
         with self.assertRaises(RegistryValidationError):
             PipelineRegistryService.render("{{ content }}", {}, ["content"])
 
+    def test_business_edit_keeps_active_output_contract(self):
+        active = (
+            "Assess the deal using {{ content }}.\n"
+            "Return exactly one JSON object.\n"
+            "```json\n"
+            '{"summary": "string"}\n'
+            "```"
+        )
+
+        composed = PipelineRegistryService.compose_business_edit(
+            active, "Prioritise risks and opportunities using {{ content }}."
+        )
+
+        self.assertIn("Prioritise risks", composed)
+        self.assertIn("Return exactly one JSON object.", composed)
+        self.assertIn("```json", composed)
+        self.assertIn('{"summary": "string"}', composed)
+
 
 class PromptRevisionLifecycleTests(TestCase):
     def setUp(self):

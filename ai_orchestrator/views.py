@@ -1305,12 +1305,21 @@ class AISettingsView(APIView):
                         )
                         PipelineRegistryService.publish_prompt(revision, published_by=request.user)
                     else:
+                        active = PipelineRegistryService.resolve_stage(
+                            stage.pipeline.key, stage.key
+                        ).prompt_revision
+                        proposed_template = PipelineRegistryService.compose_business_edit(
+                            active.user_template,
+                            str(updates.get('business_template') or ''),
+                        )
                         revision = PipelineRegistryService.create_prompt_draft(
                             stage.prompt_definition,
-                            user_template=str(updates.get('user_template') or ''),
-                            system_template=str(updates.get('system_template') or ''),
-                            input_schema=updates.get('input_schema'),
-                            output_schema=updates.get('output_schema'),
+                            user_template=proposed_template,
+                            # Operational/system rules and response contracts are
+                            # source-controlled. Only the business task is editable.
+                            system_template=active.system_template,
+                            input_schema=active.input_schema,
+                            output_schema=active.output_schema,
                             created_by=request.user,
                         )
                     return Response({"success": True, "revision": _serialize_prompt_revision(revision)})
@@ -1334,11 +1343,20 @@ class AISettingsView(APIView):
                         )
                         PipelineRegistryService.publish_skill(revision, published_by=request.user)
                     else:
+                        active = PipelineRegistryService.resolve_stage(
+                            stage.pipeline.key, stage.key
+                        ).skill_revision
+                        proposed_template = PipelineRegistryService.compose_business_edit(
+                            active.prompt_template,
+                            str(updates.get('business_template') or ''),
+                        )
                         revision = PipelineRegistryService.create_skill_draft(
                             stage.skill,
-                            system_template=str(updates.get('system_template') or ''),
-                            prompt_template=str(updates.get('prompt_template') or ''),
-                            input_schema=updates.get('input_schema'), output_schema=updates.get('output_schema'),
+                            # The model/system and JSON contracts are locked to
+                            # preserve executable pipeline behavior.
+                            system_template=active.system_template,
+                            prompt_template=proposed_template,
+                            input_schema=active.input_schema, output_schema=active.output_schema,
                             created_by=request.user,
                         )
                     return Response({"success": True, "revision": _serialize_skill_revision(revision)})

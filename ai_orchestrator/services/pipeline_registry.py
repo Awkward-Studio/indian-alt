@@ -26,6 +26,11 @@ from ai_orchestrator.models import (
 
 
 PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}")
+OUTPUT_CONTRACT_PATTERN = re.compile(
+    r"(?:json|markdown|response schema|output schema|return |code fence|```|"
+    r"additionalproperties|required\"|properties\"|<[^>]+>)",
+    re.IGNORECASE,
+)
 
 
 class RegistryValidationError(ValueError):
@@ -83,6 +88,67 @@ class PipelineRegistryService:
                 f"Unresolved prompt variables: {', '.join(unresolved)}."
             )
         return rendered
+
+    @staticmethod
+    def locked_contract_lines(template: str) -> list[str]:
+        """Return format/transport clauses that authors cannot change in-place."""
+        locked: list[str] = []
+        in_code_fence = False
+        for line in (template or "").splitlines():
+            stripped = line.strip()
+            is_fence = "```" in stripped
+            if stripped and (
+                in_code_fence or is_fence or OUTPUT_CONTRACT_PATTERN.search(stripped)
+            ):
+                locked.append(stripped)
+            if is_fence:
+                in_code_fence = not in_code_fence
+        return locked
+
+    @classmethod
+    def business_editable_template(cls, template: str) -> str:
+        """Return authorable business prose, excluding executable output clauses."""
+        locked = set(cls.locked_contract_lines(template))
+        return "\n".join(
+            line for line in (template or "").splitlines()
+            if line.strip() not in locked
+        ).strip()
+
+    @classmethod
+    def compose_business_edit(cls, active_template: str, business_template: str) -> str:
+        """Combine new business instructions with the active locked contract.
+
+        Format/code-output instructions remain byte-for-byte from the active
+        revision; an author can change only the business portion.
+        """
+        business_template = (business_template or "").strip()
+        if not business_template:
+            raise RegistryValidationError("Business instructions cannot be empty.")
+        if cls.locked_contract_lines(business_template):
+            raise RegistryValidationError(
+                "Output/code instructions belong to the locked runtime contract "
+                "and cannot be added or changed in the business editor."
+            )
+        contract = cls.locked_contract_lines(active_template)
+        return "\n\n".join(part for part in (business_template, "\n".join(contract)) if part)
+
+    @classmethod
+    def validate_business_edit(cls, active_template: str, proposed_template: str) -> None:
+        """Keep existing output and code-format clauses immutable.
+
+        Business prose remains authorable, while the exact contract lines from
+        the active published revision must remain in a proposed draft.
+        """
+        proposed_lines = {line.strip() for line in (proposed_template or "").splitlines()}
+        missing = [
+            line for line in cls.locked_contract_lines(active_template)
+            if line not in proposed_lines
+        ]
+        if missing:
+            raise RegistryValidationError(
+                "Output/code contract clauses are locked and cannot be changed: "
+                + "; ".join(missing[:3])
+            )
 
     @staticmethod
     def _next_revision(queryset) -> int:
