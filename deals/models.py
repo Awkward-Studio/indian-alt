@@ -354,33 +354,6 @@ class Deal(models.Model):
         analysis = self.latest_analysis
         return analysis.analysis_json if analysis else {}
 
-
-class DealPassReasonRemediationAudit(models.Model):
-    """Append-only provenance for human remediation of legacy pass reasons."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    deal = models.ForeignKey(
-        Deal,
-        on_delete=models.CASCADE,
-        related_name='pass_reason_remediation_audits',
-    )
-    actor = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        related_name='deal_pass_reason_remediations',
-    )
-    previous_reason = models.TextField(blank=True, null=True)
-    new_reason = models.TextField()
-    deal_updated_at = models.DateTimeField()
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'deal_pass_reason_remediation_audit'
-        ordering = ['-created_at']
-        indexes = [models.Index(fields=['deal', '-created_at'])]
-
-
     @staticmethod
     def _normalize_analysis_record(analysis):
         if not analysis:
@@ -449,6 +422,32 @@ class DealPassReasonRemediationAudit(models.Model):
     def analysis_history(self):
         analyses = self.analyses.order_by('version', 'created_at')
         return [self._normalize_analysis_record(analysis) for analysis in analyses]
+
+
+class DealPassReasonRemediationAudit(models.Model):
+    """Append-only provenance for human remediation of legacy pass reasons."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(
+        Deal,
+        on_delete=models.CASCADE,
+        related_name='pass_reason_remediation_audits',
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='deal_pass_reason_remediations',
+    )
+    previous_reason = models.TextField(blank=True, null=True)
+    new_reason = models.TextField()
+    deal_updated_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deal_pass_reason_remediation_audit'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['deal', '-created_at'])]
 
 
 class DealReceiptDateSuggestion(models.Model):
