@@ -162,10 +162,10 @@ class DocumentProcessorService:
             }
 
         personality = AIRuntimeService.get_default_personality()
-        vision_model = AIRuntimeService.get_vision_model(personality)
-        if not vision_model or vision_model == "default":
+        text_model = AIRuntimeService.get_text_model(personality)
+        if not text_model or text_model == "default":
             logger.info(
-                "[DOC-PROC] No vision model configured for %s. Using text-native fallback extraction.",
+                "[DOC-PROC] No multimodal text model configured for %s. Using native extraction.",
                 filename,
             )
             fallback_text = self.extract_text_fallback(
@@ -178,7 +178,7 @@ class DocumentProcessorService:
                     raw_text=fallback_text,
                     normalized_text=fallback_text,
                     mode="fallback_text",
-                    quality_flags=["vision_disabled", "local_backend_fallback"],
+                    quality_flags=["multimodal_model_disabled", "local_backend_fallback"],
                 )
             return {
                 "text": "",
@@ -186,13 +186,13 @@ class DocumentProcessorService:
                 "normalized_text": "",
                 "mode": "fallback_text",
                 "transcription_status": "failed",
-                "quality_flags": ["vision_disabled", "local_backend_fallback"],
-                "error": f"No readable text extracted for {filename}; a vision model is required for scanned/image-only documents.",
+                "quality_flags": ["multimodal_model_disabled", "local_backend_fallback"],
+                "error": f"No readable text extracted for {filename}; a multimodal text model is required for scanned or image-only documents.",
             }
 
         transcription = ""
         total_pages = len(images_b64)
-        logger.info("[DOC-PROC] Sending %s pages of %s to %s.", total_pages, filename, vision_model)
+        logger.info("[DOC-PROC] Sending %s pages of %s to shared model %s.", total_pages, filename, text_model)
 
         for i, img in enumerate(images_b64):
             try:
@@ -200,7 +200,7 @@ class DocumentProcessorService:
                 final_prompt = f"{hint}\n\n{base_prompt}" if hint else base_prompt
 
                 payload = {
-                    "model": vision_model,
+                    "model": text_model,
                     "prompt": final_prompt,
                     "images": [img],
                     "stream": False,
@@ -210,15 +210,15 @@ class DocumentProcessorService:
                 if page_text is not None:
                     transcription += f"\n\n--- {filename} (PAGE {i+1}) ---\n{page_text}"
             except Exception as e:
-                logger.error("Vision extraction failed on page %s of %s: %s", i + 1, filename, e)
+                logger.error("Multimodal extraction failed on page %s of %s: %s", i + 1, filename, e)
                 return {
                     "text": transcription.strip(),
                     "raw_extracted_text": transcription.strip(),
                     "normalized_text": transcription.strip(),
-                    "mode": "vllm_vision",
+                    "mode": "multimodal_model",
                     "transcription_status": "partial" if transcription.strip() else "failed",
-                    "quality_flags": ["local_backend_fallback", "vision_partial_failure"],
-                    "error": f"Vision extraction failed on page {i+1}: {str(e)}",
+                    "quality_flags": ["local_backend_fallback", "multimodal_partial_failure"],
+                    "error": f"Multimodal extraction failed on page {i+1}: {str(e)}",
                 }
 
         transcription = transcription.strip()
@@ -226,21 +226,21 @@ class DocumentProcessorService:
             return self._build_local_result(
                 raw_text=transcription,
                 normalized_text=transcription,
-                mode="vllm_vision",
+                mode="multimodal_model",
                 quality_flags=["local_backend_fallback"],
             )
         return {
             "text": "",
             "raw_extracted_text": "",
             "normalized_text": "",
-            "mode": "vllm_vision",
+            "mode": "multimodal_model",
             "transcription_status": "failed",
             "quality_flags": ["local_backend_fallback"],
-            "error": f"Vision extraction produced no readable content for {filename}",
+            "error": f"Multimodal extraction produced no readable content for {filename}",
         }
 
-    @staticmethod
     def _build_local_result(
+        self,
         *,
         raw_text: str,
         normalized_text: str,
@@ -249,15 +249,41 @@ class DocumentProcessorService:
     ) -> dict:
         text = (normalized_text or raw_text or "").strip()
         raw_text = (raw_text or text).strip()
+        flags = list(quality_flags or [])
+        personality = AIRuntimeService.get_default_personality()
+        text_model = AIRuntimeService.get_text_model(personality)
+        if text and text_model and text_model != "default":
+            try:
+                text = self._normalize_with_text_model(text, text_model)
+                flags.append("text_model_normalized")
+            except Exception as exc:
+                logger.warning("[DOC-PROC] Local text normalization failed: %s", exc)
+                flags.append("model_normalization_failed")
         return {
             "text": text,
             "raw_extracted_text": raw_text,
             "normalized_text": text,
             "mode": mode,
             "transcription_status": "complete" if text else "failed",
-            "quality_flags": quality_flags or [],
+            "quality_flags": flags,
             "render_metadata": {},
         }
+
+    def _normalize_with_text_model(self, text: str, model: str) -> str:
+        chunks = [text[start:start + 12000] for start in range(0, len(text), 12000)]
+        normalized = []
+        for chunk in chunks:
+            response = self.provider.execute_standard({
+                "model": model,
+                "prompt": (
+                    "Normalize this extracted document text into faithful Markdown. Preserve every fact, "
+                    "number, heading, page marker, and table value. Do not summarize or add commentary.\n\n"
+                    f"{chunk}"
+                ),
+                "stream": False,
+            }, timeout=180)
+            normalized.append((response.get("response") or chunk).strip())
+        return "\n\n".join(normalized).strip()
 
     def _convert_to_images(self, file_content: bytes, filename: str, page_limit: int = None) -> list[str]:
         ext = os.path.splitext(filename)[1].lower()

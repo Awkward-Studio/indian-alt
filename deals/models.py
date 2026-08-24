@@ -770,7 +770,7 @@ class InitialAnalysisStatus(models.TextChoices):
 
 class ExtractionMode(models.TextChoices):
     DOCPROC_REMOTE = 'docproc_remote', 'Docproc Remote'
-    VLLM_VISION = 'vllm_vision', 'vLLM Vision'
+    MULTIMODAL_MODEL = 'multimodal_model', 'Multimodal Model'
     FALLBACK_TEXT = 'fallback_text', 'Fallback Text'
 
 

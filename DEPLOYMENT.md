@@ -84,7 +84,6 @@ DATABASE_URL=<from Railway Postgres>
 REDIS_URL=<from Railway Redis>
 OLLAMA_URL=http://<azure-vm-ip-or-dns>:11434
 OLLAMA_DEFAULT_TEXT_MODEL=qwen3.5:latest
-OLLAMA_DEFAULT_VISION_MODEL=glm-ocr:latest
 
 ALLOWED_HOSTS=<your-backend-domain>
 CORS_ALLOWED_ORIGINS=<your-vercel-frontend-url>

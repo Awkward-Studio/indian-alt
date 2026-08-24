@@ -81,6 +81,16 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertTrue(body["messages"][-1]["content"].endswith("/no_think"))
 
+    @override_settings(VLLM_BASE_URL="http://shared-model:8000/v1")
+    def test_multimodal_requests_use_shared_text_endpoint(self):
+        provider = VLLMProviderService()
+
+        text_url = provider._get_completions_url({"prompt": "hello"})
+        image_url = provider._get_completions_url({"prompt": "read", "images": ["image"]})
+
+        self.assertEqual(text_url, "http://shared-model:8000/v1/chat/completions")
+        self.assertEqual(image_url, text_url)
+
 
 class RetrievalFusionTests(SimpleTestCase):
     def test_rrf_merge_marks_dense_sparse_and_hybrid_sources(self):
@@ -155,7 +165,6 @@ class DealHelperAnalysisRoutingTests(TestCase):
             description="",
             model_provider="vllm",
             text_model_name="default",
-            vision_model_name="default",
             system_instructions="You are an analyst.",
             is_default=True,
         )
@@ -1677,6 +1686,35 @@ class EmbeddingServiceTests(TestCase):
 
 
 class DocumentProcessorServiceTests(TestCase):
+    @override_settings(DOC_PROCESSOR_URL="")
+    @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_text_model", return_value="gemma-shared")
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_default_personality", return_value=None)
+    def test_local_image_and_normalization_use_shared_text_model(
+        self,
+        _mock_personality,
+        _mock_text_model,
+        _mock_convert,
+    ):
+        service = DocumentProcessorService()
+        service.provider = MagicMock()
+        service.provider.execute_standard.side_effect = [
+            {"response": "Raw page text"},
+            {"response": "Clean page text"},
+        ]
+
+        result = service.get_extraction_result(b"image", "example.png")
+
+        self.assertEqual(result["mode"], "multimodal_model")
+        self.assertEqual(result["raw_extracted_text"], "--- example.png (PAGE 1) ---\nRaw page text")
+        self.assertEqual(result["normalized_text"], "Clean page text")
+        first_payload = service.provider.execute_standard.call_args_list[0].args[0]
+        cleanup_payload = service.provider.execute_standard.call_args_list[1].args[0]
+        self.assertEqual(first_payload["model"], "gemma-shared")
+        self.assertEqual(cleanup_payload["model"], "gemma-shared")
+        self.assertEqual(first_payload["images"], ["rendered-page"])
+        self.assertNotIn("images", cleanup_payload)
+
     @override_settings(
         DOC_PROCESSOR_URL="http://docproc.internal",
         DOC_PROCESSOR_API_KEY="secret-token",
@@ -1690,8 +1728,8 @@ class DocumentProcessorServiceTests(TestCase):
             "normalized_text": "Normalized OCR text",
             "extraction_mode": "docproc_remote",
             "transcription_status": "complete",
-            "quality_flags": ["vision_first"],
-            "render_metadata": {"route": "vision_first", "page_count": 2},
+            "quality_flags": ["multimodal_model"],
+            "render_metadata": {"route": "multimodal_model", "page_count": 2},
         }
         mock_response.raise_for_status.return_value = None
         mock_post.return_value = mock_response
@@ -1703,7 +1741,7 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["raw_extracted_text"], "Raw OCR text")
         self.assertEqual(result["normalized_text"], "Normalized OCR text")
         self.assertEqual(result["mode"], "docproc_remote")
-        self.assertEqual(result["quality_flags"], ["vision_first"])
+        self.assertEqual(result["quality_flags"], ["multimodal_model"])
         self.assertEqual(result["render_metadata"]["page_count"], 2)
 
         _, kwargs = mock_post.call_args
@@ -1734,14 +1772,15 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["normalized_text"], "Local text")
         mock_local_extract.assert_called_once()
 
+    @override_settings(DOC_PROCESSOR_URL="")
     @patch.object(DocumentProcessorService, "extract_text_fallback", return_value="Native PDF text")
     @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
-    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_vision_model", return_value="")
+    @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_text_model", return_value="")
     @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_default_personality", return_value=None)
-    def test_missing_vision_model_uses_text_native_fallback(
+    def test_missing_multimodal_model_uses_text_native_fallback(
         self,
         _mock_personality,
-        _mock_vision_model,
+        _mock_text_model,
         _mock_convert,
         mock_text_fallback,
     ):
@@ -1751,7 +1790,7 @@ class DocumentProcessorServiceTests(TestCase):
 
         self.assertEqual(result["mode"], "fallback_text")
         self.assertEqual(result["normalized_text"], "Native PDF text")
-        self.assertIn("vision_disabled", result["quality_flags"])
+        self.assertIn("multimodal_model_disabled", result["quality_flags"])
         mock_text_fallback.assert_called_once_with(
             b"pdf-bytes",
             "example.pdf",

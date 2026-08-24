@@ -1,5 +1,5 @@
 services:
-  # H100 profile: text, vision, embeddings, and reranking share one 80GB GPU.
+  # H100 profile: one multimodal model handles text and images.
   vllm-text:
     image: vllm/vllm-openai:latest
     container_name: vllm-text
@@ -14,7 +14,7 @@ services:
       - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
     command:
       - --model
-      - ${VLLM_TEXT_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}
+      - ${VLLM_TEXT_MODEL:-google/gemma-4-12b-it}
       - --host
       - 0.0.0.0
       - --port
@@ -22,7 +22,7 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --gpu-memory-utilization
-      - ${VLLM_TEXT_GPU_MEMORY_UTILIZATION:-0.55}
+      - ${VLLM_TEXT_GPU_MEMORY_UTILIZATION:-0.77}
       - --max-model-len
       - ${VLLM_TEXT_MAX_MODEL_LEN:-32768}
       - --max-num-seqs
@@ -30,36 +30,6 @@ services:
       - --enable-prefix-caching
       - --enable-chunked-prefill
       - --trust-remote-code
-
-  # Vision/OCR model. Keep room for the TEI GPU services.
-  vllm-vision:
-    image: vllm/vllm-openai:latest
-    container_name: vllm-vision
-    restart: unless-stopped
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    ipc: host
-    ports:
-      - "8001:8001"
-    volumes:
-      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
-    command:
-      - --model
-      - ${VLLM_VISION_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8001"
-      - --api-key
-      - ${VLLM_API_KEY:-local-dev-key}
-      - --gpu-memory-utilization
-      - ${VLLM_VISION_GPU_MEMORY_UTILIZATION:-0.22}
-      - --max-model-len
-      - ${VLLM_VISION_MAX_MODEL_LEN:-8192}
-      - --enable-prefix-caching
-      - --trust-remote-code
-
 
   # 3. TEI Embedding
   tei-embedding:
@@ -105,7 +75,7 @@ services:
       - ${RERANKER_MAX_BATCH_TOKENS:-4096}
       - --auto-truncate
 
-  # 5. Docproc (PDF split/merge/GLM-4V Router)
+  # 5. Docproc uses the same multimodal model as chat and planning.
   docproc:
     build:
       context: ../indian-alt-docproc
@@ -113,8 +83,15 @@ services:
     image: india-alt-docproc:latest
     container_name: docproc
     restart: unless-stopped
-    env_file:
-      - ../indian-alt-docproc/docproc.env
+    environment:
+      VLLM_BASE_URL: http://vllm-text:8000/v1
+      VLLM_API_KEY: ${VLLM_API_KEY:-local-dev-key}
+      VLLM_TEXT_MODEL: ${VLLM_TEXT_MODEL:-google/gemma-4-12b-it}
+      DOCPROC_API_KEY: ${DOCPROC_API_KEY:-local-docproc-key}
+      DOCPROC_REQUEST_TIMEOUT: ${DOCPROC_REQUEST_TIMEOUT:-600}
+      DOCPROC_MAX_PAGE_LIMIT: ${DOCPROC_MAX_PAGE_LIMIT:-200}
+      DOCPROC_MAX_CONCURRENT_OCR: ${DOCPROC_MAX_CONCURRENT_OCR:-2}
+      DOCPROC_NORMALIZATION_CHUNK_CHARS: ${DOCPROC_NORMALIZATION_CHUNK_CHARS:-12000}
     ports:
       - "8100:8100"
     extra_hosts:

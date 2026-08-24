@@ -7,7 +7,7 @@ from .models import (
 
 @admin.register(AIPersonality)
 class AIPersonalityAdmin(admin.ModelAdmin):
-    list_display = ('name', 'text_model_name', 'vision_model_name', 'is_default', 'created_at')
+    list_display = ('name', 'text_model_name', 'is_default', 'created_at')
     list_filter = ('is_default', 'model_provider')
     search_fields = ('name', 'system_instructions')
 

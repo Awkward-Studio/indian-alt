@@ -341,7 +341,7 @@ def _is_full_transcription(doc: DealDocument) -> bool:
 
 def _prepare_document_update_from_extraction(extraction: dict, *, full: bool) -> dict:
     mode = extraction.get("mode")
-    if mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.VLLM_VISION, ExtractionMode.FALLBACK_TEXT}:
+    if mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.MULTIMODAL_MODEL, ExtractionMode.FALLBACK_TEXT}:
         mode = None
     raw_extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
     normalized_text = (extraction.get("normalized_text") or extraction.get("text") or raw_extracted_text).strip()
@@ -440,7 +440,7 @@ def _persist_folder_analysis_document(
     raw_extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
     normalized_text = (extraction.get("normalized_text") or extraction.get("text") or raw_extracted_text).strip()
     extraction_mode = extraction.get("mode")
-    if extraction_mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.VLLM_VISION, ExtractionMode.FALLBACK_TEXT}:
+    if extraction_mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.MULTIMODAL_MODEL, ExtractionMode.FALLBACK_TEXT}:
         extraction_mode = extraction_mode or None
 
     defaults = {

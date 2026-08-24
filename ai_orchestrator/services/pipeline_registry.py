@@ -502,7 +502,7 @@ Include only companies explicitly supported as competitors by supplied evidence.
             "public_news_research": ("Public news research", "Public-source deal research"),
             "analysis_support": ("Analysis support", "Claim analysis and document search"),
             "workplace_verification": ("Workplace verification", "Human-reviewed workplace verification"),
-            "document_ocr": ("Document OCR", "Local and remote vision transcription"),
+            "document_ocr": ("Document OCR", "Shared-model multimodal transcription"),
         }
         stage_bindings = (
             ("competitor_research", "query_planner", "Competitor query planner", "competitor_search_query_planner"),

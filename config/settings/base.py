@@ -251,12 +251,10 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=_allowed_hosts)
 
 # AI Orchestrator Settings
 VLLM_BASE_URL = config('VLLM_BASE_URL', default='http://localhost:8000/v1')
-VLLM_VISION_URL = config('VLLM_VISION_URL', default=VLLM_BASE_URL)
 VLLM_EMBEDDING_URL = config('VLLM_EMBEDDING_URL', default=VLLM_BASE_URL)
 VLLM_API_KEY = config('VLLM_API_KEY', default='')
 VLLM_TEXT_MODEL = config('VLLM_TEXT_MODEL', default='')
 VLLM_PLANNER_MODEL = config('VLLM_PLANNER_MODEL', default=VLLM_TEXT_MODEL)
-VLLM_VISION_MODEL = config('VLLM_VISION_MODEL', default='')
 VLLM_EMBEDDING_MODEL = config('VLLM_EMBEDDING_MODEL', default='')
 VLLM_CONNECT_TIMEOUT = config('VLLM_CONNECT_TIMEOUT', default=2, cast=float)
 VLLM_READ_TIMEOUT = config('VLLM_READ_TIMEOUT', default=600, cast=int)

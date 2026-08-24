@@ -91,7 +91,6 @@ class AIProcessorService:
                 raise RegistryValidationError("pipeline_key and stage_key must be supplied together.")
             resolved_stage = PipelineRegistryService.resolve_stage(pipeline_key, stage_key)
             skill = resolved_stage.stage.skill or skill
-        vision_model = AIRuntimeService.get_vision_model(personality)
         resolved_text_model = model_override or AIRuntimeService.get_text_model(personality)
         if model_provider == "anthropic":
             if not resolved_text_model or not resolved_text_model.startswith("claude-"):
@@ -122,7 +121,7 @@ class AIProcessorService:
         # PHASE 1: OCR (Optional, delegated to OCRService)
         if images and skill_name == "deal_extraction":
             log_worker_event(audit_log, f"Starting OCR analysis for {len(images)} images.")
-            ocr_context = self.ocr_service.transcribe(images, model=vision_model)
+            ocr_context = self.ocr_service.transcribe(images, model=resolved_text_model)
             content = f"{content}\n\n[HIGH-FIDELITY DOCUMENT OCR]:\n{ocr_context}"
             log_worker_event(audit_log, "OCR analysis complete.")
 

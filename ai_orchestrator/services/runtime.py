@@ -157,17 +157,6 @@ class AIRuntimeService:
         return getattr(settings, "VLLM_TEXT_MODEL", "")
 
     @classmethod
-    def get_vision_model(cls, personality: Optional[AIPersonality] = None) -> str:
-        personality_model = getattr(personality, "vision_model_name", None)
-        if (
-            cls.get_provider(personality) == cls.PROVIDER_VLLM
-            and personality_model
-            and personality_model != "default"
-        ):
-            return personality_model
-        return getattr(settings, "VLLM_VISION_MODEL", "")
-
-    @classmethod
     def get_embedding_model(cls) -> str:
         return getattr(settings, "EMBEDDING_MODEL", "") or getattr(settings, "VLLM_EMBEDDING_MODEL", "")
 

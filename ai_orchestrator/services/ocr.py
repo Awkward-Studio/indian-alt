@@ -16,12 +16,12 @@ class OCRService:
         self.provider = VLLMProviderService()
 
     def transcribe(self, images: List[str], model: str | None = None) -> str:
-        """Specialized OCR using visual model."""
+        """Transcribe document images with the shared multimodal model."""
         if not images: return ""
-        model = model or AIRuntimeService.get_vision_model()
+        model = model or AIRuntimeService.get_text_model()
         _, prompt, _ = PipelineRegistryService.render_prompt_stage("document_ocr", "transcribe")
         
-        print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via {model}...")
+        print(f"[AI-PIPELINE] Phase 1: Transcribing {len(images)} document pages via shared model {model}...")
         transcription = ""
         
         for i, img in enumerate(images):

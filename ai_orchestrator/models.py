@@ -23,8 +23,6 @@ class AIPersonality(models.Model):
         ]
     )
     text_model_name = models.CharField(max_length=200, default='default', help_text="Model for text-only tasks")
-    vision_model_name = models.CharField(max_length=200, default='default', help_text="Model for tasks with images/charts")
-    
     system_instructions = models.TextField(help_text="The core 'system' prompt that defines behavior")
     is_default = models.BooleanField(default=False, help_text="Whether this is the default personality")
     created_at = models.DateTimeField(auto_now_add=True)

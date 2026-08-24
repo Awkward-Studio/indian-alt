@@ -67,14 +67,13 @@ class OllamaProviderService:
 
 class VLLMProviderService:
     """
-    OpenAI-compatible transport for vLLM-backed text, vision, and embedding requests.
+    OpenAI-compatible transport for multimodal text and embedding requests.
     Normalizes responses to the legacy internal shape so the orchestration layer can
     keep using the same response contract.
     """
 
     def __init__(self):
         self.base_url = getattr(settings, "VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
-        self.vision_url = getattr(settings, "VLLM_VISION_URL", self.base_url).rstrip("/")
         self.embedding_url = getattr(settings, "VLLM_EMBEDDING_URL", self.base_url).rstrip("/")
         self.api_key = getattr(settings, "VLLM_API_KEY", "")
         self.connect_timeout = float(getattr(settings, "VLLM_CONNECT_TIMEOUT", 2.0) or 2.0)
@@ -89,18 +88,14 @@ class VLLMProviderService:
 
     def _get_completions_url(self, payload: dict | None = None) -> str:
         url = self.base_url
-        if payload and payload.get("images"):
-            url = self.vision_url
-        
         if not url.endswith("/v1"):
             url = f"{url}/v1"
         return f"{url}/chat/completions"
 
     def get_available_models(self) -> list[str]:
         try:
-            # Check both for complete telemetry
             models = set()
-            for base in [self.base_url, self.vision_url]:
+            for base in [self.base_url]:
                 url = base
                 if not url.endswith("/v1"):
                     url = f"{url}/v1"

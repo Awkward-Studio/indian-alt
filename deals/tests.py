@@ -1316,7 +1316,7 @@ class DealStatusSyncTests(TestCase):
                     "file_name": "Deck.pdf",
                     "extracted_text": "Deck extracted text",
                     "normalized_text": "Deck normalized text",
-                    "extraction_mode": "glm_ocr",
+                    "extraction_mode": "multimodal_model",
                     "transcription_status": "complete",
                 }],
                 "approved_file_ids": ["file-1"],
@@ -1355,7 +1355,7 @@ class DealStatusSyncTests(TestCase):
         passed_doc = deal.documents.get(onedrive_id="file-1")
         self.assertEqual(passed_doc.initial_analysis_status, InitialAnalysisStatus.SELECTED_AND_ANALYZED)
         self.assertEqual(passed_doc.transcription_status, "complete")
-        self.assertEqual(passed_doc.extraction_mode, "glm_ocr")
+        self.assertEqual(passed_doc.extraction_mode, "multimodal_model")
         failed_doc = deal.documents.get(onedrive_id="file-2")
         self.assertEqual(failed_doc.initial_analysis_status, InitialAnalysisStatus.SELECTED_FAILED)
 
@@ -1416,7 +1416,7 @@ class DealStatusSyncTests(TestCase):
                     "file_id": "file-1",
                     "file_name": "Deck.pdf",
                     "extracted_text": "Deck extracted text",
-                    "extraction_mode": "glm_ocr",
+                    "extraction_mode": "multimodal_model",
                     "transcription_status": "complete",
                 }],
                 "approved_file_ids": ["file-1"],
@@ -1514,7 +1514,7 @@ class DealStatusSyncTests(TestCase):
         mock_graph_service.return_value.get_drive_item_content.return_value = b"pdf"
         mock_doc_processor.return_value.get_extraction_result.return_value = {
             "text": "full extracted text from OCR",
-            "mode": "glm_ocr",
+            "mode": "multimodal_model",
         }
         mock_vectorize.return_value = 3
         mock_ai_processor.return_value.process_content.return_value = {
@@ -1530,7 +1530,7 @@ class DealStatusSyncTests(TestCase):
         doc.refresh_from_db()
         self.assertEqual(doc.extracted_text, "full extracted text from OCR")
         self.assertEqual(doc.transcription_status, "complete")
-        self.assertEqual(doc.extraction_mode, "glm_ocr")
+        self.assertEqual(doc.extraction_mode, "multimodal_model")
         self.assertEqual(doc.is_ai_analyzed, True)
         self.assertEqual(deal.latest_analysis.analysis_kind, AnalysisKind.SUPPLEMENTAL)
         self.assertIn("canonical_snapshot", deal.latest_analysis.analysis_json)
@@ -1550,7 +1550,7 @@ class DealStatusSyncTests(TestCase):
         mock_graph_service.return_value.get_drive_item_content.return_value = b"pdf"
         mock_doc_processor.return_value.get_extraction_result.return_value = {
             "text": "preview text from first pages",
-            "mode": "glm_ocr",
+            "mode": "multimodal_model",
         }
         mock_vectorize.return_value = 2
 
