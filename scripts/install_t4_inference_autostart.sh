@@ -3,10 +3,17 @@ set -euo pipefail
 
 SERVICE_NAME="india-alt-inference-t4.service"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-COMPOSE_FILE="${REPO_DIR}/docker-compose.inference.t4.yml"
-ENV_FILE="${T4_INFERENCE_ENV_FILE:-${REPO_DIR}/.env.inference.t4}"
-TEMPLATE_FILE="${REPO_DIR}/deploy/systemd/${SERVICE_NAME}.template"
+
+if [[ -n "${T4_INFERENCE_DIR:-}" ]]; then
+  PROJECT_DIR="$(cd -- "${T4_INFERENCE_DIR}" && pwd)"
+elif [[ -f "${SCRIPT_DIR}/docker-compose.inference.t4.yml" ]]; then
+  PROJECT_DIR="${SCRIPT_DIR}"
+else
+  PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+fi
+
+COMPOSE_FILE="${PROJECT_DIR}/docker-compose.inference.t4.yml"
+ENV_FILE="${T4_INFERENCE_ENV_FILE:-${PROJECT_DIR}/.env.inference.t4}"
 DOCKER_BIN="$(command -v docker || true)"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -24,33 +31,41 @@ if ! "${DOCKER_BIN}" compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-for required_file in "${COMPOSE_FILE}" "${ENV_FILE}" "${TEMPLATE_FILE}"; do
+for required_file in "${COMPOSE_FILE}" "${ENV_FILE}"; do
   if [[ ! -f "${required_file}" ]]; then
     echo "Required file not found: ${required_file}" >&2
     exit 1
   fi
 done
 
-if [[ ! -d "${REPO_DIR}/../indian-alt-docproc" ]]; then
-  echo "Expected sibling repository not found: ${REPO_DIR}/../indian-alt-docproc" >&2
+if [[ "${PROJECT_DIR}${COMPOSE_FILE}${ENV_FILE}${DOCKER_BIN}" =~ [[:space:]] ]]; then
+  echo "Paths containing whitespace are not supported by this installer." >&2
   exit 1
 fi
 
-escape_sed_replacement() {
-  printf '%s' "$1" | sed 's/[&|]/\\&/g'
-}
+install -m 0644 /dev/stdin "/etc/systemd/system/${SERVICE_NAME}" <<EOF
+[Unit]
+Description=India Alternatives T4 inference services
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service nvidia-persistenced.service
 
-repo_dir_escaped="$(escape_sed_replacement "${REPO_DIR}")"
-compose_file_escaped="$(escape_sed_replacement "${COMPOSE_FILE}")"
-env_file_escaped="$(escape_sed_replacement "${ENV_FILE}")"
-docker_bin_escaped="$(escape_sed_replacement "${DOCKER_BIN}")"
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${PROJECT_DIR}
+ExecStartPre=${DOCKER_BIN} info
+ExecStart=${DOCKER_BIN} compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} up -d --remove-orphans
+ExecReload=${DOCKER_BIN} compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} up -d --remove-orphans
+ExecStop=${DOCKER_BIN} compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} stop
+TimeoutStartSec=0
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=15
 
-sed \
-  -e "s|__REPO_DIR__|${repo_dir_escaped}|g" \
-  -e "s|__COMPOSE_FILE__|${compose_file_escaped}|g" \
-  -e "s|__ENV_FILE__|${env_file_escaped}|g" \
-  -e "s|__DOCKER_BIN__|${docker_bin_escaped}|g" \
-  "${TEMPLATE_FILE}" > "/etc/systemd/system/${SERVICE_NAME}"
+[Install]
+WantedBy=multi-user.target
+EOF
 
 systemctl daemon-reload
 systemctl enable --now docker.service
@@ -58,6 +73,7 @@ systemctl enable --now "${SERVICE_NAME}"
 
 echo
 echo "Installed and started ${SERVICE_NAME}."
+echo "Project directory:       ${PROJECT_DIR}"
 echo "Check boot configuration: systemctl is-enabled ${SERVICE_NAME}"
 echo "Check service state:      systemctl status ${SERVICE_NAME} --no-pager"
 echo "Check containers:         ${DOCKER_BIN} compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} ps"
