@@ -111,6 +111,37 @@ Web-only variable:
 RUN_AS_WORKER=false
 ```
 
+### Azure inference VM control
+
+Put the dedicated VM-control identity only on the Railway web service. Do not add these values to Vercel, the worker, or source control.
+
+```env
+AI_VM_CONTROL_ENABLED=false
+AI_VM_TARGET_LABEL=Indian Alt T4 Inference VM
+AZURE_SUBSCRIPTION_ID=80fd1561-1f23-4040-a0ad-fbfbc56cad4b
+AZURE_RESOURCE_GROUP=indian-alt-prod_group
+AZURE_VM_NAME=indian-alt-prod
+AZURE_VM_TENANT_ID=77498d9f-ab76-4aec-a9d6-3e9178c663db
+AZURE_VM_CLIENT_ID=522fe57b-82f1-4e70-a9a7-c9427b4efadc
+AZURE_VM_CLIENT_SECRET=<company-vault-secret-value>
+```
+
+Run the preflight before enabling controls:
+
+```bash
+python manage.py check_vm_control --verify-target
+```
+
+The output must name `indian-alt-prod`, report the expected resource group, and read an Azure power state without exposing a credential. Set `AI_VM_CONTROL_ENABLED=true` only after that check passes.
+
+An administrator can then use AI Settings to start the VM. Azure power state and model readiness are separate. The VM may be running while the text, embedding, and reranker services are still warming.
+
+Deallocation is blocked while an AI audit record is pending or processing. A successful deallocation must finish at Azure state `deallocated`, which releases compute allocation. Disks, backups, and static networking can still incur charges.
+
+To roll back application control, set `AI_VM_CONTROL_ENABLED=false` and redeploy the web service. This disables API commands without changing the VM's current state. If the application is unavailable, an Azure administrator can start or deallocate `indian-alt-prod` from its Overview page in the Azure portal.
+
+Monitor `VMControlOperation` in Django admin for requester, target resource, action, status, and timestamps. Rotate the client secret before its recorded expiry and keep the service principal limited to the `india alt vm power` role on this VM.
+
 ### Important notes
 
 - The backend must run as ASGI, not WSGI, because chat and AI history use websocket streaming.

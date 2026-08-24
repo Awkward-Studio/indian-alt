@@ -19,7 +19,7 @@ from django.http import StreamingHttpResponse
 from .models import (
     AIPersonality, AISkill, AIConversation, AIMessage, AIAuditLog,
     DealIndustrySkillAssignment, DocumentChunk, AIPipelineDefinition,
-    AIPromptRevision, AISkillRevision,
+    AIPromptRevision, AISkillRevision, VMControlOperation,
 )
 from .serializers import (
     AIConversationSerializer, AIMessageSerializer, AIAuditLogSerializer,
@@ -146,14 +146,101 @@ class AIConversationViewSet(viewsets.ModelViewSet):
 
 class VMControlView(APIView):
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _reconcile_operation(power_state):
+        operation = VMControlOperation.objects.filter(
+            status=VMControlOperation.Status.SUBMITTED,
+        ).first()
+        if not operation:
+            return
+        reached_target = (
+            operation.action == VMControlOperation.Action.START and power_state == "running"
+        ) or (
+            operation.action == VMControlOperation.Action.DEALLOCATE and power_state == "deallocated"
+        )
+        if reached_target:
+            operation.status = VMControlOperation.Status.SUCCEEDED
+            operation.completed_at = timezone.now()
+            operation.save(update_fields=["status", "completed_at"])
+
+    def _snapshot(self, vm_service):
+        snapshot = vm_service.snapshot()
+        active_jobs = AIAuditLog.objects.filter(status__in=["PENDING", "PROCESSING"]).count()
+        self._reconcile_operation(snapshot.power_state)
+        latest = VMControlOperation.objects.first()
+        allowed_actions = []
+        if snapshot.control_enabled:
+            if snapshot.power_state in {"deallocated", "stopped"}:
+                allowed_actions.append("start")
+            elif snapshot.power_state == "running" and active_jobs == 0:
+                allowed_actions.append("deallocate")
+        return {
+            "control_enabled": snapshot.control_enabled,
+            "target_label": snapshot.target_label,
+            "power_state": snapshot.power_state,
+            "service_state": snapshot.service_state,
+            "services": snapshot.services,
+            "active_ai_jobs": active_jobs,
+            "allowed_actions": allowed_actions,
+            "error": snapshot.error,
+            "last_operation": {
+                "id": str(latest.id),
+                "action": latest.action,
+                "status": latest.status,
+                "requested_at": latest.requested_at.isoformat(),
+                "completed_at": latest.completed_at.isoformat() if latest.completed_at else None,
+                "failure_reason": latest.failure_reason,
+            } if latest else None,
+        }
+
     def get(self, request):
-        vm_service = VMControlService()
-        return Response({"status": vm_service.get_status()})
+        if not _is_ai_admin(request.user):
+            return Response({"detail": "Administrator access is required."}, status=status.HTTP_403_FORBIDDEN)
+        return Response(self._snapshot(VMControlService()))
+
     def post(self, request):
-        action = request.data.get('action')
+        if not _is_ai_admin(request.user):
+            return Response({"detail": "Administrator access is required."}, status=status.HTTP_403_FORBIDDEN)
+        action = request.data.get("action")
+        if action not in {"start", "deallocate"}:
+            return Response({"detail": "action must be start or deallocate."}, status=status.HTTP_400_BAD_REQUEST)
         vm_service = VMControlService()
-        success = vm_service.start_vm() if action == 'start' else vm_service.stop_vm()
-        return Response({"success": success})
+        if not vm_service.available:
+            return Response({"detail": "VM control is unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if action == "deallocate" and AIAuditLog.objects.filter(status__in=["PENDING", "PROCESSING"]).exists():
+            return Response({"detail": "Deallocation is blocked while AI work is active."}, status=status.HTTP_409_CONFLICT)
+        lock_key = f"vm-control:{vm_service.subscription_id}:{vm_service.resource_group}:{vm_service.vm_name}"
+        if not cache.add(lock_key, str(uuid.uuid4()), timeout=30):
+            return Response({"detail": "Another VM command is being submitted."}, status=status.HTTP_409_CONFLICT)
+        try:
+            snapshot = vm_service.snapshot()
+            if action == "start" and snapshot.power_state in {"running", "starting"}:
+                return Response(self._snapshot(vm_service), status=status.HTTP_202_ACCEPTED)
+            if action == "deallocate" and snapshot.power_state in {"deallocated", "deallocating"}:
+                return Response(self._snapshot(vm_service), status=status.HTTP_202_ACCEPTED)
+            if snapshot.power_state in {"starting", "deallocating"}:
+                return Response({"detail": "The VM is already changing power state."}, status=status.HTTP_409_CONFLICT)
+            operation = VMControlOperation.objects.create(
+                action=action,
+                target_label=vm_service.target_label,
+                target_vm_name=vm_service.vm_name,
+                target_resource_id=vm_service.target_resource_id,
+                requested_by=request.user,
+            )
+            if action == "start":
+                vm_service.start_vm()
+            else:
+                vm_service.stop_vm()
+        except RuntimeError as exc:
+            operation.status = VMControlOperation.Status.FAILED
+            operation.failure_reason = str(exc)[:255]
+            operation.completed_at = timezone.now()
+            operation.save(update_fields=["status", "failure_reason", "completed_at"])
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        finally:
+            cache.delete(lock_key)
+        return Response(self._snapshot(vm_service), status=status.HTTP_202_ACCEPTED)
 
 class DealChatView(APIView):
     """

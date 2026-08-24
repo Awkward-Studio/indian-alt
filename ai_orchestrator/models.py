@@ -460,6 +460,36 @@ class AIAuditLog(models.Model):
     def __str__(self):
         return f"{self.source_type} {self.source_id} - {self.created_at}"
 
+
+class VMControlOperation(models.Model):
+    class Action(models.TextChoices):
+        START = "start", "Start"
+        DEALLOCATE = "deallocate", "Deallocate"
+
+    class Status(models.TextChoices):
+        SUBMITTED = "submitted", "Submitted"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    action = models.CharField(max_length=20, choices=Action.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUBMITTED)
+    target_label = models.CharField(max_length=200)
+    target_vm_name = models.CharField(max_length=200)
+    target_resource_id = models.CharField(max_length=600)
+    provider_request_id = models.CharField(max_length=200, blank=True, default="")
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name="vm_control_operations")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        ordering = ["-requested_at"]
+        indexes = [models.Index(fields=["status", "requested_at"], name="ai_orchestr_status_8ee0c2_idx")]
+
+    def __str__(self):
+        return f"{self.action} {self.target_vm_name} ({self.status})"
+
 class AIConversation(models.Model):
     """
     Stores a persistent chat session between a user and the AI.

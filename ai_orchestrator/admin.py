@@ -2,7 +2,7 @@ from django.contrib import admin
 from .models import (
     AIPersonality, AISkill, AIConversation, AIMessage, 
     AIAuditLog, DocumentChunk, DealRetrievalProfile, AnalysisProtocol, 
-    AIFlowDefinition, AIFlowVersion, AISystemSetting
+    AIFlowDefinition, AIFlowVersion, AISystemSetting, VMControlOperation
 )
 
 @admin.register(AIPersonality)
@@ -56,6 +56,14 @@ class AIAuditLogAdmin(admin.ModelAdmin):
     list_filter = ('status', 'is_success', 'source_type', 'model_used')
     search_fields = ('context_label', 'source_id', 'error_message')
     readonly_fields = ('created_at',)
+
+
+@admin.register(VMControlOperation)
+class VMControlOperationAdmin(admin.ModelAdmin):
+    list_display = ('action', 'status', 'target_vm_name', 'requested_by', 'requested_at', 'completed_at')
+    list_filter = ('action', 'status')
+    search_fields = ('target_label', 'target_vm_name', 'target_resource_id', 'provider_request_id')
+    readonly_fields = ('requested_at', 'completed_at')
 
 @admin.register(DocumentChunk)
 class DocumentChunkAdmin(admin.ModelAdmin):
