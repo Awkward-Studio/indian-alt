@@ -2,7 +2,15 @@
 set -euo pipefail
 
 SERVICE_NAME="india-alt-inference-t4.service"
-PROJECT_DIR="${T4_INFERENCE_DIR:-/home}"
+INVOKING_USER="${SUDO_USER:-$(id -un)}"
+INVOKING_HOME="$(getent passwd "${INVOKING_USER}" | cut -d: -f6 || true)"
+
+if [[ -z "${INVOKING_HOME}" ]]; then
+  echo "Could not resolve the home directory for ${INVOKING_USER}." >&2
+  exit 1
+fi
+
+PROJECT_DIR="${T4_INFERENCE_DIR:-${INVOKING_HOME}}"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.inference.t4.yml"
 ENV_FILE="${T4_INFERENCE_ENV_FILE:-${PROJECT_DIR}/.env.inference.t4}"
 DOCKER_BIN="$(command -v docker || true)"
@@ -64,6 +72,7 @@ systemctl enable --now "${SERVICE_NAME}"
 
 echo
 echo "Installed and started ${SERVICE_NAME}."
+echo "Invoking user:           ${INVOKING_USER}"
 echo "Project directory:       ${PROJECT_DIR}"
 echo "Check boot configuration: systemctl is-enabled ${SERVICE_NAME}"
 echo "Check service state:      systemctl status ${SERVICE_NAME} --no-pager"
