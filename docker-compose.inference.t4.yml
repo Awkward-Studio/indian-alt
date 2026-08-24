@@ -57,7 +57,7 @@ services:
 
   docproc:
     build:
-      context: ../indian-alt-docproc
+      context: ${DOCPROC_BUILD_CONTEXT:-./indian-alt-docproc}
       dockerfile: Dockerfile
     image: india-alt-docproc:latest
     container_name: docproc-t4

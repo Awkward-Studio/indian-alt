@@ -37,6 +37,13 @@ for required_file in "${COMPOSE_FILE}" "${ENV_FILE}"; do
   fi
 done
 
+DOCPROC_BUILD_CONTEXT="${DOCPROC_BUILD_CONTEXT:-${PROJECT_DIR}/indian-alt-docproc}"
+if [[ ! -f "${DOCPROC_BUILD_CONTEXT}/Dockerfile" ]]; then
+  echo "Docproc source is missing: ${DOCPROC_BUILD_CONTEXT}/Dockerfile" >&2
+  echo "Place the indian-alt-docproc checkout at ${PROJECT_DIR}/indian-alt-docproc." >&2
+  exit 1
+fi
+
 if [[ "${PROJECT_DIR}${COMPOSE_FILE}${ENV_FILE}${DOCKER_BIN}" =~ [[:space:]] ]]; then
   echo "Paths containing whitespace are not supported by this installer." >&2
   exit 1
@@ -68,7 +75,18 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now docker.service
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}"
+if ! systemctl restart "${SERVICE_NAME}"; then
+  echo "${SERVICE_NAME} failed to start. Recent logs:" >&2
+  journalctl -u "${SERVICE_NAME}" -n 50 --no-pager >&2
+  exit 1
+fi
+
+if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+  echo "${SERVICE_NAME} did not reach an active state." >&2
+  journalctl -u "${SERVICE_NAME}" -n 50 --no-pager >&2
+  exit 1
+fi
 
 echo
 echo "Installed and started ${SERVICE_NAME}."
