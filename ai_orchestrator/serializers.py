@@ -91,6 +91,18 @@ class AIMessageSerializer(serializers.ModelSerializer):
 
 class AIConversationSerializer(serializers.ModelSerializer):
     messages = AIMessageSerializer(many=True, read_only=True)
+    metadata = serializers.SerializerMethodField()
+
+    def get_metadata(self, obj):
+        metadata = dict(obj.metadata) if isinstance(obj.metadata, dict) else {}
+        documents = metadata.get('chat_documents')
+        if isinstance(documents, list):
+            metadata['chat_documents'] = [
+                {key: value for key, value in document.items() if key != 'text'}
+                for document in documents
+                if isinstance(document, dict)
+            ]
+        return metadata
     
     class Meta:
         model = AIConversation

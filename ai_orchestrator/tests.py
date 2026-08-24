@@ -5,7 +5,8 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from unittest.mock import MagicMock, patch
 
 from deals.models import Deal, DealDocument, DealRelationshipContext
-from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill, DocumentChunk
+from ai_orchestrator.models import AIConversation, AIAuditLog, AIPersonality, AISkill, DocumentChunk
+from ai_orchestrator.serializers import AIConversationSerializer
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
@@ -16,11 +17,33 @@ from ai_orchestrator.services.flow_config import (
     DEFAULT_PLANNER_PROMPT,
     UniversalChatFlowService,
 )
-from ai_orchestrator.tasks import _extract_markdown_report, generate_deal_helper_analysis_async
+from ai_orchestrator.tasks import _build_chat_document_context, _extract_markdown_report, generate_deal_helper_analysis_async
 from ai_orchestrator.services.universal_chat import UniversalChatService
 
 
 class DealHelperAnalysisTaskTests(SimpleTestCase):
+    def test_chat_document_context_keeps_names_and_text(self):
+        conversation = AIConversation(metadata={"chat_documents": [
+            {"id": "doc-1", "name": "IC memo.pdf", "text": "Revenue was INR 90 crore."},
+            {"id": "doc-2", "name": "empty.pdf", "text": ""},
+        ]})
+
+        context, count = _build_chat_document_context(conversation)
+
+        self.assertEqual(count, 1)
+        self.assertIn("[UPLOADED DOCUMENT: IC memo.pdf]", context)
+        self.assertIn("Revenue was INR 90 crore.", context)
+
+    def test_conversation_serializer_does_not_expose_extracted_document_text(self):
+        conversation = AIConversation(metadata={"chat_documents": [{
+            "id": "doc-1", "name": "memo.pdf", "text": "private extracted text",
+        }]})
+
+        serialized = AIConversationSerializer(conversation).data
+
+        self.assertNotIn("text", serialized["metadata"]["chat_documents"][0])
+        self.assertEqual(serialized["metadata"]["chat_documents"][0]["name"], "memo.pdf")
+
     def test_extract_markdown_report_prefers_parsed_report(self):
         report = _extract_markdown_report({
             "parsed_json": {"report": "# Financial Comparison\n\n| Deal | Revenue |\n|---|---|"},

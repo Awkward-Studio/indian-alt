@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import uuid
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
@@ -34,6 +35,7 @@ from .services.industry_skills import IndustrySkillService
 from .services.prompt_catalog import PromptCatalogService
 from .services.pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .services.universal_chat import UniversalChatService
+from .services.document_processor import DocumentProcessorService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
 from meetings.models import MeetingNote
@@ -410,6 +412,88 @@ class UniversalChatView(APIView):
         except Exception as e:
             logger.error(f"Universal Chat error: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=500)
+
+
+class UniversalChatDocumentView(APIView):
+    permission_classes = [IsAuthenticated]
+    allowed_extensions = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
+    max_file_size = 25 * 1024 * 1024
+    max_documents = 5
+    max_text_chars = 120_000
+
+    def post(self, request):
+        uploaded_file = request.FILES.get("file")
+        conversation_id = request.data.get("conversation_id")
+        if not uploaded_file:
+            return Response({"error": "file is required"}, status=400)
+
+        filename = os.path.basename(uploaded_file.name or "document")
+        extension = os.path.splitext(filename)[1].lower()
+        if extension not in self.allowed_extensions:
+            return Response({"error": f"Unsupported file type: {extension or 'unknown'}"}, status=400)
+        if uploaded_file.size > self.max_file_size:
+            return Response({"error": "Document must be 25 MB or smaller."}, status=400)
+        if conversation_id and not AIConversation.objects.filter(id=conversation_id, user=request.user).exists():
+            return Response({"error": "Conversation not found."}, status=404)
+
+        result = DocumentProcessorService().get_extraction_result(uploaded_file.read(), filename)
+        extracted_text = str(result.get("normalized_text") or result.get("text") or "").strip()
+        if not extracted_text:
+            return Response({"error": result.get("error") or "No readable text was found in the document."}, status=422)
+
+        with transaction.atomic():
+            if conversation_id:
+                conversation = AIConversation.objects.select_for_update().filter(
+                    id=conversation_id,
+                    user=request.user,
+                ).first()
+                if not conversation:
+                    return Response({"error": "Conversation not found."}, status=404)
+            else:
+                conversation = AIConversation.objects.create(
+                    user=request.user,
+                    title=f"Chat with {filename}"[:255],
+                )
+
+            metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+            documents = metadata.get("chat_documents") if isinstance(metadata.get("chat_documents"), list) else []
+            if len(documents) >= self.max_documents:
+                return Response({"error": f"A chat can contain up to {self.max_documents} documents."}, status=400)
+
+            document = {
+                "id": str(uuid.uuid4()),
+                "name": filename,
+                "size": uploaded_file.size,
+                "extraction_mode": result.get("mode"),
+                "quality_flags": result.get("quality_flags") or [],
+                "text": extracted_text[:self.max_text_chars],
+                "truncated": len(extracted_text) > self.max_text_chars,
+                "uploaded_at": timezone.now().isoformat(),
+            }
+            metadata["chat_documents"] = [*documents, document]
+            conversation.metadata = metadata
+            conversation.save(update_fields=["metadata", "updated_at"])
+
+        return Response({
+            "conversation_id": str(conversation.id),
+            "document": {key: value for key, value in document.items() if key != "text"},
+        }, status=201)
+
+    def delete(self, request, document_id):
+        conversation_id = request.data.get("conversation_id") or request.query_params.get("conversation_id")
+        conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
+        if not conversation:
+            return Response({"error": "Conversation not found."}, status=404)
+
+        metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+        documents = metadata.get("chat_documents") if isinstance(metadata.get("chat_documents"), list) else []
+        remaining = [document for document in documents if str(document.get("id")) != str(document_id)]
+        if len(remaining) == len(documents):
+            return Response({"error": "Document not found."}, status=404)
+        metadata["chat_documents"] = remaining
+        conversation.metadata = metadata
+        conversation.save(update_fields=["metadata", "updated_at"])
+        return Response(status=204)
 
 
 class DealHelperView(APIView):

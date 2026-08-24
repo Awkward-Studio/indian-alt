@@ -204,6 +204,22 @@ def _truncate_text(value: str | None, limit: int) -> str:
     tail = max(limit - head - 40, 0)
     return f"{text[:head]}\n\n[...TRUNCATED...]\n\n{text[-tail:] if tail else ''}".strip()
 
+
+def _build_chat_document_context(conversation: AIConversation) -> tuple[str, int]:
+    metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+    documents = metadata.get("chat_documents")
+    if not isinstance(documents, list):
+        return "", 0
+    usable_documents = [
+        document for document in documents
+        if isinstance(document, dict) and document.get("text")
+    ]
+    context = "\n\n".join(
+        f"[UPLOADED DOCUMENT: {document.get('name') or 'Untitled'}]\n{document.get('text')}"
+        for document in usable_documents
+    )
+    return context, len(usable_documents)
+
 @shared_task(bind=True)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
     """
@@ -257,6 +273,16 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             task_metadata = chat_service.process_intent_and_build_metadata(
                 user_message, conversation_id, history_context, audit_log_id
             )
+            document_context, document_count = _build_chat_document_context(conversation)
+            if document_context:
+                task_metadata["context_data"] = (
+                    f"{task_metadata.get('context_data', '')}\n\n"
+                    "[USER-UPLOADED DOCUMENTS]\n"
+                    "Treat these documents as the primary evidence for questions about them. "
+                    "State when an answer is not present in the documents.\n\n"
+                    f"{document_context}"
+                ).strip()
+                task_metadata["chat_document_count"] = document_count
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "used_query_builder": bool(task_metadata.get("used_query_builder", True)),
@@ -271,6 +297,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "retrieved_chunk_count": task_metadata.get("retrieved_chunk_count"),
                 "selected_chunk_count": task_metadata.get("selected_chunk_count"),
                 "selected_sources": task_metadata.get("selected_sources"),
+                "chat_document_count": task_metadata.get("chat_document_count", 0),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message

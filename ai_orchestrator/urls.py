@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     AISettingsView, AIConnectionStatusView, ForexRateView, DealChatView, UniversalChatView,
+    UniversalChatDocumentView,
     AISkillsView, DealIndustrySkillsView, DealIndustrySkillAssignmentView,
     DealIndustrySkillRunView, AIConversationViewSet, VMControlView,
     AIAuditLogViewSet, DealHelperView
@@ -24,4 +25,6 @@ urlpatterns = [
     path('deal-chat/', DealChatView.as_view(), name='ai-deal-chat'),
     path('deal-helper/<str:action>/', DealHelperView.as_view(), name='ai-deal-helper'),
     path('universal-chat/', UniversalChatView.as_view(), name='ai-universal-chat'),
+    path('universal-chat/documents/', UniversalChatDocumentView.as_view(), name='ai-universal-chat-document'),
+    path('universal-chat/documents/<uuid:document_id>/', UniversalChatDocumentView.as_view(), name='ai-universal-chat-document-detail'),
 ]
