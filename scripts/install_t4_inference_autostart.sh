@@ -2,16 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="india-alt-inference-t4.service"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-if [[ -n "${T4_INFERENCE_DIR:-}" ]]; then
-  PROJECT_DIR="$(cd -- "${T4_INFERENCE_DIR}" && pwd)"
-elif [[ -f "${SCRIPT_DIR}/docker-compose.inference.t4.yml" ]]; then
-  PROJECT_DIR="${SCRIPT_DIR}"
-else
-  PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-fi
-
+PROJECT_DIR="${T4_INFERENCE_DIR:-/home}"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.inference.t4.yml"
 ENV_FILE="${T4_INFERENCE_ENV_FILE:-${PROJECT_DIR}/.env.inference.t4}"
 DOCKER_BIN="$(command -v docker || true)"
