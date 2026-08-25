@@ -55,35 +55,6 @@ services:
       - --image-max-tokens
       - ${LLAMA_IMAGE_MAX_TOKENS:-1120}
 
-  docproc:
-    build:
-      context: ${DOCPROC_BUILD_CONTEXT:-./indian-alt-docproc}
-      dockerfile: Dockerfile
-    image: india-alt-docproc:latest
-    container_name: docproc-t4
-    restart: always
-    depends_on:
-      - vllm-text
-    environment:
-      VLLM_BASE_URL: http://vllm-text:8000/v1
-      VLLM_API_KEY: ${VLLM_API_KEY:-local-dev-key}
-      VLLM_TEXT_MODEL: ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q8}
-      DOCPROC_API_KEY: ${DOCPROC_API_KEY:-local-docproc-key}
-      DOCPROC_REQUEST_TIMEOUT: ${DOCPROC_REQUEST_TIMEOUT:-600}
-      DOCPROC_MAX_PAGE_LIMIT: ${DOCPROC_MAX_PAGE_LIMIT:-200}
-      DOCPROC_MAX_CONCURRENT_OCR: ${DOCPROC_MAX_CONCURRENT_OCR:-1}
-      DOCPROC_NORMALIZATION_CHUNK_CHARS: ${DOCPROC_NORMALIZATION_CHUNK_CHARS:-12000}
-    ports:
-      - "${DOCPROC_PORT:-8100}:8100"
-    command: >
-      uvicorn main:app
-      --host 0.0.0.0
-      --port 8100
-      --workers ${DOCPROC_WORKERS:-1}
-      --h11-max-incomplete-event-size 524288000
-      --timeout-keep-alive 600
-      --timeout-graceful-shutdown 600
-
   tei-embedding:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
     container_name: tei-embedding-t4
