@@ -1,13 +1,60 @@
+import io
+import json
 from unittest.mock import MagicMock, patch
+from urllib.error import URLError
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from ai_orchestrator.models import AIAuditLog, VMControlOperation
-from ai_orchestrator.services.vm_service import VMControlSnapshot
+from ai_orchestrator.services.vm_service import VMControlService, VMControlSnapshot
 from ai_orchestrator.views import VMControlView
+
+
+class VMControlServiceTests(SimpleTestCase):
+    def service(self):
+        service = object.__new__(VMControlService)
+        service.subscription_id = "subscription-id"
+        service.resource_group = "indian-alt-prod_group"
+        service.vm_name = "indian-alt-prod"
+        service.configured = True
+        service.credential = MagicMock()
+        service.credential.get_token.return_value.token = "access-token"
+        service.compute_client = MagicMock()
+        service.compute_client._config.api_version = "2024-11-01"
+        return service
+
+    def test_status_uses_rest_fallback_when_sdk_response_cannot_decode(self):
+        service = self.service()
+        service.compute_client.virtual_machines.instance_view.side_effect = RuntimeError(
+            "DecodeError"
+        )
+        response = io.BytesIO(
+            json.dumps(
+                {"statuses": [{"code": "ProvisioningState/succeeded"}, {"code": "PowerState/deallocated"}]}
+            ).encode()
+        )
+
+        with patch("ai_orchestrator.services.vm_service.urlopen", return_value=response):
+            self.assertEqual(service.get_status(), "deallocated")
+
+        service.credential.get_token.assert_called_once_with(
+            "https://management.azure.com/.default"
+        )
+
+    def test_status_fails_closed_when_sdk_and_rest_reads_fail(self):
+        service = self.service()
+        service.compute_client.virtual_machines.instance_view.side_effect = RuntimeError(
+            "DecodeError"
+        )
+
+        with patch(
+            "ai_orchestrator.services.vm_service.urlopen",
+            side_effect=URLError("unavailable"),
+        ):
+            self.assertEqual(service.get_status(), "unknown")
 
 
 class VMControlViewTests(TestCase):

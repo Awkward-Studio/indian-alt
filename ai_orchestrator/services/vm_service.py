@@ -1,8 +1,10 @@
 import logging
 import os
+import json
 from dataclasses import dataclass, field
 from typing import Dict
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
@@ -85,7 +87,7 @@ class VMControlService:
     def get_status(self) -> str:
         if not self.read_available:
             return "unavailable"
-            
+
         try:
             vm = self.compute_client.virtual_machines.instance_view(self.resource_group, self.vm_name)
             for status in vm.statuses:
@@ -93,7 +95,46 @@ class VMControlService:
                     return status.code.split("/", 1)[1].lower()
             return "unknown"
         except Exception as e:
-            logger.warning("Azure VM status lookup failed: %s", type(e).__name__)
+            logger.warning(
+                "Azure SDK VM status lookup failed (%s); trying ARM REST fallback.",
+                type(e).__name__,
+            )
+            return self._get_status_via_rest()
+
+    def _get_status_via_rest(self) -> str:
+        try:
+            token = self.credential.get_token(
+                "https://management.azure.com/.default"
+            ).token
+            api_version = getattr(
+                getattr(self.compute_client, "_config", None),
+                "api_version",
+                "2024-11-01",
+            )
+            resource_group = quote(self.resource_group, safe="")
+            vm_name = quote(self.vm_name, safe="")
+            url = (
+                f"https://management.azure.com/subscriptions/{self.subscription_id}"
+                f"/resourceGroups/{resource_group}/providers/Microsoft.Compute"
+                f"/virtualMachines/{vm_name}/instanceView?api-version={api_version}"
+            )
+            request = Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                method="GET",
+            )
+            with urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+            for status in payload.get("statuses", []):
+                code = str(status.get("code") or "")
+                if code.startswith("PowerState/"):
+                    return code.split("/", 1)[1].lower()
+            return "unknown"
+        except Exception as exc:
+            logger.warning("Azure ARM REST VM status fallback failed: %s", type(exc).__name__)
             return "unknown"
 
     def _probe(self, url):
