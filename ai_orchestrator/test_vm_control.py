@@ -1,7 +1,7 @@
 import io
 import json
 from unittest.mock import MagicMock, patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -55,6 +55,46 @@ class VMControlServiceTests(SimpleTestCase):
             side_effect=URLError("unavailable"),
         ):
             self.assertEqual(service.get_status(), "unknown")
+
+    def test_probe_uses_root_health_endpoint_and_reports_model_loading(self):
+        service = self.service()
+        loading = HTTPError(
+            "http://inference.example/health",
+            503,
+            "loading",
+            None,
+            None,
+        )
+
+        with patch(
+            "ai_orchestrator.services.vm_service.urlopen",
+            side_effect=loading,
+        ) as opener:
+            self.assertEqual(
+                service._probe("http://inference.example/v1"),
+                "loading",
+            )
+
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, "http://inference.example/health")
+
+    def test_startup_phase_tracks_vm_containers_models_and_readiness(self):
+        self.assertEqual(
+            VMControlService._startup_phase("starting", {"text": "offline"}),
+            "vm_starting",
+        )
+        self.assertEqual(
+            VMControlService._startup_phase("running", {"text": "offline"}),
+            "containers_starting",
+        )
+        self.assertEqual(
+            VMControlService._startup_phase("running", {"text": "loading"}),
+            "models_loading",
+        )
+        self.assertEqual(
+            VMControlService._startup_phase("running", {"text": "ready"}),
+            "ready",
+        )
 
 
 class VMControlViewTests(TestCase):

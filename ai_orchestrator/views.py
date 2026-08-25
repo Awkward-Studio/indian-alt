@@ -180,6 +180,7 @@ class VMControlView(APIView):
             "target_label": snapshot.target_label,
             "power_state": snapshot.power_state,
             "service_state": snapshot.service_state,
+            "startup_phase": snapshot.startup_phase,
             "services": snapshot.services,
             "active_ai_jobs": active_jobs,
             "allowed_actions": allowed_actions,

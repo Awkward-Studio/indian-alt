@@ -3,8 +3,8 @@ import os
 import json
 from dataclasses import dataclass, field
 from typing import Dict
-from urllib.error import URLError
-from urllib.parse import quote
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
@@ -20,6 +20,7 @@ class VMControlSnapshot:
     target_label: str
     power_state: str = "unknown"
     service_state: str = "unknown"
+    startup_phase: str = "unavailable"
     services: Dict[str, str] = field(default_factory=dict)
     error: str = ""
 
@@ -141,19 +142,52 @@ class VMControlService:
         if not url:
             return "unknown"
         try:
-            request = Request(url.rstrip("/") + "/health", method="GET")
+            parsed = urlsplit(url)
+            health_url = urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
+            request = Request(health_url, method="GET")
             with urlopen(request, timeout=3) as response:
                 return "ready" if 200 <= response.status < 300 else "degraded"
+        except HTTPError as exc:
+            return "loading" if exc.code in {425, 429, 503} else "degraded"
         except (OSError, URLError):
             return "offline"
+
+    @staticmethod
+    def _startup_phase(power_state, services):
+        if power_state in {"deallocated", "stopped"}:
+            return "offline"
+        if power_state == "starting":
+            return "vm_starting"
+        if power_state == "deallocating":
+            return "vm_stopping"
+        if power_state != "running":
+            return "unavailable"
+
+        configured_states = [value for value in services.values() if value != "unknown"]
+        if configured_states and all(value == "ready" for value in configured_states):
+            return "ready"
+        if any(value == "loading" for value in configured_states):
+            return "models_loading"
+        if any(value == "ready" for value in configured_states):
+            return "services_starting"
+        return "containers_starting"
 
     def snapshot(self):
         if not self.read_available:
             return VMControlSnapshot(False, self.configured, self.target_label, error="VM control is not configured.")
         power_state = self.get_status()
         services = {name: ("offline" if power_state != "running" else self._probe(url)) for name, url in self.inference_urls.items()}
-        service_state = "ready" if power_state == "running" and services and all(value == "ready" for value in services.values()) else ("offline" if power_state != "running" else "warming")
-        return VMControlSnapshot(self.enabled, True, self.target_label, power_state, service_state, services)
+        startup_phase = self._startup_phase(power_state, services)
+        service_state = "ready" if startup_phase == "ready" else ("offline" if startup_phase in {"offline", "vm_stopping"} else "warming")
+        return VMControlSnapshot(
+            self.enabled,
+            True,
+            self.target_label,
+            power_state,
+            service_state,
+            startup_phase,
+            services,
+        )
 
     def start_vm(self):
         if not self.available:
