@@ -1404,6 +1404,12 @@ class AISettingsView(APIView):
                 "vm_status": status_data.get("vm_status", "unknown"),
                 "live_rate": live_rate,
                 "claude_text_model": claude_text_model,
+                "web_search": {
+                    "provider": "SearXNG",
+                    "base_url": getattr(settings, "SEARXNG_BASE_URL", "http://localhost:8081"),
+                    "language": getattr(settings, "SEARXNG_LANGUAGE", "en-IN"),
+                    "engines": list(getattr(settings, "SEARXNG_ENGINES", [])),
+                },
                 "prompt_catalog": PromptCatalogService.serialize(),
                 "pipelines": _pipeline_inventory(),
             })

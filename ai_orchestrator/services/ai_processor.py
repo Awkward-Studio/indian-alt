@@ -12,6 +12,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .runtime import AIRuntimeService
 from .pipeline_registry import PipelineRegistryService, RegistryValidationError
+from .search_provider import SearXNGProviderService
 from django.conf import settings
 from django.utils import timezone
 
@@ -51,6 +52,7 @@ class AIProcessorService:
         self.provider = self.vllm_provider
         self.current_provider = self.vllm_provider
         self.ocr_service = OCRService()
+        self.search_provider = SearXNGProviderService()
         self.channel_layer = get_channel_layer()
 
     @property
@@ -135,14 +137,14 @@ class AIProcessorService:
             system_instructions = getattr(personality, "system_instructions", None) or "You are a professional PE analyst."
         else:
             system_instructions = PromptBuilderService.build_system_instructions(personality, skill, stream)
+        web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
         if model_provider == "anthropic":
-            web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
             system_instructions += (
                 "\n\n[PRIVACY & SEARCH DIRECTIVE]\n"
                 "You are routed through a secure privacy-preserving gateway.\n"
                 "You DO NOT have access to private database fields, uploaded files, financial details, internal metrics, or comments for any deals.\n"
                 + (
-                    "Web search is explicitly enabled for this question. Use the native web search tool and ground material factual claims in cited public sources."
+                    "Public search evidence is supplied by the firm's SearXNG service. Use only that evidence for current public facts and cite its source URLs. Do not invoke a provider-native search tool."
                     if web_search_enabled
                     else "Web search is explicitly disabled for this question. Do not invoke a web-search tool or imply that current public sources were checked."
                 )
@@ -162,6 +164,24 @@ class AIProcessorService:
             )
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
+        if web_search_enabled:
+            search_query = str(
+                (metadata or {}).get("web_search_query")
+                or (metadata or {}).get("company_name")
+                or content
+                or ""
+            ).strip()
+            if not search_query:
+                raise ValueError("A search query is required when web search is enabled.")
+            log_worker_event(audit_log, "Searching public sources through SearXNG.")
+            search_results = self.search_provider.search_results(search_query, num_results=8)
+            search_context = self.search_provider.format_context(search_results)
+            user_prompt = (
+                f"{user_prompt}\n\n[PUBLIC WEB EVIDENCE FROM SEARXNG]\n"
+                f"{search_context}\n\n"
+                "Use only the evidence above for current public facts. Cite source URLs and state when the evidence is insufficient."
+            )
+            log_worker_event(audit_log, f"SearXNG returned {len(search_results)} public sources.")
         if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
             user_prompt = self._truncate_prompt_to_token_budget(
                 user_prompt,
@@ -198,9 +218,11 @@ class AIProcessorService:
             if "request_timeout" in metadata:
                 payload["_request_timeout"] = metadata["request_timeout"]
             if "web_search_enabled" in metadata:
-                payload["options"]["web_search_enabled"] = bool(metadata["web_search_enabled"])
-                payload["options"]["disable_search"] = not bool(metadata["web_search_enabled"])
-                payload["options"]["enable_dynamic_web_search"] = bool(metadata["web_search_enabled"])
+                # Retrieval is centralized in SearXNG above. Provider-native
+                # search stays disabled so every query follows the same route.
+                payload["options"]["web_search_enabled"] = False
+                payload["options"]["disable_search"] = True
+                payload["options"]["enable_dynamic_web_search"] = False
 
         # Qwen's vLLM chat template otherwise emits its internal reasoning before
         # the answer. Callers can explicitly opt back in for a task that needs it.

@@ -502,7 +502,11 @@ class RerankerProviderService:
 
 class AnthropicProviderService:
     """
-    Transport for Anthropic's Claude API, supporting streaming and native web search tool.
+    Transport for Anthropic's Claude API.
+
+    Public search retrieval is handled by SearXNGProviderService before a
+    request reaches this provider. This transport never enables provider-native
+    search tools.
     Normalizes responses to the legacy internal shape.
     """
 
@@ -551,48 +555,6 @@ class AnthropicProviderService:
         options = payload.get("options") or {}
         max_tokens = options.get("max_tokens") or 8192
 
-        prompt_lower = user_prompt.lower()
-        search_keywords = [
-            "search", "web", "online", "news", "competitor", "peer",
-            "market", "industry", "latest", "recent", "find", "google",
-            "trend", "wikipedia", "current", "exits", "acquisition",
-            "who is", "who are", "website", "competitors", "peers", "news",
-            "founder", "ceo", "funding", "valuation", "revenue", "financials"
-        ]
-        explicit_search = options.get("web_search_enabled")
-        disable_search = options.get("disable_search", False)
-        has_search_intent = (
-            bool(explicit_search)
-            if isinstance(explicit_search, bool)
-            else any(kw in prompt_lower for kw in search_keywords) and not disable_search
-        )
-
-        tools = []
-        if has_search_intent:
-            # Upgrade standard Haiku queries to the configured Sonnet model for web search support
-            if "haiku" in model.lower():
-                upgraded_model = self.search_model
-                logger.info(
-                    "Dynamic Model Upgrade: Upgrading from %s to %s for web search execution.",
-                    model,
-                    upgraded_model
-                )
-                model = upgraded_model
-            
-            # Attach the native web search tool for search-capable models
-            if "haiku" not in model.lower():
-                max_search_uses = options.get("max_search_uses", 2)
-                web_search_tool_type = options.get("web_search_tool_type") or "web_search_20250305"
-                if options.get("enable_dynamic_web_search"):
-                    web_search_tool_type = "web_search_20260209"
-                tools = [
-                    {
-                        "type": web_search_tool_type,
-                        "name": "web_search",
-                        "max_uses": max_search_uses,
-                    }
-                ]
-
         anthropic_payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -607,9 +569,6 @@ class AnthropicProviderService:
 
         if system_prompt:
             anthropic_payload["system"] = system_prompt
-
-        if tools:
-            anthropic_payload["tools"] = tools
 
         # Claude 3.7 extended thinking requires temperature=1. Newer Claude
         # models reject explicit sampling parameters, so use their API default.

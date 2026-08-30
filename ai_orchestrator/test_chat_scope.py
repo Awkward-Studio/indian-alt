@@ -89,7 +89,7 @@ class AnthropicWebSearchContractTests(SimpleTestCase):
         )
         self.assertNotIn("tools", payload)
 
-    def test_explicit_on_adds_search_tool(self):
+    def test_explicit_on_does_not_bypass_searxng_with_native_search(self):
         payload = self._provider()._build_anthropic_payload(
             {
                 "model": "claude-haiku-4-5",
@@ -101,8 +101,8 @@ class AnthropicWebSearchContractTests(SimpleTestCase):
             },
             stream=True,
         )
-        self.assertEqual(payload["model"], "claude-sonnet-4-6")
-        self.assertEqual(payload["tools"][0]["type"], "web_search_20260209")
+        self.assertEqual(payload["model"], "claude-haiku-4-5")
+        self.assertNotIn("tools", payload)
 
     def test_stream_parser_preserves_provider_citations(self):
         parsed = list(

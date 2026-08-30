@@ -2260,7 +2260,7 @@ class VentureIntelligenceServiceTests(TestCase):
 
         self.assertEqual(res["cin"], "U99999DL2008PTC000001")
         self.assertEqual(res["entity_name"], "Searched Lenskart Entity")
-        self.assertEqual(res["source"], "anthropic_web_search")
+        self.assertEqual(res["source"], "searxng_ai_search")
         mock_process_content.assert_called_once()
 
     @patch("deals.services.venture_intelligence.requests.post")

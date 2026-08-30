@@ -1933,62 +1933,21 @@ class AnthropicIntegrationTests(TestCase):
             # Verify correct mock execution
             self.assertEqual(res["status"], "success")
 
-    def test_anthropic_payload_building_gated_web_search_tool(self):
+    def test_anthropic_transport_never_enables_native_web_search(self):
         from ai_orchestrator.services.llm_providers import AnthropicProviderService
         service = AnthropicProviderService()
-        
-        # Test standard haiku model WITH search intent (should be dynamically upgraded to sonnet and have tools)
-        payload_haiku_search = {
-            "model": "claude-haiku-4-5-20251001",
-            "prompt": "Who are their competitors?",
-            "system": "Be concise",
-            "options": {"max_tokens": 4096, "temperature": 0.5}
-        }
-        built_haiku_search = service._build_anthropic_payload(payload_haiku_search, stream=False)
-        self.assertEqual(built_haiku_search["model"], service.search_model)
-        self.assertEqual(built_haiku_search["tools"][0]["type"], "web_search_20250305")
-        self.assertEqual(built_haiku_search["tools"][0]["name"], "web_search")
-
-        # Test standard haiku model WITHOUT search intent (should NOT be upgraded and should NOT have tools)
-        payload_haiku_standard = {
-            "model": "claude-haiku-4-5-20251001",
-            "prompt": "Hello! Please summarize this conversation context.",
-            "system": "Be concise",
-            "options": {"max_tokens": 4096, "temperature": 0.5}
-        }
-        built_haiku_standard = service._build_anthropic_payload(payload_haiku_standard, stream=False)
-        self.assertEqual(built_haiku_standard["model"], "claude-haiku-4-5-20251001")
-        self.assertNotIn("tools", built_haiku_standard)
-        
-        # Test sonnet model with search intent (should have tools/web search)
-        payload_sonnet_search = {
-            "model": "claude-sonnet-4-6",
-            "prompt": "Who are their competitors?",
-            "system": "Be concise",
-            "options": {"max_tokens": 4096, "temperature": 0.5}
-        }
-        built_sonnet_search = service._build_anthropic_payload(payload_sonnet_search, stream=False)
-        self.assertEqual(built_sonnet_search["tools"][0]["type"], "web_search_20250305")
-        self.assertEqual(built_sonnet_search["tools"][0]["name"], "web_search")
-
-        payload_dynamic_search = {
-            "model": "claude-sonnet-4-6",
-            "prompt": "Search the web for competitors.",
-            "system": "Be concise",
-            "options": {"max_tokens": 4096, "temperature": 0.5, "enable_dynamic_web_search": True}
-        }
-        built_dynamic_search = service._build_anthropic_payload(payload_dynamic_search, stream=False)
-        self.assertEqual(built_dynamic_search["tools"][0]["type"], "web_search_20260209")
-
-        # Test sonnet model WITHOUT search intent (should NOT have tools/web search)
-        payload_sonnet_standard = {
-            "model": "claude-sonnet-4-6",
-            "prompt": "Hello! Please summarize this conversation context.",
-            "system": "Be concise",
-            "options": {"max_tokens": 4096, "temperature": 0.5}
-        }
-        built_sonnet_standard = service._build_anthropic_payload(payload_sonnet_standard, stream=False)
-        self.assertNotIn("tools", built_sonnet_standard)
+        for model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6"):
+            built = service._build_anthropic_payload(
+                {
+                    "model": model,
+                    "prompt": "Search the web for competitors.",
+                    "system": "Be concise",
+                    "options": {"web_search_enabled": True, "enable_dynamic_web_search": True},
+                },
+                stream=False,
+            )
+            self.assertEqual(built["model"], model)
+            self.assertNotIn("tools", built)
 
 
 

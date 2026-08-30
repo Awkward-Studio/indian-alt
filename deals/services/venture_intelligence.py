@@ -132,7 +132,7 @@ class VentureIntelligenceService:
             except json.JSONDecodeError:
                 return {}
 
-    def normalize_cin_resolution(self, payload: dict, *, source: str = "anthropic_web_search") -> dict:
+    def normalize_cin_resolution(self, payload: dict, *, source: str = "searxng_ai_search") -> dict:
         cin = normalize_cin(payload.get("cin"))
         confidence = payload.get("confidence")
         try:
@@ -149,7 +149,7 @@ class VentureIntelligenceService:
             "is_valid": is_valid_cin(cin),
         }
 
-    def normalize_cin_candidates(self, payload: dict, *, source: str = "anthropic_web_search") -> list[dict]:
+    def normalize_cin_candidates(self, payload: dict, *, source: str = "searxng_ai_search") -> list[dict]:
         raw_candidates = payload.get("candidates")
         if not isinstance(raw_candidates, list):
             raw_candidates = [payload]
@@ -176,10 +176,10 @@ class VentureIntelligenceService:
 
     def resolve_cin_candidates_via_ai(self, company_name: str) -> list[dict]:
         """
-        Uses Anthropic's Claude with native web search to resolve ranked MCA CIN candidates.
+        Uses SearXNG evidence and the configured AI model to resolve ranked MCA CIN candidates.
         """
         ai_service = AIProcessorService()
-        # Force using Anthropic to leverage native web search tool
+        # Claude synthesizes evidence fetched through the shared SearXNG route.
         ai_service.model_provider = "anthropic"
         ai_service.current_provider = ai_service.anthropic_provider
         
@@ -202,7 +202,7 @@ class VentureIntelligenceService:
             response_text = result.get("response", "").strip()
             candidates = self.normalize_cin_candidates(self._extract_json_object(response_text))
             if not candidates:
-                logger.warning("AI web search did not return a valid CIN for '%s': %s", company_name, response_text[:500])
+                logger.warning("SearXNG-grounded AI search did not return a valid CIN for '%s': %s", company_name, response_text[:500])
             return candidates
         except Exception as e:
             logger.error(f"Failed to resolve CIN via AI web search: {e}", exc_info=True)
@@ -219,7 +219,7 @@ class VentureIntelligenceService:
             "cin": "",
             "entity_name": "",
             "confidence": None,
-            "source": "anthropic_web_search",
+            "source": "searxng_ai_search",
             "raw": {},
             "is_valid": False,
         }
