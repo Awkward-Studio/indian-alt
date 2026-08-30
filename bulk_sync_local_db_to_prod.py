@@ -22,7 +22,11 @@ from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChu
 from api_requests.models import Request
 from banks.models import Bank
 from contacts.models import Contact
-from deals.models import Deal, DealAnalysis, DealDocument, DealPhaseLog, FolderAnalysisDocument
+from deals.models import (
+    Deal, DealAnalysis, DealDocument, DealPhaseLog, FolderAnalysisDocument,
+    DealFieldProvenance, DealPassReasonRemediationAudit,
+    DealReceiptDateSuggestion, DealReceiptDateAudit, DealContradiction,
+)
 from work_items.models import Task, TaskSuggestion
 
 
@@ -126,6 +130,11 @@ def parse_args():
         "--prompt-child-overwrite",
         action="store_true",
         help="Prompt per deal whether to rebuild analyses/documents/chunks/profile from local or keep production.",
+    )
+    parser.add_argument(
+        "--force-child-overwrite",
+        action="store_true",
+        help="Always replace all deal child records (analyses, documents, chunks, provenance, and audits) from local.",
     )
     parser.add_argument(
         "--interactive-prune",
@@ -349,6 +358,8 @@ def deal_state_differences(
         "city": local_deal.city,
         "state": local_deal.state,
         "country": local_deal.country,
+        "bank_name": local_deal.bank_name,
+        "primary_contact_name": local_deal.primary_contact_name,
         "other_contacts": [str(contact.id) for contact in local_additional_contacts],
         "primary_contact": contact_map.get(str(local_deal.primary_contact_id)) if local_deal.primary_contact_id else None,
         "fund": local_deal.fund,
@@ -727,6 +738,8 @@ def upsert_bank(local_bank: Bank | None, dry_run: bool = False, verbose: bool = 
         "name": local_bank.name,
         "website_domain": local_bank.website_domain,
         "description": local_bank.description,
+        "created_at": local_bank.created_at,
+        "updated_at": local_bank.updated_at,
     }
 
     if dry_run:
@@ -783,6 +796,7 @@ def upsert_contact(
         "name": local_contact.name,
         "email": local_contact.email,
         "designation": local_contact.designation,
+        "contact_type": local_contact.contact_type,
         "address": local_contact.address,
         "bank": bank_map.get(str(local_contact.bank_id)) if local_contact.bank_id else None,
         "location": local_contact.location,
@@ -800,6 +814,8 @@ def upsert_contact(
         "pipeline": local_contact.pipeline,
         "follow_ups": local_contact.follow_ups,
         "last_meeting_date": local_contact.last_meeting_date,
+        "created_at": local_contact.created_at,
+        "updated_at": local_contact.updated_at,
     }
 
     if dry_run:
@@ -1091,6 +1107,11 @@ def upsert_deal(
 
     mapped_bank = bank_map.get(str(local_deal.bank_id)) if local_deal.bank_id else None
     mapped_primary_contact = contact_map.get(str(local_deal.primary_contact_id)) if local_deal.primary_contact_id else None
+    mapped_fund_reviewer = None
+    if local_deal.fund_classification_reviewed_by_id:
+        local_reviewer = User.objects.using(SOURCE_DB).filter(id=local_deal.fund_classification_reviewed_by_id).first()
+        if local_reviewer:
+            mapped_fund_reviewer = User.objects.using(TARGET_DB).filter(username=local_reviewer.username).first()
     prod_request_payload = request_payload_for(prod_deal.request) if prod_deal else None
 
     payload = {
@@ -1118,9 +1139,16 @@ def upsert_deal(
         "city": local_deal.city,
         "state": local_deal.state,
         "country": local_deal.country,
+        "bank_name": local_deal.bank_name,
+        "primary_contact_name": local_deal.primary_contact_name,
         "other_contacts": [str(contact.id) for contact in additional_contacts],
         "primary_contact": mapped_primary_contact,
         "fund": local_deal.fund,
+        "fund_classification_state": local_deal.fund_classification_state,
+        "fund_classification_source_type": local_deal.fund_classification_source_type,
+        "fund_classification_source_id": local_deal.fund_classification_source_id,
+        "fund_classification_reviewed_by": mapped_fund_reviewer,
+        "fund_classification_reviewed_at": local_deal.fund_classification_reviewed_at,
         "legacy_investment_bank": local_deal.legacy_investment_bank,
         "priority_rationale": local_deal.priority_rationale,
         "themes": list(local_deal.themes or []),
@@ -1131,6 +1159,8 @@ def upsert_deal(
         "source_email_id": local_deal.source_email_id,
         "processing_status": local_deal.processing_status,
         "processing_error": local_deal.processing_error,
+        "analysis_prompt": local_deal.analysis_prompt,
+        "competitor_candidates": list(local_deal.competitor_candidates or []),
         "received_at": getattr(local_deal, "received_at", None),
         "request": prod_deal.request if prod_deal else None,
     }
@@ -1818,6 +1848,94 @@ def replace_deal_tasks(local_deal: Deal, prod_deal: Deal, dry_run: bool = False)
     return {"tasks": len(tasks), "task_suggestions": len(suggestions)}
 
 
+def _map_user(local_user_id):
+    """Resolve a local user to the hosted user, tolerating independent user IDs."""
+    if not local_user_id:
+        return None
+    local_user = User.objects.using(SOURCE_DB).filter(id=local_user_id).first()
+    if not local_user:
+        return None
+    return User.objects.using(TARGET_DB).filter(username=local_user.username).first()
+
+
+def replace_deal_provenance(local_deal: Deal, prod_deal: Deal, dry_run: bool = False) -> dict:
+    """Replace all deal-level provenance/audit records from local, preserving IDs and timestamps."""
+    field_rows = list(DealFieldProvenance.objects.using(SOURCE_DB).filter(deal=local_deal))
+    pass_rows = list(DealPassReasonRemediationAudit.objects.using(SOURCE_DB).filter(deal=local_deal))
+    suggestions = list(DealReceiptDateSuggestion.objects.using(SOURCE_DB).filter(deal=local_deal))
+    receipt_audits = list(DealReceiptDateAudit.objects.using(SOURCE_DB).filter(deal=local_deal))
+    contradictions = list(DealContradiction.objects.using(SOURCE_DB).filter(deal=local_deal))
+    counts = {
+        "field_provenance": len(field_rows),
+        "pass_reason_audits": len(pass_rows),
+        "receipt_suggestions": len(suggestions),
+        "receipt_audits": len(receipt_audits),
+        "contradictions": len(contradictions),
+    }
+    if dry_run:
+        return counts
+
+    # Receipt audits PROTECT their suggestion, so remove audits before suggestions.
+    DealReceiptDateAudit.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    DealReceiptDateSuggestion.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    DealFieldProvenance.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    DealPassReasonRemediationAudit.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+    DealContradiction.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+
+    if field_rows:
+        DealFieldProvenance.objects.using(TARGET_DB).bulk_create([
+            DealFieldProvenance(id=row.id, deal=prod_deal, field_name=row.field_name,
+                source_type=row.source_type, source_id=row.source_id,
+                previous_value=deepcopy(row.previous_value), value=deepcopy(row.value),
+                changed_by=_map_user(row.changed_by_id), created_at=row.created_at)
+            for row in field_rows
+        ], batch_size=200)
+    if pass_rows:
+        DealPassReasonRemediationAudit.objects.using(TARGET_DB).bulk_create([
+            DealPassReasonRemediationAudit(id=row.id, deal=prod_deal,
+                actor=_map_user(row.actor_id), previous_reason=row.previous_reason,
+                new_reason=row.new_reason, deal_updated_at=row.deal_updated_at,
+                created_at=row.created_at)
+            for row in pass_rows
+        ], batch_size=200)
+    if suggestions:
+        DealReceiptDateSuggestion.objects.using(TARGET_DB).bulk_create([
+            DealReceiptDateSuggestion(id=row.id, deal=prod_deal, proposed_date=row.proposed_date,
+                source_type=row.source_type, source_id=row.source_id,
+                evidence=deepcopy(row.evidence or {}), confidence=row.confidence,
+                status=row.status, reviewed_by=_map_user(row.reviewed_by_id),
+                reviewed_at=row.reviewed_at, review_note=row.review_note,
+                created_at=row.created_at, updated_at=row.updated_at)
+            for row in suggestions
+        ], batch_size=200)
+    target_audit_ids = set(AIAuditLog.objects.using(TARGET_DB).values_list("id", flat=True))
+    if receipt_audits:
+        DealReceiptDateAudit.objects.using(TARGET_DB).bulk_create([
+            DealReceiptDateAudit(id=row.id, deal=prod_deal, suggestion_id=row.suggestion_id,
+                previous_date=row.previous_date, new_date=row.new_date,
+                source_type=row.source_type, source_id=row.source_id,
+                evidence=deepcopy(row.evidence or {}), reviewer=_map_user(row.reviewer_id),
+                created_at=row.created_at)
+            for row in receipt_audits
+            if row.suggestion_id in {s.id for s in suggestions}
+        ], batch_size=200)
+    if contradictions:
+        DealContradiction.objects.using(TARGET_DB).bulk_create([
+            DealContradiction(id=row.id, deal=prod_deal, fingerprint=row.fingerprint,
+                subject=row.subject, metric=row.metric, period=row.period, unit=row.unit,
+                classification=row.classification, confidence=row.confidence,
+                materiality=row.materiality, rationale=row.rationale,
+                left_claim=deepcopy(row.left_claim or {}), right_claim=deepcopy(row.right_claim or {}),
+                classifier_version=row.classifier_version, model_used=row.model_used,
+                audit_log_id=row.audit_log_id if row.audit_log_id in target_audit_ids else None,
+                review_status=row.review_status, analyst_comment=row.analyst_comment,
+                reviewed_by_id=row.reviewed_by_id if Profile.objects.using(TARGET_DB).filter(id=row.reviewed_by_id).exists() else None,
+                reviewed_at=row.reviewed_at, detected_at=row.detected_at, updated_at=row.updated_at)
+            for row in contradictions
+        ], batch_size=200)
+    return counts
+
+
 def sync_single_deal(
     local_deal: Deal,
     bank_map: dict[str, Bank],
@@ -1826,6 +1944,7 @@ def sync_single_deal(
     verbose: bool = False,
     progress_interval: int = 250,
     prompt_child_overwrite_enabled: bool = False,
+    force_child_overwrite: bool = False,
 ):
     print(f"[DEAL] {local_deal.title or local_deal.id}: starting", flush=True)
     print(
@@ -1860,6 +1979,7 @@ def sync_single_deal(
             "profile": replace_retrieval_profile(local_deal, local_deal, dry_run=True),
             "audit_logs": analysis_docs["audit_logs"],
             "analysis_documents": analysis_docs["analysis_documents"],
+            "provenance": replace_deal_provenance(local_deal, local_deal, dry_run=True),
         }
 
     existing_prod_deal = Deal.objects.using(TARGET_DB).filter(id=local_deal.id).first()
@@ -1872,7 +1992,7 @@ def sync_single_deal(
         rewrite_children = True
         
         # Check if deal is completely intact in production (children count check)
-        if existing_prod_deal and not prompt_child_overwrite_enabled:
+        if existing_prod_deal and not prompt_child_overwrite_enabled and not force_child_overwrite:
             prod_doc_count = DealDocument.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
             prod_chunk_count = DocumentChunk.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
             prod_analysis_count = DealAnalysis.objects.using(TARGET_DB).filter(deal=existing_prod_deal).count()
@@ -1960,6 +2080,10 @@ def sync_single_deal(
             vi_records = VentureIntelligenceCompanyRelation.objects.using(TARGET_DB).filter(deal=prod_deal).count()
             deal_tasks = replace_deal_tasks(local_deal, prod_deal, dry_run=True)
 
+        # Provenance is always refreshed, even when the legacy child-count heuristic
+        # elects to retain hosted analyses/documents/chunks.
+        provenance = replace_deal_provenance(local_deal, prod_deal, dry_run=False)
+
     return {
         "deal": prod_deal.title,
         "analyses": analyses,
@@ -1972,6 +2096,7 @@ def sync_single_deal(
         "vi_records": vi_records if 'vi_records' in locals() else sync_deal_venture_intelligence(local_deal, prod_deal, dry_run=True),
         "tasks": deal_tasks["tasks"],
         "task_suggestions": deal_tasks["task_suggestions"],
+        "provenance": provenance,
         "rewritten": rewrite_children,
     }
 
@@ -2266,6 +2391,7 @@ def run():
                     verbose=args.verbose_sync,
                     progress_interval=args.progress_interval,
                     prompt_child_overwrite_enabled=args.prompt_child_overwrite,
+                    force_child_overwrite=args.force_child_overwrite,
                 )
                 processed += 1
                 log_step(
@@ -2273,6 +2399,7 @@ def run():
                     f"phase_logs={result['phase_logs']} documents={result['documents']} "
                     f"analysis_documents={result['analysis_documents']} chunks={result['chunks']} "
                     f"profile={result['profile']}"
+                    f" provenance={result.get('provenance', {})}"
                 )
             except Exception as exc:
                 errors += 1
