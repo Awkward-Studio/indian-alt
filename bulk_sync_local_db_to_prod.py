@@ -78,10 +78,16 @@ def parse_args():
         action="store_true",
         help="Delete production rows not present in the selected local sync set. For full deal syncs this prunes deals; for reference-data-only mode this prunes contacts and banks.",
     )
-    parser.add_argument(
+    deal_existence_group = parser.add_mutually_exclusive_group()
+    deal_existence_group.add_argument(
         "--only-missing-deals",
         action="store_true",
         help="Sync only local deals that do not already exist in production (matched by id, then title).",
+    )
+    deal_existence_group.add_argument(
+        "--only-existing-deals",
+        action="store_true",
+        help="Sync only local deals that already exist in production (matched by id, then normalized title).",
     )
     parser.add_argument(
         "--prod-db-ssl-require",
@@ -630,6 +636,36 @@ def filter_missing_deals(local_deals: list[Deal]) -> tuple[list[Deal], int]:
         else:
             filtered.append(local_deal)
     return filtered, skipped_existing
+
+
+def filter_existing_deals(local_deals: list[Deal]) -> tuple[list[Deal], int]:
+    """Keep local deals that match a production deal by ID or normalized title."""
+    if not local_deals:
+        return [], 0
+
+    local_id_set = {str(local_deal.id) for local_deal in local_deals}
+    prod_id_set = {
+        str(value)
+        for value in Deal.objects.using(TARGET_DB)
+        .filter(id__in=list(local_id_set))
+        .values_list("id", flat=True)
+    }
+    prod_title_set = {
+        normalize_text(value).lower()
+        for value in Deal.objects.using(TARGET_DB).values_list("title", flat=True)
+        if normalize_text(value)
+    }
+
+    filtered: list[Deal] = []
+    skipped_missing = 0
+    for local_deal in local_deals:
+        title_key = normalize_text(local_deal.title).lower()
+        exists = str(local_deal.id) in prod_id_set or (title_key and title_key in prod_title_set)
+        if exists:
+            filtered.append(local_deal)
+        else:
+            skipped_missing += 1
+    return filtered, skipped_missing
 
 
 def _deal_rank_key_for_sync(deal: Deal):
@@ -2006,7 +2042,8 @@ def run():
         "Options: "
         f"dry_run={args.dry_run} deal_subset={args.deal_subset} "
         f"deals_filter={len(args.deals or [])} skip_reference_data={args.skip_reference_data} "
-        f"reference_data_only={args.reference_data_only} only_missing_deals={args.only_missing_deals}"
+        f"reference_data_only={args.reference_data_only} only_missing_deals={args.only_missing_deals} "
+        f"only_existing_deals={args.only_existing_deals}"
     )
     if args.prune_production_data and args.deals:
         raise RuntimeError(
@@ -2017,6 +2054,11 @@ def run():
         raise RuntimeError(
             "--prune-production-data cannot be combined with --only-missing-deals. "
             "Disable pruning while resuming partial runs."
+        )
+    if args.prune_production_data and args.only_existing_deals:
+        raise RuntimeError(
+            "--prune-production-data cannot be combined with --only-existing-deals. "
+            "Update-only syncs must never prune production data."
         )
     if args.prune_production_data and args.deal_subset != "all":
         raise RuntimeError(
@@ -2030,6 +2072,10 @@ def run():
     if args.reference_data_only and args.only_missing_deals:
         raise RuntimeError(
             "--reference-data-only cannot be combined with --only-missing-deals."
+        )
+    if args.reference_data_only and args.only_existing_deals:
+        raise RuntimeError(
+            "--reference-data-only cannot be combined with --only-existing-deals."
         )
     if args.reference_data_only and args.skip_reference_data:
         raise RuntimeError(
@@ -2097,6 +2143,7 @@ def run():
             )
 
     skipped_existing = 0
+    skipped_missing = 0
     if args.only_missing_deals:
         log_step("Resolving missing deals against production")
         t0 = time.time()
@@ -2106,10 +2153,21 @@ def run():
             log_step("No missing deals to sync. Production already has all selected deals.")
             return
         log_step(f"Missing-deal resolution completed in {round(t1 - t0, 2)}s")
+    elif args.only_existing_deals:
+        log_step("Resolving existing deals against production")
+        t0 = time.time()
+        deals, skipped_missing = filter_existing_deals(deals)
+        t1 = time.time()
+        if not deals:
+            log_step("No existing production deals matched the selected local deals.")
+            return
+        log_step(f"Existing-deal resolution completed in {round(t1 - t0, 2)}s")
 
     log_step(f"Deals selected: {len(deals)}")
     if args.only_missing_deals:
         log_step(f"Skipped existing production deals: {skipped_existing}")
+    if args.only_existing_deals:
+        log_step(f"Skipped local deals missing from production: {skipped_missing}")
     if args.dry_run:
         log_step("Mode: DRY RUN")
     print("-" * 72)

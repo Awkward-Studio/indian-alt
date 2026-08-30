@@ -22,14 +22,14 @@ from .models import (
     DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
     DealRelationshipContext, SectorResearchAcquisition, SectorResearchDiscoveryRun,
-    SectorResearchRecommendation,
+    SectorResearchRecommendation, SectorResearchSourceRule,
     VentureIntelligenceCompanyRelation,
 )
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer,
     DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
     DealHeavyFieldsSerializer, SectorResearchAcquisitionSerializer, SectorResearchDiscoveryRunSerializer,
-    SectorResearchRecommendationSerializer,
+    SectorResearchRecommendationSerializer, SectorResearchSourceRuleSerializer,
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
@@ -40,6 +40,32 @@ from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
+
+
+class SectorResearchSourceRuleViewSet(viewsets.ModelViewSet):
+    serializer_class = SectorResearchSourceRuleSerializer
+    queryset = SectorResearchSourceRule.objects.all()
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def _is_admin(self):
+        profile = getattr(self.request.user, "profile", None)
+        return bool(self.request.user.is_staff or getattr(profile, "is_admin", False))
+
+    def create(self, request, *args, **kwargs):
+        if not self._is_admin():
+            return Response({"detail": "Admin access is required."}, status=status.HTTP_403_FORBIDDEN)
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not self._is_admin():
+            return Response({"detail": "Admin access is required."}, status=status.HTTP_403_FORBIDDEN)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not self._is_admin():
+            return Response({"detail": "Admin access is required."}, status=status.HTTP_403_FORBIDDEN)
+        return super().destroy(request, *args, **kwargs)
 
 
 class DealOrderingFilter(filters.OrderingFilter):

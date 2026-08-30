@@ -3,10 +3,11 @@ URL routing for deals app.
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import DealViewSet, DealDocumentViewSet, VentureIntelligencePreviewView, VentureIntelligenceResolveCinView, DealEnrichView, DealEnrichStatusView
+from .views import DealViewSet, DealDocumentViewSet, SectorResearchSourceRuleViewSet, VentureIntelligencePreviewView, VentureIntelligenceResolveCinView, DealEnrichView, DealEnrichStatusView
 
 router = DefaultRouter()
 router.register(r'documents', DealDocumentViewSet, basename='deal-document')
+router.register(r'research-source-rules', SectorResearchSourceRuleViewSet, basename='research-source-rule')
 router.register(r'', DealViewSet, basename='deal')
 
 urlpatterns = [

@@ -46,6 +46,7 @@ urlpatterns = [
     path('api/accounts/', include('accounts.urls')),
     path('api/microsoft/', include('microsoft.urls')),
     path('api/ai/', include('ai_orchestrator.urls')),
+    path('api/industry-knowledge/', include('industry_knowledge.urls')),
 ]
 
 if settings.DEBUG:

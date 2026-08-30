@@ -6,6 +6,7 @@ from .models import (
     Deal, DealContradiction, DealDocument, DealFieldProvenance, DealGeneratedDocument, DealPhaseLog,
     InitialAnalysisStatus,
     SectorResearchAcquisition, SectorResearchDiscoveryRun, SectorResearchRecommendation,
+    SectorResearchSourceRule,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
     VentureIntelligenceExecutive, VentureIntelligencePEInvestment, VentureIntelligenceAngelInvestment,
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
@@ -108,6 +109,19 @@ class SectorResearchRecommendationSerializer(serializers.ModelSerializer):
             "total_score", "score_explanation", "retrieved_at",
             "last_verified_at", "is_stale", "acquisition",
         )
+
+
+class SectorResearchSourceRuleSerializer(serializers.ModelSerializer):
+    def validate_domain(self, value):
+        domain = value.strip().lower().removeprefix("www.")
+        if not domain or "/" in domain or ":" in domain or "." not in domain:
+            raise serializers.ValidationError("Enter a publisher domain such as example.org.")
+        return domain
+
+    class Meta:
+        model = SectorResearchSourceRule
+        fields = "__all__"
+        read_only_fields = ("id", "created_at", "updated_at")
 
 
 class SectorResearchAcquisitionSerializer(serializers.ModelSerializer):

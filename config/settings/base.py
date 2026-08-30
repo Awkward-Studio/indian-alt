@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'api_requests',
     'microsoft',
     'ai_orchestrator',
+    'industry_knowledge',
 ]
 
 ASGI_APPLICATION = 'config.asgi.application'
@@ -208,7 +209,15 @@ CELERY_IMPORTS = (
     'ai_orchestrator.tasks',
     'deals.tasks',
     'microsoft.tasks',
+    'industry_knowledge.tasks',
 )
+
+CELERY_BEAT_SCHEDULE = {
+    'ingest-industry-news-every-six-hours': {
+        'task': 'industry_knowledge.tasks.ingest_industry_news',
+        'schedule': 6 * 60 * 60,
+    },
+}
 
 # Cache Configuration
 CACHES = {

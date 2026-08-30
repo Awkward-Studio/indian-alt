@@ -14,6 +14,7 @@ from deals.models import (
     DealDocument,
     SectorResearchAcquisition,
     SectorResearchDiscoveryRun,
+    SectorResearchSourceRule,
     SectorResearchRecommendation,
 )
 from deals.services.research_acquisition import ResearchAcquisitionError, ResearchAcquisitionService
@@ -351,6 +352,42 @@ class ResearchDiscoveryWorkflowTests(TestCase):
         self.assertEqual(audit.status, "COMPLETED")
         self.assertTrue(audit.is_success)
         self.assertIsNotNone(audit.completed_at)
+
+
+class ResearchSourceRuleApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("source-admin")
+        self.profile = Profile.objects.create(
+            user=self.user, name="Source Admin", email="source-admin@example.com", is_admin=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_admin_can_manage_preferred_source_rule(self):
+        response = self.client.post("/api/deals/research-source-rules/", {
+            "name": "O3 Capital", "domain": "www.o3capital.com",
+            "is_preferred": True, "is_active": True,
+            "query_templates": ["{market} research report filetype:pdf"],
+            "rationale": "Preferred IA research source",
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["domain"], "o3capital.com")
+
+    def test_non_admin_cannot_mutate_source_rules(self):
+        self.profile.is_admin = False
+        self.profile.save(update_fields=["is_admin"])
+        response = self.client.post("/api/deals/research-source-rules/", {
+            "name": "Blocked", "domain": "blocked.example",
+        }, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_rules_drive_preference_and_queries(self):
+        SectorResearchSourceRule.objects.create(
+            name="O3 Capital", domain="o3capital.com",
+            query_templates=["{sector} investment research"],
+        )
+        service = ResearchDiscoveryService(search_service=MagicMock())
+        self.assertTrue(service._is_preferred_domain("reports.o3capital.com"))
 
 
 class ResearchDiscoveryApiTests(TestCase):

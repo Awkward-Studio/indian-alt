@@ -19,6 +19,7 @@ from deals.models import (
     Deal,
     SectorResearchDiscoveryRun,
     SectorResearchRecommendation,
+    SectorResearchSourceRule,
 )
 
 
@@ -141,12 +142,16 @@ class ResearchDiscoveryService:
         self.timeout = float(
             getattr(settings, "RESEARCH_DISCOVERY_ACCESS_TIMEOUT", 6) or 6
         )
+        try:
+            self.source_rules = list(SectorResearchSourceRule.objects.filter(is_active=True))
+        except Exception:
+            # Discovery remains usable during migrations and isolated unit tests.
+            self.source_rules = []
         configured = getattr(settings, "RESEARCH_DISCOVERY_PREFERRED_DOMAINS", [])
+        fallback = configured or DEFAULT_PREFERRED_PUBLISHERS
         self.preferred_publishers = {
-            str(value).strip().lower()
-            for value in (configured or DEFAULT_PREFERRED_PUBLISHERS)
-            if str(value).strip()
-        }
+            rule.domain for rule in self.source_rules if rule.is_preferred
+        } or {str(value).strip().lower() for value in fallback if str(value).strip()}
 
     def discover(self, *, deal, cin: str = "") -> dict[str, Any]:
         title = str(getattr(deal, "title", "") or "").strip()
@@ -163,6 +168,19 @@ class ResearchDiscoveryService:
             industry=industry,
             cin=cin,
         )
+        template_context = {
+            "company": title, "sector": sector, "industry": industry,
+            "cin": cin, "market": " ".join(value for value in (sector, industry) if value).strip(),
+        }
+        for rule in self.source_rules:
+            for template in rule.query_templates:
+                try:
+                    query = str(template).format(**template_context).strip()
+                except (KeyError, ValueError):
+                    continue
+                if query:
+                    queries.append(f"site:{rule.domain} {query}")
+        queries = list(dict.fromkeys(queries))
         results = self.search_service.search_many(
             queries,
             results_per_query=8,
