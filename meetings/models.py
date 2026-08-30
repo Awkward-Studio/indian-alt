@@ -68,6 +68,12 @@ class MeetingNote(models.Model):
         blank=True,
         help_text='Deals discussed in this meeting note',
     )
+    contacts = models.ManyToManyField(
+        Contact,
+        related_name='meeting_notes',
+        blank=True,
+        help_text='Contacts who attended or were discussed in this meeting note',
+    )
     created_by = models.ForeignKey(
         'accounts.Profile',
         on_delete=models.SET_NULL,

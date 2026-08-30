@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
@@ -9,9 +9,9 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from deals.models import Deal
-from .models import Task, TaskActivity, TaskPriority, TaskStatus, TaskSuggestion, TaskSuggestionState
+from .models import Task, TaskActivity, TaskComment, TaskPriority, TaskStatus, TaskSuggestion, TaskSuggestionState
 from .permissions import IsActiveProfile
-from .serializers import TaskActivitySerializer, TaskSerializer, TaskSuggestionSerializer
+from .serializers import TaskActivitySerializer, TaskCommentSerializer, TaskSerializer, TaskSuggestionSerializer
 from .services import (
     accepted_task_defaults, ensure_latest_suggestions, record_task_activity,
     task_activity_snapshot,
@@ -34,8 +34,8 @@ class TaskViewSet(viewsets.ModelViewSet):
     pagination_class = TaskPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["title", "description", "deal__title", "assignee__name", "assignee__email"]
-    ordering_fields = ["created_at", "updated_at", "due_date", "priority", "status", "deal__title"]
-    ordering = ["due_date", "-created_at"]
+    ordering_fields = ["position", "created_at", "updated_at", "due_date", "priority", "status", "deal__title"]
+    ordering = ["position", "due_date", "-created_at"]
 
     def get_queryset(self):
         queryset = Task.objects.select_related("deal", "assignee", "created_by").prefetch_related("source_suggestions")
@@ -46,6 +46,8 @@ class TaskViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(assignee_id=params["assignee"])
         if _boolean(params.get("mine", "false")):
             queryset = queryset.filter(assignee=self.request.user.profile)
+        if _boolean(params.get("allocated", "false")):
+            queryset = queryset.filter(created_by=self.request.user.profile).exclude(assignee=self.request.user.profile)
         if _boolean(params.get("unassigned", "false")):
             queryset = queryset.filter(assignee__isnull=True)
         if params.get("status"):
@@ -61,7 +63,13 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
-        task = serializer.save(created_by=self.request.user.profile, origin=Task.Origin.MANUAL, fingerprint="")
+        next_position = (Task.objects.aggregate(max_position=Max("position"))["max_position"] or 0) + 1
+        task = serializer.save(
+            created_by=self.request.user.profile,
+            origin=Task.Origin.MANUAL,
+            fingerprint="",
+            position=next_position,
+        )
         record_task_activity(
             task,
             actor=self.request.user.profile,
@@ -75,11 +83,40 @@ class TaskViewSet(viewsets.ModelViewSet):
         before = task_activity_snapshot(locked)
         serializer.instance = locked
         task = serializer.save()
+        if before.get("status") != task.status and task.status == TaskStatus.IN_REVIEW:
+            action = TaskActivity.Action.REVIEW_REQUESTED
+        elif before.get("status") == TaskStatus.IN_REVIEW and task.status == TaskStatus.DONE:
+            action = TaskActivity.Action.REVIEW_APPROVED
+        elif "position" in serializer.validated_data:
+            action = TaskActivity.Action.REORDERED
+        else:
+            action = None
         record_task_activity(
             task,
             actor=self.request.user.profile,
             before=before,
+            action=action,
         )
+
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def move(self, request, pk=None):
+        task = Task.objects.select_for_update().get(pk=pk)
+        direction = request.data.get("direction")
+        if direction not in {"up", "down"}:
+            return Response({"detail": "Direction must be up or down."}, status=400)
+        candidates = Task.objects.select_for_update().filter(deal=task.deal)
+        if direction == "up":
+            neighbour = candidates.filter(position__lt=task.position).order_by("-position").first()
+        else:
+            neighbour = candidates.filter(position__gt=task.position).order_by("position").first()
+        if neighbour:
+            before = task_activity_snapshot(task)
+            task.position, neighbour.position = neighbour.position, task.position
+            task.save(update_fields=["position", "updated_at"])
+            neighbour.save(update_fields=["position", "updated_at"])
+            record_task_activity(task, actor=request.user.profile, before=before, action=TaskActivity.Action.REORDERED)
+        return Response(TaskSerializer(task, context={"request": request}).data)
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -115,7 +152,32 @@ class TaskViewSet(viewsets.ModelViewSet):
             "overdue": open_tasks.filter(due_date__lt=today).count(),
             "unassigned": open_tasks.filter(assignee__isnull=True).count(),
             "pending_suggestions": suggestions.count(),
+            "allocated": open_tasks.filter(created_by=request.user.profile).exclude(assignee=request.user.profile).count(),
+            "in_review": queryset.filter(status=TaskStatus.IN_REVIEW, created_by=request.user.profile).count(),
         })
+
+
+class TaskCommentViewSet(viewsets.ModelViewSet):
+    serializer_class = TaskCommentSerializer
+    permission_classes = [IsActiveProfile]
+    pagination_class = TaskPagination
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = TaskComment.objects.select_related("task", "author")
+        if self.request.query_params.get("task"):
+            queryset = queryset.filter(task_id=self.request.query_params["task"])
+        return queryset
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        comment = serializer.save(author=self.request.user.profile)
+        record_task_activity(
+            comment.task,
+            actor=self.request.user.profile,
+            action=TaskActivity.Action.COMMENTED,
+            source_context={"comment_id": str(comment.id)},
+        )
 
 
 class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):

@@ -5,7 +5,8 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth.models import User
-from deals.models import Deal, DealStatus, DealPhase
+from deals.models import Deal, DealFieldProvenance, DealStatus, DealPhase
+from deals.services.field_provenance import record_deal_field_changes
 from contacts.models import Contact
 from banks.models import Bank
 from accounts.models import Profile
@@ -198,6 +199,10 @@ class Command(BaseCommand):
                             'deal_details': f"Source: {row.get('Source')}\nNext Steps: {row.get('Next Steps')}"
                         }
 
+                        previous_values = {
+                            field: getattr(deal, field)
+                            for field in deal_fields
+                        } if is_update else {field: None for field in deal_fields}
                         if is_update:
                             # Update existing deal
                             for key, value in deal_fields.items():
@@ -208,6 +213,19 @@ class Command(BaseCommand):
                             # Create new
                             deal = Deal.objects.create(title=title, **deal_fields)
                             self.stdout.write(f"  [CREATED] {title}")
+
+                        record_deal_field_changes(
+                            deal,
+                            {
+                                'title': (deal.title if is_update else None, deal.title),
+                                **{
+                                    field: (previous_values[field], getattr(deal, field))
+                                    for field in deal_fields
+                                },
+                            },
+                            source_type=DealFieldProvenance.SourceType.SHEET,
+                            source_id=f'{os.path.basename(file_path)}:row:{int(row.name) + 2}',
+                        )
 
                         # Preserving historical date
                         Deal.objects.filter(pk=deal.pk).update(created_at=parsed_date)

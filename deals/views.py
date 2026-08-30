@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
-from django.db.models import CharField, Exists, F, OuterRef, Q, Value
+from django.db.models import CharField, Count, Exists, F, OuterRef, Q, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -90,7 +90,40 @@ class DealPagination(PageNumberPagination):
     max_page_size = 100
 
 
+FUND_FILTER_ALIASES = {
+    'FUND1': ['FUND1', 'Fund I', 'Fund 1'],
+    'FUND2': ['FUND2', 'Fund II', 'Fund 2'],
+    'FUND3': ['FUND3', 'Fund III', 'Fund 3'],
+}
+
+
+def filter_by_fund_alias(queryset, fund):
+    aliases = FUND_FILTER_ALIASES.get(fund, [])
+    if not aliases:
+        return queryset.none()
+    query = Q()
+    for alias in aliases:
+        query |= Q(fund__iexact=alias)
+    return queryset.filter(query)
+
+
 class DealFilterSet(django_filters.FilterSet):
+    deal_group = django_filters.ChoiceFilter(
+        choices=[
+            ('active', 'In process'),
+            ('passed', 'Passed'),
+            ('portfolio', 'Portfolio'),
+        ],
+        method='filter_deal_group',
+    )
+    fund = django_filters.ChoiceFilter(
+        choices=[
+            ('FUND1', 'Fund I'),
+            ('FUND2', 'Fund II'),
+            ('FUND3', 'Fund III'),
+        ],
+        method='filter_fund',
+    )
     sector = django_filters.CharFilter(lookup_expr='icontains')
     city = django_filters.CharFilter(lookup_expr='icontains')
     bank_name = django_filters.CharFilter(field_name='bank__name', lookup_expr='icontains')
@@ -103,6 +136,19 @@ class DealFilterSet(django_filters.FilterSet):
     has_competitors = django_filters.BooleanFilter(
         method='filter_has_competitors'
     )
+
+    def filter_deal_group(self, queryset, name, value):
+        terminal_statuses = ['Passed', 'Invested', 'Portfolio']
+        if value == 'portfolio':
+            return queryset.filter(current_phase__in=['Invested', 'Portfolio'])
+        if value == 'passed':
+            return queryset.filter(current_phase='Passed')
+        if value == 'active':
+            return queryset.exclude(current_phase__in=terminal_statuses)
+        return queryset
+
+    def filter_fund(self, queryset, name, value):
+        return filter_by_fund_alias(queryset, value)
 
     def filter_has_competitors(self, queryset, name, value):
         competitor_data = (
@@ -120,7 +166,7 @@ class DealFilterSet(django_filters.FilterSet):
     class Meta:
         model = Deal
         fields = [
-            'bank', 'priority', 'deal_status', 'fund', 'is_female_led',
+            'bank', 'priority', 'deal_status', 'deal_group', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
             'current_phase', 'sector', 'city', 'primary_contact',
             'bank_name', 'banker_name',
@@ -292,7 +338,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = Deal.objects.select_related(
         'bank', 'primary_contact', 'request'
     ).prefetch_related(
-        'responsibility', 'additional_contacts'
+        'responsibility', 'additional_contacts', 'field_provenance'
     ).annotate(
         has_analysis=Exists(
             DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
@@ -668,20 +714,98 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """
         queryset = Deal.objects.all()
 
+        stage_counts = [
+            {
+                'stage': row['current_phase'] or 'Unassigned',
+                'count': row['count'],
+            }
+            for row in queryset.values('current_phase')
+            .annotate(count=Count('id'))
+            .order_by('current_phase')
+        ]
+        fund_counts = [
+            {
+                'fund': (row['fund'] or '').strip() or 'UNASSIGNED',
+                'count': row['count'],
+            }
+            for row in queryset.values('fund')
+            .annotate(count=Count('id'))
+            .order_by('fund')
+        ]
+
+        analysis_queryset = queryset.annotate(
+            dashboard_has_analysis=Exists(
+                DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+            )
+        )
+        analysis_available = analysis_queryset.filter(
+            dashboard_has_analysis=True
+        ).count()
+        analysis_running = analysis_queryset.filter(
+            dashboard_has_analysis=False,
+            processing_status='processing',
+        ).count()
+        analysis_failed = analysis_queryset.filter(
+            dashboard_has_analysis=False,
+            processing_status='failed',
+        ).count()
+        analysis_not_started = (
+            queryset.count()
+            - analysis_available
+            - analysis_running
+            - analysis_failed
+        )
+
         total_value = 0.0
         invested_ytd = 0.0
-        for deal_status, funding_ask in queryset.values_list('deal_status', 'funding_ask').iterator(chunk_size=1000):
+        for current_phase, funding_ask in queryset.values_list('current_phase', 'funding_ask').iterator(chunk_size=1000):
             parsed_amount = self._parse_funding_ask(funding_ask)
             total_value += parsed_amount
-            if deal_status == 'Invested':
+            if current_phase in ['Invested', 'Portfolio']:
                 invested_ytd += parsed_amount
 
         return Response({
             'totalDeals': queryset.count(),
-            'activeDeals': queryset.exclude(deal_status__in=['Passed', 'Invested', 'Portfolio']).count(),
-            'closedDeals': queryset.filter(deal_status__in=['Invested', 'Portfolio']).count(),
+            'activeDeals': queryset.exclude(current_phase__in=['Passed', 'Invested', 'Portfolio']).count(),
+            'closedDeals': queryset.filter(current_phase__in=['Invested', 'Portfolio']).count(),
             'totalValue': total_value,
             'investedYTD': invested_ytd,
+            'stageCounts': stage_counts,
+            'fundCounts': fund_counts,
+            'analysisCounts': {
+                'available': analysis_available,
+                'running': analysis_running,
+                'failed': analysis_failed,
+                'notStarted': analysis_not_started,
+            },
+        })
+
+    @action(detail=False, methods=['get'], url_path='document-gaps')
+    def document_gaps(self, request):
+        """Return separate, actionable queues for folder and document gaps."""
+        queryset = Deal.objects.annotate(
+            dashboard_has_documents=Exists(DealDocument.objects.filter(deal_id=OuterRef('pk')))
+        ).order_by('title')
+        missing_folders = queryset.filter(Q(source_onedrive_id__isnull=True) | Q(source_onedrive_id=''))
+        missing_documents = queryset.filter(dashboard_has_documents=False)
+
+        def serialize(items):
+            return [
+                {
+                    'id': str(deal.id),
+                    'title': deal.title or 'Untitled deal',
+                    'source_onedrive_id': deal.source_onedrive_id,
+                }
+                for deal in items[:50]
+            ]
+
+        return Response({
+            'counts': {
+                'missing_folders': missing_folders.count(),
+                'missing_documents': missing_documents.count(),
+            },
+            'missing_folders': serialize(missing_folders),
+            'missing_documents': serialize(missing_documents),
         })
 
     def get_serializer_class(self):
@@ -761,7 +885,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if fund:
             if fund not in {'FUND1', 'FUND2', 'FUND3'}:
                 return Response({'error': 'fund must be FUND1, FUND2, or FUND3.'}, status=400)
-            queryset = queryset.filter(fund=fund)
+            queryset = filter_by_fund_alias(queryset, fund)
         search = str(request.query_params.get('search') or '').strip()
         if search:
             queryset = queryset.filter(title__icontains=search)
@@ -913,7 +1037,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     {'error': 'fund must be FUND1, FUND2, or FUND3.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            queryset = queryset.filter(fund=fund)
+            queryset = filter_by_fund_alias(queryset, fund)
         counts = {
             state: queryset.filter(fund_classification_state=state).count()
             for state in FundClassificationState.values

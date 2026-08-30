@@ -1,6 +1,6 @@
 import logging
 from django.db import transaction
-from deals.models import Deal, DealPhaseLog
+from deals.models import Deal, DealPhase, DealPhaseLog
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ class DealFlowService:
         """
         Transitions a deal to a new phase and logs the rationale.
         """
+        DealFlowService._validate_phase(to_phase)
         from_phase = getattr(deal, 'current_phase', None)
         update_fields = ['current_phase', 'deal_status']
         if to_phase == "Passed":
@@ -71,6 +72,7 @@ class DealFlowService:
         Unified handler for the 18-stage interactive deal flow.
         Updates decisions, phases, and rejection tracking.
         """
+        DealFlowService._validate_phase(active_stage)
         if active_stage == "Passed":
             reason = DealFlowService._effective_pass_reason(deal, reason)
             deal.reasons_for_passing = reason
@@ -121,3 +123,9 @@ class DealFlowService:
             "deal_status": deal.deal_status,
             "deal_flow_decisions": deal.deal_flow_decisions
         }
+    @staticmethod
+    def _validate_phase(phase: str | None) -> None:
+        if phase is not None and phase not in DealPhase.values:
+            raise DealFlowValidationError(
+                f"Unknown deal stage: {phase}. Choose a numbered pipeline stage, Passed, Invested, or Portfolio."
+            )

@@ -12,6 +12,19 @@ from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal
 from meetings.models import MeetingNote, MeetingSignalFlag
 from meetings.services.meeting_signal_analysis import MeetingSignalAnalysisService
+from meetings.serializers import MeetingNoteSerializer
+from contacts.models import Contact, ContactInteraction
+
+
+class MeetingContactLinkTests(TestCase):
+    @patch('ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_meeting_note', return_value=True)
+    def test_meeting_note_accepts_contacts_and_creates_interaction(self, _vectorize):
+        contact = Contact.objects.create(name='Meeting attendee')
+        serializer = MeetingNoteSerializer(data={'title': 'Founder call', 'summary': 'Discussed progress.', 'body': '', 'contact_ids': [str(contact.id)]})
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        note = serializer.save()
+        self.assertEqual(list(note.contacts.all()), [contact])
+        self.assertTrue(ContactInteraction.objects.filter(contact=contact, meeting_note=note, kind='MEETING').exists())
 
 
 class MeetingSignalAnalysisAuditTests(SimpleTestCase):

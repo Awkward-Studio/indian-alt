@@ -5,7 +5,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import Profile
 from deals.models import Deal, DealAnalysis
-from .models import Task, TaskActivity, TaskStatus, TaskSuggestion, TaskSuggestionState
+from .models import Task, TaskActivity, TaskComment, TaskStatus, TaskSuggestion, TaskSuggestionState
 from .services import merged_task_candidates, sync_deal_suggestions
 
 
@@ -143,6 +143,26 @@ class WorkItemAPITests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(TaskActivity.objects.exists())
+
+    def test_assignee_completion_requires_allocator_review_and_supports_comments(self):
+        allocator_user = User.objects.create_user(username="allocator@example.com", password="test")
+        allocator = Profile.objects.create(user=allocator_user, email="allocator@example.com", name="Allocator")
+        task = Task.objects.create(deal=self.deal, title="Review", created_by=allocator, assignee=self.profile)
+
+        response = self.client.patch(reverse("task-detail", kwargs={"pk": task.id}), {"status": "done"}, format="json")
+        self.assertEqual(response.json()["status"], TaskStatus.IN_REVIEW)
+        comment = self.client.post(reverse("task-comment-list"), {"task": str(task.id), "body": "Ready for review"}, format="json")
+        self.assertEqual(comment.status_code, 201)
+        self.assertEqual(TaskComment.objects.get().body, "Ready for review")
+
+    def test_move_swaps_saved_positions(self):
+        first = Task.objects.create(deal=self.deal, title="First", created_by=self.profile, position=1)
+        second = Task.objects.create(deal=self.deal, title="Second", created_by=self.profile, position=2)
+        response = self.client.post(reverse("task-move", kwargs={"pk": second.id}), {"direction": "up"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual((first.position, second.position), (2, 1))
 
     def test_delete_activity_retains_task_and_deal_snapshot(self):
         task = Task.objects.create(deal=self.deal, title="Retained deletion", created_by=self.profile)

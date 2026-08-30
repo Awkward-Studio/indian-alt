@@ -3,7 +3,8 @@ import logging
 from copy import deepcopy
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
-from deals.models import AnalysisKind, Deal, DealDocument, DocumentType
+from deals.models import AnalysisKind, Deal, DealDocument, DealFieldProvenance, DocumentType
+from deals.services.field_provenance import record_deal_field_changes
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,7 @@ class DealCreationService:
         model_data = DealCreationService._get_analysis_model_data(analysis_json)
         analyst_report = analysis_json.get('analyst_report')
         changed_fields = []
+        previous_values = {}
 
         field_mapping = {
             'industry': 'industry',
@@ -207,6 +209,7 @@ class DealCreationService:
             current_value = getattr(deal, deal_field)
             if overwrite or not current_value:
                 if current_value != normalized_value:
+                    previous_values[deal_field] = current_value
                     setattr(deal, deal_field, normalized_value)
                     changed_fields.append(deal_field)
 
@@ -224,6 +227,7 @@ class DealCreationService:
                 current_bool = getattr(deal, deal_field)
                 if overwrite or not current_bool:
                     if current_bool != normalized_bool:
+                        previous_values[deal_field] = current_bool
                         setattr(deal, deal_field, normalized_bool)
                         changed_fields.append(deal_field)
 
@@ -231,6 +235,7 @@ class DealCreationService:
             normalized_report = analyst_report.strip()
             if normalized_report and (overwrite or not deal.deal_summary):
                 if deal.deal_summary != normalized_report:
+                    previous_values['deal_summary'] = deal.deal_summary
                     deal.deal_summary = normalized_report
                     changed_fields.append('deal_summary')
         
@@ -268,6 +273,7 @@ class DealCreationService:
                         bank.save(update_fields=bank_updates)
 
                 if deal.bank != bank:
+                    previous_values['bank'] = deal.bank
                     deal.bank = bank
                     changed_fields.append('bank')
 
@@ -292,17 +298,28 @@ class DealCreationService:
                         linkedin_url=contact_data.get("linkedin_url")
                     )
                 if deal.primary_contact != contact:
+                    previous_values['primary_contact'] = deal.primary_contact
                     deal.primary_contact = contact
                     changed_fields.append('primary_contact')
 
         themes = DealCreationService._normalize_string_list(model_data.get('themes'))
         if themes and (overwrite_themes or not deal.themes):
             if deal.themes != themes:
+                previous_values['themes'] = deal.themes
                 deal.themes = themes
                 changed_fields.append('themes')
 
         if changed_fields:
             deal.save(update_fields=list(dict.fromkeys(changed_fields)))
+            record_deal_field_changes(
+                deal,
+                {
+                    field: (previous_values.get(field), getattr(deal, field))
+                    for field in changed_fields
+                },
+                source_type=DealFieldProvenance.SourceType.AI,
+                source_id='analysis:deal-model-data',
+            )
 
     @staticmethod
     def _map_ambiguities(deal: Deal, analysis_json: dict):

@@ -108,7 +108,7 @@ class MeetingNoteViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = MeetingNote.objects.select_related(
         'source_email',
         'created_by',
-    ).prefetch_related('deals').all()
+    ).prefetch_related('deals', 'contacts').all()
     serializer_class = MeetingNoteSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = MeetingNotePagination

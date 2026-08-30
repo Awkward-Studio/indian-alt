@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from django.db.models import Count, DateField, F, Max, Q, QuerySet
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, Greatest
 
 from banks.models import Bank
 from contacts.models import Contact
@@ -60,8 +60,8 @@ def banker_analytics_queryset() -> QuerySet[Contact]:
                 distinct=True,
             ),
             last_deal_date=Max(_effective_deal_date("primary_deals__")),
-            meeting_count=Count("meetings", distinct=True),
-            last_interaction_at=Max("meetings__created_at"),
+            meeting_count=Count("meetings", distinct=True) + Count("interactions", filter=Q(interactions__kind="MEETING", interactions__meeting_note__isnull=False), distinct=True),
+            last_interaction_at=Greatest(Max("interactions__occurred_at"), Max("meetings__created_at")),
         )
         .order_by("-total_deals_introduced", "name", "id")
     )

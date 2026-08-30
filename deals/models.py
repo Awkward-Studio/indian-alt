@@ -59,14 +59,6 @@ class DealPhase(models.TextChoices):
     PASSED = 'Passed', 'Passed'
     INVESTED = 'Invested', 'Invested'
     PORTFOLIO = 'Portfolio', 'Portfolio'
-    # Keep legacy choices for backwards compatibility during migration
-    ORIGINATION = 'Origination', 'Origination'
-    SCREENING = 'Screening', 'Screening'
-    MGMT_MEETING = 'Management Meeting', 'Management Meeting'
-    DUE_DILIGENCE = 'Due Diligence', 'Due Diligence'
-    IC_APPROVAL = 'IC Approval', 'IC Approval'
-    TERM_SHEET = 'Term Sheet', 'Term Sheet'
-    EXECUTION = 'Execution', 'Execution'
 
 
 class FundClassificationState(models.TextChoices):
@@ -422,6 +414,37 @@ class Deal(models.Model):
     def analysis_history(self):
         analyses = self.analyses.order_by('version', 'created_at')
         return [self._normalize_analysis_record(analysis) for analysis in analyses]
+
+
+class DealFieldProvenance(models.Model):
+    class SourceType(models.TextChoices):
+        AI = 'AI', 'AI'
+        SHEET = 'SHEET', 'Spreadsheet'
+        HUMAN = 'HUMAN', 'Human'
+        ONEDRIVE = 'ONEDRIVE', 'OneDrive'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='field_provenance')
+    field_name = models.CharField(max_length=100)
+    source_type = models.CharField(max_length=10, choices=SourceType.choices)
+    source_id = models.CharField(max_length=500, blank=True, default='')
+    previous_value = models.JSONField(null=True, blank=True)
+    value = models.JSONField(null=True, blank=True)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='deal_field_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['deal', 'field_name', '-created_at'], name='deals_dealf_deal_id_229bea_idx'),
+            models.Index(fields=['source_type', '-created_at'], name='deals_dealf_source__ad70c1_idx'),
+        ]
 
 
 class DealPassReasonRemediationAudit(models.Model):

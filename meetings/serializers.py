@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 from .models import Meeting, MeetingContact, MeetingNote, MeetingProfile
 from contacts.serializers import ContactListSerializer
 from accounts.serializers import ProfileListSerializer
@@ -118,6 +119,8 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
         required=False,
         source='deals',
     )
+    contacts = ContactListSerializer(many=True, read_only=True)
+    contact_ids = serializers.PrimaryKeyRelatedField(many=True, queryset=get_contact_queryset(), write_only=True, required=False, source='contacts')
 
     class Meta:
         model = MeetingNote
@@ -134,6 +137,20 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
             'body': {'required': False, 'allow_blank': True},
             'summary': {'required': False, 'allow_blank': True},
         }
+
+    @staticmethod
+    def _sync_contact_interactions(note):
+        from contacts.models import ContactInteraction
+        contact_ids = set(note.contacts.values_list('id', flat=True))
+        ContactInteraction.objects.filter(meeting_note=note).exclude(contact_id__in=contact_ids).delete()
+        occurred_at = note.meeting_at or note.created_at or timezone.now()
+        deal = note.deals.first()
+        for contact in note.contacts.all():
+            ContactInteraction.objects.update_or_create(
+                contact=contact,
+                meeting_note=note,
+                defaults={'kind': ContactInteraction.Kind.MEETING, 'occurred_at': occurred_at, 'notes': note.title, 'deal': deal},
+            )
 
     def validate(self, attrs):
         body = attrs.get('body', getattr(self.instance, 'body', '') if self.instance else '')
@@ -155,8 +172,11 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
         try:
             with transaction.atomic():
                 deals = validated_data.pop('deals', [])
+                contacts = validated_data.pop('contacts', [])
                 note = MeetingNote.objects.create(**validated_data)
                 note.deals.set(deals)
+                note.contacts.set(contacts)
+                self._sync_contact_interactions(note)
                 self._vectorize(note)
                 note.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error'])
                 return note
@@ -169,6 +189,7 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
         try:
             with transaction.atomic():
                 deals = validated_data.pop('deals', None)
+                contacts = validated_data.pop('contacts', None)
 
                 for attr, value in validated_data.items():
                     setattr(instance, attr, value)
@@ -176,6 +197,9 @@ class MeetingNoteSerializer(serializers.ModelSerializer):
 
                 if deals is not None:
                     instance.deals.set(deals)
+                if contacts is not None:
+                    instance.contacts.set(contacts)
+                self._sync_contact_interactions(instance)
 
                 self._vectorize(instance)
                 instance.refresh_from_db(fields=['is_indexed', 'chunk_count', 'embedding_error'])

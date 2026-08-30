@@ -3,7 +3,7 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from .models import (
-    Deal, DealContradiction, DealDocument, DealGeneratedDocument, DealPhaseLog,
+    Deal, DealContradiction, DealDocument, DealFieldProvenance, DealGeneratedDocument, DealPhaseLog,
     InitialAnalysisStatus,
     SectorResearchAcquisition, SectorResearchDiscoveryRun, SectorResearchRecommendation,
     VentureIntelligenceCompanyProfile, VentureIntelligenceFinancialStatement, VentureIntelligenceCompanyRelation,
@@ -298,6 +298,7 @@ class DealSerializer(serializers.ModelSerializer):
     source_email_id = serializers.UUIDField(write_only=True, required=False)
     contact_discovery = serializers.JSONField(write_only=True, required=False)
     analysis_json = serializers.JSONField(write_only=True, required=False)
+    field_provenance = serializers.SerializerMethodField()
     
     # Allow passing a list of Profile IDs (UUIDs)
     responsibility = serializers.PrimaryKeyRelatedField(
@@ -362,6 +363,9 @@ class DealSerializer(serializers.ModelSerializer):
             "bank": str(contact.bank_id) if contact.bank_id else None,
             "bank_name": contact.bank.name if contact.bank else None,
         }
+
+    def get_field_provenance(self, obj):
+        return latest_field_provenance(obj)
     
     def create(self, validated_data):
         # Pop fields that are not on the Deal model anymore
@@ -388,6 +392,15 @@ class DealSerializer(serializers.ModelSerializer):
         model_data.pop('contact_discovery', None)
         model_data.pop('analysis_json', None)
         deal = super().create(model_data)
+
+        from .services.field_provenance import record_deal_field_changes
+        record_deal_field_changes(
+            deal,
+            {field: (None, getattr(deal, field)) for field in model_data},
+            source_type=DealFieldProvenance.SourceType.HUMAN,
+            source_id='api:create',
+            changed_by=getattr(self.context.get('request'), 'user', None),
+        )
 
         if additional_contacts is None and legacy_other_contacts:
             additional_contacts = Contact.objects.filter(id__in=legacy_other_contacts)
@@ -417,6 +430,11 @@ class DealSerializer(serializers.ModelSerializer):
             for field in ("title", "sector", "industry")
         )
         model_data = validated_data.copy()
+        previous_values = {
+            field: getattr(instance, field)
+            for field in model_data
+            if hasattr(instance, field)
+        }
         if 'fund' in model_data and model_data['fund'] != instance.fund:
             requested_by = getattr(self.context.get('request'), 'user', None)
             model_data.update({
@@ -434,6 +452,19 @@ class DealSerializer(serializers.ModelSerializer):
             model_data['deal_status'] = synced_status
             model_data['current_phase'] = synced_status
         deal = super().update(instance, model_data)
+
+        from .services.field_provenance import record_deal_field_changes
+        record_deal_field_changes(
+            deal,
+            {
+                field: (previous_values.get(field), getattr(deal, field))
+                for field in model_data
+                if hasattr(deal, field)
+            },
+            source_type=DealFieldProvenance.SourceType.HUMAN,
+            source_id='api:update',
+            changed_by=getattr(self.context.get('request'), 'user', None),
+        )
 
         if additional_contacts is None and legacy_other_contacts is not None:
             additional_contacts = Contact.objects.filter(id__in=legacy_other_contacts)
@@ -605,6 +636,7 @@ class DealDetailSerializer(DealSerializer):
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree', 'vi_relations', 'competitor_candidates',
+            'field_provenance',
         )
         read_only_fields = ('id',)
 
@@ -659,6 +691,10 @@ class DealListSerializer(serializers.ModelSerializer):
         source='primary_contact.name',
         read_only=True
     )
+    field_provenance = serializers.SerializerMethodField()
+
+    def get_field_provenance(self, obj):
+        return latest_field_provenance(obj)
 
     def get_days_since_sourcing(self, obj):
         if not obj.received_at:
@@ -696,5 +732,23 @@ class DealListSerializer(serializers.ModelSerializer):
             'fund_classification_state', 'fund_classification_source_type',
             'fund_classification_source_id', 'fund_classification_reviewed_by',
             'fund_classification_reviewed_at',
+            'field_provenance',
         )
         read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')
+
+
+def latest_field_provenance(obj):
+    records = getattr(obj, '_prefetched_objects_cache', {}).get('field_provenance')
+    if records is None:
+        records = obj.field_provenance.all()
+    latest = {}
+    for record in records:
+        if record.field_name in latest:
+            continue
+        latest[record.field_name] = {
+            'source_type': record.source_type,
+            'source_id': record.source_id,
+            'changed_by': record.changed_by_id,
+            'changed_at': record.created_at,
+        }
+    return latest

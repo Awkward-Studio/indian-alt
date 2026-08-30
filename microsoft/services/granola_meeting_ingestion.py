@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from deals.models import Deal
+from contacts.models import Contact, ContactInteraction
 from meetings.models import MeetingNote, MeetingNoteSource
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class GranolaMeetingPayload:
     meeting_at: datetime
     deal_name_source: str
     resolution_evidence: dict
+    attendees: str = ''
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,7 @@ class GranolaMeetingEmailIngestionService:
                     "body": payload.transcript,
                     "summary": payload.summary,
                     "meeting_at": payload.meeting_at,
+                    "attendees": payload.attendees,
                     "source": MeetingNoteSource.EMAIL,
                     "metadata": {
                         "source": "granola",
@@ -130,6 +133,11 @@ class GranolaMeetingEmailIngestionService:
                 },
             )
             note.deals.set([payload.deal])
+            attendee_text = payload.attendees.lower()
+            contacts = [contact for contact in Contact.objects.exclude(name__isnull=True) if (contact.email and contact.email.lower() in attendee_text) or (contact.name and contact.name.lower() in attendee_text)]
+            note.contacts.set(contacts)
+            for contact in contacts:
+                ContactInteraction.objects.update_or_create(contact=contact, meeting_note=note, defaults={'kind': ContactInteraction.Kind.MEETING, 'occurred_at': payload.meeting_at, 'notes': payload.title, 'deal': payload.deal})
 
             from ai_orchestrator.services.embedding_processor import EmbeddingService
 
@@ -261,6 +269,7 @@ class GranolaMeetingEmailIngestionService:
             meeting_at=meeting_at,
             deal_name_source=resolution.source,
             resolution_evidence=resolution.as_dict(),
+            attendees=cls._extract_section(body, "attendees"),
         )
 
     @classmethod

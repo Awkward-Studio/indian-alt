@@ -1,15 +1,19 @@
+import re
+
 from rest_framework import filters, status, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from django.db.models import Count, Q
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from django.db.models import Count, DateField, F, Max, Q
+from django.db.models.functions import Cast, Coalesce
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, CharFilter
 from drf_spectacular.utils import extend_schema_view, extend_schema
 from core.mixins import ErrorHandlingMixin
-from .models import Contact, WorkplaceVerificationSuggestion
+from .models import Contact, ContactCardExtraction, WorkplaceVerificationSuggestion
 from contacts.services.banker_analytics import (
     bank_analytics_queryset,
     banker_analytics_queryset,
@@ -24,9 +28,68 @@ from .serializers import (
     BankerAnalyticsSerializer,
     ContactSerializer,
     ContactListSerializer,
+    ContactCardExtractionSerializer,
     WorkplaceVerificationReviewSerializer,
     WorkplaceVerificationSuggestionSerializer,
 )
+
+
+class ContactCardExtractionViewSet(viewsets.ModelViewSet):
+    serializer_class = ContactCardExtractionSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        queryset = ContactCardExtraction.objects.select_related('matched_contact')
+        return queryset if self.request.user.is_staff else queryset.filter(created_by=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        uploaded = request.FILES.get('file')
+        if not uploaded:
+            return Response({'detail': 'Choose a visiting-card image.'}, status=400)
+        if uploaded.size > 10 * 1024 * 1024:
+            return Response({'detail': 'The image must be 10 MB or smaller.'}, status=400)
+        from ai_orchestrator.services.document_processor import DocumentProcessorService
+        result = DocumentProcessorService().get_extraction_result(uploaded.read(), uploaded.name, page_limit=1, hint='Visiting card: extract contact details accurately.')
+        text = str(result.get('normalized_text') or result.get('text') or '').strip()
+        if not text:
+            return Response({'detail': 'No readable contact details were found.'}, status=422)
+        email_match = re.search(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', text)
+        phone_match = re.search(r'(?:\+?\d[\d ()-]{7,}\d)', text)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        data = {
+            'name': lines[0] if lines else '',
+            'designation': lines[1] if len(lines) > 1 else '',
+            'email': email_match.group(0) if email_match else '',
+            'phone': phone_match.group(0).strip() if phone_match else '',
+            'contact_type': 'OTHER',
+        }
+        match = Contact.objects.filter(email__iexact=data['email']).first() if data['email'] else None
+        if not match and data['phone']:
+            match = Contact.objects.filter(phone=data['phone']).first()
+        extraction = ContactCardExtraction.objects.create(created_by=request.user, file_name=uploaded.name, file_size=uploaded.size, raw_text=text, extracted_data=data, matched_contact=match)
+        return Response(self.get_serializer(extraction).data, status=201)
+
+    @action(detail=True, methods=['post'])
+    def review(self, request, pk=None):
+        extraction = self.get_object()
+        data = request.data.get('extracted_data') or extraction.extracted_data
+        contact_id = request.data.get('contact_id') or extraction.matched_contact_id
+        contact = Contact.objects.filter(id=contact_id).first() if contact_id else None
+        allowed = {key: data.get(key) for key in ('name', 'email', 'phone', 'designation', 'contact_type') if key in data}
+        if contact:
+            for key, value in allowed.items():
+                if value:
+                    setattr(contact, key, value)
+            contact.save()
+        else:
+            contact = Contact.objects.create(**allowed)
+        extraction.extracted_data = data
+        extraction.matched_contact = contact
+        extraction.status = ContactCardExtraction.Status.COMPLETED
+        extraction.save(update_fields=['extracted_data', 'matched_contact', 'status', 'updated_at'])
+        return Response({'extraction': self.get_serializer(extraction).data, 'contact': ContactSerializer(contact).data})
 
 
 class ContactFilterSet(FilterSet):
@@ -34,6 +97,7 @@ class ContactFilterSet(FilterSet):
     sector_coverage = CharFilter(method='filter_sector_coverage')
     designation = CharFilter(method='filter_designation')
     location = CharFilter(field_name='location', lookup_expr='icontains')
+    contact_type = CharFilter(field_name='contact_type', lookup_expr='iexact')
 
     def filter_sector_coverage(self, queryset, _name, value):
         return queryset.filter(sector_coverage__icontains=value.strip())
@@ -58,7 +122,7 @@ class ContactFilterSet(FilterSet):
     
     class Meta:
         model = Contact
-        fields = ['bank', 'sector_coverage', 'designation', 'location']
+        fields = ['bank', 'sector_coverage', 'designation', 'location', 'contact_type']
 
 
 @extend_schema_view(
@@ -98,16 +162,19 @@ class ContactViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = (
         Contact.objects.select_related('bank')
         .prefetch_related('primary_deals', 'additional_deals')
-        .annotate(deal_count=Count('primary_deals', distinct=True))
+        .annotate(
+            deal_count=Count('primary_deals', distinct=True),
+            last_deal_date=Max(Coalesce('primary_deals__received_at', Cast(F('primary_deals__created_at'), output_field=DateField()), output_field=DateField())),
+        )
     )
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = [
-        'name', 'email', 'designation', 'location', 'bank__name',
+        'name', 'email', 'designation', 'contact_type', 'location', 'bank__name',
         'sector_coverage',
     ]
     ordering_fields = [
-        'name', 'email', 'designation', 'location', 'sector_coverage',
+        'name', 'email', 'designation', 'contact_type', 'location', 'sector_coverage',
         'deal_count', 'created_at',
     ]
     ordering = ['-created_at']

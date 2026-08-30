@@ -2,7 +2,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import Profile
-from .models import Task, TaskActivity, TaskStatus, TaskSuggestion
+from .models import Task, TaskActivity, TaskComment, TaskStatus, TaskSuggestion
 
 
 class CompactProfileSerializer(serializers.ModelSerializer):
@@ -25,9 +25,9 @@ class TaskSerializer(serializers.ModelSerializer):
         fields = (
             "id", "deal", "deal_title", "title", "description", "status", "priority", "due_date",
             "assignee", "assignee_id", "created_by", "origin", "fingerprint", "source_sections",
-            "completed_at", "created_at", "updated_at",
+            "position", "review_requested_at", "completed_at", "created_at", "updated_at",
         )
-        read_only_fields = ("id", "created_by", "origin", "fingerprint", "completed_at", "created_at", "updated_at")
+        read_only_fields = ("id", "created_by", "origin", "fingerprint", "review_requested_at", "completed_at", "created_at", "updated_at")
 
     def get_source_sections(self, obj):
         return list(obj.source_suggestions.values_list("source_section", flat=True).distinct())
@@ -51,11 +51,39 @@ class TaskSerializer(serializers.ModelSerializer):
         return task
 
     def update(self, instance, validated_data):
+        actor = getattr(getattr(self.context.get("request"), "user", None), "profile", None)
+        requested_status = validated_data.get("status")
+        if (
+            requested_status == TaskStatus.DONE
+            and instance.created_by_id
+            and instance.created_by_id != getattr(actor, "id", None)
+        ):
+            validated_data["status"] = TaskStatus.IN_REVIEW
+            instance.review_requested_at = timezone.now()
+        elif requested_status == TaskStatus.DONE:
+            instance.review_requested_at = None
+        elif requested_status and requested_status != TaskStatus.IN_REVIEW:
+            instance.review_requested_at = None
         for key, value in validated_data.items():
             setattr(instance, key, value)
         self._apply_completion(instance, instance.status)
         instance.save()
         return instance
+
+
+class TaskCommentSerializer(serializers.ModelSerializer):
+    author = CompactProfileSerializer(read_only=True)
+
+    class Meta:
+        model = TaskComment
+        fields = ("id", "task", "author", "body", "created_at", "updated_at")
+        read_only_fields = ("id", "author", "created_at", "updated_at")
+
+    def validate_body(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Comment cannot be empty.")
+        return value
 
 
 class TaskSuggestionSerializer(serializers.ModelSerializer):

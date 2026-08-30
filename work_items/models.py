@@ -7,6 +7,7 @@ class TaskStatus(models.TextChoices):
     TODO = "todo", "To Do"
     IN_PROGRESS = "in_progress", "In Progress"
     BLOCKED = "blocked", "Blocked"
+    IN_REVIEW = "in_review", "In Review"
     DONE = "done", "Done"
 
 
@@ -37,12 +38,14 @@ class Task(models.Model):
     origin = models.CharField(max_length=20, choices=Origin.choices, default=Origin.MANUAL)
     fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    position = models.PositiveIntegerField(default=0, db_index=True)
+    review_requested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "task"
-        ordering = ["due_date", "-created_at"]
+        ordering = ["position", "due_date", "-created_at"]
         indexes = [
             models.Index(fields=["deal", "status"], name="task_deal_id_status_idx"),
             models.Index(fields=["assignee", "status"], name="task_assignee_status_idx"),
@@ -64,6 +67,10 @@ class TaskActivity(models.Model):
         DUE_DATE_CHANGED = "due_date_changed", "Due date changed"
         DELETED = "deleted", "Deleted"
         SUGGESTION_ACCEPTED = "suggestion_accepted", "Suggestion accepted"
+        COMMENTED = "commented", "Commented"
+        REVIEW_REQUESTED = "review_requested", "Review requested"
+        REVIEW_APPROVED = "review_approved", "Review approved"
+        REORDERED = "reordered", "Reordered"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     task = models.ForeignKey(Task, on_delete=models.SET_NULL, null=True, blank=True, related_name="activities")
@@ -98,6 +105,22 @@ class TaskSuggestionState(models.TextChoices):
     ACCEPTED = "accepted", "Accepted"
     DISMISSED = "dismissed", "Dismissed"
     SUPERSEDED = "superseded", "Superseded"
+
+
+class TaskComment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="comments")
+    author = models.ForeignKey(
+        "accounts.Profile", on_delete=models.SET_NULL, null=True, related_name="task_comments"
+    )
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "task_comment"
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["task", "created_at"], name="task_comment_task_time_idx")]
 
 
 class TaskSuggestion(models.Model):

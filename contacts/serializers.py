@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Contact, WorkplaceVerificationSuggestion
+from .models import Contact, ContactCardExtraction, WorkplaceVerificationSuggestion
 from deals.models import Deal
 from deals.services.contact_linking import sync_contact_deal_links, sync_primary_contact_bank
 from contacts.services.banker_analytics import conversion_rate
@@ -55,18 +55,26 @@ class ContactSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at')
 
 
+class ContactCardExtractionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ContactCardExtraction
+        fields = ('id', 'file_name', 'file_size', 'raw_text', 'extracted_data', 'status', 'matched_contact', 'created_at', 'updated_at')
+        read_only_fields = fields
+
+
 class ContactListSerializer(serializers.ModelSerializer):
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     deal_count = serializers.IntegerField(read_only=True)
+    last_deal_date = serializers.DateField(read_only=True, allow_null=True)
     
     class Meta:
         model = Contact
         fields = (
-            'id', 'name', 'email', 'designation', 'bank', 'bank_name',
+            'id', 'name', 'email', 'designation', 'contact_type', 'bank', 'bank_name',
             'location', 'phone', 'sector_coverage', 'rank', 'created_at',
             'ranking', 'primary_coverage_person', 'secondary_coverage_person',
             'total_deals_legacy', 'pipeline', 'follow_ups', 'last_meeting_date',
-            'deal_count',
+            'deal_count', 'last_deal_date',
         )
         read_only_fields = ('id', 'created_at')
 

@@ -2,6 +2,7 @@ from datetime import date
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -260,6 +261,45 @@ class ContactDirectoryAPITests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["results"][0]["id"], str(self.md.id))
         self.assertEqual(response.data["results"][0]["deal_count"], 3)
+        self.assertIsNotNone(response.data["results"][0]["last_deal_date"])
+
+    @patch('ai_orchestrator.services.document_processor.DocumentProcessorService.get_extraction_result')
+    def test_visiting_card_can_be_reviewed_into_a_contact(self, extract):
+        extract.return_value = {'normalized_text': 'Riya Investor\nPartner\nriya@example.test\n+91 98765 43210'}
+        uploaded = self.client.post(
+            reverse('contact-card-extraction-list'),
+            {'file': SimpleUploadedFile('card.jpg', b'image', content_type='image/jpeg')},
+            format='multipart',
+        )
+        self.assertEqual(uploaded.status_code, 201)
+        reviewed = self.client.post(
+            reverse('contact-card-extraction-review', kwargs={'pk': uploaded.data['id']}),
+            {'extracted_data': {**uploaded.data['extracted_data'], 'contact_type': 'INVESTOR'}},
+            format='json',
+        )
+        self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(reviewed.data['contact']['email'], 'riya@example.test')
+
+    def test_contact_type_can_be_created_and_filtered(self):
+        created = self.client.post(
+            reverse("contact-list"),
+            {"name": "Ira Investor", "contact_type": "INVESTOR"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data["contact_type"], "INVESTOR")
+
+        response = self.client.get(reverse("contact-list"), {"contact_type": "INVESTOR"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["name"] for item in response.data["results"]], ["Ira Investor"])
+
+    def test_invalid_contact_type_is_rejected(self):
+        response = self.client.post(
+            reverse("contact-list"),
+            {"name": "Invalid", "contact_type": "BROKER"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
 
 
 class WorkplaceVerificationAPITests(TestCase):
