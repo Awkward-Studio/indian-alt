@@ -32,16 +32,30 @@ class Migration(migrations.Migration):
                 ),
             ],
         ),
-        migrations.AddIndex(
-            model_name='dealretrievalprofile',
-            index=pgvector.django.indexes.HnswIndex(ef_construction=64, fields=['embedding'], m=16, name='dealprofile_embedding_hnsw', opclasses=['vector_cosine_ops']),
+        # HNSW builds are intentionally deferred. Railway's deploy container has
+        # a small /dev/shm budget, and building these indexes during startup can
+        # make the healthcheck time out. The indexes remain in migration state;
+        # run `build_vector_indexes` after deploy to create them concurrently.
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.AddIndex(
+                    model_name='dealretrievalprofile',
+                    index=pgvector.django.indexes.HnswIndex(ef_construction=64, fields=['embedding'], m=16, name='dealprofile_embedding_hnsw', opclasses=['vector_cosine_ops']),
+                ),
+            ],
         ),
         migrations.AddIndex(
             model_name='documentchunk',
             index=django.contrib.postgres.indexes.GinIndex(fields=['search_vector'], name='docchunk_search_vector_gin'),
         ),
-        migrations.AddIndex(
-            model_name='documentchunk',
-            index=pgvector.django.indexes.HnswIndex(ef_construction=64, fields=['embedding'], m=16, name='docchunk_embedding_hnsw', opclasses=['vector_cosine_ops']),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.AddIndex(
+                    model_name='documentchunk',
+                    index=pgvector.django.indexes.HnswIndex(ef_construction=64, fields=['embedding'], m=16, name='docchunk_embedding_hnsw', opclasses=['vector_cosine_ops']),
+                ),
+            ],
         ),
     ]
