@@ -771,6 +771,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             .annotate(count=Count('id'))
             .order_by('fund')
         ]
+        priority_counts = [
+            {'priority': row['priority'] or 'Unassigned', 'count': row['count']}
+            for row in queryset.values('priority').annotate(count=Count('id')).order_by('priority')
+        ]
+        female_led_counts = [
+            {'label': 'Female-led' if row['is_female_led'] else 'Other', 'count': row['count']}
+            for row in queryset.values('is_female_led').annotate(count=Count('id')).order_by('is_female_led')
+        ]
 
         analysis_queryset = queryset.annotate(
             dashboard_has_analysis=Exists(
@@ -811,6 +819,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'investedYTD': invested_ytd,
             'stageCounts': stage_counts,
             'fundCounts': fund_counts,
+            'priorityCounts': priority_counts,
+            'femaleLedCounts': female_led_counts,
             'analysisCounts': {
                 'available': analysis_available,
                 'running': analysis_running,
