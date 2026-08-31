@@ -497,7 +497,7 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                             defaults={"name": email.split("@")[0].replace(".", " ").title(), "bank": bank}
                         )
                         contacts_by_email[email] = c
-                    elif bank and not c.bank:
+                    elif bank and c.bank_id != bank.id:
                         c.bank = bank
                         c.save(using=db_alias, update_fields=['bank'])
 
@@ -506,7 +506,7 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                     if not first_contact:
                         first_contact = c
 
-                if first_contact and not d.primary_contact:
+                if first_contact:
                     d.primary_contact = first_contact
                     d.save(using=db_alias, update_fields=['primary_contact'])
 
@@ -570,7 +570,7 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                             defaults={"name": email.split("@")[0].replace(".", " ").title(), "bank": bank}
                         )
                         contacts_by_email[email] = c
-                    elif bank and not c.bank:
+                    elif bank and c.bank_id != bank.id:
                         c.bank = bank
                         c.save(using=db_alias, update_fields=['bank'])
 
