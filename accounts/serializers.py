@@ -8,7 +8,7 @@ class ProfileSerializer(serializers.ModelSerializer):
     """Full serializer for Profile with User synchronization."""
     
     password = serializers.CharField(write_only=True, required=False)
-    role = serializers.ReadOnlyField(source='role')
+    role = serializers.ReadOnlyField()
     
     class Meta:
         model = Profile
@@ -77,7 +77,7 @@ class ProfileSerializer(serializers.ModelSerializer):
 
 
 class ProfileListSerializer(serializers.ModelSerializer):
-    role = serializers.ReadOnlyField(source='role')
+    role = serializers.ReadOnlyField()
     class Meta:
         model = Profile
         fields = (
