@@ -1,10 +1,10 @@
 from rest_framework import viewsets, filters
-from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import Profile
 from .serializers import ProfileSerializer, ProfileListSerializer
+from .permissions import IsActiveProfile, IsAdminProfile
 
 
 @extend_schema_view(
@@ -41,7 +41,12 @@ from .serializers import ProfileSerializer, ProfileListSerializer
 )
 class ProfileViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = Profile.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsActiveProfile]
+
+    def get_permissions(self):
+        if self.action in {'create', 'update', 'partial_update', 'destroy'}:
+            return [IsAdminProfile()]
+        return [IsActiveProfile()]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'email']
     ordering_fields = ['name', 'email', 'created_at']

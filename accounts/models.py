@@ -4,6 +4,8 @@ from django.contrib.auth.models import User
 
 
 class Profile(models.Model):
+    ROLE_ADMIN = 'admin'
+    ROLE_INVESTMENT_TEAM = 'investment_team'
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
         User,
@@ -34,6 +36,10 @@ class Profile(models.Model):
 
     def __str__(self):
         return self.name or self.email or f'Profile {self.id}'
+
+    @property
+    def role(self):
+        return self.ROLE_ADMIN if self.is_admin else self.ROLE_INVESTMENT_TEAM
 
     def save(self, *args, **kwargs):
         # Auto-generate initials from name if not provided (e.g., "John Doe" -> "JD")

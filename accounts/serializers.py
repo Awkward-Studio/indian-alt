@@ -8,11 +8,12 @@ class ProfileSerializer(serializers.ModelSerializer):
     """Full serializer for Profile with User synchronization."""
     
     password = serializers.CharField(write_only=True, required=False)
+    role = serializers.ReadOnlyField(source='role')
     
     class Meta:
         model = Profile
         fields = (
-            'id', 'user', 'name', 'email', 'image_url', 'is_admin',
+            'id', 'user', 'name', 'email', 'image_url', 'is_admin', 'role',
             'initials', 'is_disabled', 'password', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'user', 'created_at', 'updated_at')
@@ -76,10 +77,11 @@ class ProfileSerializer(serializers.ModelSerializer):
 
 
 class ProfileListSerializer(serializers.ModelSerializer):
+    role = serializers.ReadOnlyField(source='role')
     class Meta:
         model = Profile
         fields = (
-            'id', 'name', 'email', 'image_url', 'is_admin',
+            'id', 'name', 'email', 'image_url', 'is_admin', 'role',
             'initials', 'is_disabled', 'created_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
