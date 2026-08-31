@@ -1169,17 +1169,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     def pass_reason_remediation_list(self, request):
         queryset = self._pass_reason_remediation_queryset(request.user)
         fund = request.query_params.get('fund')
-        if fund and fund not in {'FUND1', 'FUND2'}:
+        allowed_funds = {'FUND1', 'FUND2', 'FUND3'}
+        if fund and fund not in allowed_funds:
             return Response(
-                {'error': 'fund must be FUND1 or FUND2.'},
+                {'error': 'fund must be FUND1, FUND2, or FUND3.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        queryset = queryset.filter(fund__in=['FUND1', 'FUND2'])
-        counts = {
-            'FUND1': queryset.filter(fund='FUND1').count(),
-            'FUND2': queryset.filter(fund='FUND2').count(),
-        }
-        counts['total'] = counts['FUND1'] + counts['FUND2']
+        counts = {fund_name: queryset.filter(fund=fund_name).count() for fund_name in sorted(allowed_funds)}
+        counts['total'] = sum(counts.values())
         if fund:
             queryset = queryset.filter(fund=fund)
         search = (request.query_params.get('search') or '').strip()
