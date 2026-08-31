@@ -151,9 +151,15 @@ class DealFilterSet(django_filters.FilterSet):
         method='filter_fund',
     )
     sector = django_filters.CharFilter(lookup_expr='icontains')
+    industry = django_filters.CharFilter(lookup_expr='icontains')
     city = django_filters.CharFilter(lookup_expr='icontains')
     bank_name = django_filters.CharFilter(field_name='bank__name', lookup_expr='icontains')
     banker_name = django_filters.CharFilter(field_name='primary_contact__name', lookup_expr='icontains')
+    pass_reason = django_filters.CharFilter(field_name='reasons_for_passing', lookup_expr='icontains')
+    pass_reason_state = django_filters.ChoiceFilter(
+        choices=[('has_reason', 'Has reason'), ('missing', 'Missing reason')],
+        method='filter_pass_reason_state',
+    )
     fund_classification_state = django_filters.ChoiceFilter(
         choices=FundClassificationState.choices
     )
@@ -189,15 +195,22 @@ class DealFilterSet(django_filters.FilterSet):
             competitor_data
         )
 
+    def filter_pass_reason_state(self, queryset, name, value):
+        normalized = Trim(Coalesce('reasons_for_passing', Value(''), output_field=CharField()))
+        queryset = queryset.annotate(_pass_reason_filter=normalized)
+        return queryset.exclude(_pass_reason_filter='') if value == 'has_reason' else queryset.filter(_pass_reason_filter='')
+
     class Meta:
         model = Deal
         fields = [
             'bank', 'priority', 'deal_status', 'deal_group', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
             'current_phase', 'sector', 'city', 'primary_contact',
+            'industry',
             'bank_name', 'banker_name',
             'fund_classification_state',
             'has_analysis', 'has_vi_data', 'has_competitors',
+            'pass_reason', 'pass_reason_state',
         ]
 
 
