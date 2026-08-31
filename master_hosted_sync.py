@@ -418,11 +418,15 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
         with transaction.atomic(using=db_alias):
             up_count = 0
             cr_count = 0
+            contact_links = []
+            responsibility_links = []
+            relationship_deal_ids = set()
 
             # Update existing
             for item in to_update:
                 d = item["deal"]
                 p = item["payload"]
+                relationship_deal_ids.add(d.id)
                 previous_values = {
                     field_name: getattr(d, field_name, None)
                     for field_name in set(SHEET_DEAL_FIELDS.values())
@@ -497,7 +501,8 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                         c.bank = bank
                         c.save(using=db_alias, update_fields=['bank'])
 
-                    d.additional_contacts.add(c)
+                    contact_links.append((d.id, c.id))
+                    relationship_deal_ids.add(d.id)
                     if not first_contact:
                         first_contact = c
 
@@ -508,7 +513,8 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                 for init in p["team_initials"]:
                     prof = profiles_by_initial.get(init)
                     if prof:
-                        d.responsibility.add(prof)
+                        responsibility_links.append((d.id, prof.id))
+                        relationship_deal_ids.add(d.id)
 
                 up_count += 1
 
@@ -552,6 +558,7 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                     fund_classification_source_type=FundClassificationSourceType.WORKBOOK,
                     fund_classification_source_id=f"{p['file_name']}:row:{p['row_idx']}",
                 )
+                relationship_deal_ids.add(new_deal.id)
                 record_sheet_provenance(new_deal, p, {}, db_alias)
 
                 first_contact = None
@@ -567,7 +574,8 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                         c.bank = bank
                         c.save(using=db_alias, update_fields=['bank'])
 
-                    new_deal.additional_contacts.add(c)
+                    contact_links.append((new_deal.id, c.id))
+                    relationship_deal_ids.add(new_deal.id)
                     if not first_contact:
                         first_contact = c
 
@@ -578,9 +586,30 @@ def sync_fund_file(excel_path, fund_name, create_new=False, db_alias="production
                 for init in p["team_initials"]:
                     prof = profiles_by_initial.get(init)
                     if prof:
-                        new_deal.responsibility.add(prof)
+                        responsibility_links.append((new_deal.id, prof.id))
+                        relationship_deal_ids.add(new_deal.id)
 
                 cr_count += 1
+
+            # Replace workbook-managed many-to-many links in two bulk statements
+            # instead of issuing one network round-trip per row/profile.
+            contact_through = Deal.additional_contacts.through
+            responsibility_through = Deal.responsibility.through
+            if relationship_deal_ids:
+                contact_through.objects.using(db_alias).filter(deal_id__in=relationship_deal_ids).delete()
+                responsibility_through.objects.using(db_alias).filter(deal_id__in=relationship_deal_ids).delete()
+            if contact_links:
+                contact_through.objects.using(db_alias).bulk_create(
+                    [contact_through(deal_id=deal_id, contact_id=contact_id) for deal_id, contact_id in set(contact_links)],
+                    ignore_conflicts=True,
+                    batch_size=500,
+                )
+            if responsibility_links:
+                responsibility_through.objects.using(db_alias).bulk_create(
+                    [responsibility_through(deal_id=deal_id, profile_id=profile_id) for deal_id, profile_id in set(responsibility_links)],
+                    ignore_conflicts=True,
+                    batch_size=500,
+                )
 
         print(f"✓ SUCCESS! {fund_name.upper()} committed: {up_count} deals updated, {cr_count} new deals created.\n")
     else:
