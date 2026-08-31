@@ -1147,6 +1147,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 'name': getattr(profile, 'name', None) or latest_audit.actor.get_username(),
                 'email': getattr(profile, 'email', None) or latest_audit.actor.email,
             }
+        remediation_task = deal.tasks.filter(
+            title__startswith='Add reason for passing:'
+        ).order_by('-created_at').first()
         return {
             'id': str(deal.id),
             'title': deal.title,
@@ -1158,6 +1161,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 'actor': actor,
                 'created_at': latest_audit.created_at.isoformat(),
             } if latest_audit else None),
+            'remediation_task': ({
+                'id': str(remediation_task.id),
+                'title': remediation_task.title,
+                'status': remediation_task.status,
+            } if remediation_task else None),
         }
 
     @action(
