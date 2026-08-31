@@ -56,6 +56,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--funds",
+        nargs="+",
+        metavar="FUND",
+        help="Limit the sync to one or more fund labels (for example FUND1 FUND2 FUND3).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be synced without writing to the production DB.",
@@ -2244,6 +2250,10 @@ def run():
     log_step("Selecting local deals for sync")
     t0 = time.time()
     deals = iter_target_deals(args.deals, subset=args.deal_subset)
+    if args.funds:
+        requested_funds = {normalize_text(value).upper() for value in args.funds if normalize_text(value)}
+        deals = [deal for deal in deals if normalize_text(deal.fund).upper() in requested_funds]
+        log_step(f"Fund filter: {', '.join(sorted(requested_funds))}")
     log_step(f"Selected local deals: {len(deals)} elapsed={round(time.time() - t0, 2)}s")
     if not deals:
         log_step("No matching deals found in local DB.")
