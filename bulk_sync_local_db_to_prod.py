@@ -82,6 +82,10 @@ def parse_args():
         help="Directory where Railway CLI should run. Defaults to current directory.",
     )
     parser.add_argument(
+        "--railway-database-service",
+        help="Optional Railway database service name used with --railway-cli.",
+    )
+    parser.add_argument(
         "--prune-production-data",
         "--prune-production-deals",
         dest="prune_production_data",
@@ -120,6 +124,14 @@ def parse_args():
         "--reference-data-only",
         action="store_true",
         help="Sync only banks and bankers/contacts. If pruning is enabled, prune production contacts/banks not present locally.",
+    )
+    parser.add_argument(
+        "--provenance-only",
+        action="store_true",
+        help=(
+            "Replace field-provenance rows for deals that already exist in production. "
+            "Never creates or updates Deal rows or other child records."
+        ),
     )
     parser.add_argument(
         "--skip-reference-data",
@@ -175,8 +187,10 @@ def log_step(message: str):
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-def database_url_from_railway_cli(project_dir: str = ".") -> str | None:
+def database_url_from_railway_cli(project_dir: str = ".", service: str | None = None) -> str | None:
     command = ["railway", "variables", "--json"]
+    if service:
+        command[2:2] = ["--service", service]
     result = subprocess.run(
         command,
         cwd=project_dir,
@@ -1942,6 +1956,110 @@ def replace_deal_provenance(local_deal: Deal, prod_deal: Deal, dry_run: bool = F
     return counts
 
 
+def replace_field_provenance_only(local_deal: Deal, prod_deal: Deal, dry_run: bool = False) -> dict:
+    """Mirror only DealFieldProvenance for an already-resolved production deal."""
+    local_rows = list(
+        DealFieldProvenance.objects.using(SOURCE_DB)
+        .filter(deal=local_deal)
+        .order_by("created_at", "id")
+    )
+    hosted_count = DealFieldProvenance.objects.using(TARGET_DB).filter(deal=prod_deal).count()
+    result = {"local": len(local_rows), "hosted_before": hosted_count, "hosted_after": len(local_rows)}
+    if dry_run:
+        return result
+
+    with transaction.atomic(using=TARGET_DB):
+        DealFieldProvenance.objects.using(TARGET_DB).filter(deal=prod_deal).delete()
+        if local_rows:
+            DealFieldProvenance.objects.using(TARGET_DB).bulk_create([
+                DealFieldProvenance(
+                    id=row.id,
+                    deal=prod_deal,
+                    field_name=row.field_name,
+                    source_type=row.source_type,
+                    source_id=row.source_id,
+                    previous_value=deepcopy(row.previous_value),
+                    value=deepcopy(row.value),
+                    changed_by=_map_user(row.changed_by_id),
+                    created_at=row.created_at,
+                )
+                for row in local_rows
+            ], batch_size=200)
+    return result
+
+
+def sync_field_provenance_only(local_deals: list[Deal], dry_run: bool = False) -> dict:
+    totals = {"matched_deals": 0, "skipped_missing": 0, "local_rows": 0, "missing_rows": 0, "hosted_before": 0, "hosted_after": 0}
+    hosted_deals = list(Deal.objects.using(TARGET_DB).all().only("id", "title"))
+    hosted_by_id = {str(deal.id): deal for deal in hosted_deals}
+    hosted_title_groups = {}
+    for deal in hosted_deals:
+        title_key = normalize_text(deal.title).lower()
+        if title_key:
+            hosted_title_groups.setdefault(title_key, []).append(deal)
+
+    matched_pairs = []
+    for local_deal in local_deals:
+        prod_deal = hosted_by_id.get(str(local_deal.id))
+        if prod_deal is None and normalize_text(local_deal.title):
+            title_matches = hosted_title_groups.get(normalize_text(local_deal.title).lower(), [])
+            if len(title_matches) == 1:
+                prod_deal = title_matches[0]
+        if prod_deal is None:
+            totals["skipped_missing"] += 1
+            continue
+        matched_pairs.append((local_deal, prod_deal))
+
+    local_to_hosted = {local_deal.id: prod_deal.id for local_deal, prod_deal in matched_pairs}
+    local_rows = list(
+        DealFieldProvenance.objects.using(SOURCE_DB)
+        .filter(deal_id__in=local_to_hosted)
+        .order_by("created_at", "id")
+    )
+    hosted_ids = list(local_to_hosted.values())
+    totals["matched_deals"] = len(matched_pairs)
+    totals["local_rows"] = len(local_rows)
+    totals["hosted_before"] = DealFieldProvenance.objects.using(TARGET_DB).filter(
+        deal_id__in=hosted_ids
+    ).count()
+    local_row_ids = [row.id for row in local_rows]
+    existing_local_row_ids = set(
+        DealFieldProvenance.objects.using(TARGET_DB)
+        .filter(id__in=local_row_ids)
+        .values_list("id", flat=True)
+    )
+    missing_rows = [row for row in local_rows if row.id not in existing_local_row_ids]
+    totals["missing_rows"] = len(missing_rows)
+    totals["hosted_after"] = totals["hosted_before"] + len(missing_rows)
+    if dry_run:
+        return totals
+
+    changed_by_ids = {row.changed_by_id for row in missing_rows if row.changed_by_id}
+    local_usernames = dict(
+        User.objects.using(SOURCE_DB).filter(id__in=changed_by_ids).values_list("id", "username")
+    )
+    hosted_users_by_username = {
+        user.username: user
+        for user in User.objects.using(TARGET_DB).filter(username__in=local_usernames.values())
+    }
+    with transaction.atomic(using=TARGET_DB):
+        DealFieldProvenance.objects.using(TARGET_DB).bulk_create([
+            DealFieldProvenance(
+                id=row.id,
+                deal_id=local_to_hosted[row.deal_id],
+                field_name=row.field_name,
+                source_type=row.source_type,
+                source_id=row.source_id,
+                previous_value=deepcopy(row.previous_value),
+                value=deepcopy(row.value),
+                changed_by=hosted_users_by_username.get(local_usernames.get(row.changed_by_id)),
+                created_at=row.created_at,
+            )
+            for row in missing_rows
+        ], batch_size=200)
+    return totals
+
+
 def sync_single_deal(
     local_deal: Deal,
     bank_map: dict[str, Bank],
@@ -2212,11 +2330,24 @@ def run():
         raise RuntimeError(
             "--reference-data-only cannot be combined with --skip-reference-data."
         )
+    if args.provenance_only and (
+        args.reference_data_only
+        or args.only_missing_deals
+        or args.prune_production_data
+        or args.prompt_child_overwrite
+        or args.force_child_overwrite
+    ):
+        raise RuntimeError(
+            "--provenance-only cannot be combined with reference sync, missing-deal sync, pruning, or child overwrite options."
+        )
 
     prod_database_url = args.prod_database_url
     if not prod_database_url and args.railway_cli:
         log_step("Loading production DATABASE_URL from Railway CLI")
-        prod_database_url = database_url_from_railway_cli(args.railway_project_dir)
+        prod_database_url = database_url_from_railway_cli(
+            args.railway_project_dir,
+            service=args.railway_database_service,
+        )
     log_step("Configuring production database connection")
     configure_target_database(prod_database_url, ssl_require=args.prod_db_ssl_require)
     log_step("Checking migration parity between local and production")
@@ -2306,6 +2437,17 @@ def run():
     if args.dry_run:
         log_step("Mode: DRY RUN")
     print("-" * 72)
+
+    if args.provenance_only:
+        log_step("Running guarded field-provenance-only sync; Deal rows will not be written")
+        totals = sync_field_provenance_only(deals, dry_run=args.dry_run)
+        log_step(
+            "Provenance-only summary: "
+            f"matched_deals={totals['matched_deals']} skipped_missing={totals['skipped_missing']} "
+            f"local_rows={totals['local_rows']} missing_rows={totals['missing_rows']} hosted_before={totals['hosted_before']} "
+            f"hosted_after={totals['hosted_after']}"
+        )
+        return
 
     reference_data = {"bank_map": {}, "contact_map": {}, "banks": 0, "contacts": 0, "local_banks": 0, "local_contacts": 0}
     if args.skip_reference_data:

@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
-from django.db.models import CharField, Count, Exists, F, JSONField, OuterRef, Q, Subquery, Value
+from django.db.models import CharField, Count, Exists, F, JSONField, OuterRef, Prefetch, Q, Subquery, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -21,7 +21,7 @@ from .models import (
     DealPassReasonRemediationAudit,
     DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
-    DealRelationshipContext, SectorResearchAcquisition, SectorResearchDiscoveryRun,
+    SectorResearchAcquisition, SectorResearchDiscoveryRun,
     SectorResearchRecommendation, SectorResearchSourceRule,
     VentureIntelligenceCompanyRelation,
 )
@@ -183,17 +183,7 @@ class DealFilterSet(django_filters.FilterSet):
         return filter_by_fund_alias(queryset, value)
 
     def filter_has_competitors(self, queryset, name, value):
-        competitor_data = (
-            Q(has_vi_competitors=True)
-            | Q(has_relationship_competitors=True)
-            | (
-                Q(competitor_candidates__isnull=False)
-                & ~Q(competitor_candidates=[])
-            )
-        )
-        return queryset.filter(competitor_data) if value else queryset.exclude(
-            competitor_data
-        )
+        return queryset.filter(has_vi_competitors=value)
 
     def filter_pass_reason_state(self, queryset, name, value):
         normalized = Trim(Coalesce('reasons_for_passing', Value(''), output_field=CharField()))
@@ -377,7 +367,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     queryset = Deal.objects.select_related(
         'bank', 'primary_contact', 'request'
     ).prefetch_related(
-        'responsibility', 'additional_contacts', 'field_provenance'
+        'responsibility', 'additional_contacts', 'field_provenance',
+        Prefetch(
+            'vi_relations',
+            queryset=VentureIntelligenceCompanyRelation.objects.filter(
+                relation_type='competitor',
+            ).select_related('company_profile'),
+            to_attr='selected_competitor_relations',
+        ),
     ).annotate(
         latest_news_source_map=Subquery(
             DealDocument.objects.filter(
@@ -389,6 +386,28 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         has_analysis=Exists(
             DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
         ),
+        latest_analysis_json=Subquery(
+            DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+            .order_by('-version', '-created_at')
+            .values('analysis_json')[:1],
+            output_field=JSONField(),
+        ),
+        latest_analysis_ambiguities=Subquery(
+            DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+            .order_by('-version', '-created_at')
+            .values('ambiguities')[:1],
+            output_field=JSONField(),
+        ),
+        pending_task_count=Count(
+            'tasks',
+            filter=~Q(tasks__status='done'),
+            distinct=True,
+        ),
+        pending_task_suggestion_count=Count(
+            'task_suggestions',
+            filter=Q(task_suggestions__state='pending'),
+            distinct=True,
+        ),
         has_vi_data=Exists(
             VentureIntelligenceCompanyRelation.objects.filter(
                 deal_id=OuterRef('pk')
@@ -398,12 +417,6 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             VentureIntelligenceCompanyRelation.objects.filter(
                 deal_id=OuterRef('pk'),
                 relation_type='competitor',
-            )
-        ),
-        has_relationship_competitors=Exists(
-            DealRelationshipContext.objects.filter(
-                deal_id=OuterRef('pk'),
-                relationship_type='competitor',
             )
         ),
         has_receipt_date_suggestions=Exists(

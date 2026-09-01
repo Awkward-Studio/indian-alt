@@ -8,13 +8,17 @@ TRACKED_DEAL_FIELDS = {
     'primary_contact', 'primary_contact_name', 'deal_status',
     'current_phase', 'priority', 'fund', 'responsibility', 'sector',
     'industry', 'city', 'funding_ask', 'funding_ask_for', 'is_female_led',
-    'source_onedrive_id',
+    'deal_summary', 'company_details', 'priority_rationale', 'comments',
+    'reasons_for_passing', 'rejection_reason', 'state', 'country', 'themes',
+    'competitor_candidates', 'additional_contacts', 'source_onedrive_id',
 }
 
 
 def serializable_field_value(value):
     if isinstance(value, models.Model):
         return str(value.pk)
+    if isinstance(value, (models.Manager, models.QuerySet)):
+        return [str(item.pk) for item in value.all()]
     if hasattr(value, 'isoformat'):
         return value.isoformat()
     if isinstance(value, (list, tuple, set)):

@@ -51,6 +51,51 @@ from deals.services.venture_intelligence import VentureIntelligenceService
 from deals.services.analysis_next_steps import inspect_analysis_next_steps
 
 
+class DealLedgerSerializerTests(TestCase):
+    def test_competitors_include_only_explicitly_selected_relations(self):
+        deal = Deal.objects.create(
+            title="Selected competitors",
+            competitor_candidates=[{"name": "Candidate only"}],
+        )
+        selected = VentureIntelligenceCompanyProfile.objects.create(name="Selected peer")
+        target = VentureIntelligenceCompanyProfile.objects.create(name="Target company")
+        VentureIntelligenceCompanyRelation.objects.create(
+            deal=deal,
+            company_profile=selected,
+            relation_type=VentureIntelligenceRelationType.COMPETITOR,
+        )
+        VentureIntelligenceCompanyRelation.objects.create(
+            deal=deal,
+            company_profile=target,
+            relation_type=VentureIntelligenceRelationType.TARGET,
+        )
+
+        names = DealListSerializer().get_competitor_names(deal)
+
+        self.assertEqual(names, ["Selected peer"])
+
+    def test_risks_are_extracted_from_the_analysis_report(self):
+        deal = Deal(title="Risk extraction")
+        deal.latest_analysis_json = {
+            "analyst_report": """
+## Risk Factors
+
+| Key Risk | Probability | Mitigants and IA comments |
+| :--- | :--- | :--- |
+| Customer concentration | High | Validate contracts |
+| Working-capital intensity | Medium | Review cash conversion |
+
+## Investment Rationale
+
+Strong category growth.
+"""
+        }
+
+        risks = DealListSerializer().get_analysis_risks(deal)
+
+        self.assertEqual(risks, ["Customer concentration", "Working-capital intensity"])
+
+
 class DealAssignmentCapabilityTests(TestCase):
     def setUp(self):
         self.deal = Deal.objects.create(title="Capability test deal")

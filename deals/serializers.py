@@ -1,3 +1,5 @@
+import re
+
 from rest_framework import serializers
 from django.db import transaction
 from django.utils import timezone
@@ -448,6 +450,14 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if additional_contacts is not None or legacy_other_contacts is not None:
+            record_deal_field_changes(
+                deal,
+                {'additional_contacts': ([], list(deal.additional_contacts.values_list('id', flat=True)))},
+                source_type=DealFieldProvenance.SourceType.HUMAN,
+                source_id='api:create',
+                changed_by=getattr(self.context.get('request'), 'user', None),
+            )
         if deal.sector or deal.industry:
             requested_by = getattr(self.context.get("request"), "user", None)
             transaction.on_commit(
@@ -466,6 +476,9 @@ class DealSerializer(serializers.ModelSerializer):
             for field in ("title", "sector", "industry")
         )
         model_data = validated_data.copy()
+        previous_additional_contacts = list(
+            instance.additional_contacts.values_list('id', flat=True)
+        )
         previous_values = {
             field: getattr(instance, field)
             for field in model_data
@@ -512,6 +525,19 @@ class DealSerializer(serializers.ModelSerializer):
             additional_contacts=additional_contacts,
             additional_contacts_provided=additional_contacts is not None or legacy_other_contacts is not None,
         )
+        if additional_contacts is not None or legacy_other_contacts is not None:
+            record_deal_field_changes(
+                deal,
+                {
+                    'additional_contacts': (
+                        previous_additional_contacts,
+                        list(deal.additional_contacts.values_list('id', flat=True)),
+                    )
+                },
+                source_type=DealFieldProvenance.SourceType.HUMAN,
+                source_id='api:update',
+                changed_by=getattr(self.context.get('request'), 'user', None),
+            )
         if research_context_changed and (deal.sector or deal.industry):
             requested_by = getattr(self.context.get("request"), "user", None)
             transaction.on_commit(
@@ -715,6 +741,10 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 class DealListSerializer(serializers.ModelSerializer):
     banker_names = serializers.SerializerMethodField()
     competitor_names = serializers.SerializerMethodField()
+    analysis_risks = serializers.SerializerMethodField()
+    ambiguities = serializers.SerializerMethodField()
+    pending_task_count = serializers.IntegerField(read_only=True)
+    pending_task_suggestion_count = serializers.IntegerField(read_only=True)
     pipeline_insights = serializers.SerializerMethodField()
     days_since_sourcing = serializers.SerializerMethodField()
     receipt_date_state = serializers.SerializerMethodField()
@@ -750,13 +780,63 @@ class DealListSerializer(serializers.ModelSerializer):
 
     def get_competitor_names(self, obj):
         names = []
-        for candidate in obj.competitor_candidates or []:
-            if not isinstance(candidate, dict):
-                continue
-            name = str(candidate.get('name') or '').strip()
+        relations = getattr(obj, 'selected_competitor_relations', None)
+        if relations is None:
+            relations = obj.vi_relations.filter(
+                relation_type='competitor',
+            ).select_related('company_profile')
+        for relation in relations:
+            profile = relation.company_profile
+            name = str(profile.name or profile.registered_name or '').strip()
             if name and name not in names:
                 names.append(name)
         return names
+
+    def get_analysis_risks(self, obj):
+        analysis_json = getattr(obj, 'latest_analysis_json', None)
+        if not isinstance(analysis_json, dict):
+            return []
+
+        canonical = analysis_json.get('canonical_snapshot')
+        canonical_report = canonical.get('analyst_report') if isinstance(canonical, dict) else None
+        report = analysis_json.get('analyst_report') or canonical_report
+        if not isinstance(report, str) or not report.strip():
+            return []
+
+        section_match = re.search(
+            r'(?ims)^#{1,3}\s+(?:risk factors?|risk matrix(?:\s*\([^\n]*\))?|red flags?(?:\s*&\s*warning signs?)?)\s*$'
+            r'(?P<body>.*?)(?=^#{1,3}\s+|\Z)',
+            report,
+        )
+        if not section_match:
+            return []
+
+        risks = []
+        for raw_line in section_match.group('body').splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith('|') and line.endswith('|'):
+                cells = [cell.strip() for cell in line.strip('|').split('|')]
+                if not cells or all(re.fullmatch(r':?-{3,}:?', cell) for cell in cells):
+                    continue
+                risk = cells[0]
+                if risk.lower() in {'key risk', 'risk', 'risk factor'}:
+                    continue
+            else:
+                risk = re.sub(r'^[-*+]\s+|^\d+[.)]\s+', '', line)
+            risk = re.sub(r'[*_`]', '', risk).strip()
+            if risk and risk not in risks:
+                risks.append(risk)
+            if len(risks) == 8:
+                break
+        return risks
+
+    def get_ambiguities(self, obj):
+        ambiguities = getattr(obj, 'latest_analysis_ambiguities', None)
+        if ambiguities is None:
+            ambiguities = obj.ambiguities
+        return ambiguities if isinstance(ambiguities, list) else []
 
     def get_pipeline_insights(self, obj):
         source_map = getattr(obj, 'latest_news_source_map', None)
@@ -771,9 +851,7 @@ class DealListSerializer(serializers.ModelSerializer):
         return max((timezone.localdate() - obj.received_at).days, 0)
 
     def get_has_competitors(self, obj):
-        return bool(obj.competitor_candidates) or bool(
-            getattr(obj, 'has_vi_competitors', False)
-        ) or bool(getattr(obj, 'has_relationship_competitors', False))
+        return bool(getattr(obj, 'has_vi_competitors', False))
 
     def get_receipt_date_state(self, obj):
         if obj.received_at:
@@ -802,7 +880,8 @@ class DealListSerializer(serializers.ModelSerializer):
             'fund_classification_source_id', 'fund_classification_reviewed_by',
             'fund_classification_reviewed_at',
             'deal_summary', 'company_details', 'priority_rationale', 'comments', 'ambiguities',
-            'state', 'country', 'competitor_names', 'pipeline_insights', 'field_provenance',
+            'state', 'country', 'competitor_names', 'analysis_risks', 'pipeline_insights',
+            'pending_task_count', 'pending_task_suggestion_count', 'field_provenance',
         )
         read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')
 

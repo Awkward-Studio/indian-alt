@@ -2426,9 +2426,17 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             if key not in persisted_keys:
                 persisted_competitors.append(competitor)
                 persisted_keys.add(key)
+        previous_competitors = deal.competitor_candidates or []
         deal.competitor_candidates = persisted_competitors
         deal.updated_at = timezone.now()
         deal.save(update_fields=["competitor_candidates", "updated_at"])
+        from deals.services.field_provenance import record_deal_field_changes
+        record_deal_field_changes(
+            deal,
+            {"competitor_candidates": (previous_competitors, persisted_competitors)},
+            source_type="AI",
+            source_id="pipeline:competitor_search",
+        )
 
         report_title = "Additional Competitor Search" if instruction else "Competitor Search Results"
         report = _format_competitor_items_report(competitors, title=report_title)

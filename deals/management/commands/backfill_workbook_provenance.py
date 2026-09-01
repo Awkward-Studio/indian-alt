@@ -59,6 +59,8 @@ class Command(BaseCommand):
                 fund = clean(row[positions["Fund"]]).upper()
                 if fund != expected_fund or not normalized_title(title):
                     continue
+                reason_position = positions.get("Reasons for Passing")
+                reason_for_passing = clean(row[reason_position]) if reason_position is not None else ""
                 values = {
                     "title": title,
                     "fund": fund,
@@ -72,6 +74,8 @@ class Command(BaseCommand):
                     "is_female_led": parse_bool(row[positions["Is Female Led"]]),
                     "current_phase": canonical_workbook_status(row[positions["Deal Status"]]),
                     "deal_status": canonical_workbook_status(row[positions["Deal Status"]]),
+                    "reasons_for_passing": reason_for_passing,
+                    "rejection_reason": reason_for_passing,
                     "_contact_emails": extract_external_emails(row[positions["Contacts"]]),
                     "_deal_team": split_team_initials(row[positions["Deal Team"]]),
                 }
