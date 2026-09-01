@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import requests
+from types import SimpleNamespace
 
 
 from django.core.management import call_command
@@ -22,7 +23,8 @@ from deals.models import (
     VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany,
     VentureIntelligenceRelationType
 )
-from deals.serializers import DealDetailSerializer, DealSerializer
+from deals.serializers import DealDetailSerializer, DealListSerializer, DealSerializer
+from accounts.models import Profile
 from contacts.serializers import ContactSerializer
 from contacts.models import Contact
 from banks.models import Bank
@@ -47,6 +49,58 @@ from ai_orchestrator.services.search_provider import SearXNGProviderService
 from deals.services.screener import ScreenerCompanyService, _normalize_screener_url
 from deals.services.venture_intelligence import VentureIntelligenceService
 from deals.services.analysis_next_steps import inspect_analysis_next_steps
+
+
+class DealAssignmentCapabilityTests(TestCase):
+    def setUp(self):
+        self.deal = Deal.objects.create(title="Capability test deal")
+        self.member_user = User.objects.create_user(username="member@example.com")
+        self.member = Profile.objects.create(
+            user=self.member_user,
+            email="member@example.com",
+            name="Member",
+        )
+        self.assignee = Profile.objects.create(
+            email="assignee@example.com",
+            name="Assignee",
+        )
+
+    def serializer(self, profile, *, data=None):
+        request = SimpleNamespace(user=profile.user)
+        kwargs = {
+            "partial": True,
+            "context": {"request": request},
+        }
+        if data is not None:
+            kwargs["data"] = data
+        return DealSerializer(self.deal, **kwargs)
+
+    def test_rejects_assignment_changes_without_capability(self):
+        serializer = self.serializer(
+            self.member,
+            data={"responsibility": [str(self.assignee.id)]},
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("responsibility", serializer.errors)
+
+    def test_allows_assignment_changes_with_capability(self):
+        self.member.can_manage_deal_assignments = True
+        self.member.save(update_fields=["can_manage_deal_assignments"])
+        serializer = self.serializer(
+            self.member,
+            data={"responsibility": [str(self.assignee.id)]},
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        self.assertEqual(list(self.deal.responsibility.all()), [self.assignee])
+
+    def test_exposes_capability_to_the_deal_editor(self):
+        self.member.can_manage_deal_assignments = True
+        self.member.save(update_fields=["can_manage_deal_assignments"])
+
+        self.assertTrue(self.serializer(self.member).data["can_manage_responsibility"])
 
 
 class AnalysisNextStepsInspectionTests(SimpleTestCase):
@@ -587,6 +641,12 @@ class ScreenerUrlResolutionTests(SimpleTestCase):
 
 
 class CompetitorSearchPipelineTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+
+        PipelineRegistryService.sync_legacy_defaults()
+
     def test_screener_parser_selects_current_peer_by_ticker_not_first_peer(self):
         html = """
         <html>
@@ -712,6 +772,17 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(first["counts"]["green_flags"], 1)
         self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
         self.assertEqual(second["document"]["title"], docs.last().title)
+        self.assertEqual(
+            docs.last().source_map_json["ledger_insights"]["industry_context"],
+            "Acme has recent public-domain diligence news.",
+        )
+
+        deal.latest_news_source_map = docs.last().source_map_json
+        ledger_data = DealListSerializer(deal).data
+        self.assertEqual(
+            ledger_data["pipeline_insights"]["industry_context"],
+            "Acme has recent public-domain diligence news.",
+        )
 
     @patch("deals.tasks.EmbeddingService")
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
@@ -792,6 +863,11 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(result["competitors"][0]["evidence_urls"], ["https://example.com/peer-listing"])
         self.assertIn("https://example.com/peer-listing", result["response"])
         self.assertNotIn("CIN:", result["response"])
+        deal.refresh_from_db()
+        self.assertEqual(
+            [item["name"] for item in deal.competitor_candidates],
+            ["Peer Commerce"],
+        )
         mock_research.assert_called_once()
 
     def test_competitor_parser_accepts_nested_grouped_public_private_payloads(self):

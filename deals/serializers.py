@@ -293,6 +293,7 @@ class DealGeneratedDocumentSerializer(serializers.ModelSerializer):
 
 
 class DealSerializer(serializers.ModelSerializer):
+    can_manage_responsibility = serializers.SerializerMethodField()
     days_since_sourcing = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
@@ -321,8 +322,29 @@ class DealSerializer(serializers.ModelSerializer):
         required=False
     )
 
+    def get_can_manage_responsibility(self, obj):
+        request = self.context.get('request')
+        profile = getattr(getattr(request, 'user', None), 'profile', None)
+        return bool(
+            getattr(getattr(request, 'user', None), 'is_staff', False)
+            or getattr(profile, 'is_admin', False)
+            or getattr(profile, 'can_manage_deal_assignments', False)
+        )
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if 'responsibility' in attrs:
+            request = self.context.get('request')
+            profile = getattr(getattr(request, 'user', None), 'profile', None)
+            can_manage = bool(
+                getattr(getattr(request, 'user', None), 'is_staff', False)
+                or getattr(profile, 'is_admin', False)
+                or getattr(profile, 'can_manage_deal_assignments', False)
+            )
+            if not can_manage:
+                raise serializers.ValidationError({
+                    'responsibility': 'You do not have permission to manage the IA team for this deal.'
+                })
         status_supplied = self.instance is None or 'deal_status' in attrs or 'current_phase' in attrs
         if not status_supplied:
             return attrs
@@ -650,7 +672,7 @@ class DealDetailSerializer(DealSerializer):
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree', 'vi_relations', 'competitor_candidates',
-            'field_provenance',
+            'field_provenance', 'can_manage_responsibility',
         )
         read_only_fields = ('id',)
 
@@ -691,6 +713,9 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 
 class DealListSerializer(serializers.ModelSerializer):
+    banker_names = serializers.SerializerMethodField()
+    competitor_names = serializers.SerializerMethodField()
+    pipeline_insights = serializers.SerializerMethodField()
     days_since_sourcing = serializers.SerializerMethodField()
     receipt_date_state = serializers.SerializerMethodField()
     receipt_date_has_evidence = serializers.BooleanField(
@@ -709,6 +734,36 @@ class DealListSerializer(serializers.ModelSerializer):
 
     def get_field_provenance(self, obj):
         return latest_field_provenance(obj)
+
+    def get_banker_names(self, obj):
+        names = []
+        primary_name = (
+            getattr(getattr(obj, 'primary_contact', None), 'name', None)
+            or getattr(obj, 'primary_contact_name', None)
+        )
+        if primary_name:
+            names.append(primary_name)
+        for contact in obj.additional_contacts.all():
+            if contact.name and contact.name not in names:
+                names.append(contact.name)
+        return names
+
+    def get_competitor_names(self, obj):
+        names = []
+        for candidate in obj.competitor_candidates or []:
+            if not isinstance(candidate, dict):
+                continue
+            name = str(candidate.get('name') or '').strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def get_pipeline_insights(self, obj):
+        source_map = getattr(obj, 'latest_news_source_map', None)
+        if not isinstance(source_map, dict):
+            return {}
+        insights = source_map.get('ledger_insights')
+        return insights if isinstance(insights, dict) else {}
 
     def get_days_since_sourcing(self, obj):
         if not obj.received_at:
@@ -739,14 +794,15 @@ class DealListSerializer(serializers.ModelSerializer):
             'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
-            'primary_contact_name', 'fund', 'themes', 'responsibility',
+            'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
             'rejection_stage_id', 'rejection_reason', 'reasons_for_passing',
             'fund_classification_state', 'fund_classification_source_type',
             'fund_classification_source_id', 'fund_classification_reviewed_by',
             'fund_classification_reviewed_at',
-            'field_provenance',
+            'deal_summary', 'company_details', 'priority_rationale', 'comments', 'ambiguities',
+            'state', 'country', 'competitor_names', 'pipeline_insights', 'field_provenance',
         )
         read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')
 

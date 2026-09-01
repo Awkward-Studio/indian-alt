@@ -51,7 +51,7 @@ class ProfileViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     search_fields = ['name', 'email']
     ordering_fields = ['name', 'email', 'created_at']
     ordering = ['name']
-    filterset_fields = ['is_admin', 'is_disabled']
+    filterset_fields = ['is_admin', 'can_manage_deal_assignments', 'is_disabled']
     
     def get_serializer_class(self):
         # Use lightweight serializer for list to reduce response size

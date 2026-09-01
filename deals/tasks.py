@@ -2251,6 +2251,30 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
 
         research["news_cards"] = news_cards
 
+        news_risks = (
+            _company_news_list(research.get("litigation"))
+            + _company_news_list(research.get("red_flags"))
+            + [
+                card for card in news_cards
+                if str(card.get("sentiment") or "").lower() == "red"
+            ]
+        )
+        ledger_insights = {
+            "industry_context": str(
+                research.get("overview") or research.get("executive_summary") or ""
+            ).strip(),
+            "funding_rationale": [
+                text for text in (
+                    _company_news_item_text(item)
+                    for item in _company_news_list(research.get("funding"))
+                ) if text
+            ],
+            "risks": [
+                text for text in (_company_news_item_text(item) for item in news_risks)
+                if text
+            ],
+        }
+
         markdown_report = _format_company_news_markdown(
             research,
             company_name=deal.title or "Company",
@@ -2264,6 +2288,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
             "warnings": warnings,
+            "ledger_insights": ledger_insights,
         }
         title = f"Public Domain News Research - {generated_at.date().isoformat()}"
 
@@ -2355,12 +2380,18 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         from deals.models import Deal
         deal = Deal.objects.get(id=deal_id)
         instruction = str(instruction or "").strip()
-        existing_competitors = existing_competitors or []
+        requested_existing = existing_competitors or []
+        existing_competitors = list(deal.competitor_candidates or [])
         existing_keys = {
             _competitor_result_key(item)
             for item in existing_competitors
             if _competitor_result_key(item) not in {"name:", "cin:"}
         }
+        for competitor in requested_existing:
+            key = _competitor_result_key(competitor)
+            if key not in existing_keys:
+                existing_competitors.append(competitor)
+                existing_keys.add(key)
         from .services.competitor_web_research import CompetitorWebResearchService
 
         research = CompetitorWebResearchService().research(
@@ -2381,6 +2412,23 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
                 continue
             seen_keys.add(key)
             competitors.append(competitor)
+
+        # Persist pipeline output in the worker so the ledger is updated even if
+        # the browser closes before its polling loop receives the result.
+        persisted_competitors = list(existing_competitors)
+        persisted_keys = {
+            _competitor_result_key(item)
+            for item in persisted_competitors
+            if _competitor_result_key(item) not in {"name:", "cin:"}
+        }
+        for competitor in competitors:
+            key = _competitor_result_key(competitor)
+            if key not in persisted_keys:
+                persisted_competitors.append(competitor)
+                persisted_keys.add(key)
+        deal.competitor_candidates = persisted_competitors
+        deal.updated_at = timezone.now()
+        deal.save(update_fields=["competitor_candidates", "updated_at"])
 
         report_title = "Additional Competitor Search" if instruction else "Competitor Search Results"
         report = _format_competitor_items_report(competitors, title=report_title)

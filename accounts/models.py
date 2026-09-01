@@ -19,6 +19,10 @@ class Profile(models.Model):
     email = models.EmailField(unique=True)
     image_url = models.URLField(blank=True, null=True)
     is_admin = models.BooleanField(default=False)
+    can_manage_deal_assignments = models.BooleanField(
+        default=False,
+        help_text='Can add or remove IA team members from deals.',
+    )
     initials = models.CharField(max_length=10, blank=True, null=True)
     is_disabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

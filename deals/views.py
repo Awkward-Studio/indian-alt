@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
-from django.db.models import CharField, Count, Exists, F, OuterRef, Q, Value
+from django.db.models import CharField, Count, Exists, F, JSONField, OuterRef, Q, Subquery, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -379,6 +379,13 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ).prefetch_related(
         'responsibility', 'additional_contacts', 'field_provenance'
     ).annotate(
+        latest_news_source_map=Subquery(
+            DealDocument.objects.filter(
+                deal_id=OuterRef('pk'),
+                title__startswith='Public Domain News Research',
+            ).order_by('-created_at').values('source_map_json')[:1],
+            output_field=JSONField(),
+        ),
         has_analysis=Exists(
             DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
         ),

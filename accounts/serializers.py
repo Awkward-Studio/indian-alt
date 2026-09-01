@@ -13,7 +13,8 @@ class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
         fields = (
-            'id', 'user', 'name', 'email', 'image_url', 'is_admin', 'role',
+            'id', 'user', 'name', 'email', 'image_url', 'is_admin',
+            'can_manage_deal_assignments', 'role',
             'initials', 'is_disabled', 'password', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'user', 'created_at', 'updated_at')
@@ -81,7 +82,8 @@ class ProfileListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
         fields = (
-            'id', 'name', 'email', 'image_url', 'is_admin', 'role',
+            'id', 'name', 'email', 'image_url', 'is_admin',
+            'can_manage_deal_assignments', 'role',
             'initials', 'is_disabled', 'created_at'
         )
         read_only_fields = ('id', 'created_at', 'updated_at')
