@@ -36,6 +36,7 @@ from .services.prompt_catalog import PromptCatalogService
 from .services.pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .services.universal_chat import UniversalChatService
 from .services.document_processor import DocumentProcessorService
+from .services.chat_documents import ChatDocumentEvidenceService
 from .services.vm_service import VMControlService
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
 from meetings.models import MeetingNote
@@ -438,6 +439,12 @@ class UniversalChatView(APIView):
         if not user_message: return Response({"error": "message is required"}, status=400)
 
         try:
+            model_provider = str(request.data.get('model_provider') or 'vllm').strip().lower()
+            if model_provider not in {'vllm', 'anthropic'}:
+                return Response({"error": "model_provider must be either vllm or anthropic."}, status=400)
+            web_search_enabled = request.data.get('web_search_enabled', False)
+            if not isinstance(web_search_enabled, bool):
+                return Response({"error": "web_search_enabled must be a boolean."}, status=400)
             if conversation_id:
                 try: 
                     conversation = AIConversation.objects.get(id=conversation_id, user=request.user)
@@ -445,10 +452,20 @@ class UniversalChatView(APIView):
                     conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
             else:
                 conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
+
+            chat_documents = (
+                conversation.metadata.get('chat_documents', [])
+                if isinstance(conversation.metadata, dict)
+                else []
+            )
+            if model_provider == 'anthropic' and chat_documents:
+                return Response(
+                    {"error": "Private uploaded documents cannot be sent to the external Anthropic provider."},
+                    status=400,
+                )
             
             AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
             
-            model_provider = request.data.get('model_provider', 'vllm')
             if not isinstance(conversation.metadata, dict):
                 conversation.metadata = {}
             conversation.metadata['model_provider'] = model_provider
@@ -481,6 +498,7 @@ class UniversalChatView(APIView):
                         'skill_name': 'universal_chat',
                         'metadata': {
                             'model_provider': model_provider,
+                            'web_search_enabled': web_search_enabled,
                         }, # We will build the context entirely inside the Celery task
                         'audit_log_id': str(audit_log.id)
                     }
@@ -524,6 +542,7 @@ class UniversalChatDocumentView(APIView):
         if conversation_id and not AIConversation.objects.filter(id=conversation_id, user=request.user).exists():
             return Response({"error": "Conversation not found."}, status=404)
 
+        document_id = str(uuid.uuid4())
         result = DocumentProcessorService().get_extraction_result(uploaded_file.read(), filename)
         extracted_text = str(result.get("normalized_text") or result.get("text") or "").strip()
         if not extracted_text:
@@ -548,14 +567,23 @@ class UniversalChatDocumentView(APIView):
             if len(documents) >= self.max_documents:
                 return Response({"error": f"A chat can contain up to {self.max_documents} documents."}, status=400)
 
+            enriched = ChatDocumentEvidenceService.build(
+                file_name=filename,
+                extracted_text=extracted_text,
+                extraction_mode=result.get("mode"),
+                source_id=document_id,
+                quality_flags=result.get("quality_flags") or [],
+            )
             document = {
-                "id": str(uuid.uuid4()),
+                "id": document_id,
                 "name": filename,
                 "size": uploaded_file.size,
                 "extraction_mode": result.get("mode"),
-                "quality_flags": result.get("quality_flags") or [],
-                "text": extracted_text[:self.max_text_chars],
-                "truncated": len(extracted_text) > self.max_text_chars,
+                "quality_flags": enriched["evidence"].get("quality_flags") or [],
+                "artifact_status": enriched["artifact_status"],
+                "evidence": enriched["evidence"],
+                "text": enriched["text"],
+                "truncated": enriched["truncated"],
                 "uploaded_at": timezone.now().isoformat(),
             }
             metadata["chat_documents"] = [*documents, document]
@@ -564,7 +592,7 @@ class UniversalChatDocumentView(APIView):
 
         return Response({
             "conversation_id": str(conversation.id),
-            "document": {key: value for key, value in document.items() if key != "text"},
+            "document": ChatDocumentEvidenceService.public_metadata(document),
         }, status=201)
 
     def delete(self, request, document_id):

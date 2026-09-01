@@ -68,8 +68,6 @@ def parse_chat_scope(data: dict[str, Any]) -> ChatScope:
         document_ids=_identifier_list(data.get("document_ids"), "document_ids"),
         transcript_ids=_identifier_list(data.get("transcript_ids"), "transcript_ids"),
     )
-    if scope.web_search_enabled and scope.model_provider != "anthropic":
-        raise ChatScopeValidationError("Web search requires the Anthropic provider.")
     if scope.has_private_scope and scope.model_provider == "anthropic":
         raise ChatScopeValidationError(
             "Private documents and transcripts cannot be sent to the external Anthropic provider."

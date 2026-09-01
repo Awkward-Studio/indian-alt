@@ -21,6 +21,7 @@ class SearXNGProviderService:
             if str(engine).strip()
         ]
         self.language = str(getattr(settings, "SEARXNG_LANGUAGE", "en-IN") or "en-IN").strip()
+        self.last_status = "not_run"
 
     def search_results(
         self,
@@ -31,6 +32,8 @@ class SearXNGProviderService:
     ) -> list[dict[str, Any]]:
         """Return normalized SearXNG results, keeping source metadata for grounding."""
         raw_results: list[dict[str, Any]] = []
+        self.last_status = "searching"
+        had_error = False
         engine_order = (
             [",".join(self.engines) if self.engines else None]
             if aggregate_engines
@@ -64,6 +67,7 @@ class SearXNGProviderService:
                     f": {engine_errors}" if engine_errors else "",
                 )
             except Exception as exc:
+                had_error = True
                 logger.warning("SearXNG engine %s failed for %r: %s", engine or "default", query, exc)
 
         results: list[dict[str, Any]] = []
@@ -84,6 +88,7 @@ class SearXNGProviderService:
                 "query": query,
                 "score": item.get("score"),
             })
+        self.last_status = "completed" if results else ("failed" if had_error else "no_results")
         return results
 
     def _engine_order(self, query: str) -> list[str | None]:

@@ -14,9 +14,20 @@ from ai_orchestrator.services.parsers import ResponseParserService
 
 
 class ChatScopeContractTests(SimpleTestCase):
-    def test_explicit_web_scope_requires_external_provider(self):
-        with self.assertRaisesRegex(ChatScopeValidationError, "requires the Anthropic"):
-            parse_chat_scope({"model_provider": "vllm", "web_search_enabled": True})
+    def test_local_provider_can_use_web_scope(self):
+        scope = parse_chat_scope({"model_provider": "vllm", "web_search_enabled": True})
+
+        self.assertTrue(scope.web_search_enabled)
+        self.assertEqual(scope.evidence_mode, "web")
+
+    def test_local_provider_can_mix_private_and_web_scope(self):
+        scope = parse_chat_scope({
+            "model_provider": "vllm",
+            "web_search_enabled": True,
+            "document_ids": [str(uuid4())],
+        })
+
+        self.assertEqual(scope.evidence_mode, "mixed")
 
     def test_private_scope_is_deduplicated_and_kept_internal(self):
         document_id = str(uuid4())

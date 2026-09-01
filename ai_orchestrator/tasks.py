@@ -10,6 +10,7 @@ from .services.chat_scope import internal_citation, normalize_web_citation
 from .services.universal_chat import UniversalChatService
 from .services.runtime import AIRuntimeService
 from .services.prompt_catalog import PromptCatalogService
+from .services.chat_documents import ChatDocumentEvidenceService
 
 from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update
 
@@ -210,15 +211,7 @@ def _build_chat_document_context(conversation: AIConversation) -> tuple[str, int
     documents = metadata.get("chat_documents")
     if not isinstance(documents, list):
         return "", 0
-    usable_documents = [
-        document for document in documents
-        if isinstance(document, dict) and document.get("text")
-    ]
-    context = "\n\n".join(
-        f"[UPLOADED DOCUMENT: {document.get('name') or 'Untitled'}]\n{document.get('text')}"
-        for document in usable_documents
-    )
-    return context, len(usable_documents)
+    return ChatDocumentEvidenceService.build_context(documents)
 
 @shared_task(bind=True)
 def generate_chat_response_async(self, conversation_id: str, user_message: str, skill_name: str, metadata: dict, audit_log_id: str):
@@ -283,6 +276,13 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     f"{document_context}"
                 ).strip()
                 task_metadata["chat_document_count"] = document_count
+            task_metadata["web_search_enabled"] = bool((metadata or {}).get("web_search_enabled", False))
+            task_metadata["evidence_mode"] = (
+                "mixed" if document_count and task_metadata["web_search_enabled"]
+                else "internal" if document_count
+                else "web" if task_metadata["web_search_enabled"]
+                else "general"
+            )
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "used_query_builder": bool(task_metadata.get("used_query_builder", True)),
@@ -298,6 +298,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "selected_chunk_count": task_metadata.get("selected_chunk_count"),
                 "selected_sources": task_metadata.get("selected_sources"),
                 "chat_document_count": task_metadata.get("chat_document_count", 0),
+                "web_search_enabled": task_metadata.get("web_search_enabled", False),
+                "evidence_mode": task_metadata.get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
@@ -313,6 +315,9 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         elif skill_name == 'deal_chat':
             chat_service = UniversalChatService(ai_service)
             model_provider = (metadata or {}).get("model_provider", "vllm")
+            document_context, document_count = _build_chat_document_context(conversation)
+            if model_provider == "anthropic" and document_count:
+                raise ValueError("Uploaded private documents require Local AI.")
             if model_provider == "anthropic":
                 from deals.models import Deal
                 deal = Deal.objects.filter(id=metadata.get("deal_id")).first()
@@ -363,6 +368,23 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     audit_log_id,
                     metadata.get("deal_id"),
                 )
+            if document_context:
+                task_metadata["context_data"] = (
+                    f"{task_metadata.get('context_data', '')}\n\n"
+                    "[USER-UPLOADED DOCUMENTS]\n"
+                    "Treat this structured extraction as primary evidence. Preserve citations, metrics, risks, "
+                    "open questions, and diligence gaps; state clearly when the documents do not support a claim.\n\n"
+                    f"{document_context}"
+                ).strip()
+                task_metadata["deal_context"] = task_metadata["context_data"]
+                task_metadata["chat_document_count"] = document_count
+            task_metadata["web_search_enabled"] = bool((metadata or {}).get("web_search_enabled", False))
+            task_metadata["evidence_mode"] = (
+                "mixed" if document_count and task_metadata["web_search_enabled"]
+                else "internal" if document_count
+                else "web" if task_metadata["web_search_enabled"]
+                else task_metadata.get("evidence_mode", "general")
+            )
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "used_query_builder": True,
@@ -379,8 +401,9 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "selected_sources": task_metadata.get("selected_sources"),
                 "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
                 "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
+                "chat_document_count": task_metadata.get("chat_document_count", 0),
                 "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
-                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
+                "evidence_mode": task_metadata.get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
             final_content = user_message
@@ -496,8 +519,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 data_points={"citations": structured_citations},
                 applied_filters={
                     "audit_log_id": audit_log_id,
-                    "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
-                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "evidence_mode": task_metadata.get("evidence_mode", "general"),
+                    "web_search_enabled": bool(task_metadata.get("web_search_enabled", False)),
                     "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
                     "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
                 }
@@ -510,8 +533,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "citations": structured_citations,
-                "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
-                "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "evidence_mode": task_metadata.get("evidence_mode", "general"),
+                "web_search_enabled": bool(task_metadata.get("web_search_enabled", False)),
                 "selected_document_ids": (metadata or {}).get("selected_document_ids") or [],
                 "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
             }

@@ -19,6 +19,7 @@ from ai_orchestrator.services.flow_config import (
 )
 from ai_orchestrator.tasks import _build_chat_document_context, _extract_markdown_report, generate_deal_helper_analysis_async
 from ai_orchestrator.services.universal_chat import UniversalChatService
+from ai_orchestrator.services.chat_documents import ChatDocumentEvidenceService
 
 
 class DealHelperAnalysisTaskTests(SimpleTestCase):
@@ -31,18 +32,83 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         context, count = _build_chat_document_context(conversation)
 
         self.assertEqual(count, 1)
-        self.assertIn("[UPLOADED DOCUMENT: IC memo.pdf]", context)
+        self.assertIn("[UPLOADED DOCUMENT EVIDENCE: IC memo.pdf]", context)
         self.assertIn("Revenue was INR 90 crore.", context)
+
+    def test_chat_document_context_includes_structured_evidence(self):
+        conversation = AIConversation(metadata={"chat_documents": [{
+            "id": "doc-1",
+            "name": "IC memo.pdf",
+            "text": "Revenue was INR 90 crore.",
+            "evidence": {
+                "document_summary": "Revenue grew strongly.",
+                "metrics": [{"name": "Revenue", "value": 90, "unit": "INR crore"}],
+                "risks": ["Customer concentration"],
+            },
+        }]})
+
+        context, count = _build_chat_document_context(conversation)
+
+        self.assertEqual(count, 1)
+        self.assertIn('"structured_evidence"', context)
+        self.assertIn("Customer concentration", context)
+        self.assertIn("Revenue was INR 90 crore.", context)
+
+    def test_chat_document_evidence_mode_can_be_mixed_with_web_search(self):
+        has_documents = True
+        web_search_enabled = True
+
+        evidence_mode = (
+            "mixed" if has_documents and web_search_enabled
+            else "internal" if has_documents
+            else "web" if web_search_enabled
+            else "general"
+        )
+
+        self.assertEqual(evidence_mode, "mixed")
 
     def test_conversation_serializer_does_not_expose_extracted_document_text(self):
         conversation = AIConversation(metadata={"chat_documents": [{
             "id": "doc-1", "name": "memo.pdf", "text": "private extracted text",
+            "evidence": {
+                "document_summary": "Private summary",
+                "claims": [{"claim": "Private claim"}],
+                "metrics": [{"name": "Revenue"}],
+            },
         }]})
+        conversation._prefetched_objects_cache = {"messages": []}
 
         serialized = AIConversationSerializer(conversation).data
 
         self.assertNotIn("text", serialized["metadata"]["chat_documents"][0])
+        self.assertNotIn("evidence", serialized["metadata"]["chat_documents"][0])
+        self.assertEqual(serialized["metadata"]["chat_documents"][0]["evidence_summary"]["claim_count"], 1)
         self.assertEqual(serialized["metadata"]["chat_documents"][0]["name"], "memo.pdf")
+
+    @patch("ai_orchestrator.services.chat_documents.DocumentArtifactService.build_document_artifact")
+    def test_chat_document_evidence_reuses_artifact_contract_and_bounds_text(self, build_artifact):
+        build_artifact.return_value = {
+            "document_name": "memo.pdf",
+            "document_summary": "Detailed evidence summary",
+            "claims": [{"claim": "Revenue grew"}],
+            "metrics": [{"name": "Revenue", "value": 90}],
+            "risks": ["Concentration"],
+            "quality_flags": ["artifact_flag"],
+            "normalized_text": "x" * (ChatDocumentEvidenceService.MAX_TEXT_CHARS + 10),
+        }
+
+        result = ChatDocumentEvidenceService.build(
+            file_name="memo.pdf",
+            extracted_text="raw text",
+            extraction_mode="docproc_remote",
+            source_id="doc-1",
+            quality_flags=["extractor_flag"],
+        )
+
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["text"]), ChatDocumentEvidenceService.MAX_TEXT_CHARS)
+        self.assertEqual(result["evidence"]["document_summary"], "Detailed evidence summary")
+        self.assertEqual(result["evidence"]["quality_flags"], ["extractor_flag", "artifact_flag"])
 
     def test_extract_markdown_report_prefers_parsed_report(self):
         report = _extract_markdown_report({

@@ -97,8 +97,9 @@ class AIConversationSerializer(serializers.ModelSerializer):
         metadata = dict(obj.metadata) if isinstance(obj.metadata, dict) else {}
         documents = metadata.get('chat_documents')
         if isinstance(documents, list):
+            from .services.chat_documents import ChatDocumentEvidenceService
             metadata['chat_documents'] = [
-                {key: value for key, value in document.items() if key != 'text'}
+                ChatDocumentEvidenceService.public_metadata(document)
                 for document in documents
                 if isinstance(document, dict)
             ]

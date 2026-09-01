@@ -164,6 +164,7 @@ class AIProcessorService:
             )
         
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
+        search_results = []
         if web_search_enabled:
             search_query = str(
                 (metadata or {}).get("web_search_query")
@@ -182,6 +183,13 @@ class AIProcessorService:
                 "Use only the evidence above for current public facts. Cite source URLs and state when the evidence is insufficient."
             )
             log_worker_event(audit_log, f"SearXNG returned {len(search_results)} public sources.")
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "web_search_enabled": True,
+                "web_search_status": self.search_provider.last_status,
+                "web_search_result_count": len(search_results),
+            }
+            audit_log.save(update_fields=["source_metadata"])
         if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
             user_prompt = self._truncate_prompt_to_token_budget(
                 user_prompt,
@@ -206,6 +214,15 @@ class AIProcessorService:
                 "temperature": metadata.get("temperature", 0.1) if metadata else 0.1,
             }
         }
+        if search_results:
+            payload["_retrieved_citations"] = [
+                {
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                    "snippet": item.get("snippet"),
+                }
+                for item in search_results
+            ]
 
         # Support for Phase 3 style strict JSON and thinking control
         if metadata:
@@ -319,12 +336,19 @@ class AIProcessorService:
         try:
             full_response = ""
             full_thinking = ""
-            collected_citations = []
+            retrieved_citations = list(payload.pop("_retrieved_citations", []) or [])
+            collected_citations = list(retrieved_citations)
             chunk_counter = 0
 
             stream_iterator = self.current_provider.execute_stream(payload)
             
             for ui_chunk, thinking_delta, response_delta in ResponseParserService.parse_stream(stream_iterator):
+                if retrieved_citations:
+                    ui_chunk["citations"] = [
+                        *(ui_chunk.get("citations") or []),
+                        *retrieved_citations,
+                    ]
+                    retrieved_citations = []
                 full_thinking += thinking_delta
                 full_response += response_delta
                 for citation in ui_chunk.get("citations") or []:
