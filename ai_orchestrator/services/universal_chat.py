@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import uuid
+from datetime import date
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Tuple
 
@@ -104,6 +105,11 @@ QUERY_PLANNER_RESPONSE_FORMAT = {
                 },
                 "exact_terms": {"type": "array", "items": {"type": "string"}},
                 "semantic_queries": {"type": "array", "items": {"type": "string"}},
+                "web_search_queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 4,
+                },
                 "soft_constraints": {"type": "array", "items": {"type": "string"}},
                 "metric_terms": {"type": "array", "items": {"type": "string"}},
                 "evidence_preference": {"type": "string", "enum": sorted(EVIDENCE_PREFERENCES)},
@@ -121,6 +127,7 @@ QUERY_PLANNER_RESPONSE_FORMAT = {
                 "named_entities",
                 "exact_terms",
                 "semantic_queries",
+                "web_search_queries",
                 "soft_constraints",
                 "metric_terms",
                 "evidence_preference",
@@ -1791,6 +1798,7 @@ class UniversalChatService:
             .replace("{{user_message}}", user_message)
             .replace("{{ user_message }}", user_message)
         )
+        planner_prompt = f"Current date: {date.today().isoformat()}\n{planner_prompt}"
         try:
             result = self._execute_planner_request(planner_prompt)
             if isinstance(result, dict) and not result.get("error"):
@@ -1799,6 +1807,21 @@ class UniversalChatService:
             logger.warning("Universal chat planner failed, falling back to heuristics: %s", e)
 
         return self._heuristic_plan(user_message)
+
+    def plan_web_search_queries(
+        self,
+        user_message: str,
+        conversation_id: str,
+        active_context: str = "",
+        query_plan: Any = None,
+    ) -> List[str]:
+        """Return planner-authored, public-safe searches for the current chat turn."""
+        if isinstance(query_plan, dict):
+            existing = self._normalize_string_list(query_plan.get("web_search_queries"))[:4]
+            if existing:
+                return existing
+        planned = self._build_query_plan(user_message, conversation_id, active_context=active_context)
+        return self._normalize_string_list(planned.get("web_search_queries"))[:4] or [user_message]
 
     def _execute_planner_request(self, planner_prompt: str) -> Dict[str, Any]:
         payload = {
@@ -1863,6 +1886,7 @@ class UniversalChatService:
             semantic_queries = self._normalize_string_list(plan.get("rag_queries"))
         if not self.disable_hard_caps:
             semantic_queries = semantic_queries[:HARD_MAX_SEMANTIC_QUERIES]
+        web_search_queries = self._normalize_string_list(plan.get("web_search_queries"))[:4]
 
         result_shape = str(plan.get("result_shape") or "").lower().strip()
         if result_shape not in RESULT_SHAPES:
@@ -1917,6 +1941,7 @@ class UniversalChatService:
             "named_entities": named_entities,
             "exact_terms": self._normalize_string_list(plan.get("exact_terms")),
             "semantic_queries": semantic_queries,
+            "web_search_queries": web_search_queries,
             "soft_constraints": self._normalize_string_list(plan.get("soft_constraints")),
             "metric_terms": self._normalize_string_list(plan.get("metric_terms")),
             "evidence_preference": evidence_preference,
@@ -1973,6 +1998,8 @@ class UniversalChatService:
 
         if not normalized["semantic_queries"]:
             normalized["semantic_queries"] = [user_message]
+        if not normalized["web_search_queries"]:
+            normalized["web_search_queries"] = [user_message]
         if not normalized["metric_terms"]:
             normalized["metric_terms"] = [
                 term for term in self._tokenize_keywords(user_message)
@@ -2107,6 +2134,7 @@ class UniversalChatService:
             "named_entities": [],
             "exact_terms": [],
             "semantic_queries": [user_message],
+            "web_search_queries": [user_message],
             "soft_constraints": [],
             "metric_terms": [],
             "evidence_preference": "mixed",

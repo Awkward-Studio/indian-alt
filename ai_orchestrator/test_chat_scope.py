@@ -68,12 +68,19 @@ class ChatScopeContractTests(SimpleTestCase):
             }
         )
         web = normalize_web_citation(
-            {"url": "https://example.com/report", "title": "Public report"},
+            {
+                "url": "https://example.com/report",
+                "title": "Public report",
+                "query": "Acme latest results",
+                "published_date": "2026-08-01",
+            },
             retrieved_at="2026-07-27T00:00:00Z",
         )
         self.assertEqual(transcript["kind"], "transcript")
         self.assertEqual(transcript["meeting_at"], "2026-07-01T10:00:00Z")
         self.assertEqual(web["kind"], "web")
+        self.assertEqual(web["query"], "Acme latest results")
+        self.assertEqual(web["published_date"], "2026-08-01")
         self.assertIsNone(
             normalize_web_citation(
                 {"url": "javascript:alert(1)"},

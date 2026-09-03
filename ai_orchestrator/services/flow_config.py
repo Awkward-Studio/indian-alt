@@ -91,6 +91,7 @@ Return only JSON with this shape:
   ],
   "exact_terms": ["exact company names or phrases kept only for compatibility"],
   "semantic_queries": ["semantic search query variants"],
+  "web_search_queries": ["targeted public-web search queries grounded in the user's current intent"],
   "soft_constraints": ["semantic preferences that should not become DB filters"],
   "metric_terms": ["ARR", "revenue", "CM1"],
   "evidence_preference": "summary|metrics|risks|mixed|documents|timeline",
@@ -107,6 +108,10 @@ User query: {{user_message}}
 
 Important planner rules:
 - The planner is the main semantic interpreter. Downstream retrieval will execute your structure mechanically.
+- Create 2-4 concise "web_search_queries" that a public search engine can execute directly. Resolve pronouns and follow-ups from Active Context, include the relevant company/entity name, and vary the searches by the facts needed (for example latest news, market size, competitors, regulation, or financial performance).
+- Web queries must contain only public-safe terms. Never copy confidential metrics, document excerpts, internal comments, or other private deal data into them.
+- Do not turn a request into a generic company-name search. Add the topic, geography, date/recency language, source type, or comparison requested by the user.
+- Treat the supplied Current date as authoritative. For latest/recent/since questions, use that date or an appropriate recent range; never substitute stale years from model memory.
 - Populate "named_entities" whenever a specific deal or set of deals is referenced.
 - Use "single_deal" for one named deal, "named_set" for explicitly named 2-3 deal comparisons, "shortlist" for thematic searches, and "cross_pipeline" for system-wide questions.
 - Use "selection_mode":
@@ -169,6 +174,7 @@ DEFAULT_ANSWER_PROMPT = """You are answering a user query against the firm-wide 
 
 Use the retrieved evidence below. Answer directly, stay precise, and avoid inventing values that are not present in the evidence.
 If retrieval is inconclusive, say so clearly.
+For claims based on [PUBLIC WEB EVIDENCE], cite the matching [S#] and include its supplied URL as a Markdown link. Never cite or invent a URL that is absent from the evidence.
 
 [CHAT HISTORY]
 {{ history_context }}

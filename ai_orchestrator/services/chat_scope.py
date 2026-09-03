@@ -107,5 +107,7 @@ def normalize_web_citation(value: Any, *, retrieved_at: str) -> dict[str, Any] |
         "url": url,
         "title": str(value.get("title") or value.get("source_title") or parsed.netloc),
         "cited_text": str(value.get("cited_text") or value.get("snippet") or "")[:1000],
+        "query": str(value.get("query") or "")[:500],
+        "published_date": str(value.get("published_date") or "")[:100],
         "retrieved_at": retrieved_at,
     }

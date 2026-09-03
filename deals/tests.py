@@ -242,6 +242,29 @@ class SearXNGProviderTests(SimpleTestCase):
         self.assertIn("[S1]", context)
         self.assertEqual(context.count("https://example.com/shared"), 1)
 
+    def test_research_search_filters_navigation_and_balances_queries(self):
+        service = SearXNGProviderService()
+        service.search_results = MagicMock(side_effect=[
+            [
+                {"title": "Acme Login", "url": "https://acme.example/login", "query": "Acme latest news"},
+                {"title": "Acme raises Series C", "url": "https://news.example/acme-series-c", "query": "Acme latest news"},
+            ],
+            [
+                {"title": "Regulator approves Acme licence", "url": "https://regulator.example/acme", "query": "Acme regulatory update"},
+            ],
+        ])
+
+        results = service.search_many(
+            ["Acme latest news", "Acme regulatory update"],
+            results_per_query=2,
+            max_results=4,
+        )
+
+        self.assertEqual(
+            [result["title"] for result in results],
+            ["Regulator approves Acme licence", "Acme raises Series C"],
+        )
+
     @override_settings(SEARXNG_ENGINES=["brave", "google", "duckduckgo", "bing"])
     @patch("ai_orchestrator.services.search_provider.requests.get")
     def test_aggregate_search_uses_configured_engines_in_one_request(self, mock_get):

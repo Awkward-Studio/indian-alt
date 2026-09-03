@@ -1,7 +1,9 @@
 import logging
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from django.conf import settings
@@ -109,13 +111,19 @@ class SearXNGProviderService:
         """Run independent searches concurrently and deduplicate their source URLs."""
         unique_queries = list(dict.fromkeys(query.strip() for query in queries if query and query.strip()))
         if not unique_queries:
+            self.last_status = "no_results"
             return []
 
         results_by_query: dict[str, list[dict[str, Any]]] = {}
         worker_count = max(1, min(self.search_workers, len(unique_queries)))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_queries = {
-                executor.submit(self.search_results, query, results_per_query): query
+                executor.submit(
+                    self.search_results,
+                    query,
+                    results_per_query,
+                    aggregate_engines=True,
+                ): query
                 for query in unique_queries
             }
             for future in as_completed(future_queries):
@@ -129,16 +137,41 @@ class SearXNGProviderService:
         combined: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         result_limit = max_results if max_results is not None else self.max_results
-        for query in unique_queries:
-            for result in results_by_query.get(query, []):
+        result_groups = [results_by_query.get(query, []) for query in unique_queries]
+        max_group_size = max((len(group) for group in result_groups), default=0)
+        for result_index in range(max_group_size):
+            for group in result_groups:
+                if result_index >= len(group):
+                    continue
+                result = group[result_index]
+                if self._is_low_value_navigation_result(result):
+                    continue
                 key = self.normalize_url(result.get("url"))
                 if not key or key in seen_urls:
                     continue
                 seen_urls.add(key)
                 combined.append(result)
                 if len(combined) >= result_limit:
+                    self.last_status = "completed"
                     return combined
+        self.last_status = "completed" if combined else "no_results"
         return combined
+
+    @staticmethod
+    def _is_low_value_navigation_result(result: dict[str, Any]) -> bool:
+        """Exclude account/navigation pages that do not provide research evidence."""
+        haystack = f"{result.get('title') or ''} {result.get('url') or ''}".casefold()
+        if re.search(r"(?:\bsign[ -]?up\b|\blog[ -]?in\b|\bdashboard\b|\bonboarding\b|/login(?:[/?#]|$)|/signup(?:[/?#]|$))", haystack):
+            return True
+
+        query = str(result.get("query") or "").casefold()
+        research_terms = r"\b(news|latest|recent|development|regulatory|regulation|funding|investment|valuation|competitor|market|risk|lawsuit|acquisition)\b"
+        if not re.search(research_terms, query):
+            return False
+        parsed = urlparse(str(result.get("url") or ""))
+        path = parsed.path.rstrip("/")
+        title = str(result.get("title") or "").casefold()
+        return not path or bool(re.search(r"\b(payment solution|payment gateway|customer care|support)\b", title))
 
     def format_context(
         self,

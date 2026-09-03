@@ -166,21 +166,35 @@ class AIProcessorService:
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
         search_results = []
         if web_search_enabled:
-            search_query = str(
-                (metadata or {}).get("web_search_query")
-                or (metadata or {}).get("company_name")
-                or content
-                or ""
-            ).strip()
-            if not search_query:
+            raw_search_queries = (metadata or {}).get("web_search_queries") or []
+            if isinstance(raw_search_queries, str):
+                raw_search_queries = [raw_search_queries]
+            search_queries = list(dict.fromkeys(
+                str(query).strip()
+                for query in raw_search_queries
+                if str(query or "").strip()
+            ))[:4]
+            if not search_queries:
+                fallback_query = str(
+                    (metadata or {}).get("web_search_query")
+                    or (metadata or {}).get("company_name")
+                    or content
+                    or ""
+                ).strip()
+                search_queries = [fallback_query] if fallback_query else []
+            if not search_queries:
                 raise ValueError("A search query is required when web search is enabled.")
-            log_worker_event(audit_log, "Searching public sources through SearXNG.")
-            search_results = self.search_provider.search_results(search_query, num_results=8)
+            log_worker_event(audit_log, f"Searching public sources through SearXNG with {len(search_queries)} planned queries.")
+            search_results = self.search_provider.search_many(
+                search_queries,
+                results_per_query=4,
+                max_results=12,
+            )
             search_context = self.search_provider.format_context(search_results)
             user_prompt = (
                 f"{user_prompt}\n\n[PUBLIC WEB EVIDENCE FROM SEARXNG]\n"
                 f"{search_context}\n\n"
-                "Use only the evidence above for current public facts. Cite source URLs and state when the evidence is insufficient."
+                "Use only the evidence above for current public facts. Connect each web-supported claim to its [S#] source, include the corresponding source URL in Markdown, and state when the evidence is insufficient."
             )
             log_worker_event(audit_log, f"SearXNG returned {len(search_results)} public sources.")
             audit_log.source_metadata = {
@@ -188,6 +202,7 @@ class AIProcessorService:
                 "web_search_enabled": True,
                 "web_search_status": self.search_provider.last_status,
                 "web_search_result_count": len(search_results),
+                "web_search_queries": search_queries,
             }
             audit_log.save(update_fields=["source_metadata"])
         if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
@@ -220,6 +235,8 @@ class AIProcessorService:
                     "url": item.get("url"),
                     "title": item.get("title"),
                     "snippet": item.get("snippet"),
+                    "query": item.get("query"),
+                    "published_date": item.get("published_date"),
                 }
                 for item in search_results
             ]

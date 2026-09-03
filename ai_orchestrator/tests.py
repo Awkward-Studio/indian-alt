@@ -639,6 +639,7 @@ class UniversalChatServiceTests(TestCase):
                 "hard_filters": {"industry": "Fintech"},
                 "named_entities": [{"type": "deal", "text": "Acme", "confidence": 0.95}],
                 "semantic_queries": ["deep retrieval query"],
+                "web_search_queries": ["Acme fintech ARR India latest", "Acme fintech competitors India"],
                 "soft_constraints": ["prefer companies with clear monetization"],
                 "metric_terms": ["ARR"],
                 "evidence_preference": "metrics",
@@ -656,6 +657,7 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(normalized["hard_filters"]["industry"], "Fintech")
         self.assertEqual(normalized["named_entities"][0]["text"], "Acme")
         self.assertEqual(normalized["semantic_queries"], ["deep retrieval query"])
+        self.assertEqual(normalized["web_search_queries"][0], "Acme fintech ARR India latest")
         self.assertEqual(normalized["soft_constraints"], ["prefer companies with clear monetization"])
         self.assertEqual(normalized["evidence_preference"], "metrics")
         self.assertEqual(normalized["result_shape"], "shortlist")
@@ -664,6 +666,37 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(normalized["deal_limit"], 28)
         self.assertEqual(normalized["chunks_per_deal"], 11)
         self.assertEqual(normalized["global_chunk_limit"], 18)
+
+    def test_web_search_planner_reuses_first_stage_queries(self):
+        queries = self.service.plan_web_search_queries(
+            "What has changed recently?",
+            "conversation-id",
+            active_context="We were discussing Acme's payments business.",
+            query_plan={"web_search_queries": ["Acme payments latest news India", "Acme regulatory filings"]},
+        )
+
+        self.assertEqual(queries, ["Acme payments latest news India", "Acme regulatory filings"])
+        self.ai_service.provider.execute_standard.assert_not_called()
+
+    def test_web_search_planner_uses_history_for_follow_up(self):
+        with patch.object(
+            self.service,
+            "_build_query_plan",
+            return_value={"web_search_queries": ["Acme payments funding latest news"]},
+        ) as mock_build:
+            queries = self.service.plan_web_search_queries(
+                "What happened since then?",
+                "conversation-id",
+                active_context="Active deal/company: Acme",
+                query_plan={"mode": "conversation_only"},
+            )
+
+        self.assertEqual(queries, ["Acme payments funding latest news"])
+        mock_build.assert_called_once_with(
+            "What happened since then?",
+            "conversation-id",
+            active_context="Active deal/company: Acme",
+        )
 
     def test_normalize_plan_translates_old_schema_during_compatibility_window(self):
         normalized = self.service._normalize_plan(

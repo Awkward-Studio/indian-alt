@@ -33,6 +33,7 @@ Answer conversationally as a deal chat assistant. Be direct, useful, and grounde
 Do not write a formal report, memo, diligence document, or long structured analysis unless the user explicitly asks for that artifact.
 Use bullets or a small table only when it makes the answer easier to scan.
 If the context does not contain enough evidence, say what is missing instead of inventing facts.
+For claims based on [PUBLIC WEB EVIDENCE], cite the matching [S#] and include its supplied URL as a Markdown link. Never cite or invent a URL that is absent from the evidence.
 
 [VISUAL OUTPUT]
 When the user asks for a graph, chart, visual, infographic, timeline, KPI view, comparison, or financial deep dive, include fenced deal_visual JSON blocks when the available evidence supports them.
@@ -260,6 +261,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
 
         ai_service = AIProcessorService()
         history_context, history_messages_used, history_chars_used = _build_history_context(conversation)
+        web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
         
         if skill_name == 'universal_chat':
             chat_service = UniversalChatService(ai_service)
@@ -276,7 +278,14 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     f"{document_context}"
                 ).strip()
                 task_metadata["chat_document_count"] = document_count
-            task_metadata["web_search_enabled"] = bool((metadata or {}).get("web_search_enabled", False))
+            task_metadata["web_search_enabled"] = web_search_enabled
+            if web_search_enabled:
+                task_metadata["web_search_queries"] = chat_service.plan_web_search_queries(
+                    user_message,
+                    conversation_id,
+                    active_context=history_context,
+                    query_plan=task_metadata.get("query_plan"),
+                )
             task_metadata["evidence_mode"] = (
                 "mixed" if document_count and task_metadata["web_search_enabled"]
                 else "internal" if document_count
@@ -299,6 +308,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "selected_sources": task_metadata.get("selected_sources"),
                 "chat_document_count": task_metadata.get("chat_document_count", 0),
                 "web_search_enabled": task_metadata.get("web_search_enabled", False),
+                "web_search_queries": task_metadata.get("web_search_queries") or [],
                 "evidence_mode": task_metadata.get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
@@ -337,7 +347,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                     "retrieved_chunk_count": 0,
                     "selected_chunk_count": 0,
                     "selected_sources": [],
-                    "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                    "web_search_enabled": web_search_enabled,
                     "evidence_mode": (metadata or {}).get("evidence_mode", "general"),
                 }
             elif (metadata or {}).get("interactive_context_data"):
@@ -378,7 +388,23 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 ).strip()
                 task_metadata["deal_context"] = task_metadata["context_data"]
                 task_metadata["chat_document_count"] = document_count
-            task_metadata["web_search_enabled"] = bool((metadata or {}).get("web_search_enabled", False))
+            task_metadata["web_search_enabled"] = web_search_enabled
+            if web_search_enabled:
+                deal_title = ""
+                try:
+                    from deals.models import Deal
+                    deal_title = str(Deal.objects.filter(id=metadata.get("deal_id")).values_list("title", flat=True).first() or "")
+                except Exception:
+                    deal_title = ""
+                planner_context = history_context
+                if deal_title:
+                    planner_context = f"Active deal/company: {deal_title}\n{history_context}".strip()
+                task_metadata["web_search_queries"] = chat_service.plan_web_search_queries(
+                    user_message,
+                    conversation_id,
+                    active_context=planner_context,
+                    query_plan=task_metadata.get("query_plan"),
+                )
             task_metadata["evidence_mode"] = (
                 "mixed" if document_count and task_metadata["web_search_enabled"]
                 else "internal" if document_count
@@ -403,6 +429,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 "selected_transcript_ids": (metadata or {}).get("selected_transcript_ids") or [],
                 "chat_document_count": task_metadata.get("chat_document_count", 0),
                 "web_search_enabled": bool((metadata or {}).get("web_search_enabled", False)),
+                "web_search_queries": task_metadata.get("web_search_queries") or [],
                 "evidence_mode": task_metadata.get("evidence_mode", "general"),
             }
             audit_log.save(update_fields=['source_metadata'])
