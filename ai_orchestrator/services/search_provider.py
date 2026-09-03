@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class SearXNGProviderService:
             if str(engine).strip()
         ]
         self.language = str(getattr(settings, "SEARXNG_LANGUAGE", "en-IN") or "en-IN").strip()
+        self.cache_ttl = max(0, int(getattr(settings, "SEARXNG_CACHE_TTL", 300) or 0))
         self.last_status = "not_run"
 
     def search_results(
@@ -34,6 +36,10 @@ class SearXNGProviderService:
         engine_subset: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return normalized SearXNG results, keeping source metadata for grounding."""
+        query = self.sanitize_query(query)
+        if not query:
+            self.last_status = "no_results"
+            return []
         raw_results: list[dict[str, Any]] = []
         self.last_status = "searching"
         had_error = False
@@ -43,6 +49,15 @@ class SearXNGProviderService:
             if aggregate_engines
             else self._engine_order(query)
         )
+        cache_key = self._cache_key(query, num_results, engine_order)
+        if self.cache_ttl:
+            try:
+                cached = cache.get(cache_key)
+            except Exception:
+                cached = None
+            if isinstance(cached, list):
+                self.last_status = "cache_hit"
+                return cached
         for engine in engine_order:
             params = {"q": query, "format": "json", "language": self.language}
             if engine:
@@ -88,12 +103,42 @@ class SearXNGProviderService:
                 "snippet": snippet,
                 "url": url,
                 "engine": str(item.get("engine") or "").strip(),
+                "engines": [str(engine).strip() for engine in (item.get("engines") or []) if str(engine).strip()],
                 "published_date": str(item.get("publishedDate") or item.get("pubdate") or "").strip(),
                 "query": query,
                 "score": item.get("score"),
             })
         self.last_status = "completed" if results else ("failed" if had_error else "no_results")
+        if results and self.cache_ttl:
+            try:
+                cache.set(cache_key, results, timeout=self.cache_ttl)
+            except Exception:
+                pass
         return results
+
+    def _cache_key(self, query: str, num_results: int, engine_order: list[str | None]) -> str:
+        material = "|".join([
+            self.base_url,
+            self.language,
+            str(num_results),
+            ",".join(str(engine or "default") for engine in engine_order),
+            query.casefold(),
+        ])
+        return f"searxng:search:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+    @staticmethod
+    def sanitize_query(value: Any, *, max_length: int = 320) -> str:
+        """Bound outbound queries and remove common accidental private identifiers."""
+        query = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or ""))
+        query = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"(?<!\d)(?:\+?\d[\d ()-]{8,}\d)(?!\d)", " ", query)
+        query = re.sub(
+            r"(?i)(?:\b(?:INR|USD|EUR|GBP|Rs\.?)\s*[₹$€£]?|[₹$€£])\s*\d[\d,.]*\s*(?:crore|cr|lakh|million|billion|mn|bn)?\b",
+            " ",
+            query,
+        )
+        query = re.sub(r"(?<!\w)\d+(?:\.\d+)?%(?!\w)", " ", query)
+        return re.sub(r"\s+", " ", query).strip()[:max_length]
 
     def _engine_order(self, query: str) -> list[str | None]:
         """Distribute queries across engines, retaining sequential fallbacks."""
@@ -103,26 +148,34 @@ class SearXNGProviderService:
         start = int.from_bytes(digest[:4], "big") % len(self.engines)
         return self.engines[start:] + self.engines[:start]
 
-    def _engine_subset(self, query: str, *, limit: int = 3) -> list[str]:
+    def engine_subset_for_query(self, query: str, *, limit: int = 3) -> list[str]:
         """Choose a small provider group suited to one planned query."""
         lowered = str(query or "").casefold()
         if re.search(r"\b(news|latest|recent|today|update|funding|investment|acquisition|regulatory|regulation|licen[cs]e|rbi)\b", lowered):
-            preferred = ["duckduckgo news", "bing news", "brave.news", "mwmbl"]
+            anchors = ["duckduckgo news", "bing news"]
+            optional = ["brave.news", "mwmbl"]
         elif re.search(r"\b(what is|who is|overview|profile|founded|founder|headquarter|business model|history)\b", lowered):
-            preferred = ["duckduckgo web", "brave", "bing", "wikipedia", "wikidata"]
+            anchors = ["duckduckgo web", "bing"]
+            optional = ["brave", "wikipedia", "wikidata"]
         else:
-            preferred = ["duckduckgo web", "brave", "bing", "mwmbl", "privacywall"]
+            anchors = ["duckduckgo web", "bing"]
+            optional = ["brave", "mwmbl", "privacywall"]
 
         configured = {engine.casefold(): engine for engine in self.engines}
-        available = [configured[name.casefold()] for name in preferred if name.casefold() in configured]
+        selected = [configured[name.casefold()] for name in anchors if name.casefold() in configured]
+        available_optional = [configured[name.casefold()] for name in optional if name.casefold() in configured]
+        if available_optional and len(selected) < limit:
+            digest = hashlib.sha256(str(query or "").strip().casefold().encode("utf-8")).digest()
+            start = int.from_bytes(digest[:4], "big") % len(available_optional)
+            selected.extend((available_optional[start:] + available_optional[:start])[: limit - len(selected)])
+        available = [*selected, *[engine for engine in self.engines if engine not in selected]]
         if not available:
-            available = list(self.engines)
-        if len(available) <= limit:
-            return available
-        digest = hashlib.sha256(str(query or "").strip().casefold().encode("utf-8")).digest()
-        start = int.from_bytes(digest[:4], "big") % len(available)
-        rotated = available[start:] + available[:start]
-        return rotated[:limit]
+            return []
+        return available[:limit]
+
+    def _engine_subset(self, query: str, *, limit: int = 3) -> list[str]:
+        """Backward-compatible alias for callers outside the shared provider."""
+        return self.engine_subset_for_query(query, limit=limit)
 
     def search_many(
         self,
@@ -146,7 +199,7 @@ class SearXNGProviderService:
                     query,
                     results_per_query,
                     aggregate_engines=True,
-                    engine_subset=self._engine_subset(query),
+                    engine_subset=self.engine_subset_for_query(query),
                 ): query
                 for query in unique_queries
             }

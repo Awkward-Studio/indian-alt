@@ -4,6 +4,7 @@ import json
 from typing import Any, Optional
 
 from django.conf import settings
+from django.utils import timezone
 
 from ..models import (
     AIAuditLog, AIPersonality, AISkill, AIPipelineDefinition,
@@ -213,3 +214,77 @@ class AIRuntimeService:
             source_metadata=source_metadata,
             celery_task_id=celery_task_id,
         )
+
+    @classmethod
+    def start_pipeline_stage(
+        cls,
+        pipeline_key: str,
+        stage_key: str,
+        *,
+        source_type: str,
+        source_id: Optional[str],
+        context_label: str,
+        source_metadata: Optional[dict] = None,
+        celery_task_id: Optional[str] = None,
+    ) -> Optional[AIAuditLog]:
+        """Create and broadcast one observable execution of a registered stage."""
+        from ai_orchestrator.services.pipeline_registry import (
+            PipelineRegistryService,
+            RegistryValidationError,
+        )
+        from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+        try:
+            resolved = PipelineRegistryService.resolve_stage(pipeline_key, stage_key)
+        except (AIPipelineDefinition.DoesNotExist, AIPipelineStage.DoesNotExist, RegistryValidationError):
+            return None
+
+        log = cls.create_audit_log(
+            source_type=source_type,
+            source_id=source_id,
+            context_label=context_label,
+            status="PROCESSING",
+            is_success=False,
+            system_prompt="",
+            user_prompt="",
+            source_metadata=source_metadata or {},
+            celery_task_id=celery_task_id,
+            pipeline=resolved.pipeline,
+            pipeline_stage=resolved.stage,
+            prompt_revision=resolved.prompt_revision,
+            skill_revision=resolved.skill_revision,
+        )
+        broadcast_audit_log_update(log, event_type="snapshot", done=False)
+        return log
+
+    @staticmethod
+    def finish_pipeline_stage(
+        log: Optional[AIAuditLog],
+        *,
+        result: Optional[dict] = None,
+        error: Optional[BaseException | str] = None,
+    ) -> None:
+        """Finish a stage log and send the terminal event used by the graph."""
+        if log is None:
+            return
+        from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+        log.completed_at = timezone.now()
+        log.request_duration_ms = max(
+            0,
+            int((log.completed_at - log.created_at).total_seconds() * 1000),
+        )
+        if error is None:
+            log.status = "COMPLETED"
+            log.is_success = True
+            log.parsed_json = result or {}
+            log.error_message = ""
+        else:
+            log.status = "FAILED"
+            log.is_success = False
+            log.error_message = str(error)[:2000]
+        log.save(update_fields=[
+            "status", "is_success", "parsed_json", "error_message",
+            "completed_at", "request_duration_ms",
+        ])
+        broadcast_audit_log_update(log, event_type="terminal", done=True)

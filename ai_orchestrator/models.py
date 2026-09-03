@@ -360,6 +360,7 @@ class AIPipelineStage(models.Model):
     class Kind(models.TextChoices):
         PROMPT = "prompt", "Prompt"
         SKILL = "skill", "Skill"
+        OPERATION = "operation", "Runtime operation"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     pipeline = models.ForeignKey(AIPipelineDefinition, on_delete=models.CASCADE, related_name="stages")
@@ -371,6 +372,11 @@ class AIPipelineStage(models.Model):
     prompt_definition = models.ForeignKey(AIPromptDefinition, on_delete=models.PROTECT, null=True, blank=True, related_name="stages")
     skill = models.ForeignKey(AISkill, on_delete=models.PROTECT, null=True, blank=True, related_name="pipeline_stages")
     required_variables = models.JSONField(default=list, blank=True)
+    depends_on = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Stage keys that must complete before this stage can run.",
+    )
     is_required = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

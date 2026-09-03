@@ -273,6 +273,7 @@ SEARXNG_BASE_URL = config('SEARXNG_BASE_URL', default='http://localhost:8081').r
 SEARXNG_TIMEOUT = config('SEARXNG_TIMEOUT', default=15, cast=float)
 SEARXNG_MAX_RESULTS = config('SEARXNG_MAX_RESULTS', default=30, cast=int)
 SEARXNG_SEARCH_WORKERS = config('SEARXNG_SEARCH_WORKERS', default=4, cast=int)
+SEARXNG_CACHE_TTL = config('SEARXNG_CACHE_TTL', default=300, cast=int)
 SEARXNG_ENGINES = config('SEARXNG_ENGINES', default='', cast=Csv())
 SEARXNG_LANGUAGE = config('SEARXNG_LANGUAGE', default='en-IN')
 SEARXNG_PAGE_FETCH_LIMIT = config('SEARXNG_PAGE_FETCH_LIMIT', default=5, cast=int)

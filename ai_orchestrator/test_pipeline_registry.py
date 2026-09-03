@@ -1,7 +1,8 @@
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase
 
-from ai_orchestrator.models import AIPipelineDefinition, AIPipelineStage, AIPromptDefinition
+from ai_orchestrator.models import AIAuditLog, AIPipelineDefinition, AIPipelineStage, AIPromptDefinition
+from ai_orchestrator.views import _pipeline_inventory
 from ai_orchestrator.services.pipeline_registry import (
     PipelineRegistryService,
     RegistryValidationError,
@@ -95,3 +96,38 @@ class PromptRevisionLifecycleTests(TestCase):
 
         self.assertEqual(competitor.prompt_revision.definition.key, "competitor_research_extract")
         self.assertEqual(ocr.prompt_revision.definition.key, "ocr_transcription")
+        public_search = PipelineRegistryService.resolve_stage(
+            "competitor_research", "public_search"
+        )
+        private_search = PipelineRegistryService.resolve_stage(
+            "competitor_research", "private_search"
+        )
+        screener = PipelineRegistryService.resolve_stage(
+            "competitor_research", "screener_resolution"
+        )
+        self.assertEqual(public_search.stage.kind, AIPipelineStage.Kind.OPERATION)
+        self.assertEqual(private_search.stage.depends_on, ["query_planner"])
+        self.assertEqual(screener.stage.depends_on, ["grounding"])
+
+    def test_inventory_exposes_registered_topology_and_live_stage_state(self):
+        call_command("seed_ai_prompts", verbosity=0)
+        extraction = AIPipelineStage.objects.get(pipeline__key="deal_ingestion", key="extraction")
+        self.assertEqual(extraction.depends_on, ["normalization"])
+        log = AIAuditLog.objects.create(
+            source_type="pipeline_test",
+            pipeline=extraction.pipeline,
+            pipeline_stage=extraction,
+            model_used="test-model",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PROCESSING",
+        )
+
+        pipeline = next(row for row in _pipeline_inventory() if row["key"] == "deal_ingestion")
+        stage = next(row for row in pipeline["stages"] if row["key"] == "extraction")
+
+        self.assertEqual(stage["depends_on"], ["normalization"])
+        self.assertEqual(stage["runtime"]["active_runs"], 1)
+        self.assertEqual(stage["runtime"]["last_run"]["id"], str(log.id))
+        self.assertEqual(pipeline["active_runs"], 1)

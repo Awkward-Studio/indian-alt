@@ -104,10 +104,13 @@ def normalize_web_citation(value: Any, *, retrieved_at: str) -> dict[str, Any] |
         return None
     return {
         "kind": "web",
+        "source_label": str(value.get("source_label") or "")[:20],
         "url": url,
         "title": str(value.get("title") or value.get("source_title") or parsed.netloc),
         "cited_text": str(value.get("cited_text") or value.get("snippet") or "")[:1000],
         "query": str(value.get("query") or "")[:500],
         "published_date": str(value.get("published_date") or "")[:100],
+        "engine": str(value.get("engine") or "")[:100],
+        "engines": [str(engine)[:100] for engine in (value.get("engines") or [])[:10]],
         "retrieved_at": retrieved_at,
     }

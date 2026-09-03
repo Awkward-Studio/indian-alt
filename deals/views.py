@@ -4,6 +4,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
 import django_filters.rest_framework as django_filters
+from django.conf import settings
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -43,7 +44,7 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
-COMPETITOR_RESEARCH_LOCK_SECONDS = 15 * 60
+COMPETITOR_RESEARCH_LOCK_SECONDS = 45 * 60
 COMPANY_NEWS_RESEARCH_LOCK_SECONDS = 15 * 60
 
 
@@ -2205,10 +2206,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Triggers an asynchronous background Celery task to research and fetch competitors.
         """
         deal = self.get_object()
-        instruction = str(request.data.get("instruction") or "").strip()
-        existing_competitors = request.data.get("existing_competitors") or []
-        if not isinstance(existing_competitors, list):
-            existing_competitors = []
+        instruction = str(request.data.get("instruction") or "").strip()[:1000]
+        # Competitor candidates are server-owned state. Never merge arbitrary
+        # candidate objects supplied by a browser into the deal record.
+        existing_competitors = []
+
+        if request.data.get("sync") and not settings.DEBUG:
+            return Response(
+                {"error": "Synchronous competitor research is disabled outside development."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if request.data.get("sync"):
             try:
@@ -2302,6 +2309,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         Polls the execution status of the competitor research background task.
         """
         from celery.result import AsyncResult
+        expected_task_id = cache.get(_competitor_research_cache_key(pk))
+        if not expected_task_id or str(expected_task_id) != str(task_id):
+            return Response(
+                {"status": "FAILURE", "error": "This competitor task does not belong to the requested deal or has expired."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         res = AsyncResult(task_id)
         if res.status == 'SUCCESS':
             data = res.result or {}

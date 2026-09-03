@@ -16,7 +16,7 @@ from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_up
 
 logger = logging.getLogger(__name__)
 
-CHAT_HISTORY_MESSAGE_LIMIT = 3
+CHAT_HISTORY_MESSAGE_LIMIT = 8
 CHAT_HISTORY_CHAR_LIMIT = 12000
 
 DEAL_CHAT_CONVERSATIONAL_PROMPT = """[CHAT HISTORY]
@@ -109,6 +109,22 @@ def _split_leaked_thinking(response: str, thinking: str = "") -> tuple[str, str]
     cleaned_response = re.sub(r"</?(thinking|think|response)>", "", cleaned_response, flags=re.IGNORECASE).strip()
     cleaned_thinking = "\n\n".join(part for part in thinking_parts if part)
     return cleaned_response, cleaned_thinking
+
+
+def _citations_used_in_response(citations: list[dict], response: str) -> list[dict]:
+    """Keep web sources the answer actually references; internal retrieval stays visible."""
+    response_text = str(response or "")
+    selected = []
+    for citation in citations:
+        if citation.get("kind") != "web":
+            selected.append(citation)
+            continue
+        url = str(citation.get("url") or "").strip()
+        label = str(citation.get("source_label") or "").strip()
+        label_pattern = rf"\[{re.escape(label)}\]" if label else ""
+        if (url and url in response_text) or (label_pattern and re.search(label_pattern, response_text, flags=re.IGNORECASE)):
+            selected.append(citation)
+    return selected
 
 
 def _build_history_context(conversation: AIConversation) -> tuple[str, int, int]:
@@ -250,9 +266,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
 
         # Update triggering user message with audit_log_id
         user_msg = AIMessage.objects.filter(
-            conversation=conversation, 
-            role='user'
-        ).order_by('-created_at').first()
+            id=(metadata or {}).get("user_message_id"),
+            conversation=conversation,
+            role='user',
+        ).first()
         if user_msg:
             if not isinstance(user_msg.applied_filters, dict):
                 user_msg.applied_filters = {}
@@ -537,6 +554,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             return {"status": "error", "error": audit_log.error_message or "Stream failed"}
 
         if full_text:
+            structured_citations = _citations_used_in_response(structured_citations, full_text)
             # Commit final message to conversation history
             AIMessage.objects.create(
                 conversation=conversation,

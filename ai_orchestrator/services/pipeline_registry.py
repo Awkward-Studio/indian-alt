@@ -50,6 +50,33 @@ class ResolvedStage:
 
 
 class PipelineRegistryService:
+    CORE_STAGE_DEPENDENCIES = {
+        ("deal_ingestion", "extraction"): ["normalization"],
+        ("deal_ingestion", "evidence"): ["normalization"],
+        ("deal_ingestion", "synthesis"): ["extraction", "evidence"],
+        ("deal_ingestion", "incremental_analysis"): ["synthesis"],
+        ("email_ingestion", "unroll"): ["routing"],
+        ("email_ingestion", "fusion"): ["unroll"],
+        ("email_ingestion", "synthesis"): ["fusion"],
+    }
+
+    RESEARCH_STAGE_DEPENDENCIES = {
+        ("competitor_research", "public_search"): ["query_planner"],
+        ("competitor_research", "private_search"): ["query_planner"],
+        ("competitor_research", "page_fetch"): ["public_search", "private_search"],
+        ("competitor_research", "extract"): ["page_fetch"],
+        ("competitor_research", "grounding"): ["extract"],
+        ("competitor_research", "screener_resolution"): ["grounding"],
+        ("competitor_research", "persist_candidates"): ["screener_resolution"],
+        ("meeting_analysis", "extract"): ["system"],
+        ("company_enrichment", "screener_resolve"): ["screener_system"],
+        ("public_news_research", "synthesis"): ["system", "research", "web_search"],
+        ("public_news_research", "ground_cards"): ["synthesis"],
+        ("public_news_research", "persist_memo"): ["ground_cards"],
+        ("public_news_research", "embed_memo"): ["persist_memo"],
+        ("workplace_verification", "queries"): ["policy"],
+    }
+
     @staticmethod
     def placeholders(template: str) -> set[str]:
         return set(PLACEHOLDER_PATTERN.findall(template or ""))
@@ -268,6 +295,8 @@ class PipelineRegistryService:
             if not revision:
                 raise RegistryValidationError(f"No published prompt revision for {pipeline_key}.{stage_key}.")
             return ResolvedStage(pipeline=pipeline, stage=stage, prompt_revision=revision)
+        if stage.kind == AIPipelineStage.Kind.OPERATION:
+            return ResolvedStage(pipeline=pipeline, stage=stage)
         revision = AISkillRevision.objects.filter(
             skill=stage.skill, status=AISkillRevision.Status.PUBLISHED,
         ).order_by("-revision").first()
@@ -421,9 +450,13 @@ class PipelineRegistryService:
                 if not skill:
                     continue
                 defaults["skill"] = skill
-            AIPipelineStage.objects.get_or_create(
+            stage, _ = AIPipelineStage.objects.get_or_create(
                 pipeline=resolved_pipelines[pipeline_key], key=stage_key, defaults=defaults
             )
+            dependencies = cls.CORE_STAGE_DEPENDENCIES.get((pipeline_key, stage_key), [])
+            if stage.depends_on != dependencies:
+                stage.depends_on = dependencies
+                stage.save(update_fields=["depends_on", "updated_at"])
 
     @classmethod
     @transaction.atomic
@@ -531,7 +564,7 @@ Include only companies explicitly supported as competitors by supplied evidence.
             definition = definitions.get(definition_key)
             if not definition:
                 continue
-            AIPipelineStage.objects.get_or_create(
+            stage, _ = AIPipelineStage.objects.get_or_create(
                 pipeline=resolved_pipelines[pipeline_key],
                 key=stage_key,
                 defaults={
@@ -542,3 +575,45 @@ Include only companies explicitly supported as competitors by supplied evidence.
                     "required_variables": definition.variables,
                 },
             )
+            dependencies = cls.RESEARCH_STAGE_DEPENDENCIES.get((pipeline_key, stage_key), [])
+            if stage.depends_on != dependencies:
+                stage.depends_on = dependencies
+                stage.save(update_fields=["depends_on", "updated_at"])
+
+        operation_stages = (
+            ("competitor_research", "public_search", "Public-company web search", "Searches listed peers using the public-company query and selected SearXNG engines."),
+            ("competitor_research", "private_search", "Private-company web search", "Searches private and unlisted competitors using a separate SearXNG route."),
+            ("competitor_research", "page_fetch", "Evidence page fetch", "Fetches selected public pages and extracts article evidence from safe URLs."),
+            ("competitor_research", "grounding", "Evidence grounding", "Keeps candidates tied to returned source URLs and separates public, private, and unknown classifications."),
+            ("competitor_research", "screener_resolution", "Screener name and URL resolution", "Resolves aliases, tickers, and canonical Screener URLs without dropping grounded public candidates when Screener has no match."),
+            ("competitor_research", "persist_candidates", "Persist competitor candidates", "Merges grounded candidates into the deal ledger with provenance."),
+            ("public_news_research", "web_search", "Company-news web search", "Runs the company query through the configured SearXNG engines."),
+            ("public_news_research", "synthesis", "News synthesis", "Combines the published system and research prompts with returned web evidence."),
+            ("public_news_research", "ground_cards", "Ground news cards", "Keeps news cards that match an actual returned source URL."),
+            ("public_news_research", "persist_memo", "Persist research memo", "Stores the dated memo, artifact, source map, and citations."),
+            ("public_news_research", "embed_memo", "Embed research memo", "Indexes the saved memo for later deal retrieval."),
+        )
+        for offset, (pipeline_key, stage_key, name, description) in enumerate(operation_stages, start=len(stage_bindings)):
+            stage, _ = AIPipelineStage.objects.get_or_create(
+                pipeline=resolved_pipelines[pipeline_key],
+                key=stage_key,
+                defaults={
+                    "name": name,
+                    "description": description,
+                    "position": offset,
+                    "kind": AIPipelineStage.Kind.OPERATION,
+                },
+            )
+            changed_fields = []
+            for field, value in {
+                "name": name,
+                "description": description,
+                "position": offset,
+                "kind": AIPipelineStage.Kind.OPERATION,
+                "depends_on": cls.RESEARCH_STAGE_DEPENDENCIES.get((pipeline_key, stage_key), []),
+            }.items():
+                if getattr(stage, field) != value:
+                    setattr(stage, field, value)
+                    changed_fields.append(field)
+            if changed_fields:
+                stage.save(update_fields=[*changed_fields, "updated_at"])

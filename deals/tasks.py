@@ -3,7 +3,7 @@ import json
 import time
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from celery import shared_task, chord
+from celery import shared_task, chord, current_task
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
@@ -2140,6 +2140,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
     Runs SearXNG-grounded VM research for public-domain company/promoter news,
     persists each run as a dated memo document, and vectorizes it for retrieval.
     """
+    active_log = None
     try:
         deal = Deal.objects.get(id=deal_id)
         generated_at = timezone.now()
@@ -2181,14 +2182,36 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         from ai_orchestrator.services.search_provider import SearXNGProviderService
         search_query = instruction if instruction else f"{deal.title} public news latest"
         search_service = SearXNGProviderService()
+        active_log = AIRuntimeService.start_pipeline_stage(
+            "public_news_research",
+            "web_search",
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}: Web search",
+            source_metadata={"deal_id": str(deal.id), "query": search_query},
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         search_results = search_service.search_results(search_query, num_results=8)
+        AIRuntimeService.finish_pipeline_stage(
+            active_log,
+            result={"query": search_query, "sources": len(search_results)},
+        )
+        active_log = None
         search_context = search_service.format_context(search_results)
 
         augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
 
         from ai_orchestrator.services.llm_providers import VLLMProviderService
-        from ai_orchestrator.services.runtime import AIRuntimeService
         service = VLLMProviderService()
+        active_log = AIRuntimeService.start_pipeline_stage(
+            "public_news_research",
+            "synthesis",
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}: News synthesis",
+            source_metadata={"deal_id": str(deal.id), "source_count": len(search_results)},
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         result = service.execute_standard({
             "model": AIRuntimeService.get_text_model(),
             "system": system_prompt,
@@ -2216,9 +2239,23 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
                 "other": [],
                 "sources": [],
             }
+        AIRuntimeService.finish_pipeline_stage(
+            active_log,
+            result={"response_chars": len(response_text), "parsed_json": bool(research)},
+        )
+        active_log = None
 
         if not research.get("executive_summary") and research.get("overview"):
             research["executive_summary"] = research.get("overview")
+        active_log = AIRuntimeService.start_pipeline_stage(
+            "public_news_research",
+            "ground_cards",
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}: Ground news cards",
+            source_metadata={"deal_id": str(deal.id), "source_count": len(search_results)},
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         news_cards = _ground_company_news_cards(research, search_results)
         research["sources"] = [
             str(item.get("url") or "").strip()
@@ -2250,6 +2287,11 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             news_cards = merged_cards[:10]  # Cap at 10 total items if refined
 
         research["news_cards"] = news_cards
+        AIRuntimeService.finish_pipeline_stage(
+            active_log,
+            result={"grounded_cards": len(news_cards), "sources": len(search_results)},
+        )
+        active_log = None
 
         news_risks = (
             _company_news_list(research.get("litigation"))
@@ -2292,6 +2334,15 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         }
         title = f"Public Domain News Research - {generated_at.date().isoformat()}"
 
+        active_log = AIRuntimeService.start_pipeline_stage(
+            "public_news_research",
+            "persist_memo",
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}: Persist research memo",
+            source_metadata={"deal_id": str(deal.id), "grounded_cards": len(news_cards)},
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         doc = DealDocument.objects.create(
             deal=deal,
             title=title,
@@ -2332,12 +2383,31 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "source_map": source_map,
         }
         DocumentArtifactService.persist_artifact(doc, artifact)
+        AIRuntimeService.finish_pipeline_stage(
+            active_log,
+            result={"document_id": str(doc.id), "title": title},
+        )
+        active_log = None
 
         indexed = False
+        active_log = AIRuntimeService.start_pipeline_stage(
+            "public_news_research",
+            "embed_memo",
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}: Embed research memo",
+            source_metadata={"deal_id": str(deal.id), "document_id": str(doc.id)},
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         try:
             indexed = EmbeddingService().vectorize_document(doc)
         except Exception as embedding_error:
+            AIRuntimeService.finish_pipeline_stage(active_log, error=embedding_error)
+            active_log = None
             logger.warning("Company news document vectorization failed for %s: %s", doc.id, embedding_error, exc_info=True)
+        else:
+            AIRuntimeService.finish_pipeline_stage(active_log, result={"indexed": bool(indexed)})
+            active_log = None
 
         doc.refresh_from_db()
         return {
@@ -2363,6 +2433,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "generated_at": generated_at.isoformat(),
         }
     except Exception as e:
+        AIRuntimeService.finish_pipeline_stage(active_log, error=e)
         logger.error("Company news web search failed for deal %s: %s", deal_id, str(e), exc_info=True)
         return {"error": str(e)}
 
@@ -2376,22 +2447,17 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
     """
     import logging
     logger = logging.getLogger(__name__)
+    persist_log = None
     try:
         from deals.models import Deal
         deal = Deal.objects.get(id=deal_id)
         instruction = str(instruction or "").strip()
-        requested_existing = existing_competitors or []
         existing_competitors = list(deal.competitor_candidates or [])
         existing_keys = {
             _competitor_result_key(item)
             for item in existing_competitors
             if _competitor_result_key(item) not in {"name:", "cin:"}
         }
-        for competitor in requested_existing:
-            key = _competitor_result_key(competitor)
-            if key not in existing_keys:
-                existing_competitors.append(competitor)
-                existing_keys.add(key)
         from .services.competitor_web_research import CompetitorWebResearchService
 
         research = CompetitorWebResearchService().research(
@@ -2402,6 +2468,13 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
             business_summary=deal.deal_summary or "",
             instruction=instruction,
             existing_competitors=existing_competitors,
+            tracking_context={
+                "source_id": str(deal.id),
+                "context_label": f"Competitor research: {deal.title}",
+                "celery_task_id": getattr(getattr(current_task, "request", None), "id", None),
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+            },
         )
         raw_competitors = research.get("competitors", [])
         competitors = []
@@ -2415,27 +2488,51 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
 
         # Persist pipeline output in the worker so the ledger is updated even if
         # the browser closes before its polling loop receives the result.
-        persisted_competitors = list(existing_competitors)
-        persisted_keys = {
-            _competitor_result_key(item)
-            for item in persisted_competitors
-            if _competitor_result_key(item) not in {"name:", "cin:"}
-        }
-        for competitor in competitors:
-            key = _competitor_result_key(competitor)
-            if key not in persisted_keys:
-                persisted_competitors.append(competitor)
-                persisted_keys.add(key)
-        previous_competitors = deal.competitor_candidates or []
-        deal.competitor_candidates = persisted_competitors
-        deal.updated_at = timezone.now()
-        deal.save(update_fields=["competitor_candidates", "updated_at"])
-        from deals.services.field_provenance import record_deal_field_changes
-        record_deal_field_changes(
-            deal,
-            {"competitor_candidates": (previous_competitors, persisted_competitors)},
-            source_type="AI",
-            source_id="pipeline:competitor_search",
+        persist_log = AIRuntimeService.start_pipeline_stage(
+            "competitor_research",
+            "persist_candidates",
+            source_type="competitor_research",
+            source_id=str(deal.id),
+            context_label=f"Competitor research: {deal.title}: Persist candidates",
+            source_metadata={
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+                "candidate_count": len(competitors),
+            },
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
+        with transaction.atomic():
+            locked_deal = Deal.objects.select_for_update().get(id=deal_id)
+            previous_competitors = list(locked_deal.competitor_candidates or [])
+            persisted_competitors = list(previous_competitors)
+            persisted_keys = {
+                _competitor_result_key(item)
+                for item in persisted_competitors
+                if _competitor_result_key(item) not in {"name:", "cin:"}
+            }
+            for competitor in competitors:
+                key = _competitor_result_key(competitor)
+                if key not in persisted_keys:
+                    persisted_competitors.append(competitor)
+                    persisted_keys.add(key)
+            locked_deal.competitor_candidates = persisted_competitors
+            locked_deal.updated_at = timezone.now()
+            locked_deal.save(update_fields=["competitor_candidates", "updated_at"])
+            from deals.services.field_provenance import record_deal_field_changes
+            record_deal_field_changes(
+                locked_deal,
+                {"competitor_candidates": (previous_competitors, persisted_competitors)},
+                source_type="AI",
+                source_id="pipeline:competitor_search",
+            )
+        AIRuntimeService.finish_pipeline_stage(
+            persist_log,
+            result={
+                "new_candidates": len(competitors),
+                "total_candidates": len(persisted_competitors),
+                "public": sum(item.get("company_type") == "listed_public" for item in competitors),
+                "private": sum(item.get("company_type") == "private" for item in competitors),
+            },
         )
 
         report_title = "Additional Competitor Search" if instruction else "Competitor Search Results"
@@ -2454,6 +2551,7 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
         }
             
     except Exception as e:
+        AIRuntimeService.finish_pipeline_stage(persist_log, error=e)
         logger.error(f"Async fetch competitors failed: {str(e)}")
         return {"error": str(e)}
 

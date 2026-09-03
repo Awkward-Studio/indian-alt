@@ -25,6 +25,10 @@ def serialize_audit_log(log) -> dict:
         "skill_name": log.skill.name if log.skill else "General Analysis",
         "personality_name": log.personality.name if log.personality else "Direct Inference",
         "celery_task_id": log.celery_task_id,
+        "pipeline_id": str(log.pipeline_id) if log.pipeline_id else None,
+        "pipeline_key": log.pipeline.key if log.pipeline_id else None,
+        "pipeline_stage_id": str(log.pipeline_stage_id) if log.pipeline_stage_id else None,
+        "pipeline_stage_key": log.pipeline_stage.key if log.pipeline_stage_id else None,
     }
 
 
@@ -49,6 +53,13 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
     )
 
     # 2. Lightweight payload for the general ledger (reduces "over capacity" errors)
+    active_runs = 0
+    if log.pipeline_stage_id:
+        active_runs = type(log).objects.filter(
+            pipeline_stage_id=log.pipeline_stage_id,
+            status__in=("PENDING", "PROCESSING"),
+        ).count()
+
     ledger_data = {
         "type": "ai_message",
         "event_type": "ledger_update",
@@ -57,6 +68,15 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
         "done": done,
         "context_label": log.context_label,
         "last_log_entry": log.worker_logs[-1] if log.worker_logs else None,
+        "pipeline_id": str(log.pipeline_id) if log.pipeline_id else None,
+        "pipeline_key": log.pipeline.key if log.pipeline_id else None,
+        "pipeline_stage_id": str(log.pipeline_stage_id) if log.pipeline_stage_id else None,
+        "pipeline_stage_key": log.pipeline_stage.key if log.pipeline_stage_id else None,
+        "started_at": log.created_at.isoformat() if log.created_at else None,
+        "completed_at": log.completed_at.isoformat() if log.completed_at else None,
+        "duration_ms": log.request_duration_ms,
+        "error": log.error_message,
+        "active_runs": active_runs,
     }
 
     async_to_sync(channel_layer.group_send)(

@@ -107,7 +107,7 @@ QUERY_PLANNER_RESPONSE_FORMAT = {
                 "semantic_queries": {"type": "array", "items": {"type": "string"}},
                 "web_search_queries": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "maxLength": 320},
                     "maxItems": 4,
                 },
                 "soft_constraints": {"type": "array", "items": {"type": "string"}},
@@ -579,7 +579,8 @@ class UniversalChatService:
                 "selected_sources": [],
             }
 
-        plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
+        planner_context = f"Active deal/company: {deal.title}\n{history_context}".strip()
+        plan = self._build_query_plan(user_message, conversation_id, active_context=planner_context)
         plan["deal_limit"] = 1
         evidence_scope = self._explicit_deal_evidence_scope(deal, user_message)
         if evidence_scope:
@@ -1834,7 +1835,6 @@ class UniversalChatService:
                 "max_tokens": 8192,
                 "temperature": 0.0,
             },
-            "chat_template_kwargs": {"enable_thinking": False},
         }
         planner_timeout = int(getattr(settings, "VLLM_PLANNER_TIMEOUT", 600) or 600)
         try:

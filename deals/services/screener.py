@@ -495,7 +495,15 @@ class ScreenerCompanyService:
     the existing company profile and relation tables.
     """
 
-    def search_company(self, company_name: str, *, raise_on_error: bool = False) -> dict[str, Any]:
+    def search_company(
+        self,
+        company_name: str,
+        *,
+        ticker: str = "",
+        exchange: str = "",
+        resolve_fallback: bool = False,
+        raise_on_error: bool = False,
+    ) -> dict[str, Any]:
         name_key = _company_match_key(company_name)
         if not name_key:
             return {}
@@ -513,6 +521,7 @@ class ScreenerCompanyService:
             value.strip()
             for value in [
                 company_name,
+                ticker,
                 *known_aliases,
                 *parenthetical,
                 outer_name,
@@ -550,7 +559,7 @@ class ScreenerCompanyService:
                 break
         if not successful_requests and last_error is not None and raise_on_error:
             raise last_error
-        if not results:
+        if not results and not resolve_fallback:
             return {}
 
         matches = []
@@ -565,7 +574,9 @@ class ScreenerCompanyService:
             if not result_key:
                 continue
             alias_keys = {_company_match_key(value) for value in known_aliases}
-            exact = result_key == name_key or result_key in alias_keys
+            result_ticker = _extract_ticker_from_url(str(result.get("url") or ""))
+            ticker_match = bool(ticker) and result_ticker == _clean_text(ticker, max_length=40).upper()
+            exact = result_key == name_key or result_key in alias_keys or ticker_match
             result_tokens = {
                 token for token in result_key.split()
                 if len(token) > 1 and token not in {"and", "the"}
@@ -586,7 +597,29 @@ class ScreenerCompanyService:
             if exact or contained or token_match:
                 matches.append((exact, overlap, result))
         if not matches:
-            return {}
+            if not resolve_fallback:
+                return {}
+            try:
+                resolved = self.resolve_screener_url(
+                    company_name,
+                    ticker=ticker,
+                    exchange=exchange,
+                )
+            except Exception:
+                if raise_on_error:
+                    raise
+                return {}
+            screener_url = _normalize_screener_url(resolved.get("screener_url"))
+            if not screener_url:
+                return {}
+            return {
+                "company_name": _clean_text(resolved.get("company_name") or company_name, max_length=200),
+                "ticker": _clean_text(resolved.get("ticker") or _extract_ticker_from_url(screener_url), max_length=40).upper(),
+                "exchange": _normalize_exchange(resolved.get("exchange") or exchange),
+                "screener_url": screener_url,
+                "warehouse_id": "",
+                "resolution_source": "grounded_url_resolver",
+            }
 
         result = max(matches, key=lambda item: (item[0], item[1]))[2]
         screener_url = _normalize_screener_url(

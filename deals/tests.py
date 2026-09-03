@@ -342,8 +342,10 @@ class SearXNGProviderTests(SimpleTestCase):
 
 
 @override_settings(VLLM_TEXT_MODEL="configured-local-model")
-class GroundedCompetitorWebResearchTests(SimpleTestCase):
-    databases = {"default"}
+class GroundedCompetitorWebResearchTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_ai_prompts", verbosity=0)
 
     @patch("deals.services.screener.ScreenerCompanyService.search_company")
     def test_two_searches_extract_and_classify_grounded_competitors(self, mock_screener_search):
@@ -399,7 +401,15 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
         service = CompetitorWebResearchService(search_service=search_service, llm_service=llm_service)
         service._enrich_evidence = MagicMock(side_effect=lambda **kwargs: kwargs["results"])
 
-        result = service.research(company_name="Zepto", sector="Quick commerce", location="India")
+        result = service.research(
+            company_name="Zepto",
+            sector="Quick commerce",
+            location="India",
+            tracking_context={
+                "source_id": "test-deal",
+                "context_label": "Competitor research: Zepto",
+            },
+        )
 
         self.assertEqual(search_service.search_results.call_count, 2)
         search_queries = [call.args[0] for call in search_service.search_results.call_args_list]
@@ -419,6 +429,15 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
         self.assertEqual(result["diagnostics"]["search_requests"], 2)
         self.assertEqual(result["diagnostics"]["discovered_candidates"], 2)
         self.assertEqual(result["diagnostics"]["query_plan"]["source"], "vm")
+        tracked_stages = list(
+            AIAuditLog.objects.filter(pipeline__key="competitor_research")
+            .values_list("pipeline_stage__key", flat=True)
+        )
+        self.assertTrue({
+            "query_planner", "public_search", "private_search", "page_fetch",
+            "extract", "grounding", "screener_resolution",
+        }.issubset(set(tracked_stages)))
+        self.assertEqual(tracked_stages.count("extract"), 2)
 
     @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
     def test_single_search_downgrades_unsupported_classification_to_unknown(self, _mock_screener_search):
@@ -546,6 +565,23 @@ class GroundedCompetitorWebResearchTests(SimpleTestCase):
         self.assertEqual(confirmed[0]["company_type"], "listed_public")
         self.assertEqual(confirmed[0]["ticker"], "LISTEDFOOD")
 
+    @patch("deals.services.screener.ScreenerCompanyService.search_company", return_value={})
+    def test_grounded_public_company_survives_missing_screener_match(self, _mock_search):
+        confirmed = CompetitorWebResearchService._confirm_screener_listings([{
+            "name": "Consumer Brand Listed Ltd",
+            "company_type": "listed_public",
+            "classification_confidence": 0.9,
+            "exchange": "NSE",
+            "ticker": "CONSUMER",
+            "classification_source": "Exchange evidence confirms the NSE listing.",
+            "discovery_route": "public",
+        }])
+
+        self.assertEqual(confirmed[0]["company_type"], "listed_public")
+        self.assertEqual(confirmed[0]["ticker"], "CONSUMER")
+        self.assertEqual(confirmed[0]["screener_url"], "")
+        self.assertIn("Screener name and URL resolution found no match", confirmed[0]["classification_source"])
+
     def test_grounding_excludes_target_legal_name_alias(self):
         service = CompetitorWebResearchService(search_service=MagicMock(), llm_service=MagicMock())
         evidence = [{
@@ -639,6 +675,33 @@ class ScreenerUrlResolutionTests(SimpleTestCase):
         self.assertEqual(
             mock_get.call_args_list[1].kwargs["params"]["q"],
             "FSN E-Commerce Ventures",
+        )
+
+    @patch("deals.services.screener.requests.get")
+    def test_company_search_uses_grounded_url_resolver_when_names_differ(self, mock_get):
+        response = MagicMock()
+        response.json.return_value = []
+        mock_get.return_value = response
+        service = ScreenerCompanyService()
+        service.resolve_screener_url = MagicMock(return_value={
+            "company_name": "Legal Listed Entity Ltd",
+            "ticker": "LEGAL",
+            "exchange": "NSE",
+            "screener_url": "https://screener.in/company/LEGAL/consolidated/?ref=search",
+        })
+
+        result = service.search_company(
+            "Consumer Brand",
+            ticker="LEGAL",
+            exchange="NSE",
+            resolve_fallback=True,
+        )
+
+        self.assertEqual(result["company_name"], "Legal Listed Entity Ltd")
+        self.assertEqual(result["ticker"], "LEGAL")
+        self.assertEqual(
+            result["screener_url"],
+            "https://www.screener.in/company/LEGAL/consolidated/",
         )
 
     def test_normalizes_only_official_screener_company_urls(self):
@@ -862,6 +925,13 @@ class CompetitorSearchPipelineTests(TestCase):
             docs.last().source_map_json["ledger_insights"]["industry_context"],
             "Acme has recent public-domain diligence news.",
         )
+        tracked_stages = set(
+            AIAuditLog.objects.filter(pipeline__key="public_news_research")
+            .values_list("pipeline_stage__key", flat=True)
+        )
+        self.assertTrue({
+            "web_search", "synthesis", "ground_cards", "persist_memo", "embed_memo",
+        }.issubset(tracked_stages))
 
         deal.latest_news_source_map = docs.last().source_map_json
         ledger_data = DealListSerializer(deal).data
@@ -954,6 +1024,12 @@ class CompetitorSearchPipelineTests(TestCase):
             [item["name"] for item in deal.competitor_candidates],
             ["Peer Commerce"],
         )
+        persist_log = AIAuditLog.objects.get(
+            pipeline__key="competitor_research",
+            pipeline_stage__key="persist_candidates",
+        )
+        self.assertEqual(persist_log.status, "COMPLETED")
+        self.assertEqual(persist_log.parsed_json["public"], 1)
         mock_research.assert_called_once()
 
     def test_competitor_parser_accepts_nested_grouped_public_private_payloads(self):

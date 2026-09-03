@@ -255,6 +255,9 @@ class DealChatView(APIView):
         stream = request.data.get('stream', True)
         if not deal_id or not user_message:
             return Response({"error": "deal_id and message are required"}, status=400)
+        if not isinstance(user_message, str) or len(user_message.strip()) > 12000:
+            return Response({"error": "message must be text no longer than 12,000 characters"}, status=400)
+        user_message = user_message.strip()
         try:
             deal = Deal.objects.get(id=deal_id)
             try:
@@ -323,6 +326,31 @@ class DealChatView(APIView):
             personality = AIPersonality.objects.filter(is_default=True).first()
             skill = AISkill.objects.filter(name='deal_chat').first()
             citation_preview = [internal_citation(chunk) for chunk in selected_sources]
+
+            conversation_id = request.data.get('conversation_id')
+            if conversation_id:
+                conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
+                if not conversation:
+                    return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+                conversation_metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+                if (
+                    conversation_metadata.get("kind") != "deal_chat"
+                    or str(conversation_metadata.get("deal_id") or "") != str(deal.id)
+                ):
+                    return Response(
+                        {"error": "This conversation belongs to a different chat context."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            else:
+                conversation = AIConversation.objects.create(
+                    user=request.user,
+                    title=f"Chat: {deal.title}",
+                    metadata={
+                        "kind": "deal_chat",
+                        "deal_id": str(deal.id),
+                        "deal_title": deal.title,
+                    },
+                )
             
             # Create PENDING audit log for background tracking
             audit_log = AIRuntimeService.create_audit_log(
@@ -348,24 +376,8 @@ class DealChatView(APIView):
 
             from .tasks import generate_chat_response_async
             
-            # If conversation_id is provided, try to find the existing conversation
-            conversation_id = request.data.get('conversation_id')
-            conversation = None
-            if conversation_id:
-                conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
-            if not conversation:
-                conversation = AIConversation.objects.create(
-                    user=request.user,
-                    title=f"Chat: {deal.title}",
-                    metadata={
-                        "kind": "deal_chat",
-                        "deal_id": str(deal.id),
-                        "deal_title": deal.title,
-                    }
-                )
-
             # Save the user message to DB immediately (fixes Bug 1)
-            AIMessage.objects.create(
+            user_chat_message = AIMessage.objects.create(
                 conversation=conversation,
                 role='user',
                 content=user_message,
@@ -404,6 +416,7 @@ class DealChatView(APIView):
                             'selected_transcript_ids': scope.transcript_ids,
                             'interactive_context_data': interactive_context_data,
                             'selected_sources': selected_sources,
+                            'user_message_id': str(user_chat_message.id),
                         },
                         'audit_log_id': str(audit_log.id)
                     }
@@ -437,6 +450,9 @@ class UniversalChatView(APIView):
         conversation_id = request.data.get('conversation_id')
         stream = request.data.get('stream', True)
         if not user_message: return Response({"error": "message is required"}, status=400)
+        if not isinstance(user_message, str) or len(user_message.strip()) > 12000:
+            return Response({"error": "message must be text no longer than 12,000 characters"}, status=400)
+        user_message = user_message.strip()
 
         try:
             model_provider = str(request.data.get('model_provider') or 'vllm').strip().lower()
@@ -446,10 +462,15 @@ class UniversalChatView(APIView):
             if not isinstance(web_search_enabled, bool):
                 return Response({"error": "web_search_enabled must be a boolean."}, status=400)
             if conversation_id:
-                try: 
-                    conversation = AIConversation.objects.get(id=conversation_id, user=request.user)
-                except: 
-                    conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
+                conversation = AIConversation.objects.filter(id=conversation_id, user=request.user).first()
+                if not conversation:
+                    return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+                conversation_metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
+                if conversation_metadata.get("kind") == "deal_chat":
+                    return Response(
+                        {"error": "A deal chat conversation cannot be reused as a global chat."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
             else:
                 conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
 
@@ -464,11 +485,12 @@ class UniversalChatView(APIView):
                     status=400,
                 )
             
-            AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
+            user_chat_message = AIMessage.objects.create(conversation=conversation, role='user', content=user_message)
             
             if not isinstance(conversation.metadata, dict):
                 conversation.metadata = {}
             conversation.metadata['model_provider'] = model_provider
+            conversation.metadata['kind'] = 'universal_chat'
             conversation.save(update_fields=['metadata'])
 
             personality = AIPersonality.objects.filter(is_default=True).first()
@@ -499,6 +521,7 @@ class UniversalChatView(APIView):
                         'metadata': {
                             'model_provider': model_provider,
                             'web_search_enabled': web_search_enabled,
+                            'user_message_id': str(user_chat_message.id),
                         }, # We will build the context entirely inside the Celery task
                         'audit_log_id': str(audit_log.id)
                     }
@@ -1334,19 +1357,57 @@ class ForexRateView(APIView):
 
 
 def _pipeline_inventory() -> list[dict]:
-    """Small, UI-oriented representation of the published pipeline registry."""
+    """Return registered topology plus the latest observed execution per stage."""
     pipelines = AIPipelineDefinition.objects.filter(is_active=True).prefetch_related(
         "stages__prompt_definition__revisions", "stages__skill__revisions"
     ).order_by("name")
+    active_statuses = ("PENDING", "PROCESSING")
+    active_counts = {
+        row["pipeline_stage_id"]: row["count"]
+        for row in AIAuditLog.objects.filter(
+            pipeline_stage_id__isnull=False,
+            status__in=active_statuses,
+        ).values("pipeline_stage_id").annotate(count=Count("id"))
+    }
+    latest_by_stage = {}
+    for log in AIAuditLog.objects.filter(
+        pipeline_stage_id__isnull=False,
+    ).only(
+        "id", "pipeline_stage_id", "status", "created_at", "completed_at",
+        "request_duration_ms", "context_label", "source_type", "error_message",
+    ).order_by("-created_at")[:2000]:
+        latest_by_stage.setdefault(log.pipeline_stage_id, log)
+
     result = []
     for pipeline in pipelines:
         stages = []
         for stage in pipeline.stages.all().order_by("position", "name"):
+            latest = latest_by_stage.get(stage.id)
+            stage_active_runs = active_counts.get(stage.id, 0)
+            runtime = {
+                "status": "PROCESSING" if stage_active_runs else (latest.status if latest else "IDLE"),
+                "active_runs": stage_active_runs,
+                "last_run": {
+                    "id": str(latest.id),
+                    "status": latest.status,
+                    "started_at": latest.created_at,
+                    "completed_at": latest.completed_at,
+                    "duration_ms": latest.request_duration_ms,
+                    "label": latest.context_label,
+                    "source_type": latest.source_type,
+                    "error": latest.error_message,
+                } if latest else None,
+            }
+            shared = {
+                "id": str(stage.id), "key": stage.key, "name": stage.name,
+                "position": stage.position, "depends_on": stage.depends_on,
+                "is_required": stage.is_required, "runtime": runtime,
+            }
             if stage.prompt_definition_id:
                 revisions = list(stage.prompt_definition.revisions.order_by("-revision"))
                 active = next((row for row in revisions if row.status == AIPromptRevision.Status.PUBLISHED), None)
                 stages.append({
-                    "id": str(stage.id), "key": stage.key, "name": stage.name,
+                    **shared,
                     "kind": "prompt", "required_variables": stage.required_variables,
                     "definition_key": stage.prompt_definition.key,
                     "description": stage.prompt_definition.description,
@@ -1358,14 +1419,31 @@ def _pipeline_inventory() -> list[dict]:
                 revisions = list(stage.skill.revisions.order_by("-revision"))
                 active = next((row for row in revisions if row.status == AISkillRevision.Status.PUBLISHED), None)
                 stages.append({
-                    "id": str(stage.id), "key": stage.key, "name": stage.name,
+                    **shared,
                     "kind": "skill", "required_variables": stage.required_variables,
                     "skill_id": str(stage.skill_id), "skill_name": stage.skill.name,
                     "description": stage.skill.description,
                     "active_revision": _serialize_skill_revision(active),
                     "revisions": [_serialize_skill_revision(row) for row in revisions[:20]],
                 })
-        result.append({"key": pipeline.key, "name": pipeline.name, "description": pipeline.description, "stages": stages})
+            else:
+                stages.append({
+                    **shared,
+                    "kind": "operation",
+                    "description": stage.description,
+                    "required_variables": [],
+                    "active_revision": None,
+                    "revisions": [],
+                })
+        pipeline_active_runs = sum(stage["runtime"]["active_runs"] for stage in stages)
+        result.append({
+            "key": pipeline.key,
+            "name": pipeline.name,
+            "description": pipeline.description,
+            "kind": "catalog" if pipeline.key.startswith("legacy_") else "runtime",
+            "active_runs": pipeline_active_runs,
+            "stages": stages,
+        })
     return result
 
 
