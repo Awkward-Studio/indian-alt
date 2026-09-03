@@ -216,6 +216,24 @@ class AnalysisNextStepsInspectionTests(SimpleTestCase):
     SEARXNG_SEARCH_WORKERS=2,
 )
 class SearXNGProviderTests(SimpleTestCase):
+    @override_settings(
+        SEARXNG_ENGINES=[
+            "duckduckgo web", "duckduckgo news", "duckduckgo", "bing news",
+            "bing", "brave.news", "brave", "mwmbl", "wikipedia", "wikidata",
+        ]
+    )
+    def test_query_specific_engine_subsets_are_small_and_intent_aware(self):
+        service = SearXNGProviderService()
+
+        news_engines = service._engine_subset("Razorpay latest RBI licence news")
+        profile_engines = service._engine_subset("Who is Razorpay and what is its business model?")
+
+        self.assertLessEqual(len(news_engines), 3)
+        self.assertLessEqual(len(profile_engines), 3)
+        self.assertTrue(set(news_engines).issubset({"duckduckgo news", "bing news", "brave.news", "mwmbl"}))
+        self.assertTrue(set(profile_engines).issubset({"duckduckgo web", "brave", "bing", "wikipedia", "wikidata"}))
+        self.assertNotEqual(news_engines, profile_engines)
+
     @patch("ai_orchestrator.services.search_provider.requests.get")
     def test_search_many_uses_configured_url_and_deduplicates_sources(self, mock_get):
         def response_for_query(*args, **kwargs):

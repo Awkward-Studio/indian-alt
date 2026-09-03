@@ -1,9 +1,4 @@
-use_default_settings:
-  engines:
-    keep_only:
-      - duckduckgo
-      - bing
-      - brave
+use_default_settings: true
 
 general:
   debug: false
@@ -35,14 +30,3 @@ outgoing:
   pool_connections: 50
   pool_maxsize: 20
   enable_http2: true
-
-engines:
-  - name: duckduckgo
-    disabled: false
-    timeout: 6.0
-  - name: bing
-    disabled: false
-    timeout: 6.0
-  - name: brave
-    disabled: false
-    timeout: 6.0

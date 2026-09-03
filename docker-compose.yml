@@ -48,7 +48,7 @@ services:
       - SEARXNG_TIMEOUT=${SEARXNG_TIMEOUT:-15}
       - SEARXNG_MAX_RESULTS=${SEARXNG_MAX_RESULTS:-30}
       - SEARXNG_SEARCH_WORKERS=${SEARXNG_SEARCH_WORKERS:-4}
-      - SEARXNG_ENGINES=${SEARXNG_ENGINES:-duckduckgo,bing}
+      - SEARXNG_ENGINES=${SEARXNG_ENGINES:-duckduckgo web,duckduckgo news,duckduckgo,bing news,bing,brave.news,brave,mwmbl,privacywall,wikipedia,wikidata}
       - SEARXNG_LANGUAGE=${SEARXNG_LANGUAGE:-en-IN}
       - SEARXNG_PAGE_FETCH_LIMIT=${SEARXNG_PAGE_FETCH_LIMIT:-5}
       - SEARXNG_PAGE_FETCH_WORKERS=${SEARXNG_PAGE_FETCH_WORKERS:-3}

@@ -31,13 +31,15 @@ class SearXNGProviderService:
         num_results: int = 5,
         *,
         aggregate_engines: bool = False,
+        engine_subset: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return normalized SearXNG results, keeping source metadata for grounding."""
         raw_results: list[dict[str, Any]] = []
         self.last_status = "searching"
         had_error = False
+        selected_engines = engine_subset if engine_subset is not None else self.engines
         engine_order = (
-            [",".join(self.engines) if self.engines else None]
+            [",".join(selected_engines) if selected_engines else None]
             if aggregate_engines
             else self._engine_order(query)
         )
@@ -101,6 +103,27 @@ class SearXNGProviderService:
         start = int.from_bytes(digest[:4], "big") % len(self.engines)
         return self.engines[start:] + self.engines[:start]
 
+    def _engine_subset(self, query: str, *, limit: int = 3) -> list[str]:
+        """Choose a small provider group suited to one planned query."""
+        lowered = str(query or "").casefold()
+        if re.search(r"\b(news|latest|recent|today|update|funding|investment|acquisition|regulatory|regulation|licen[cs]e|rbi)\b", lowered):
+            preferred = ["duckduckgo news", "bing news", "brave.news", "mwmbl"]
+        elif re.search(r"\b(what is|who is|overview|profile|founded|founder|headquarter|business model|history)\b", lowered):
+            preferred = ["duckduckgo web", "brave", "bing", "wikipedia", "wikidata"]
+        else:
+            preferred = ["duckduckgo web", "brave", "bing", "mwmbl", "privacywall"]
+
+        configured = {engine.casefold(): engine for engine in self.engines}
+        available = [configured[name.casefold()] for name in preferred if name.casefold() in configured]
+        if not available:
+            available = list(self.engines)
+        if len(available) <= limit:
+            return available
+        digest = hashlib.sha256(str(query or "").strip().casefold().encode("utf-8")).digest()
+        start = int.from_bytes(digest[:4], "big") % len(available)
+        rotated = available[start:] + available[:start]
+        return rotated[:limit]
+
     def search_many(
         self,
         queries: list[str],
@@ -123,6 +146,7 @@ class SearXNGProviderService:
                     query,
                     results_per_query,
                     aggregate_engines=True,
+                    engine_subset=self._engine_subset(query),
                 ): query
                 for query in unique_queries
             }
