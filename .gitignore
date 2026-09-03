@@ -58,6 +58,8 @@ auth_output.txt
 # Ignore all root-level python scripts except manage.py and specific config files
 /*.py
 !/manage.py
+!/bulk_pipeline_cli.py
+!/test_bulk_pipeline_cli.py
 !/requirements.txt
 !/railway.toml
 

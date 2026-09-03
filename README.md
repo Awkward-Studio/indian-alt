@@ -179,6 +179,50 @@ curl -X GET http://localhost:8000/api/core/deals/ \
 
 ## Development
 
+### Interactive bulk document pipeline
+
+Run the complete OneDrive extraction, artifact, and analysis workflow from one
+terminal interface:
+
+```bash
+venv/bin/python bulk_pipeline_cli.py
+```
+
+The interface reads `deal_discovery.json` and opens a keyboard-controlled folder
+picker. Use Up and Down to move, Space to select up to five deal folders, `B` or
+Right to inspect a selected folder's live OneDrive file tree, and Enter to move
+to phase choices. The tree view uses Enter or Right to expand a folder, Left to
+collapse it, and Backspace to return. Processing remains deal-folder scoped so
+Phase 3 never presents a partial file selection as a complete deal analysis.
+
+The runner calls the existing `bulk_1_extract.py`, `bulk_2_normalize.py`, and
+`bulk_3_synthesize.py` entry points. It does not alter their artifact formats.
+Child-process output is also copied to
+`data/extractions/audit/pipeline_cli/phaseN_latest.log`.
+
+The runner checkpoints every phase transition in
+`data/extractions/audit/pipeline_cli/run_state.json`. After interruption, launch
+the interactive CLI again and accept the resume prompt, or run:
+
+```bash
+venv/bin/python bulk_pipeline_cli.py --resume-run --yes
+```
+
+Completed phases are skipped. The interrupted phase restarts in resume mode so
+its existing outputs and caches are reused even when the original run requested
+a full redo.
+
+Phases run as complete batches rather than a per-deal conveyor. Phase 1 finishes
+for every selected deal before Phase 2 starts, and Phase 2 finishes for every
+selected deal before Phase 3 starts. The worker pools inside each phase remain
+concurrent.
+
+You can preview a run without calling OneDrive or the model services:
+
+```bash
+venv/bin/python bulk_pipeline_cli.py --select 1-10 --phases 1,2,3 --dry-run
+```
+
 ### Running Tests
 
 ```bash
