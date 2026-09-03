@@ -1,6 +1,6 @@
 services:
-  # T4 profile: llama.cpp serves multimodal Gemma 4 because vLLM's Gemma 4 attention
-  # kernel requires more shared memory than Turing provides.
+  # Application text generation and planning. llama.cpp is used because the
+  # vLLM Gemma 4 attention kernel exceeds Turing's shared-memory limit.
   vllm-text:
     image: ${VLLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
     container_name: vllm-text-t4
@@ -51,9 +51,6 @@ services:
       - --log-timestamps
       - --log-prefix
       - --no-webui
-      - --mmproj-auto
-      - --image-max-tokens
-      - ${LLAMA_IMAGE_MAX_TOKENS:-1120}
 
   tei-embedding:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:turing-1.9.3}
