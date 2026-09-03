@@ -1,4 +1,5 @@
 import logging
+import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
@@ -10,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
+from django.core.cache import cache
 from django.db.models import CharField, Count, Exists, F, JSONField, OuterRef, Prefetch, Q, Subquery, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
@@ -40,6 +42,17 @@ from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
+
+COMPETITOR_RESEARCH_LOCK_SECONDS = 15 * 60
+COMPANY_NEWS_RESEARCH_LOCK_SECONDS = 15 * 60
+
+
+def _competitor_research_cache_key(deal_id):
+    return f"deal:{deal_id}:competitor-research-task"
+
+
+def _company_news_research_cache_key(deal_id):
+    return f"deal:{deal_id}:company-news-research-task"
 
 
 class SectorResearchSourceRuleViewSet(viewsets.ModelViewSet):
@@ -2229,21 +2242,57 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 return Response({"error": f"Failed to run competitors research: {str(e)}"}, status=500)
 
         try:
+            from celery.result import AsyncResult
+            from celery.states import READY_STATES
             from .tasks import fetch_competitors_async_task
+
+            cache_key = _competitor_research_cache_key(deal.id)
+            existing_task_id = cache.get(cache_key)
+            if existing_task_id:
+                existing_status = AsyncResult(existing_task_id).status
+                if existing_status not in READY_STATES:
+                    return Response({
+                        "status": "queued",
+                        "task_id": existing_task_id,
+                        "reused": True,
+                        "message": "Competitor research is already running. Reusing the active task.",
+                    })
+                cache.delete(cache_key)
+
+            task_id = str(uuid.uuid4())
+            claimed = cache.add(
+                cache_key,
+                task_id,
+                timeout=COMPETITOR_RESEARCH_LOCK_SECONDS,
+            )
+            if claimed is False:
+                active_task_id = cache.get(cache_key)
+                if active_task_id:
+                    return Response({
+                        "status": "queued",
+                        "task_id": active_task_id,
+                        "reused": True,
+                        "message": "Competitor research is already being queued. Reusing the active task.",
+                    })
+
             task = fetch_competitors_async_task.apply_async(
                 kwargs={
                     'deal_id': str(deal.id),
                     'instruction': instruction,
                     'existing_competitors': existing_competitors,
                 },
-                queue='high_priority'
+                queue='high_priority',
+                task_id=task_id,
             )
             return Response({
                 "status": "queued",
                 "task_id": task.id,
+                "reused": False,
                 "message": "Competitor research background task successfully initialized."
             })
         except Exception as e:
+            if 'cache_key' in locals() and 'task_id' in locals() and cache.get(cache_key) == task_id:
+                cache.delete(cache_key)
             logger.error(f"Failed to trigger async competitors task for deal {deal.id}: {str(e)}")
             return Response({"error": f"Failed to initialize competitors research: {str(e)}"}, status=500)
 
@@ -2279,7 +2328,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return Response({
                 "status": "FAILURE",
                 "error": str(res.info or "Background execution failed unexpectedly.")
-            }, status=500)
+            }, status=200)
         
         return Response({
             "status": res.status,  # PENDING, STARTED, RETRY
@@ -2316,7 +2365,39 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 return Response({"error": f"Failed to run company news research: {str(e)}"}, status=500)
 
         try:
+            from celery.result import AsyncResult
+            from celery.states import READY_STATES
             from .tasks import fetch_company_news_async_task
+
+            cache_key = _company_news_research_cache_key(deal.id)
+            existing_task_id = cache.get(cache_key)
+            if existing_task_id:
+                existing_status = AsyncResult(existing_task_id).status
+                if existing_status not in READY_STATES:
+                    return Response({
+                        "status": "queued",
+                        "task_id": existing_task_id,
+                        "reused": True,
+                        "message": "Company news research is already running. Reusing the active task.",
+                    })
+                cache.delete(cache_key)
+
+            task_id = str(uuid.uuid4())
+            claimed = cache.add(
+                cache_key,
+                task_id,
+                timeout=COMPANY_NEWS_RESEARCH_LOCK_SECONDS,
+            )
+            if claimed is False:
+                active_task_id = cache.get(cache_key)
+                if active_task_id:
+                    return Response({
+                        "status": "queued",
+                        "task_id": active_task_id,
+                        "reused": True,
+                        "message": "Company news research is already being queued. Reusing the active task.",
+                    })
+
             task = fetch_company_news_async_task.apply_async(
                 kwargs={
                     "deal_id": str(deal.id),
@@ -2324,13 +2405,17 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     "existing_news": existing_news,
                 },
                 queue='high_priority',
+                task_id=task_id,
             )
             return Response({
                 "status": "queued",
                 "task_id": task.id,
+                "reused": False,
                 "message": "Company news research background task successfully initialized.",
             })
         except Exception as e:
+            if 'cache_key' in locals() and 'task_id' in locals() and cache.get(cache_key) == task_id:
+                cache.delete(cache_key)
             logger.error(f"Failed to trigger async company news task for deal {deal.id}: {str(e)}", exc_info=True)
             return Response({"error": f"Failed to initialize company news research: {str(e)}"}, status=500)
 
@@ -2353,7 +2438,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return Response({
                 "status": "FAILURE",
                 "error": str(res.info or "Background company news research failed unexpectedly."),
-            }, status=500)
+            }, status=200)
 
         return Response({"status": res.status})
 

@@ -2794,6 +2794,7 @@ class VentureIntelligenceServiceTests(TestCase):
 
 class VentureIntelligenceViewTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.user = User.objects.create_user(username="testuser", password="testpassword")
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
@@ -2803,6 +2804,66 @@ class VentureIntelligenceViewTests(TestCase):
             sector="Old Sector",
             city="Old City"
         )
+
+    @patch("celery.result.AsyncResult")
+    @patch("deals.tasks.fetch_competitors_async_task.apply_async")
+    def test_competitor_research_reuses_running_task(self, mock_apply_async, mock_async_result):
+        mock_apply_async.side_effect = lambda **kwargs: SimpleNamespace(id=kwargs["task_id"])
+        mock_async_result.return_value.status = "STARTED"
+        url = reverse("deal-fetch-competitors", kwargs={"pk": self.deal.id})
+
+        first = self.client.post(url, {}, format="json")
+        second = self.client.post(url, {}, format="json")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["task_id"], first.data["task_id"])
+        self.assertTrue(second.data["reused"])
+        self.assertEqual(mock_apply_async.call_count, 1)
+
+    @patch("celery.result.AsyncResult")
+    @patch("deals.tasks.fetch_competitors_async_task.apply_async")
+    def test_competitor_research_can_refresh_after_completion(self, mock_apply_async, mock_async_result):
+        mock_apply_async.side_effect = lambda **kwargs: SimpleNamespace(id=kwargs["task_id"])
+        mock_async_result.return_value.status = "SUCCESS"
+        url = reverse("deal-fetch-competitors", kwargs={"pk": self.deal.id})
+
+        first = self.client.post(url, {}, format="json")
+        refreshed = self.client.post(url, {}, format="json")
+
+        self.assertNotEqual(refreshed.data["task_id"], first.data["task_id"])
+        self.assertFalse(refreshed.data["reused"])
+        self.assertEqual(mock_apply_async.call_count, 2)
+
+    @patch("celery.result.AsyncResult")
+    @patch("deals.tasks.fetch_company_news_async_task.apply_async")
+    def test_company_news_research_reuses_running_task(self, mock_apply_async, mock_async_result):
+        mock_apply_async.side_effect = lambda **kwargs: SimpleNamespace(id=kwargs["task_id"])
+        mock_async_result.return_value.status = "STARTED"
+        url = reverse("deal-fetch-company-news", kwargs={"pk": self.deal.id})
+
+        first = self.client.post(url, {}, format="json")
+        second = self.client.post(url, {}, format="json")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["task_id"], first.data["task_id"])
+        self.assertTrue(second.data["reused"])
+        self.assertEqual(mock_apply_async.call_count, 1)
+
+    @patch("celery.result.AsyncResult")
+    @patch("deals.tasks.fetch_company_news_async_task.apply_async")
+    def test_company_news_research_can_refresh_after_completion(self, mock_apply_async, mock_async_result):
+        mock_apply_async.side_effect = lambda **kwargs: SimpleNamespace(id=kwargs["task_id"])
+        mock_async_result.return_value.status = "SUCCESS"
+        url = reverse("deal-fetch-company-news", kwargs={"pk": self.deal.id})
+
+        first = self.client.post(url, {}, format="json")
+        refreshed = self.client.post(url, {}, format="json")
+
+        self.assertNotEqual(refreshed.data["task_id"], first.data["task_id"])
+        self.assertFalse(refreshed.data["reused"])
+        self.assertEqual(mock_apply_async.call_count, 2)
 
     @patch("deals.services.venture_intelligence.VentureIntelligenceService.fetch_company_details")
     def test_preview_view_success(self, mock_fetch):
