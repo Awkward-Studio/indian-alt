@@ -32,6 +32,9 @@ services:
       - "8000"
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
+      # llama.cpp requires Jinja chat templating for OpenAI-compatible tools.
+      # Gemma 4's GGUF carries the canonical native tool-call template.
+      - --jinja
       - --ctx-size
       - ${LLAMA_CONTEXT_SIZE:-16384}
       - --parallel

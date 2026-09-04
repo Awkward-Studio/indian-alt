@@ -6,7 +6,7 @@ from ai_orchestrator.agent_demo.runtime import DemoAgentRuntime
 
 
 class Command(BaseCommand):
-    help = "Run a small read-only agentic chat demo over existing deals/chunks."
+    help = "Run the non-production, manual-only agent demo over existing deals/chunks."
 
     def add_arguments(self, parser):
         parser.add_argument("question", nargs="+", help="Question to ask the demo agent.")

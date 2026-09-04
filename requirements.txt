@@ -52,3 +52,7 @@ channels
 channels-redis
 daphne
 django-redis
+
+# Agent runtime. Keep this exact pin until the VM tool-calling compatibility
+# suite has passed for a newer Pydantic AI release.
+pydantic-ai-slim[openai]==2.38.0

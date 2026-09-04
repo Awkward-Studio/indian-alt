@@ -269,6 +269,35 @@ VLLM_CONNECT_TIMEOUT = config('VLLM_CONNECT_TIMEOUT', default=2, cast=float)
 VLLM_READ_TIMEOUT = config('VLLM_READ_TIMEOUT', default=600, cast=int)
 VLLM_STREAM_TIMEOUT = config('VLLM_STREAM_TIMEOUT', default=600, cast=int)
 VLLM_PLANNER_TIMEOUT = config('VLLM_PLANNER_TIMEOUT', default=600, cast=int)
+
+# Production agent runtime. Both execution modes are off until the Gemma 4
+# llama.cpp
+# tool-calling smoke test and scoped-tool authorization tests pass.
+AGENT_RUNTIME_ENABLED = config('AGENT_RUNTIME_ENABLED', default=False, cast=bool)
+AGENT_RUNTIME_SHADOW_ENABLED = config('AGENT_RUNTIME_SHADOW_ENABLED', default=False, cast=bool)
+AGENT_RUNTIME_BASE_URL = config('AGENT_RUNTIME_BASE_URL', default=VLLM_BASE_URL)
+AGENT_RUNTIME_API_KEY = config('AGENT_RUNTIME_API_KEY', default=VLLM_API_KEY)
+AGENT_RUNTIME_MODEL = config('AGENT_RUNTIME_MODEL', default=VLLM_TEXT_MODEL)
+AGENT_RUNTIME_EXPECTED_SERVER_BUILD = config(
+    'AGENT_RUNTIME_EXPECTED_SERVER_BUILD', default=''
+)
+AGENT_RUNTIME_CONNECT_TIMEOUT = config(
+    'AGENT_RUNTIME_CONNECT_TIMEOUT', default=VLLM_CONNECT_TIMEOUT, cast=float
+)
+AGENT_RUNTIME_REQUEST_TIMEOUT = config(
+    'AGENT_RUNTIME_REQUEST_TIMEOUT', default=VLLM_READ_TIMEOUT, cast=float
+)
+# The OpenAI client must not retry independently of the agent run policy.
+AGENT_RUNTIME_HTTP_MAX_RETRIES = config('AGENT_RUNTIME_HTTP_MAX_RETRIES', default=0, cast=int)
+AGENT_RUNTIME_MODEL_REQUEST_LIMIT = config('AGENT_RUNTIME_MODEL_REQUEST_LIMIT', default=8, cast=int)
+AGENT_RUNTIME_TOOL_CALL_LIMIT = config('AGENT_RUNTIME_TOOL_CALL_LIMIT', default=16, cast=int)
+# Zero means no aggregate token limit. Request and tool-call limits still apply.
+AGENT_RUNTIME_TOTAL_TOKENS_LIMIT = config('AGENT_RUNTIME_TOTAL_TOKENS_LIMIT', default=0, cast=int)
+AGENT_RUNTIME_OUTPUT_RETRIES = config('AGENT_RUNTIME_OUTPUT_RETRIES', default=2, cast=int)
+AGENT_RUNTIME_TOOL_RESULT_MAX_CHARS = config(
+    'AGENT_RUNTIME_TOOL_RESULT_MAX_CHARS', default=20_000, cast=int
+)
+AGENT_RUNTIME_MAX_PROMPT_CHARS = config('AGENT_RUNTIME_MAX_PROMPT_CHARS', default=50_000, cast=int)
 SEARXNG_BASE_URL = config('SEARXNG_BASE_URL', default='http://localhost:8081').rstrip('/')
 SEARXNG_TIMEOUT = config('SEARXNG_TIMEOUT', default=15, cast=float)
 SEARXNG_MAX_RESULTS = config('SEARXNG_MAX_RESULTS', default=30, cast=int)
