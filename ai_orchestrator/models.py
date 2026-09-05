@@ -55,6 +55,7 @@ class AISkill(models.Model):
     class Format(models.TextChoices):
         NATIVE_PROMPT_V1 = "native_prompt_v1", "Native prompt template v1"
         CLAUDE_PROMPT_V1 = "claude_prompt_v1", "Claude prompt-only subset v1"
+        AGENT_SKILL_V1 = "agent_skill_v1", "Installable agent skill package v1"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True, help_text="Unique name for this skill (e.g., deal_extraction)")
@@ -315,6 +316,12 @@ class AISkillRevision(models.Model):
         PUBLISHED = "published", "Published"
         ARCHIVED = "archived", "Archived"
 
+    class CompatibilityStatus(models.TextChoices):
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
+        UNVERIFIED = "unverified", "Unverified"
+        COMPATIBLE = "compatible", "Compatible"
+        INCOMPATIBLE = "incompatible", "Incompatible"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     skill = models.ForeignKey(AISkill, on_delete=models.CASCADE, related_name="revisions")
     revision = models.PositiveIntegerField()
@@ -324,6 +331,15 @@ class AISkillRevision(models.Model):
     input_schema = models.JSONField(default=dict, blank=True)
     output_schema = models.JSONField(default=dict, blank=True)
     skill_format = models.CharField(max_length=30, choices=AISkill.Format.choices, default=AISkill.Format.NATIVE_PROMPT_V1)
+    package_manifest = models.JSONField(default=dict, blank=True)
+    package_files = models.JSONField(default=dict, blank=True)
+    package_digest = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    validation_report = models.JSONField(default=dict, blank=True)
+    compatibility_status = models.CharField(
+        max_length=20,
+        choices=CompatibilityStatus.choices,
+        default=CompatibilityStatus.NOT_APPLICABLE,
+    )
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_ai_skill_revisions")
     published_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="published_ai_skill_revisions")
     published_at = models.DateTimeField(null=True, blank=True)
@@ -338,6 +354,47 @@ class AISkillRevision(models.Model):
 
     def __str__(self):
         return f"{self.skill.name} r{self.revision} ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if self.skill_format != AISkill.Format.AGENT_SKILL_V1:
+            return
+        from .agents.skill_packages import validate_skill_package
+
+        result = validate_skill_package(self.package_manifest, self.package_files)
+        self.validation_report = result.report
+        self.package_digest = result.digest
+        if self.status == self.Status.PUBLISHED and not result.valid:
+            from django.core.exceptions import ValidationError
+
+            raise ValidationError({"package_manifest": result.errors})
+
+    def save(self, *args, **kwargs):
+        if self.skill_format == AISkill.Format.AGENT_SKILL_V1:
+            self.clean()
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = set(kwargs["update_fields"]) | {
+                    "package_digest", "validation_report", "updated_at",
+                }
+        super().save(*args, **kwargs)
+
+
+class AISkillLifecycleEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    skill = models.ForeignKey(AISkill, on_delete=models.CASCADE, related_name="lifecycle_events")
+    revision = models.ForeignKey(
+        AISkillRevision, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="lifecycle_events",
+    )
+    action = models.CharField(max_length=30)
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    package_digest = models.CharField(max_length=64, blank=True, default="")
+    validation_report = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class AIPipelineDefinition(models.Model):

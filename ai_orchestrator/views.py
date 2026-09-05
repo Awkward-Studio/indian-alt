@@ -34,6 +34,7 @@ from .services.runtime import AIRuntimeService
 from .services.industry_skills import IndustrySkillService
 from .services.prompt_catalog import PromptCatalogService
 from .services.pipeline_registry import PipelineRegistryService, RegistryValidationError
+from .services.agent_skill_packages import AgentSkillPackageService, SkillPackageLifecycleError
 from .services.universal_chat import UniversalChatService
 from .services.document_processor import DocumentProcessorService
 from .services.chat_documents import ChatDocumentEvidenceService
@@ -1465,8 +1466,78 @@ def _serialize_skill_revision(revision):
         "id": str(revision.id), "revision": revision.revision, "status": revision.status,
         "system_template": revision.system_template, "prompt_template": revision.prompt_template,
         "input_schema": revision.input_schema, "output_schema": revision.output_schema,
+        "skill_format": revision.skill_format,
+        "package_manifest": revision.package_manifest,
+        "package_files": revision.package_files,
+        "package_digest": revision.package_digest,
+        "validation_report": revision.validation_report,
+        "compatibility_status": revision.compatibility_status,
         "created_at": revision.created_at, "published_at": revision.published_at,
     }
+
+
+class AgentSkillPackageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _admin(self, request):
+        if not _is_ai_admin(request.user):
+            return Response({"error": "Administrator access is required."}, status=403)
+        return None
+
+    def get(self, request, skill_id):
+        denied = self._admin(request)
+        if denied:
+            return denied
+        skill = AISkill.objects.filter(id=skill_id).first()
+        if not skill:
+            return Response({"error": "Skill not found."}, status=404)
+        revisions = list(skill.revisions.order_by("-revision"))
+        revision_id = request.query_params.get("export")
+        if revision_id:
+            revision = skill.revisions.filter(id=revision_id).first()
+            if not revision:
+                return Response({"error": "Revision not found."}, status=404)
+            return Response(AgentSkillPackageService.export(revision))
+        return Response({"skill_id": str(skill.id), "version": skill.version, "revisions": [_serialize_skill_revision(row) for row in revisions]})
+
+    def post(self, request, skill_id):
+        denied = self._admin(request)
+        if denied:
+            return denied
+        action_name = request.data.get("action", "validate")
+        try:
+            if action_name == "validate":
+                return Response(AgentSkillPackageService.validate(request.data.get("manifest"), request.data.get("files")))
+            if action_name == "publish":
+                revision = AgentSkillPackageService.publish(
+                    skill_id=skill_id,
+                    expected_version=int(request.data.get("expected_version")),
+                    actor=request.user,
+                    manifest=request.data.get("manifest"),
+                    files=request.data.get("files"),
+                )
+            elif action_name == "rollback":
+                revision = AgentSkillPackageService.rollback(
+                    skill_id=skill_id,
+                    revision_id=request.data.get("revision_id"),
+                    expected_version=int(request.data.get("expected_version")),
+                    actor=request.user,
+                )
+            elif action_name == "archive":
+                revision = AgentSkillPackageService.archive(
+                    skill_id=skill_id,
+                    revision_id=request.data.get("revision_id"),
+                    actor=request.user,
+                )
+            else:
+                return Response({"error": "Unsupported package action."}, status=400)
+            return Response({"revision": _serialize_skill_revision(revision)})
+        except (AISkill.DoesNotExist, AISkillRevision.DoesNotExist):
+            return Response({"error": "Skill or revision not found."}, status=404)
+        except PermissionError as exc:
+            return Response({"error": str(exc)}, status=403)
+        except (TypeError, ValueError, SkillPackageLifecycleError) as exc:
+            return Response({"error": str(exc)}, status=400)
 
 
 class AISettingsView(APIView):

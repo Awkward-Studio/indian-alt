@@ -4,6 +4,7 @@ from .views import (
     AISettingsView, AIConnectionStatusView, ForexRateView, DealChatView, UniversalChatView,
     UniversalChatDocumentView,
     AISkillsView, DealIndustrySkillsView, DealIndustrySkillAssignmentView,
+    AgentSkillPackageView,
     DealIndustrySkillRunView, AIConversationViewSet, VMControlView,
     AIAuditLogViewSet, DealHelperView
 )
@@ -18,6 +19,7 @@ urlpatterns = [
     path('settings/connection-status/', AIConnectionStatusView.as_view(), name='ai-settings-connection-status'),
     path('forex-rate/', ForexRateView.as_view(), name='ai-forex-rate'),
     path('skills/', AISkillsView.as_view(), name='ai-skills'),
+    path('skills/<uuid:skill_id>/package/', AgentSkillPackageView.as_view(), name='ai-skill-package'),
     path('skills/deals/<uuid:deal_id>/', DealIndustrySkillsView.as_view(), name='deal-industry-skills'),
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/', DealIndustrySkillAssignmentView.as_view(), name='deal-industry-skill-assignment'),
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/run/', DealIndustrySkillRunView.as_view(), name='deal-industry-skill-run'),

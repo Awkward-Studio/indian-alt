@@ -1,6 +1,7 @@
 """Typed contracts and configuration for the production agent runtime."""
 
 from .authorization import AgentAuthorizationError, AgentAuthorizationService
+from .catalog import LoadedSkill, SkillCatalog, SkillSummary
 from .config import AgentRuntimeSettings
 from .contracts import (
     AgentBudget,
@@ -36,4 +37,7 @@ __all__ = [
     "AgentTerminalReason",
     "AgentUsage",
     "ShadowMetrics",
+    "SkillCatalog",
+    "SkillSummary",
+    "LoadedSkill",
 ]
