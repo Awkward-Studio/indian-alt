@@ -1,8 +1,15 @@
 from rest_framework.routers import DefaultRouter
 
-from .views import IAThemeViewSet, KnowledgeDocumentViewSet, NewsArticleViewSet, NewsSourceViewSet
+from .views import (
+    IAThemeViewSet,
+    IndustryViewSet,
+    KnowledgeDocumentViewSet,
+    NewsArticleViewSet,
+    NewsSourceViewSet,
+)
 
 router = DefaultRouter()
+router.register("industries", IndustryViewSet, basename="industry")
 router.register("documents", KnowledgeDocumentViewSet, basename="knowledge-document")
 router.register("themes", IAThemeViewSet, basename="ia-theme")
 router.register("sources", NewsSourceViewSet, basename="news-source")

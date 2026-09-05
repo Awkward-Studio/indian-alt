@@ -390,7 +390,7 @@ class CompetitorWebResearchService:
             "options": {"temperature": 0.0, "max_tokens": 500},
         }
         try:
-            result = self.llm_service.execute_standard(payload, timeout=180)
+            result = self.llm_service.execute_standard(payload, timeout=None)
             raw = str(result.get("response") or "").strip()
             match = re.search(r"\{[\s\S]*\}", raw)
             parsed = json.loads(match.group(0) if match else raw)

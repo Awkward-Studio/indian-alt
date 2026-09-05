@@ -76,9 +76,9 @@ class VLLMProviderService:
         self.base_url = getattr(settings, "VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
         self.embedding_url = getattr(settings, "VLLM_EMBEDDING_URL", self.base_url).rstrip("/")
         self.api_key = getattr(settings, "VLLM_API_KEY", "")
-        self.connect_timeout = float(getattr(settings, "VLLM_CONNECT_TIMEOUT", 2.0) or 2.0)
-        self.read_timeout = int(getattr(settings, "VLLM_READ_TIMEOUT", 600) or 600)
-        self.stream_timeout = int(getattr(settings, "VLLM_STREAM_TIMEOUT", 600) or 600)
+        self.connect_timeout = float(getattr(settings, "VLLM_CONNECT_TIMEOUT", 5.0) or 5.0)
+        self.read_timeout = getattr(settings, "VLLM_READ_TIMEOUT", None)
+        self.stream_timeout = getattr(settings, "VLLM_STREAM_TIMEOUT", None)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -168,9 +168,9 @@ class VLLMProviderService:
             done = choice.get("finish_reason") is not None
             yield json.dumps({"response": text, "thinking": self._flatten_content(thinking), "done": done})
 
-    def execute_standard(self, payload: dict, timeout: int = 3600) -> dict:
+    def execute_standard(self, payload: dict, timeout: int | None = None) -> dict:
         body = self._build_chat_body(payload, stream=False)
-        effective_timeout = int(timeout or self.read_timeout)
+        effective_timeout = timeout if (timeout is not None and timeout > 0) else self.read_timeout
         response = requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),

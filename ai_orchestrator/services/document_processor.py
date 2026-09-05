@@ -432,7 +432,7 @@ class DocumentProcessorService:
                     f"{chunk}"
                 ),
                 "stream": False,
-            }, timeout=180)
+            }, timeout=None)
             normalized.append((response.get("response") or chunk).strip())
         return "\n\n".join(normalized).strip()
 

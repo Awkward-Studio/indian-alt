@@ -90,3 +90,61 @@ class NewsArticle(models.Model):
     class Meta:
         ordering = ["-published_at", "-created_at"]
         indexes = [models.Index(fields=["source", "-published_at"])]
+
+
+class Industry(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, unique=True, db_index=True)
+    overview = models.TextField(blank=True, default="", help_text="Industry overview and sector dynamics")
+    context = models.TextField(blank=True, default="", help_text="Analyst notes, thesis, and investment context")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "Industries"
+
+    def __str__(self):
+        return self.name
+
+
+class IndustryDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    industry = models.ForeignKey(Industry, on_delete=models.CASCADE, related_name="documents")
+    title = models.CharField(max_length=500)
+    file = models.FileField(upload_to="industry_documents/%Y/%m/", null=True, blank=True)
+    file_name = models.CharField(max_length=255, blank=True, default="")
+    document_type = models.CharField(max_length=100, default="Industry Report")
+    extracted_text = models.TextField(blank=True, default="")
+    file_size = models.BigIntegerField(default=0)
+    deal_document = models.ForeignKey("deals.DealDocument", null=True, blank=True, on_delete=models.SET_NULL, related_name="industry_attachments")
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title} ({self.industry.name})"
+
+
+class IndustryNewsArticle(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    industry = models.ForeignKey(Industry, on_delete=models.CASCADE, related_name="news_articles")
+    title = models.CharField(max_length=600)
+    url = models.URLField(max_length=1000)
+    source_name = models.CharField(max_length=255, blank=True)
+    summary = models.TextField(blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-published_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["industry", "url"], name="unique_industry_news_url")
+        ]
+
+    def __str__(self):
+        return f"{self.title} ({self.industry.name})"
+

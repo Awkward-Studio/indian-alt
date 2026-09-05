@@ -2271,7 +2271,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
                 "max_tokens": 4000,
                 "temperature": 0.0,
             },
-        }, timeout=180)
+        }, timeout=None)
 
         response_text = result.get("response") or ""
         research = _extract_json_object_from_text(response_text)

@@ -131,7 +131,7 @@ class DemoAgentRuntime:
             },
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        response = self.provider.execute_standard(payload, timeout=180)
+        response = self.provider.execute_standard(payload, timeout=None)
         text = response.get("response") or ""
         return AgentAction.from_model_text(text)
 

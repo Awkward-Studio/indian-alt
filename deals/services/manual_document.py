@@ -52,7 +52,7 @@ class ManualDocumentEvidenceService:
                     "response_format": {"type": "json_object"},
                     "chat_template_kwargs": {"enable_thinking": False},
                     "options": {"temperature": 0, "max_tokens": 4096},
-                }, timeout=180)
+                }, timeout=None)
                 parsed = json.loads(result["response"])
                 if not isinstance(parsed, dict) or any(key not in parsed for key in PHASE2_ARTIFACT_REQUIRED_KEYS):
                     raise ValueError("Incomplete evidence response")

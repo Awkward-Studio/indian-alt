@@ -110,3 +110,74 @@ class NewsIngestionTests(TestCase):
         source = NewsSource.objects.create(name="Licensed", homepage_url="https://licensed.example", requires_licensed_api=True)
         with self.assertRaisesRegex(ValueError, "approved feed or API"):
             ingest_source(source)
+
+
+class IndustryViewSetTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="analyst2", password="password")
+        self.deal1 = Deal.objects.create(title="Fintech App", industry="Fintech", current_phase="Initial Review")
+        self.deal2 = Deal.objects.create(title="PayTech Solutions", industry="Fintech", current_phase="Due Diligence")
+        self.deal3 = Deal.objects.create(title="Cold Storage Logistics", industry="Cold Chain", current_phase="Passed")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_list_industries_syncs_from_deals(self):
+        response = self.client.get("/api/industry-knowledge/industries/")
+        self.assertEqual(response.status_code, 200)
+        names = [item["name"] for item in response.data]
+        self.assertIn("Fintech", names)
+        self.assertIn("Cold Chain", names)
+        fintech = next(item for item in response.data if item["name"] == "Fintech")
+        self.assertEqual(fintech["deals_count"], 2)
+
+    def test_retrieve_industry_returns_historic_deals(self):
+        response = self.client.get("/api/industry-knowledge/industries/")
+        fintech_id = next(item["id"] for item in response.data if item["name"] == "Fintech")
+        detail = self.client.get(f"/api/industry-knowledge/industries/{fintech_id}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.data["name"], "Fintech")
+        self.assertEqual(detail.data["deals_count"], 2)
+        deal_titles = [d["title"] for d in detail.data["deals"]]
+        self.assertIn("Fintech App", deal_titles)
+        self.assertIn("PayTech Solutions", deal_titles)
+
+    def test_merge_industries_updates_deals_and_provenance(self):
+        self.client.get("/api/industry-knowledge/industries/")
+        from industry_knowledge.models import Industry
+        from deals.models import DealFieldProvenance
+
+        cold_chain = Industry.objects.get(name="Cold Chain")
+        fintech = Industry.objects.get(name="Fintech")
+
+        merge_response = self.client.post("/api/industry-knowledge/industries/merge/", {
+            "source_industry_id": str(cold_chain.id),
+            "target_industry_id": str(fintech.id),
+        }, format="json")
+
+        self.assertEqual(merge_response.status_code, 200, merge_response.data)
+        self.deal3.refresh_from_db()
+        self.assertEqual(self.deal3.industry, "Fintech")
+        self.assertFalse(Industry.objects.filter(name="Cold Chain").exists())
+
+        provenance = DealFieldProvenance.objects.filter(deal=self.deal3, field_name="industry").first()
+        self.assertIsNotNone(provenance)
+        self.assertEqual(provenance.previous_value, "Cold Chain")
+        self.assertEqual(provenance.value, "Fintech")
+
+    @patch("ai_orchestrator.services.search_provider.SearXNGProviderService.search_results")
+    def test_pull_industry_news(self, mock_search):
+        mock_search.return_value = [{
+            "title": "Fintech growth in India accelerates",
+            "url": "https://example.com/fintech-growth",
+            "snippet": "Venture funding increased this quarter.",
+            "published_date": "2026-09-01T10:00:00Z",
+        }]
+        self.client.get("/api/industry-knowledge/industries/")
+        from industry_knowledge.models import Industry
+        fintech = Industry.objects.get(name="Fintech")
+
+        response = self.client.post(f"/api/industry-knowledge/industries/{fintech.id}/pull-news/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["title"], "Fintech growth in India accelerates")
+

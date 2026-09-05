@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from deals.models import Deal, DealDocument
 from meetings.models import MeetingNote
-from .models import IATheme, KnowledgeDocument, NewsArticle, NewsSource
+from .models import IATheme, Industry, IndustryDocument, IndustryNewsArticle, KnowledgeDocument, NewsArticle, NewsSource
 from .permissions import is_admin
 
 
@@ -91,3 +91,76 @@ class NewsArticleSerializer(serializers.ModelSerializer):
     def get_is_dismissed(self, obj):
         request = self.context.get("request")
         return bool(request and request.user.is_authenticated and obj.dismissed_by.filter(id=request.user.id).exists())
+
+
+class IndustryDocumentSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+    deal_title = serializers.CharField(source="deal_document.deal.title", read_only=True, allow_null=True)
+    uploaded_by_name = serializers.CharField(source="uploaded_by.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = IndustryDocument
+        fields = [
+            "id", "industry_id", "title", "file_name", "document_type",
+            "file_size", "file_url", "extracted_text", "deal_document_id",
+            "deal_title", "uploaded_by_name", "created_at", "updated_at",
+        ]
+
+    def get_file_url(self, obj):
+        if obj.file:
+            request = self.context.get("request")
+            return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+        if obj.deal_document:
+            return obj.deal_document.file_url
+        return None
+
+
+class IndustryNewsArticleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IndustryNewsArticle
+        fields = ["id", "industry_id", "title", "url", "source_name", "summary", "published_at", "created_at"]
+
+
+class DealSummaryForIndustrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Deal
+        fields = [
+            "id", "title", "deal_status", "current_phase", "fund",
+            "funding_ask", "funding_ask_for", "received_at", "deal_summary",
+            "city", "is_female_led", "created_at",
+        ]
+
+
+class IndustryListSerializer(serializers.ModelSerializer):
+    deals_count = serializers.IntegerField(read_only=True)
+    documents_count = serializers.IntegerField(read_only=True)
+    news_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Industry
+        fields = [
+            "id", "name", "overview", "context", "deals_count",
+            "documents_count", "news_count", "created_at", "updated_at",
+        ]
+
+
+class IndustryDetailSerializer(serializers.ModelSerializer):
+    deals_count = serializers.SerializerMethodField()
+    documents = IndustryDocumentSerializer(many=True, read_only=True)
+    news_articles = IndustryNewsArticleSerializer(many=True, read_only=True)
+    deals = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Industry
+        fields = [
+            "id", "name", "overview", "context", "deals_count",
+            "documents", "news_articles", "deals", "created_at", "updated_at",
+        ]
+
+    def get_deals_count(self, obj):
+        return Deal.objects.filter(industry=obj.name).count()
+
+    def get_deals(self, obj):
+        deals = Deal.objects.filter(industry=obj.name).order_by("-received_at", "-created_at")[:100]
+        return DealSummaryForIndustrySerializer(deals, many=True).data
+
