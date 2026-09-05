@@ -140,8 +140,20 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer
     permission_classes = [IsAuthenticated]
+
     def get_queryset(self):
-        return AIConversation.objects.filter(user=self.request.user)
+        qs = AIConversation.objects.filter(user=self.request.user)
+        kind = self.request.query_params.get("kind")
+        if kind == "universal_chat":
+            return qs.exclude(metadata__kind="deal_chat")
+        elif kind == "deal_chat":
+            deal_id = self.request.query_params.get("deal_id")
+            qs = qs.filter(metadata__kind="deal_chat")
+            if deal_id:
+                qs = qs.filter(metadata__deal_id=str(deal_id))
+            return qs
+        return qs
+
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
