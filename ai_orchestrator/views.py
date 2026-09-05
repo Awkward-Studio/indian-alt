@@ -479,10 +479,11 @@ class UniversalChatView(APIView):
                     return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
                 conversation_metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
                 if conversation_metadata.get("kind") == "deal_chat":
-                    return Response(
-                        {"error": "A deal chat conversation cannot be reused as a global chat."},
-                        status=status.HTTP_409_CONFLICT,
-                    )
+                    deal_id = conversation_metadata.get("deal_id")
+                    if deal_id:
+                        view = DealChatView()
+                        view.setup(request)
+                        return view.post(request, deal_id=deal_id)
             else:
                 conversation = AIConversation.objects.create(user=request.user, title=user_message[:50])
 
