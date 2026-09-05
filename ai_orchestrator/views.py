@@ -261,8 +261,8 @@ class DealChatView(APIView):
     View to chat with the AI about a specific deal.
     """
     permission_classes = [IsAuthenticated]
-    def post(self, request):
-        deal_id = request.query_params.get('deal_id')
+    def post(self, request, deal_id=None):
+        deal_id = deal_id or request.query_params.get('deal_id')
         user_message = request.data.get('message')
         stream = request.data.get('stream', True)
         if not deal_id or not user_message:
@@ -377,6 +377,7 @@ class DealChatView(APIView):
                 user_prompt=user_message,
                 source_metadata={
                     "deal_id": str(deal.id),
+                    "conversation_id": str(conversation.id),
                     "evidence_mode": scope.evidence_mode,
                     "web_search_enabled": scope.web_search_enabled,
                     "selected_document_ids": scope.document_ids,
