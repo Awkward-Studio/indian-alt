@@ -555,7 +555,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         full_text, full_thinking = _split_leaked_thinking(full_text, full_thinking)
 
         # Check if the stream layer already marked this as failed (fixes Bug 3 and Bug 9)
-        audit_log.refresh_from_db(fields=['status', 'error_message'])
+        audit_log.refresh_from_db(fields=['status', 'error_message', 'source_metadata'])
         if audit_log.status == 'FAILED':
             logger.warning(f"Stream failed for Conv {conversation_id}: {audit_log.error_message}")
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)

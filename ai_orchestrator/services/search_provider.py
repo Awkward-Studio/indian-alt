@@ -106,6 +106,33 @@ class SearXNGProviderService:
                 had_error = True
                 logger.warning("SearXNG engine %s failed for %r: %s", engine or "default", query, exc)
 
+        # Fallback: if time-bounded search yielded 0 results, retry without time constraint
+        if not raw_results and time_range in {"day", "month", "year"}:
+            logger.info("Time-range %r yielded no results for %r; retrying without time constraint.", time_range, query)
+            for engine in engine_order:
+                params = {"q": query, "format": "json", "language": self.language}
+                if engine:
+                    params["engines"] = engine
+                try:
+                    logger.info("Querying SearXNG at %s (fallback without time_range) with engine %s for: %s", self.base_url, engine or "default", query)
+                    response = requests.get(
+                        f"{self.base_url}/search",
+                        params=params,
+                        headers={
+                            "X-Real-IP": "127.0.0.1",
+                            "X-Forwarded-For": "127.0.0.1",
+                        },
+                        timeout=self.timeout,
+                    )
+                    response.raise_for_status()
+                    payload = response.json() or {}
+                    raw_results = payload.get("results", [])[: max(0, num_results)]
+                    if raw_results:
+                        break
+                except Exception as exc:
+                    had_error = True
+                    logger.warning("SearXNG fallback engine %s failed for %r: %s", engine or "default", query, exc)
+
         results: list[dict[str, Any]] = []
         for item in raw_results:
             if not isinstance(item, dict):
@@ -169,14 +196,14 @@ class SearXNGProviderService:
         """Choose a small provider group suited to one planned query."""
         lowered = str(query or "").casefold()
         if re.search(r"\b(news|latest|recent|today|update|funding|investment|acquisition|regulatory|regulation|licen[cs]e|rbi)\b", lowered):
-            anchors = ["duckduckgo news", "bing news"]
-            optional = ["brave.news", "mwmbl"]
+            anchors = ["brave", "duckduckgo news", "bing news"]
+            optional = ["brave.news", "duckduckgo web", "mwmbl"]
         elif re.search(r"\b(what is|who is|overview|profile|founded|founder|headquarter|business model|history)\b", lowered):
-            anchors = ["duckduckgo web", "bing"]
-            optional = ["brave", "wikipedia", "wikidata"]
+            anchors = ["brave", "duckduckgo web", "bing"]
+            optional = ["wikipedia", "wikidata", "mwmbl"]
         else:
-            anchors = ["duckduckgo web", "bing"]
-            optional = ["brave", "mwmbl", "privacywall"]
+            anchors = ["brave", "duckduckgo web", "bing"]
+            optional = ["mwmbl", "privacywall", "wikipedia"]
 
         configured = {engine.casefold(): engine for engine in self.engines}
         selected = [configured[name.casefold()] for name in anchors if name.casefold() in configured]
