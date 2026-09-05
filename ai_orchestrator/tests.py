@@ -85,30 +85,21 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         self.assertEqual(serialized["metadata"]["chat_documents"][0]["evidence_summary"]["claim_count"], 1)
         self.assertEqual(serialized["metadata"]["chat_documents"][0]["name"], "memo.pdf")
 
-    @patch("ai_orchestrator.services.chat_documents.DocumentArtifactService.build_document_artifact")
-    def test_chat_document_evidence_reuses_artifact_contract_and_bounds_text(self, build_artifact):
-        build_artifact.return_value = {
-            "document_name": "memo.pdf",
-            "document_summary": "Detailed evidence summary",
-            "claims": [{"claim": "Revenue grew"}],
-            "metrics": [{"name": "Revenue", "value": 90}],
-            "risks": ["Concentration"],
-            "quality_flags": ["artifact_flag"],
-            "normalized_text": "x" * (ChatDocumentEvidenceService.MAX_TEXT_CHARS + 10),
-        }
-
+    def test_chat_document_evidence_bounds_text_and_sets_direct_flags(self):
+        long_text = "x" * (ChatDocumentEvidenceService.MAX_TEXT_CHARS + 10)
         result = ChatDocumentEvidenceService.build(
             file_name="memo.pdf",
-            extracted_text="raw text",
-            extraction_mode="docproc_remote",
+            extracted_text=long_text,
+            extraction_mode="chat_native_text",
             source_id="doc-1",
             quality_flags=["extractor_flag"],
         )
 
         self.assertTrue(result["truncated"])
         self.assertEqual(len(result["text"]), ChatDocumentEvidenceService.MAX_TEXT_CHARS)
-        self.assertEqual(result["evidence"]["document_summary"], "Detailed evidence summary")
-        self.assertEqual(result["evidence"]["quality_flags"], ["extractor_flag", "artifact_flag"])
+        self.assertEqual(result["artifact_status"], "complete")
+        self.assertIn("extractor_flag", result["evidence"]["quality_flags"])
+        self.assertIn("chat_direct_text", result["evidence"]["quality_flags"])
 
     def test_extract_markdown_report_prefers_parsed_report(self):
         report = _extract_markdown_report({

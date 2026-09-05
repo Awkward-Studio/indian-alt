@@ -47,28 +47,30 @@ class ChatDocumentEvidenceService:
         quality_flags: list[str] | None = None,
     ) -> dict[str, Any]:
         text = str(extracted_text or "").strip()
-        artifact = DocumentArtifactService.build_document_artifact(
+        # Chat uploads do not need heavy Phase 2 artifact extraction;
+        # direct text is retained so the model can ground immediately on user questions.
+        artifact = DocumentArtifactService._fallback_artifact(
             file_name=file_name,
             extracted_text=text,
+            document_type="Other",
             extraction_mode=extraction_mode,
-            source_metadata={"source_id": source_id, "source_type": "chat_upload"},
         )
+        combined_flags = list(dict.fromkeys([
+            *(quality_flags or []),
+            "chat_direct_text",
+        ]))
+        artifact["quality_flags"] = combined_flags
         evidence = {
             key: cls._bound_value(artifact.get(key))
             for key in cls.EVIDENCE_FIELDS
             if artifact.get(key) not in (None, "", [], {})
         }
-        combined_flags = list(dict.fromkeys([
-            *(quality_flags or []),
-            *(artifact.get("quality_flags") or []),
-        ]))
         evidence["quality_flags"] = combined_flags
-        normalized_text = str(artifact.get("normalized_text") or text).strip()
         return {
-            "text": normalized_text[: cls.MAX_TEXT_CHARS],
-            "truncated": len(normalized_text) > cls.MAX_TEXT_CHARS,
+            "text": text[: cls.MAX_TEXT_CHARS],
+            "truncated": len(text) > cls.MAX_TEXT_CHARS,
             "evidence": evidence,
-            "artifact_status": DocumentArtifactService.artifact_status(artifact),
+            "artifact_status": "complete" if text else "failed",
         }
 
     @classmethod

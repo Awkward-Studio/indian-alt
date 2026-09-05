@@ -30,6 +30,54 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 
 logger = logging.getLogger(__name__)
 
+
+@shared_task
+def process_manual_document(document_id):
+    """Enrich persisted native text with Gemma; no docproc, vision or embeddings."""
+    from .services.manual_document import ManualDocumentEvidenceService, source_segments
+
+    doc = DealDocument.objects.get(id=document_id)
+    original = doc.extracted_text or ""
+    initial = doc.evidence_json or {}
+    try:
+        artifact = ManualDocumentEvidenceService().build(original, doc.title, initial.get("quality_flags"))
+        with transaction.atomic():
+            doc = DealDocument.objects.select_for_update().get(id=document_id)
+            doc.evidence_json = artifact
+            doc.source_map_json = artifact["source_map"]
+            doc.table_json = artifact["table_definitions"]
+            doc.key_metrics_json = artifact["metrics"]
+            doc.is_ai_analyzed = True
+            suggested_type = artifact.get("document_type") or artifact.get("document_type_suggestion", {}).get("display_label")
+            if suggested_type:
+                from .models import DocumentType
+                label_to_type = {
+                    "Financial Model": DocumentType.FINANCIALS,
+                    "Pitch Deck": DocumentType.PITCH_DECK,
+                    "Information Memorandum": DocumentType.MEMO,
+                    "Legal Document": DocumentType.LEGAL,
+                }
+                if suggested_type in label_to_type and doc.document_type == DocumentType.OTHER:
+                    doc.document_type = label_to_type[suggested_type]
+            DocumentChunk.objects.filter(deal=doc.deal, source_type="document", source_id=str(doc.id)).delete()
+            chunks = [DocumentChunk(
+                deal=doc.deal, source_type="document", source_id=str(doc.id),
+                content=part["text"], search_text=part["text"],
+                metadata={"title": doc.title, "document_id": str(doc.id), "chunk_kind": "normalized_text", "indexing_mode": "text_only", "start": part["start"], "end": part["end"]},
+            ) for part in source_segments(original, size=2400, overlap=200)]
+            DocumentChunk.objects.bulk_create(chunks)
+            doc.is_indexed = bool(chunks)
+            doc.chunking_status = "chunked" if chunks else "failed"
+            doc.last_chunked_at = timezone.now()
+            doc.save(update_fields=["evidence_json", "source_map_json", "table_json", "key_metrics_json", "normalized_text", "document_type", "is_indexed", "chunking_status", "last_chunked_at", "is_ai_analyzed"])
+            _sync_deal_extracted_text_for_documents(doc.deal, [doc])
+        return {"status": artifact["upload_processing_status"], "document_id": str(doc.id)}
+    except Exception:
+        initial["upload_processing_status"] = "failed"
+        initial["quality_flags"] = [*initial.get("quality_flags", []), "Evidence processing failed; original text retained."]
+        DealDocument.objects.filter(id=document_id).update(evidence_json=initial, chunking_status="failed")
+        raise
+
 VDR_DOCUMENT_LIMIT = 50
 SUPPORTED_ANALYSIS_EXTENSIONS = {
     ".pdf", ".png", ".jpg", ".jpeg", ".docx", ".doc",

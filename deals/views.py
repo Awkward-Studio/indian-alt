@@ -2131,19 +2131,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         
         if not file_obj:
             return Response({"error": "No file provided"}, status=400)
-            
+
+        if file_obj.size > 25 * 1024 * 1024:
+            return Response({"error": "Document must be 25 MB or smaller."}, status=400)
+
         try:
             from ai_orchestrator.services.document_processor import DocumentProcessorService
-            from ai_orchestrator.services.embedding_processor import EmbeddingService
-            from ai_orchestrator.services.ai_processor import AIProcessorService
             from django.utils import timezone
-            
+            from .tasks import process_manual_document
+            import os
+
             doc_processor = DocumentProcessorService()
-            embed_service = EmbeddingService()
-            ai_service = AIProcessorService()
-            
             file_content = file_obj.read()
-            file_name = file_obj.name
+            file_name = os.path.basename(file_obj.name)
             
             from .models import DocumentType
             doc_type = DocumentType.OTHER
@@ -2157,12 +2157,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             elif any(k in name_lower for k in ['annual report', 'industry report', 'market report', 'sector report']):
                 doc_type = DocumentType.MEMO
                 
-            extraction = doc_processor.get_extraction_result(file_content, file_name)
+            try:
+                extraction = doc_processor.get_native_extraction_result(file_content, file_name)
+            except Exception as exc:
+                return Response({"error": f"Could not read this document: {exc}"}, status=422)
             extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
             normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
             
             from .models import DealDocument
-            doc = DealDocument.objects.create(
+            with transaction.atomic():
+                doc = DealDocument.objects.create(
                 deal=deal,
                 title=file_name,
                 document_type=doc_type,
@@ -2171,28 +2175,24 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 is_indexed=False,
                 is_ai_analyzed=False,
                 extraction_mode=extraction.get("mode"),
-                transcription_status="complete" if normalized_text else "failed",
+                transcription_status=extraction["transcription_status"],
+                evidence_json={
+                    "upload_processing_status": "queued",
+                    "quality_flags": extraction.get("quality_flags", []),
+                    "source_metadata": {"filename": file_name, "size": file_obj.size, "extraction": "native_text_only"},
+                },
                 chunking_status="not_chunked",
                 last_transcribed_at=timezone.now() if normalized_text else None,
                 uploaded_by=request.user.profile if hasattr(request.user, 'profile') else None
-            )
+                )
+                transaction.on_commit(lambda: process_manual_document.delay(str(doc.id)))
 
-            if normalized_text:
-                DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=True)
-            
-            if normalized_text and len(normalized_text.strip()) > 50:
-                aggregate_text = doc.normalized_text or normalized_text
-                new_context = f"\n\n--- MANUAL DOCUMENT: {file_name} ---\n{aggregate_text}"
-                deal.extracted_text = (deal.extracted_text or "") + new_context
-                deal.save(update_fields=['extracted_text'])
-                
-                embed_service.vectorize_document(doc)
-                
             from .serializers import DealDocumentSerializer
             return Response({
-                "status": "success",
+                "status": "queued",
+                "message": "Document text saved. Evidence extraction is queued.",
                 "document": DealDocumentSerializer(doc).data
-            })
+            }, status=202)
             
         except Exception as e:
             import logging

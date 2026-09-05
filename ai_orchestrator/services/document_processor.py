@@ -135,6 +135,90 @@ class DocumentProcessorService:
             "error": "No readable content was extracted. Scanned pages and images require a working local vision model." if not text else "",
         }
 
+    def get_native_extraction_result(self, file_content: bytes, filename: str) -> dict:
+        """Full native extraction for deal uploads, with no remote or vision calls."""
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        ext = os.path.splitext(filename)[1].lower()
+        sections, warnings = [], []
+        if ext == ".pdf":
+            with fitz.open(stream=file_content, filetype="pdf") as document:
+                for index, page in enumerate(document):
+                    text = page.get_text(sort=True).strip()
+                    if page.get_images():
+                        warnings.append(f"Page {index + 1}: embedded images were not interpreted.")
+                    if not text and (page.get_images() or page.get_drawings()):
+                        warnings.append(f"Page {index + 1}: no extractable text; OCR is required.")
+                    sections.append(f"[Page {index + 1}]\n{text}")
+        elif ext == ".docx":
+            document = Document(io.BytesIO(file_content))
+            for index, element in enumerate(document.element.body):
+                if element.tag.endswith("}p"):
+                    sections.append(f"[Paragraph {index + 1}]\n{Paragraph(element, document).text}")
+                elif element.tag.endswith("}tbl"):
+                    table = Table(element, document)
+                    sections.append(f"[Table {index + 1}]\n" + "\n".join(
+                        f"Row {row_index + 1}: " + "\t".join(cell.text for cell in row.cells)
+                        for row_index, row in enumerate(table.rows)
+                    ))
+            for index, section in enumerate(document.sections):
+                for label, container in (("Header", section.header), ("Footer", section.footer)):
+                    sections.extend(f"[{label} {index + 1}]\n{p.text}" for p in container.paragraphs if p.text)
+            if document.inline_shapes:
+                warnings.append("Embedded images were not interpreted.")
+        elif ext == ".xlsx":
+            formulas = load_workbook(io.BytesIO(file_content), data_only=False, read_only=True)
+            values = load_workbook(io.BytesIO(file_content), data_only=True, read_only=True)
+            try:
+                for sheet in formulas:
+                    sections.append(f"[Sheet: {sheet.title}]")
+                    for row, cached_row in zip(sheet.iter_rows(), values[sheet.title].iter_rows()):
+                        cells = []
+                        for cell, cached in zip(row, cached_row):
+                            if cell.value is None:
+                                continue
+                            value = str(cell.value)
+                            if cell.data_type == "f":
+                                value += f" [cached value: {cached.value if cached.value is not None else 'unavailable'}]"
+                            cells.append(f"{cell.coordinate}={value}")
+                        if cells:
+                            sections.append("\t".join(cells))
+            finally:
+                formulas.close()
+                values.close()
+        elif ext == ".pptx":
+            presentation = Presentation(io.BytesIO(file_content))
+            for index, slide in enumerate(presentation.slides):
+                sections.append(f"[Slide {index + 1}]")
+                def extract_shapes(shapes):
+                    for shape in shapes:
+                        if hasattr(shape, "shapes"):
+                            extract_shapes(shape.shapes)
+                        if getattr(shape, "has_text_frame", False):
+                            sections.append(shape.text)
+                        if getattr(shape, "has_table", False):
+                            sections.extend("\t".join(cell.text for cell in row.cells) for row in shape.table.rows)
+                        if hasattr(shape, "image") or getattr(shape, "has_chart", False):
+                            warnings.append(f"Slide {index + 1}: image or chart requires visual review.")
+                extract_shapes(slide.shapes)
+                if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                    sections.append(f"[Speaker notes]\n{slide.notes_slide.notes_text_frame.text}")
+        elif ext in {".txt", ".csv"}:
+            sections.append(file_content.decode("utf-8-sig"))
+        else:
+            raise ValueError("Use a text PDF, DOCX, XLSX, PPTX, TXT, or CSV file. Scans and images require OCR first.")
+        text = "\n\n".join(sections).strip()
+        # Source markers by themselves are not document content.
+        import re
+        if not re.sub(r"\[[^\]\n]+\]", "", text).strip():
+            raise ValueError("No readable text found. Scanned documents need OCR before upload.")
+        return {
+            "text": text, "raw_extracted_text": text, "normalized_text": text,
+            "mode": "fallback_text", "quality_flags": warnings,
+            "transcription_status": "partial" if warnings else "complete",
+        }
+
     def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict | None:
         try:
             payload = {
