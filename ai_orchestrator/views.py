@@ -1513,6 +1513,9 @@ class AISettingsView(APIView):
             claude_setting = AISystemSetting.objects.filter(key="CLAUDE_TEXT_MODEL").first()
             claude_text_model = claude_setting.value if claude_setting else getattr(settings, "CLAUDE_TEXT_MODEL", "claude-haiku-4-5-20251001")
 
+            from .services.search_provider import get_web_search_telemetry
+            search_telemetry = get_web_search_telemetry()
+
             return Response({
                 "personalities": AIPersonalitySerializer(personalities, many=True).data,
                 "skills": AISkillSerializer(skills, many=True).data,
@@ -1529,6 +1532,10 @@ class AISettingsView(APIView):
                     "base_url": getattr(settings, "SEARXNG_BASE_URL", "http://localhost:8081"),
                     "language": getattr(settings, "SEARXNG_LANGUAGE", "en-IN"),
                     "engines": list(getattr(settings, "SEARXNG_ENGINES", [])),
+                    "total_queries": search_telemetry["total_queries"],
+                    "today_queries": search_telemetry["today_queries"],
+                    "daily_counts": search_telemetry["daily_counts"],
+                    "recent_queries": search_telemetry["recent_queries"],
                 },
                 "prompt_catalog": PromptCatalogService.serialize(),
                 "pipelines": _pipeline_inventory(),

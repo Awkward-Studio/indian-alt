@@ -72,6 +72,7 @@ class SearXNGProviderService:
                 cached = None
             if isinstance(cached, list):
                 self.last_status = "cache_hit"
+                record_web_search_telemetry(query, selected_engines, len(cached), is_cache_hit=True)
                 return cached
         for engine in engine_order:
             params = {"q": query, "format": "json", "language": self.language}
@@ -158,6 +159,7 @@ class SearXNGProviderService:
                 cache.set(cache_key, results, timeout=self.cache_ttl)
             except Exception:
                 pass
+        record_web_search_telemetry(query, selected_engines, len(results), is_cache_hit=False)
         return results
 
     def _cache_key(self, query: str, num_results: int, engine_order: list[str | None]) -> str:
@@ -350,3 +352,117 @@ class SearXNGProviderService:
     @staticmethod
     def normalize_url(value: Any) -> str:
         return str(value or "").strip().rstrip("/").casefold()
+
+
+def record_web_search_telemetry(
+    query: str,
+    engines: list[str] | str | None,
+    results_count: int,
+    *,
+    is_cache_hit: bool = False,
+) -> None:
+    try:
+        import sys
+        if "test" in sys.argv:
+            return
+
+        import json
+        from django.utils import timezone
+        from ai_orchestrator.models import AISystemSetting
+
+        today_str = timezone.localdate().isoformat()
+        now_iso = timezone.now().isoformat()
+
+        # Total count
+        total_setting, _ = AISystemSetting.objects.get_or_create(
+            key="WEB_SEARCH_TOTAL_COUNT",
+            defaults={"value": "0", "description": "Total number of web search queries executed"},
+        )
+        try:
+            current_total = int(total_setting.value)
+        except (ValueError, TypeError):
+            current_total = 0
+        total_setting.value = str(current_total + 1)
+        total_setting.save(update_fields=["value", "updated_at"])
+
+        # Daily counts
+        daily_setting, _ = AISystemSetting.objects.get_or_create(
+            key="WEB_SEARCH_DAILY_COUNTS",
+            defaults={"value": "{}", "description": "Daily web search query counts as JSON"},
+        )
+        try:
+            daily_data = json.loads(daily_setting.value)
+        except Exception:
+            daily_data = {}
+        daily_data[today_str] = daily_data.get(today_str, 0) + 1
+        if len(daily_data) > 30:
+            sorted_days = sorted(daily_data.keys())
+            daily_data = {d: daily_data[d] for d in sorted_days[-30:]}
+        daily_setting.value = json.dumps(daily_data)
+        daily_setting.save(update_fields=["value", "updated_at"])
+
+        # Recent queries list (keep last 30)
+        recent_setting, _ = AISystemSetting.objects.get_or_create(
+            key="WEB_SEARCH_RECENT_QUERIES",
+            defaults={"value": "[]", "description": "Recent web search queries as JSON list"},
+        )
+        try:
+            recent_list = json.loads(recent_setting.value)
+        except Exception:
+            recent_list = []
+
+        engine_str = ", ".join(engines) if isinstance(engines, list) else str(engines or "default")
+        recent_list.insert(0, {
+            "timestamp": now_iso,
+            "query": query[:250],
+            "engines": engine_str,
+            "results_count": results_count,
+            "cache_hit": is_cache_hit,
+        })
+        recent_setting.value = json.dumps(recent_list[:30])
+        recent_setting.save(update_fields=["value", "updated_at"])
+    except Exception as exc:
+        logger.warning("Failed to record web search telemetry: %s", exc)
+
+
+def get_web_search_telemetry() -> dict[str, Any]:
+    try:
+        import json
+        from django.utils import timezone
+        from ai_orchestrator.models import AISystemSetting
+
+        today_str = timezone.localdate().isoformat()
+
+        total_setting = AISystemSetting.objects.filter(key="WEB_SEARCH_TOTAL_COUNT").first()
+        try:
+            total_queries = int(total_setting.value) if total_setting else 0
+        except (ValueError, TypeError):
+            total_queries = 0
+
+        daily_setting = AISystemSetting.objects.filter(key="WEB_SEARCH_DAILY_COUNTS").first()
+        try:
+            daily_counts = json.loads(daily_setting.value) if daily_setting else {}
+        except Exception:
+            daily_counts = {}
+        today_queries = daily_counts.get(today_str, 0)
+
+        recent_setting = AISystemSetting.objects.filter(key="WEB_SEARCH_RECENT_QUERIES").first()
+        try:
+            recent_queries = json.loads(recent_setting.value) if recent_setting else []
+        except Exception:
+            recent_queries = []
+
+        return {
+            "total_queries": total_queries,
+            "today_queries": today_queries,
+            "daily_counts": daily_counts,
+            "recent_queries": recent_queries,
+        }
+    except Exception as exc:
+        logger.warning("Failed to retrieve web search telemetry: %s", exc)
+        return {
+            "total_queries": 0,
+            "today_queries": 0,
+            "daily_counts": {},
+            "recent_queries": [],
+        }

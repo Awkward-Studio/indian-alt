@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 
 from deals.models import DealFieldProvenance
@@ -15,12 +17,16 @@ TRACKED_DEAL_FIELDS = {
 
 
 def serializable_field_value(value):
+    if isinstance(value, uuid.UUID):
+        return str(value)
     if isinstance(value, models.Model):
         return str(value.pk)
     if isinstance(value, (models.Manager, models.QuerySet)):
         return [str(item.pk) for item in value.all()]
     if hasattr(value, 'isoformat'):
         return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): serializable_field_value(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [serializable_field_value(item) for item in value]
     return value

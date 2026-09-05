@@ -1691,6 +1691,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
+        raw_document_ids = request.data.get('document_ids') or []
+        if isinstance(raw_document_ids, str):
+            document_ids = [raw_document_ids]
+        elif isinstance(raw_document_ids, list):
+            document_ids = [str(did) for did in raw_document_ids if did]
+        else:
+            document_ids = []
+
         try:
             import hashlib
             from django.core import signing
@@ -1738,6 +1746,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 instruction=instruction,
                 full_report=full_report,
                 version=version,
+                document_ids=document_ids,
             )
             token = signing.dumps(
                 {

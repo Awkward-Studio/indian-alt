@@ -50,6 +50,7 @@ class AnalysisSectionRewriteService:
         instruction: str,
         full_report: str,
         version=None,
+        document_ids: list[str] | None = None,
     ) -> str:
         evidence_scope = self._requested_evidence_scope(instruction)
         meeting_context = self._meeting_context(
@@ -60,8 +61,22 @@ class AnalysisSectionRewriteService:
             deal=deal,
             query=f"{section_title}\n{instruction}",
         ) if evidence_scope in {"all", "news", "meetings_and_news"} else ""
+        document_context = self._document_context(
+            deal=deal,
+            document_ids=document_ids,
+            query=f"{section_title}\n{instruction}",
+        )
+        prompt_parts = []
+        if document_context:
+            prompt_parts.append(f"[ATTACHED DEAL DOCUMENTS CONTEXT]\n{document_context}")
+        if meeting_context:
+            prompt_parts.append(f"[RELEVANT INDEXED MEETING EVIDENCE]\n{meeting_context}")
+        if news_context:
+            prompt_parts.append(f"[RELEVANT INDEXED COMPANY NEWS EVIDENCE]\n{news_context}")
+        content = "\n\n".join(prompt_parts)
+
         result = self.ai_service.process_content(
-            content="",
+            content=content,
             skill_name=None,
             source_type="analysis_section_rewrite",
             source_id=str(deal.id),
@@ -73,13 +88,14 @@ class AnalysisSectionRewriteService:
                 "section_title": section_title,
                 "analysis_version": version,
                 "max_tokens": 4096,
-                "max_input_tokens": 11000,
+                "max_input_tokens": 14000,
                 "pipeline_key": "analysis_support",
                 "stage_key": "section_rewrite",
                 "deal_title": deal.title,
                 "instruction": instruction,
                 "section_markdown": section_markdown,
                 "full_report": self._report_context(full_report, section_title),
+                "document_context": document_context or "No specific deal documents attached for this rewrite.",
                 "meeting_context": meeting_context or "No indexed meeting evidence matched this rewrite.",
                 "news_context": news_context or "No indexed company-news evidence matched this rewrite.",
             },
@@ -215,6 +231,66 @@ class AnalysisSectionRewriteService:
                     ]
                 )
             )
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _document_context(*, deal, document_ids: list[str] | None = None, query: str = "", limit: int = 10) -> str:
+        if not document_ids:
+            return ""
+        from ai_orchestrator.models import DocumentChunk
+        from deals.models import DealDocument
+
+        clean_ids = [str(did).strip() for did in document_ids if str(did).strip()]
+        if not clean_ids:
+            return ""
+
+        documents = list(deal.documents.filter(id__in=clean_ids))
+        if not documents:
+            return ""
+
+        blocks = []
+        for doc in documents:
+            title = doc.title or f"Document {doc.id}"
+            doc_type = doc.document_type or "Document"
+            chunks = []
+            source_id = str(doc.id)
+            if doc.is_indexed:
+                try:
+                    from ai_orchestrator.services.embedding_processor import EmbeddingService
+                    chunks = EmbeddingService().search_global_chunks(
+                        query,
+                        limit=limit,
+                        deal_ids=[str(deal.id)],
+                        source_ids=[source_id],
+                    )
+                    chunks = [c for c in chunks if c.source_type == "document"]
+                except Exception:
+                    chunks = []
+                if not chunks:
+                    chunks = list(
+                        DocumentChunk.objects.filter(
+                            deal=deal,
+                            source_type="document",
+                            source_id=source_id,
+                        ).order_by("chunk_index")[:limit]
+                    )
+
+            if chunks:
+                chunk_texts = [str(c.content or "").strip() for c in chunks if str(c.content or "").strip()]
+                body = "\n\n".join(chunk_texts)
+            else:
+                body = str(doc.normalized_text or doc.extracted_text or "").strip()
+
+            if body:
+                if len(body) > 12_000:
+                    body = body[:12_000] + "\n...[Content truncated for context budget]..."
+                blocks.append(
+                    f"### Document: {title}\n"
+                    f"Document ID: {doc.id}\n"
+                    f"Type: {doc_type}\n"
+                    f"{body}"
+                )
+
         return "\n\n".join(blocks)
 
     @staticmethod

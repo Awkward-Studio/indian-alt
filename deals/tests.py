@@ -214,6 +214,7 @@ class AnalysisNextStepsInspectionTests(SimpleTestCase):
     SEARXNG_TIMEOUT=7,
     SEARXNG_MAX_RESULTS=10,
     SEARXNG_SEARCH_WORKERS=2,
+    SEARXNG_CACHE_TTL=0,
 )
 class SearXNGProviderTests(SimpleTestCase):
     def setUp(self):
@@ -238,7 +239,7 @@ class SearXNGProviderTests(SimpleTestCase):
 
         self.assertLessEqual(len(news_engines), 3)
         self.assertLessEqual(len(profile_engines), 3)
-        self.assertTrue(set(news_engines).issubset({"duckduckgo news", "bing news", "brave.news", "mwmbl"}))
+        self.assertTrue(set(news_engines).issubset({"duckduckgo news", "bing news", "brave.news", "brave", "mwmbl"}))
         self.assertTrue(set(profile_engines).issubset({"duckduckgo web", "brave", "bing", "wikipedia", "wikidata"}))
         self.assertNotEqual(news_engines, profile_engines)
 

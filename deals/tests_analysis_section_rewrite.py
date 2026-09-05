@@ -215,3 +215,30 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         self.assertEqual(response.status_code, 409)
         self.analysis.refresh_from_db()
         self.assertEqual(self.analysis.analysis_json["analyst_report"], REPORT)
+
+    def test_rewrite_prompt_retrieves_attached_deal_document_evidence(self):
+        document = DealDocument.objects.create(
+            deal=self.deal,
+            title="Q3_Investor_Deck.pdf",
+            document_type="Pitch Deck",
+            extracted_text="Unit economics improved to 28% gross margin in Q3.",
+            normalized_text="Unit economics improved to 28% gross margin in Q3.",
+            is_indexed=False,
+        )
+        ai_service = MagicMock()
+        ai_service.process_content.return_value = {"response": "## Key Financials\n\nUpdated with deck facts."}
+
+        AnalysisSectionRewriteService(ai_service).rewrite(
+            deal=self.deal,
+            section_title="Key Financials",
+            section_markdown=AnalysisSectionRewriteService.locate_section(REPORT, "Key Financials")[0],
+            instruction="Include the unit economics from the attached deck.",
+            full_report=REPORT,
+            version=1,
+            document_ids=[str(document.id)],
+        )
+
+        prompt = ai_service.process_content.call_args.kwargs["content"]
+        self.assertIn("ATTACHED DEAL DOCUMENTS CONTEXT", prompt)
+        self.assertIn("Q3_Investor_Deck.pdf", prompt)
+        self.assertIn("28% gross margin in Q3", prompt)

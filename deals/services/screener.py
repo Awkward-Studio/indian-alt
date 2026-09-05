@@ -702,6 +702,56 @@ class ScreenerCompanyService:
         }
 
     def resolve_screener_url(self, company_name: str, *, ticker: str = "", exchange: str = "") -> dict[str, Any]:
+        from django.core.cache import cache
+
+        name_key = _company_match_key(company_name)
+        ticker_key = _clean_text(ticker, max_length=40).upper()
+        cache_key = f"screener:resolved:{name_key}:{ticker_key}"
+        try:
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                return cached
+        except Exception:
+            pass
+
+        from ai_orchestrator.services.search_provider import SearXNGProviderService
+
+        # Fast direct web search: targeted site query bypasses heavy query planning and secondary LLM calls.
+        search_service = SearXNGProviderService()
+        direct_queries = [
+            f'"{company_name}" site:screener.in/company/',
+        ]
+        if ticker:
+            direct_queries.append(f"{company_name} {ticker} site:screener.in/company/")
+        else:
+            direct_queries.append(f"{company_name} site:screener.in/company/")
+
+        for direct_query in list(dict.fromkeys(direct_queries)):
+            try:
+                raw_hits = search_service._search_results(direct_query, num_results=3)
+            except Exception as exc:
+                logger.warning("SearXNG direct lookup failed for %s: %s", direct_query, exc)
+                raw_hits = []
+
+            for hit in raw_hits:
+                hit_url = _normalize_screener_url(hit.get("url"))
+                hit_ticker = _extract_ticker_from_url(hit_url)
+                if hit_url and hit_ticker:
+                    payload = {
+                        "is_listed": True,
+                        "company_name": company_name,
+                        "ticker": hit_ticker,
+                        "exchange": exchange or "NSE",
+                        "screener_url": hit_url,
+                        "resolution_source": "targeted_web_search",
+                        "raw_response": hit.get("title") or "",
+                    }
+                    try:
+                        cache.set(cache_key, payload, timeout=86400 * 7)
+                    except Exception:
+                        pass
+                    return payload
+
         from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
         _, prompt, _ = PipelineRegistryService.render_prompt_stage(
             "company_enrichment",
@@ -715,9 +765,10 @@ class ScreenerCompanyService:
         )
         if not system_prompt:
             system_prompt = system_stage.prompt_revision.user_template
-        from ai_orchestrator.services.search_provider import SearXNGProviderService
-        search_query = f"{company_name} {ticker} screener.in profile"
-        search_context = SearXNGProviderService().search(search_query)
+
+        search_query = f"{company_name} {ticker} screener.in profile".strip()
+        search_hits = search_service._search_results(search_query, num_results=3)
+        search_context = search_service.format_context(search_hits)
 
         augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
 
@@ -739,6 +790,11 @@ class ScreenerCompanyService:
         )
         payload = _extract_json_object(result.get("response") or "")
         payload["raw_response"] = result.get("response") or ""
+        if payload.get("screener_url") or payload.get("ticker"):
+            try:
+                cache.set(cache_key, payload, timeout=86400 * 7)
+            except Exception:
+                pass
         return payload
 
     def fetch_screener_direct_snapshot(self, *, ticker: str = "", screener_url: str = "") -> dict[str, Any]:
