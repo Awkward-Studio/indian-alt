@@ -66,6 +66,11 @@ class CompetitorWebResearchService:
         tracking_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._tracking_context = dict(tracking_context or {})
+        self._search_context = {
+            "purpose": "competitors", "company": company_name,
+            "sector": sector, "industry": industry, "geography": location,
+            "question": instruction,
+        }
         existing_competitors = existing_competitors or []
         existing_names = [
             str(item.get("name") or item.get("company_name") or "").strip()
@@ -418,6 +423,7 @@ class CompetitorWebResearchService:
                     query,
                     num_results=min(max(self.search_service.max_results, 12), 16),
                     aggregate_engines=True,
+                    context={**getattr(self, "_search_context", {}), "purpose": f"{route} company competitors"},
                     engine_subset=self.search_service.engine_subset_for_query(query),
                 ): route
                 for route, query in queries.items()

@@ -2191,7 +2191,10 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             source_metadata={"deal_id": str(deal.id), "query": search_query},
             celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
         )
-        search_results = search_service.search_results(search_query, num_results=8)
+        search_results = search_service.search_results(search_query, num_results=8, context={
+            "purpose": "company news", "company": deal.title,
+            "question": instruction or "latest public news",
+        })
         AIRuntimeService.finish_pipeline_stage(
             active_log,
             result={"query": search_query, "sources": len(search_results)},

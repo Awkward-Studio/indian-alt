@@ -185,6 +185,7 @@ class ResearchDiscoveryService:
             queries,
             results_per_query=8,
             max_results=40,
+            context={"purpose": "industry reports", "company": title, "sector": sector, "industry": industry},
         )
         recommendations = []
         seen_urls = set()

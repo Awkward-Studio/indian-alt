@@ -28,12 +28,27 @@ class SearXNGProviderService:
         self.last_status = "not_run"
 
     def search_results(
+        self, query: str, num_results: int = 5, *,
+        context: dict | None = None,
+        aggregate_engines: bool = False,
+        engine_subset: list[str] | None = None,
+        time_range: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """All public entry points infer intent before contacting search engines."""
+        return self.search_many(
+            [query], results_per_query=num_results, max_results=num_results,
+            context=context, time_range=time_range,
+            engine_subset=engine_subset,
+        )
+
+    def _search_results(
         self,
         query: str,
         num_results: int = 5,
         *,
         aggregate_engines: bool = False,
         engine_subset: list[str] | None = None,
+        time_range: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return normalized SearXNG results, keeping source metadata for grounding."""
         query = self.sanitize_query(query)
@@ -49,7 +64,7 @@ class SearXNGProviderService:
             if aggregate_engines
             else self._engine_order(query)
         )
-        cache_key = self._cache_key(query, num_results, engine_order)
+        cache_key = self._cache_key(query, num_results, engine_order) + f":{time_range or 'all'}"
         if self.cache_ttl:
             try:
                 cached = cache.get(cache_key)
@@ -60,6 +75,8 @@ class SearXNGProviderService:
                 return cached
         for engine in engine_order:
             params = {"q": query, "format": "json", "language": self.language}
+            if time_range in {"day", "month", "year"}:
+                params["time_range"] = time_range
             if engine:
                 params["engines"] = engine
             try:
@@ -183,9 +200,31 @@ class SearXNGProviderService:
         *,
         results_per_query: int = 5,
         max_results: int | None = None,
+        plan_queries: bool = True,
+        context: dict | None = None,
+        time_range: str | None = None,
+        engine_subset: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Run independent searches concurrently and deduplicate their source URLs."""
+        """Infer queries, retrieve concurrently, and deduplicate source URLs.
+
+        The legacy plan_queries argument is retained for callers, but can no
+        longer disable inference. Disabled or failed planning blocks retrieval.
+        """
         unique_queries = list(dict.fromkeys(query.strip() for query in queries if query and query.strip()))
+        plan = {"source": "provided", "queries": unique_queries, "time_range": None}
+        self.last_plan = plan
+        if unique_queries:
+            from .search_query_planner import SearchQueryPlanner
+            plan = SearchQueryPlanner().plan(unique_queries, self.sanitize_query, context=context)
+            self.last_plan = plan
+            if plan.get("source") != "vm":
+                self.last_status = "planning_failed"
+                logger.warning("Public search blocked: intent planning %s", self.last_plan.get("source"))
+                return []
+            unique_queries = plan["queries"]
+        if (max_results is not None and max_results <= 0) or results_per_query <= 0:
+            self.last_status = "no_results"
+            return []
         if not unique_queries:
             self.last_status = "no_results"
             return []
@@ -195,11 +234,12 @@ class SearXNGProviderService:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_queries = {
                 executor.submit(
-                    self.search_results,
+                    self._search_results,
                     query,
                     results_per_query,
                     aggregate_engines=True,
-                    engine_subset=self.engine_subset_for_query(query),
+                    engine_subset=engine_subset if engine_subset is not None else self.engine_subset_for_query(query),
+                    time_range=time_range or plan.get("time_range"),
                 ): query
                 for query in unique_queries
             }
@@ -259,6 +299,8 @@ class SearXNGProviderService:
         include_page_content: bool = False,
     ) -> str:
         if not results:
+            if self.last_status == "planning_failed":
+                return "Web search was not performed because intent inference was unavailable or invalid. Do not claim public sources were checked."
             return "Web search returned no relevant results."
         lines = [f"### {heading} ###"]
         for index, result in enumerate(results, 1):

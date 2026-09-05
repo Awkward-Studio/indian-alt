@@ -196,6 +196,10 @@ class AIProcessorService:
                 search_queries,
                 results_per_query=4,
                 max_results=12,
+                context=(metadata or {}).get("web_search_context") or {
+                    "company": (metadata or {}).get("company_name", ""),
+                    "purpose": "chat",
+                },
             )
             search_context = self.search_provider.format_context(search_results)
             user_prompt = (
@@ -204,12 +208,17 @@ class AIProcessorService:
                 "Use only the evidence above for current public facts. Connect each web-supported claim to its [S#] source, include the corresponding source URL in Markdown, and state when the evidence is insufficient."
             )
             log_worker_event(audit_log, f"SearXNG returned {len(search_results)} public sources.")
+            query_plan = getattr(self.search_provider, "last_plan", {})
+            if not isinstance(query_plan, dict):
+                query_plan = {}
+            search_queries = query_plan.get("queries", search_queries)
             audit_log.source_metadata = {
                 **(audit_log.source_metadata or {}),
                 "web_search_enabled": True,
                 "web_search_status": self.search_provider.last_status,
                 "web_search_result_count": len(search_results),
                 "web_search_queries": search_queries,
+                "web_search_query_plan": query_plan,
                 "web_search_engine_plan": {
                     query: self.search_provider.engine_subset_for_query(query)
                     for query in search_queries

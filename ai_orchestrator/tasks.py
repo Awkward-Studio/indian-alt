@@ -297,6 +297,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 task_metadata["chat_document_count"] = document_count
             task_metadata["web_search_enabled"] = web_search_enabled
             if web_search_enabled:
+                task_metadata["web_search_context"] = {
+                    "purpose": "global chat", "question": user_message,
+                    "conversation": history_context,
+                }
                 task_metadata["web_search_queries"] = chat_service.plan_web_search_queries(
                     user_message,
                     conversation_id,
@@ -414,6 +418,10 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 except Exception:
                     deal_title = ""
                 planner_context = history_context
+                task_metadata["web_search_context"] = {
+                    "purpose": "deal chat", "question": user_message,
+                    "company": deal_title, "conversation": history_context,
+                }
                 if deal_title:
                     planner_context = f"Active deal/company: {deal_title}\n{history_context}".strip()
                 task_metadata["web_search_queries"] = chat_service.plan_web_search_queries(

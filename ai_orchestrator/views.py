@@ -566,7 +566,7 @@ class UniversalChatDocumentView(APIView):
             return Response({"error": "Conversation not found."}, status=404)
 
         document_id = str(uuid.uuid4())
-        result = DocumentProcessorService().get_extraction_result(uploaded_file.read(), filename)
+        result = DocumentProcessorService().get_chat_extraction_result(uploaded_file.read(), filename)
         extracted_text = str(result.get("normalized_text") or result.get("text") or "").strip()
         if not extracted_text:
             return Response({"error": result.get("error") or "No readable text was found in the document."}, status=422)

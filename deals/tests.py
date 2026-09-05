@@ -216,6 +216,14 @@ class AnalysisNextStepsInspectionTests(SimpleTestCase):
     SEARXNG_SEARCH_WORKERS=2,
 )
 class SearXNGProviderTests(SimpleTestCase):
+    def setUp(self):
+        planner = patch("ai_orchestrator.services.search_query_planner.SearchQueryPlanner.plan")
+        self.planner = planner.start()
+        self.addCleanup(planner.stop)
+        self.planner.side_effect = lambda queries, sanitize, **kwargs: {
+            "source": "vm", "intent": "general", "queries": queries, "time_range": None,
+        }
+
     @override_settings(
         SEARXNG_ENGINES=[
             "duckduckgo web", "duckduckgo news", "duckduckgo", "bing news",
@@ -262,7 +270,7 @@ class SearXNGProviderTests(SimpleTestCase):
 
     def test_research_search_filters_navigation_and_balances_queries(self):
         service = SearXNGProviderService()
-        service.search_results = MagicMock(side_effect=[
+        service._search_results = MagicMock(side_effect=[
             [
                 {"title": "Acme Login", "url": "https://acme.example/login", "query": "Acme latest news"},
                 {"title": "Acme raises Series C", "url": "https://news.example/acme-series-c", "query": "Acme latest news"},
@@ -297,7 +305,7 @@ class SearXNGProviderTests(SimpleTestCase):
         }
         mock_get.return_value = response
 
-        results = SearXNGProviderService().search_results(
+        results = SearXNGProviderService()._search_results(
             "company competitors",
             aggregate_engines=True,
         )
@@ -332,7 +340,7 @@ class SearXNGProviderTests(SimpleTestCase):
         }
         mock_get.side_effect = [empty_response, result_response]
 
-        results = service.search_results("competitor research")
+        results = service._search_results("competitor research")
 
         self.assertEqual(len(results), 1)
         self.assertEqual(mock_get.call_count, 2)

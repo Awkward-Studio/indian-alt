@@ -20,7 +20,10 @@ def _search_entries(source):
     if not domain:
         raise ValueError("Configure the publisher homepage before running web discovery.")
     provider = SearXNGProviderService()
-    results = provider.search_results(f"site:{domain} latest startup investment industry news India", num_results=30)
+    results = provider.search_results(
+        f"site:{domain} latest startup investment industry news India", num_results=30,
+        context={"purpose": "industry news", "domain": domain, "geography": "India"},
+    )
     return [{
         "title": item.get("title", ""), "url": item.get("url", ""),
         "summary": item.get("snippet", ""), "author": "",
