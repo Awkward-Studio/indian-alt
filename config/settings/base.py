@@ -250,8 +250,8 @@ CELERY_TASK_ROUTES = {
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'
 
-# Enable after migrations, worker, private storage and pilot validation are ready.
-EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=False, cast=bool)
+# Enable unified email processing and evidence extraction.
+EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=True, cast=bool)
 EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))
 EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES = config('EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES', default=26214400, cast=int)
 
