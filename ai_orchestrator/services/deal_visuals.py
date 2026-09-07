@@ -8,13 +8,24 @@ Respect an explicit request for a table or text-only answer. Simple factual answ
 A comparison_matrix is a table, not a chart: do not use it to satisfy an explicit graph or chart request. Prefer charts for comparable numeric metrics; reserve matrices for mixed qualitative attributes or detailed exact-value lookup.
 Avoid repeating a chart's full dataset in a Markdown table unless the user asks for both.
 Return one visual for a singular request. Return up to three distinct visuals when the user asks for charts/graphs, multiple visuals, or a deep dive and the evidence supports materially different views.
-Put each visual in its own fenced deal_visual block. Do not repeat the same values in multiple visuals merely to reach the limit.
+Put each visual in its own fenced deal_visual block. Never use ```json or any generic tag for visuals; always use the ```deal_visual code fence. Do not repeat the same values in multiple visuals merely to reach the limit.
 Do not invent values for a visual. Use a supported subset when it answers the question, state its coverage and missing evidence, and never fill gaps with zeros. If no meaningful supported visual is possible, explain what is missing.
 Copy every numeric value at the exact scale stated in the evidence: 214 must remain 214, not 21.4 or 2140. Never rescale, normalize, annualize, interpolate, or convert a value unless the evidence explicitly provides that converted value.
-Each visual block must be valid JSON only, with no comments or trailing commas.
+Each visual block must be valid JSON only, with no comments or trailing commas, enclosed in a ```deal_visual code fence.
 Every visual object MUST include `"version": 1`, a supported `type`, a non-empty `title`, and a non-empty `data` array.
 Always emit `source_notes` as an array of strings, even when there is only one source. Never emit it as a single string.
-Example skeleton: {"version": 1, "type": "bar", "title": "Revenue trend", "summary": "Revenue increased.", "unit": "INR Cr", "data": [{"label": "FY25", "value": 100}], "source_notes": ["Information memorandum, page 26"]}
+Example skeleton:
+```deal_visual
+{
+  "version": 1,
+  "type": "bar",
+  "title": "Revenue trend",
+  "summary": "Revenue increased.",
+  "unit": "INR Cr",
+  "data": [{"label": "FY25", "value": 100}],
+  "source_notes": ["Information memorandum, page 26"]
+}
+```
 Supported type values are: bar, line, area, pie, donut, kpi_strip, timeline, comparison_matrix.
 Choose the type from the shape of the evidence:
 - line: a chronological trend with at least two comparable numeric periods. When the labels are dates, fiscal years, quarters, or months for the same metric, use line rather than bar unless the user explicitly requests bars.
