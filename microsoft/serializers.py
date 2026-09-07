@@ -72,13 +72,52 @@ class EmailListSerializer(serializers.ModelSerializer):
     )
     deal_title = serializers.CharField(source='deal.title', read_only=True)
     is_meeting_note_email = serializers.SerializerMethodField()
+    latest_ingestion = serializers.SerializerMethodField()
     sanitizer_version = serializers.IntegerField(
         source='body_html_sanitizer_version',
         read_only=True,
     )
 
     def get_is_meeting_note_email(self, obj):
+        runs = getattr(obj, 'prefetched_ingestion_runs', None)
+        run = runs[0] if runs else (obj.ingestion_runs.first() if hasattr(obj, 'ingestion_runs') else None)
+        if run and run.classification and run.classification.get('type'):
+            return run.classification.get('type').upper() == 'MEETING_NOTE'
         return GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
+
+    def get_latest_ingestion(self, obj):
+        runs = getattr(obj, 'prefetched_ingestion_runs', None)
+        run = runs[0] if runs else (obj.ingestion_runs.first() if hasattr(obj, 'ingestion_runs') else None)
+        if not run:
+            is_meeting = GranolaMeetingEmailIngestionService.is_meeting_note_email(obj)
+            return {
+                'run_id': None,
+                'status': 'completed' if obj.is_processed or obj.deal_id else 'pending',
+                'revision': 0,
+                'classification_type': 'MEETING_NOTE' if is_meeting else ('NORMAL_EMAIL' if obj.is_processed else None),
+                'classification_confidence': 1.0 if (is_meeting or obj.deal_id) else None,
+                'matched_deal_id': str(obj.deal_id) if obj.deal_id else None,
+                'matched_deal_title': obj.deal.title if obj.deal else None,
+                'deal_match_confidence': 1.0 if obj.deal_id else None,
+                'deal_match_status': 'confirmed' if obj.deal_id else 'unmatched',
+                'stages': {},
+                'error': '',
+            }
+        match = run.match or {}
+        classification = run.classification or {}
+        return {
+            'run_id': str(run.id),
+            'status': run.status,
+            'revision': run.revision,
+            'classification_type': classification.get('type'),
+            'classification_confidence': classification.get('confidence'),
+            'matched_deal_id': match.get('deal_id') or match.get('suggested_deal_id') or (str(obj.deal_id) if obj.deal_id else None),
+            'matched_deal_title': match.get('title') or (obj.deal.title if obj.deal else None),
+            'deal_match_confidence': match.get('confidence'),
+            'deal_match_status': match.get('status'),
+            'stages': run.stages or {},
+            'error': run.error or '',
+        }
     
     class Meta:
         model = Email
@@ -88,7 +127,7 @@ class EmailListSerializer(serializers.ModelSerializer):
             'body_text', 'body_html', 'sanitizer_version', 'date_received', 'date_sent',
             'importance', 'is_read', 'has_attachments', 'body_preview', 
             'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id',
-            'deal_title', 'is_meeting_note_email'
+            'deal_title', 'is_meeting_note_email', 'latest_ingestion'
         )
         read_only_fields = ('id', 'created_at')
 

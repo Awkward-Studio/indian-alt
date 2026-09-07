@@ -101,7 +101,7 @@ class EmailAccountViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 class EmailViewSet(EmailIngestionActions, ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing emails (read-only)."""
     
-    queryset = Email.objects.select_related('email_account').all()
+    queryset = Email.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['subject', 'from_email', 'body_text', 'body_preview']
@@ -114,6 +114,13 @@ class EmailViewSet(EmailIngestionActions, ErrorHandlingMixin, viewsets.ReadOnlyM
         'importance',
         'has_attachments'
     ]
+
+    def get_queryset(self):
+        from django.db.models import Prefetch
+        from .ingestion_models import EmailIngestionRun
+        return Email.objects.select_related('email_account', 'deal').prefetch_related(
+            Prefetch('ingestion_runs', queryset=EmailIngestionRun.objects.order_by('-created_at'), to_attr='prefetched_ingestion_runs')
+        ).all()
     
     def get_serializer_class(self):
         if self.action == 'list':
