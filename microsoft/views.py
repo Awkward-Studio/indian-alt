@@ -32,6 +32,7 @@ from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.runtime import AIRuntimeService
 from deals.models import Deal
 from .services.granola_meeting_ingestion import GranolaMeetingEmailIngestionService
+from .ingestion_views import EmailIngestionActions
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class EmailAccountViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         tags=["Emails"],
     ),
 )
-class EmailViewSet(ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
+class EmailViewSet(EmailIngestionActions, ErrorHandlingMixin, viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing emails (read-only)."""
     
     queryset = Email.objects.select_related('email_account').all()

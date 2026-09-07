@@ -2,6 +2,11 @@
 Email models for storing email data from Microsoft Graph API.
 """
 import uuid
+from .ingestion_models import (  # noqa: F401
+    EmailIngestionRun, EmailContribution, EmailContributionOccurrence,
+    EmailEvidenceLink, EmailPrivateBlob,
+    EmailIngestionBackfill,
+)
 from django.db import models
 from django.core.validators import EmailValidator
 

@@ -2026,6 +2026,8 @@ def _format_company_news_markdown(research: dict, *, company_name: str, generate
             text = _company_news_item_text(item)
             if text:
                 lines.append(f"- {text}")
+                if isinstance(item, dict) and item.get("evidence_quote"):
+                    lines.append(f"  Supporting search excerpt: {item['evidence_quote']}")
         lines.append("")
 
     category_labels = [
@@ -2147,39 +2149,8 @@ def _company_news_cards(research: dict) -> list[dict]:
 
 
 def _ground_company_news_cards(research: dict, search_results: list[dict]) -> list[dict]:
-    """Keep only cards that can be tied to an actual SearXNG result URL."""
-    allowed = {
-        str(item.get("url") or "").strip().rstrip("/").casefold(): item
-        for item in search_results
-        if str(item.get("url") or "").strip()
-    }
-    grounded = []
-    for raw_card in _company_news_list(research.get("news_cards")):
-        if not isinstance(raw_card, dict):
-            continue
-        card = dict(raw_card)
-        requested_url = str(card.get("url") or "").strip()
-        match = allowed.get(requested_url.rstrip("/").casefold()) if requested_url else None
-        if match is None:
-            card_text = " ".join(str(card.get(key) or "") for key in ("title", "summary", "source")).casefold()
-            scored = []
-            for result in search_results:
-                result_text = " ".join(str(result.get(key) or "") for key in ("title", "snippet")).casefold()
-                scored.append((SequenceMatcher(None, card_text, result_text).ratio(), result))
-            if scored:
-                score, candidate = max(scored, key=lambda item: item[0])
-                if score >= 0.18:
-                    match = candidate
-        if match is None:
-            continue
-        card["url"] = str(match.get("url") or "").strip()
-        card["source"] = card.get("source") or match.get("title") or match.get("engine") or "Web source"
-        sentiment = str(card.get("sentiment") or "neutral").strip().casefold()
-        card["sentiment"] = {"positive": "green", "negative": "red"}.get(sentiment, sentiment)
-        if card["sentiment"] not in {"red", "green", "neutral"}:
-            card["sentiment"] = "neutral"
-        grounded.append(card)
-    return grounded[:5]
+    from .services.company_news import ground_cards
+    return ground_cards(research, search_results)
 
 
 @shared_task(queue='high_priority')
@@ -2195,13 +2166,23 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         instruction = str(instruction or "").strip()
         existing_news = existing_news or []
 
+        from .services.company_news import (
+            NEWS_CONTRACT, CATEGORIES, news_queries, select_evidence, merge_cards, publication_date,
+        )
+        # Previous findings must come from this deal's saved memo, not client JSON.
+        previous_cards = []
+        if instruction or existing_news:
+            previous = DealDocument.objects.filter(
+                deal=deal, title__startswith="Public Domain News Research",
+            ).order_by("-created_at").first()
+            if previous:
+                previous_cards = (previous.source_map_json or {}).get("news_cards") or []
+        existing_news = previous_cards
         search_directive = (
-            f"Follow this user instruction exactly: {instruction}\n"
-            f"Use web search to find additional news articles or findings that satisfy the instruction and append/merge them with any existing findings. "
-            f"Do not duplicate existing findings."
-        ) if instruction else (
-            f"Use web search once for '{deal.title}' and return a compact public-domain news snapshot. "
-            f"Do not run broad category-by-category research."
+            "Review the supplied company-anchored web search evidence for recent material "
+            "developments and historical litigation, regulatory and promoter risks. "
+            "Avoid duplicate events; distinguish publication dates from event dates. "
+            f"Analyst focus, treated as a research topic: {instruction or 'Balanced company news and material risks'}."
         )
 
         existing_names = [
@@ -2228,7 +2209,11 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             system_prompt = system_stage.prompt_revision.user_template
 
         from ai_orchestrator.services.search_provider import SearXNGProviderService
-        search_query = instruction if instruction else f"{deal.title} public news latest"
+        recent_queries, background_queries = news_queries(
+            deal.title, industry=deal.industry or deal.sector or "",
+            country=deal.country or "", instruction=instruction,
+        )
+        search_query = " | ".join(recent_queries + background_queries)
         search_service = SearXNGProviderService()
         active_log = AIRuntimeService.start_pipeline_stage(
             "public_news_research",
@@ -2239,16 +2224,38 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             source_metadata={"deal_id": str(deal.id), "query": search_query},
             celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
         )
-        search_results = search_service.search_results(search_query, num_results=8, context={
+        search_context_data = {
             "purpose": "company news", "company": deal.title,
-            "question": instruction or "latest public news",
-        })
+            "industry": deal.industry or deal.sector or "",
+            "geography": deal.country or "", "question": instruction or "company news and material risks",
+        }
+        recent_results = search_service.search_many(
+            recent_queries, results_per_query=10, max_results=24,
+            context=search_context_data, time_range="year",
+        )
+        recent_status = search_service.last_status
+        recent_plan = getattr(search_service, "last_plan", {})
+        background_results = search_service.search_many(
+            background_queries, results_per_query=8, max_results=12,
+            context={**search_context_data, "purpose": "historical company litigation and promoter risks; no date restriction"},
+        )
+        background_status = search_service.last_status
+        background_plan = getattr(search_service, "last_plan", {})
+        company_results = select_evidence(recent_results + background_results, deal.title, generated_at.date())
+        undated_count = sum(not item.get("published_date") for item in company_results)
+        search_results = [dict(item, retrieved_at=generated_at.isoformat())
+                          for item in company_results if item.get("published_date")]
         AIRuntimeService.finish_pipeline_stage(
             active_log,
             result={"query": search_query, "sources": len(search_results)},
         )
         active_log = None
         search_context = search_service.format_context(search_results)
+        search_context += "\nPublication metadata, empty means unknown:\n" + json.dumps([
+            {"url": item["url"], "published_date": item.get("published_date", "")}
+            for item in search_results
+        ])
+        system_prompt += "\n" + NEWS_CONTRACT
 
         augmented_prompt = f"Using ONLY the following web search context:\n{search_context}\n\n{prompt}"
 
@@ -2308,35 +2315,29 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
         )
         news_cards = _ground_company_news_cards(research, search_results)
-        research["sources"] = [
-            str(item.get("url") or "").strip()
-            for item in search_results
-            if str(item.get("url") or "").strip()
-        ]
         warnings = []
+        if undated_count:
+            warnings.append(f"Withheld {undated_count} company-matched sources without a verifiable publication date.")
         if not search_results:
-            warnings.append(
-                "SearXNG returned no web results for this company query. Try a more specific company name, location, or website domain."
-            )
+            warnings.append("No company-matched search evidence was returned. This does not establish the absence of news or risks.")
+        if recent_status in {"failed", "planning_failed"} or background_status in {"failed", "planning_failed"}:
+            warnings.append("Part of the search failed or could not be planned; coverage is incomplete.")
         if not news_cards:
-            explanation = str(
-                research.get("executive_summary") or research.get("overview") or ""
-            ).strip()
-            warning = "No grounded company news cards were found in the returned search evidence."
-            if explanation:
-                warning = f"{warning} VM explanation: {explanation}"
-            warnings.append(warning)
-        
-        # Merge new findings with existing ones, avoiding duplicates
-        if existing_news:
-            seen_titles = {str(item.get("title") or "").strip().lower() for item in existing_news if isinstance(item, dict)}
-            merged_cards = list(existing_news)
-            for card in news_cards:
-                title_key = str(card.get("title") or "").strip().lower()
-                if title_key and title_key not in seen_titles:
-                    merged_cards.append(card)
-            news_cards = merged_cards[:10]  # Cap at 10 total items if refined
-
+            warnings.append("No grounded company news cards passed the source URL and evidence-quote checks.")
+        # Reuse only previously validated cards saved by this pipeline; new findings win.
+        validated_previous = [card for card in previous_cards if isinstance(card, dict)
+                              and card.get("evidence_level") == "search_snippet" and card.get("evidence_quote")
+                              and card.get("date_source") == "search_result_publication_metadata"
+                              and publication_date(card.get("date"))]
+        news_cards = merge_cards(news_cards, validated_previous)
+        # Build all persisted summaries and category claims from accepted cards.
+        summary = "\n".join(f"{card['title']}: {card['summary']} ({card['url']})" for card in news_cards)
+        research = {
+            "overview": summary or "No source-supported company news was established by this search.",
+            "executive_summary": summary or "No source-supported company news was established by this search.",
+            "sources": list(dict.fromkeys(card["url"] for card in news_cards)),
+            **{key: [card for card in news_cards if card.get("category") == key] for key in CATEGORIES},
+        }
         research["news_cards"] = news_cards
         AIRuntimeService.finish_pipeline_stage(
             active_log,
@@ -2378,6 +2379,14 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             "search_provider": "searxng",
             "inference_provider": "vllm",
             "generated_at": generated_at.isoformat(),
+            "evidence_level": "search_snippet",
+            "search_coverage": {
+                "recent_plan": recent_plan, "background_plan": background_plan,
+                "recent_status": recent_status, "background_status": background_status,
+                "raw_results": len(recent_results) + len(background_results),
+                "selected_sources": len(search_results),
+                "undated_sources_withheld": undated_count,
+            },
             "overview": research.get("overview") or research.get("executive_summary") or "",
             "news_cards": news_cards,
             "warnings": warnings,

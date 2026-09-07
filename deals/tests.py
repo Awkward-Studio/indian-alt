@@ -852,10 +852,11 @@ class CompetitorSearchPipelineTests(TestCase):
     @patch("deals.tasks.EmbeddingService")
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
     @patch(
-        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_many",
         return_value=[{
             "title": "Acme raised growth capital",
-            "snippet": "Acme announced a new funding round.",
+            "snippet": "Acme Commerce announced a new funding round.",
+            "published_date": "2026-01-15",
             "url": "https://example.com/acme-funding",
             "engine": "test",
             "query": "Acme public news latest",
@@ -879,6 +880,7 @@ class CompetitorSearchPipelineTests(TestCase):
                     "title": "Acme raised growth capital",
                     "date": "2026-01-15",
                     "summary": "Acme announced a new funding round.",
+                    "evidence_quote": "Acme Commerce announced a new funding round.",
                     "category": "funding",
                     "sentiment": "green",
                     "source": "Example News",
@@ -909,7 +911,9 @@ class CompetitorSearchPipelineTests(TestCase):
         mock_embedding_service.return_value.vectorize_document.return_value = True
 
         first = fetch_company_news_async_task(str(deal.id))
-        second = fetch_company_news_async_task(str(deal.id))
+        second = fetch_company_news_async_task(str(deal.id), instruction="founder updates", existing_news=[{
+            "title": "Injected finding", "summary": "Unverified client claim", "url": "https://injected.example/story",
+        }])
 
         prompt = provider.execute_standard.call_args.args[0]["prompt"].lower()
         self.assertIn("web search", prompt)
@@ -920,7 +924,7 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertIn("red/green flags", prompt)
         self.assertIn("at most 5 news_cards", prompt)
         self.assertEqual(provider.execute_standard.call_args.args[0]["options"]["max_tokens"], 4000)
-        self.assertEqual(mock_search.call_count, 2)
+        self.assertEqual(mock_search.call_count, 4)
 
         docs = DealDocument.objects.filter(deal=deal, title__startswith="Public Domain News Research").order_by("created_at")
         self.assertEqual(docs.count(), 2)
@@ -929,10 +933,17 @@ class CompetitorSearchPipelineTests(TestCase):
         self.assertEqual(mock_embedding_service.return_value.vectorize_document.call_count, 2)
         self.assertEqual(first["counts"]["green_flags"], 1)
         self.assertEqual(first["news_cards"][0]["title"], "Acme raised growth capital")
+        self.assertEqual(first["news_cards"][0]["date"], "2026-01-15")
+        self.assertEqual(first["news_cards"][0]["date_source"], "search_result_publication_metadata")
+        self.assertEqual(docs.first().source_map_json["news_cards"][0]["published_date_raw"], "2026-01-15")
+        self.assertTrue(docs.first().source_map_json["news_cards"][0]["retrieved_at"])
+        self.assertNotIn("Injected finding", second["response"])
+        self.assertNotIn("Acme won an award", first["response"])
+        self.assertIn("Acme Commerce", mock_search.call_args_list[-2].args[0][-1])
         self.assertEqual(second["document"]["title"], docs.last().title)
         self.assertEqual(
             docs.last().source_map_json["ledger_insights"]["industry_context"],
-            "Acme has recent public-domain diligence news.",
+            "Acme raised growth capital: Acme announced a new funding round. (https://example.com/acme-funding)",
         )
         tracked_stages = set(
             AIAuditLog.objects.filter(pipeline__key="public_news_research")
@@ -946,13 +957,13 @@ class CompetitorSearchPipelineTests(TestCase):
         ledger_data = DealListSerializer(deal).data
         self.assertEqual(
             ledger_data["pipeline_insights"]["industry_context"],
-            "Acme has recent public-domain diligence news.",
+            "Acme raised growth capital: Acme announced a new funding round. (https://example.com/acme-funding)",
         )
 
     @patch("deals.tasks.EmbeddingService")
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
     @patch(
-        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_results",
+        "ai_orchestrator.services.search_provider.SearXNGProviderService.search_many",
         return_value=[{
             "title": "Dil (1990 film)",
             "snippet": "A Bollywood film starring Aamir Khan and Madhuri Dixit.",
@@ -987,9 +998,9 @@ class CompetitorSearchPipelineTests(TestCase):
         result = fetch_company_news_async_task(str(deal.id))
 
         self.assertEqual(result["news_cards"], [])
-        self.assertEqual(len(result["warnings"]), 1)
-        self.assertIn("No grounded company news cards", result["warnings"][0])
-        self.assertIn(explanation, result["warnings"][0])
+        self.assertEqual(len(result["warnings"]), 2)
+        self.assertIn("No grounded company news cards", result["warnings"][-1])
+        self.assertNotIn(explanation, result["overview"])
         document = DealDocument.objects.get(id=result["document"]["id"])
         self.assertEqual(document.source_map_json["warnings"], result["warnings"])
 

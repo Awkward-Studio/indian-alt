@@ -213,6 +213,10 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
+    'reconcile-email-evidence-every-minute': {
+        'task': 'microsoft.tasks.reconcile_email_evidence',
+        'schedule': 60,
+    },
     'ingest-industry-news-every-six-hours': {
         'task': 'industry_knowledge.tasks.ingest_industry_news',
         'schedule': 6 * 60 * 60,
@@ -245,6 +249,11 @@ CELERY_TASK_ROUTES = {
     'microsoft.tasks.analyze_email_async': {'queue': 'low_priority'},
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'
+
+# Enable after migrations, worker, private storage and pilot validation are ready.
+EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=False, cast=bool)
+EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))
+EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES = config('EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES', default=26214400, cast=int)
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = config(

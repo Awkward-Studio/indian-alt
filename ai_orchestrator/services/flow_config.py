@@ -462,7 +462,16 @@ class UniversalChatFlowService:
 
     @classmethod
     def stage_settings(cls, config: Dict[str, Any], stage_id: str) -> Dict[str, Any]:
-        for stage in config.get("stages", []):
-            if stage.get("id") == stage_id:
-                return stage.get("settings") or {}
+        if not isinstance(config, dict):
+            return {}
+        stages = config.get("stages", [])
+        if isinstance(stages, dict):
+            val = stages.get(stage_id)
+            if isinstance(val, dict):
+                return val.get("settings") if "settings" in val else val
+            return {}
+        if isinstance(stages, list):
+            for stage in stages:
+                if isinstance(stage, dict) and stage.get("id") == stage_id:
+                    return stage.get("settings") or {}
         return {}

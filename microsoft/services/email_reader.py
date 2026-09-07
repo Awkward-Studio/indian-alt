@@ -336,7 +336,12 @@ class EmailReaderService:
                                 total_fetched += 1
 
                             try:
-                                GranolaMeetingEmailIngestionService.process_email(email)
+                                from django.conf import settings
+                                if getattr(settings, 'EMAIL_INGESTION_ENABLED', False):
+                                    from .email_ingestion import EmailIngestionService
+                                    EmailIngestionService.enqueue(email)
+                                else:
+                                    GranolaMeetingEmailIngestionService.process_email(email)
                             except Exception as granola_err:
                                 logger.exception(
                                     "Granola meeting ingestion failed for email %s: %s",

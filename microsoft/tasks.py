@@ -13,6 +13,21 @@ from .services.email_thread_originator import EmailThreadOriginatorResolver
 
 logger = logging.getLogger(__name__)
 
+
+@shared_task(acks_late=True, reject_on_worker_lost=True, time_limit=1800)
+def ingest_email_evidence(run_id):
+    from django.conf import settings
+    from .services.email_ingestion import EmailIngestionService
+    if not getattr(settings, 'EMAIL_INGESTION_ENABLED', False):
+        return {'status': 'disabled'}
+    return EmailIngestionService.process(run_id)
+
+
+@shared_task
+def reconcile_email_evidence():
+    from .services.email_ingestion import EmailIngestionService
+    return EmailIngestionService.reconcile()
+
 @shared_task(bind=True)
 def analyze_email_async(self, email_id: str, audit_log_id: str | None = None):
     """
