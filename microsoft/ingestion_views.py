@@ -38,9 +38,22 @@ class EmailIngestionActions:
         email = self.get_object()
         try:
             deal_id = request.data.get('deal_id')
-            if not deal_id:
-                return Response({'error': 'deal_id is required.'}, status=400)
-            deal = get_object_or_404(Deal, pk=deal_id)
+            create_new_deal = request.data.get('create_new_deal', False)
+            new_deal_title = (request.data.get('new_deal_title') or '').strip()
+
+            if create_new_deal or (new_deal_title and not deal_id):
+                title = new_deal_title
+                if not title:
+                    clean_subject = (email.subject or 'New Deal').strip()
+                    for prefix in ['re:', 'fwd:', 'fw:']:
+                        if clean_subject.lower().startswith(prefix):
+                            clean_subject = clean_subject[len(prefix):].strip()
+                    title = clean_subject[:200] or 'New Deal from Email'
+                deal = Deal.objects.create(title=title)
+            elif deal_id:
+                deal = get_object_or_404(Deal, pk=deal_id)
+            else:
+                return Response({'error': 'Either deal_id or create_new_deal with new_deal_title is required.'}, status=400)
 
             run_id = request.data.get('run_id')
             revision = request.data.get('expected_revision')
