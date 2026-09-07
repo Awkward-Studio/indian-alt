@@ -8,6 +8,10 @@ from microsoft.models import Email
 from .email_contributions import normalize
 
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 class EmailDecisionService:
     @staticmethod
     def ai(stage, payload, source_id):
@@ -52,7 +56,70 @@ class EmailDecisionService:
 
     @staticmethod
     def candidates(text, deals, *, use_semantic=True, limit=12):
-        """Use the same persisted retrieval profiles as global chat, with a scoped pool."""
+        """
+        Primary path: Query the VM embedding service for semantic deal profiles,
+        then rerank candidates using the VM cross-encoder reranker.
+        Fallback path: Word matching and SequenceMatcher if semantic services are offline or return no hits.
+        """
+        semantic_candidates = []
+
+        if use_semantic:
+            try:
+                from ai_orchestrator.services.embedding_processor import EmbeddingService
+                service = EmbeddingService()
+                if service.is_embedding_available(timeout=2):
+                    hits = service.search_deal_profiles(text[:12000], limit=max(limit * 2, 24))
+                    permitted_ids = set(deals.filter(id__in=[d.id for d in hits]).values_list('id', flat=True))
+                    filtered_hits = [d for d in hits if d.id in permitted_ids]
+
+                    if filtered_hits:
+                        reranked_hits = filtered_hits
+                        if service.reranker_model and getattr(service, 'reranker', None):
+                            try:
+                                candidate_docs = []
+                                for d in filtered_hits:
+                                    profile = getattr(d, 'retrieval_profile', None)
+                                    prof_text = str(getattr(profile, 'profile_text', '') or d.deal_summary or '')
+                                    candidate_docs.append(f"{d.title}. Sector: {d.sector or ''}. Industry: {d.industry or ''}. {prof_text}"[:1500])
+
+                                rerank_results = service.reranker.rerank(
+                                    model=service.reranker_model,
+                                    query=text[:4000],
+                                    documents=candidate_docs,
+                                )
+                                if rerank_results:
+                                    index_to_score = {
+                                        item.get('index'): float(item.get('score', 0))
+                                        for item in rerank_results
+                                        if item.get('index') is not None
+                                    }
+                                    reranked_hits = sorted(
+                                        filtered_hits,
+                                        key=lambda d: index_to_score.get(filtered_hits.index(d), -999.0),
+                                        reverse=True,
+                                    )
+                            except Exception as exc:
+                                logger.warning("Reranker failed during candidate ranking: %s", exc)
+
+                        for rank, deal in enumerate(reranked_hits[:limit]):
+                            profile = getattr(deal, 'retrieval_profile', None)
+                            prof_text = str(getattr(profile, 'profile_text', '') or deal.deal_summary or '')
+                            haystack = ' '.join([deal.title, deal.sector or '', deal.industry or '', prof_text])
+                            score = max(1.0, 100.0 - (rank * 5.0))
+                            semantic_candidates.append({
+                                'deal_id': str(deal.id),
+                                'title': deal.title,
+                                'score': score,
+                                'context': haystack[:3000],
+                                'evidence': 'VM embedding + reranking',
+                            })
+            except Exception as exc:
+                logger.warning("Semantic candidate retrieval failed, falling back: %s", exc)
+
+        if semantic_candidates:
+            return semantic_candidates
+
+        # Fallback: word / token matching when semantic search is unavailable or yields no candidates
         terms = set(re.findall(r'[\w-]{3,}', text.casefold()))
         scored = {}
         for deal in deals.select_related('retrieval_profile', 'primary_contact').iterator():
@@ -66,19 +133,7 @@ class EmailDecisionService:
             score += SequenceMatcher(None, text[:300].casefold(), title).ratio()
             if score > 1:
                 scored[str(deal.id)] = {'deal_id': str(deal.id), 'title': deal.title, 'score': score,
-                    'context': haystack[:3000], 'evidence': 'name/profile terms'}
-        if use_semantic:
-            from ai_orchestrator.services.embedding_processor import EmbeddingService
-            service = EmbeddingService()
-            if service.is_embedding_available(timeout=1):
-                hits = service.search_deal_profiles(text[:12000], limit=30)
-                permitted = {str(x) for x in deals.filter(id__in=[d.id for d in hits]).values_list('id', flat=True)}
-                for rank, deal in enumerate(hits):
-                    key = str(deal.id)
-                    if key in permitted:
-                        item = scored.setdefault(key, {'deal_id': key, 'title': deal.title, 'score': 0,
-                            'context': (deal.deal_summary or '')[:3000], 'evidence': 'semantic profile'})
-                        item['score'] += 10 / (rank + 1)
+                    'context': haystack[:3000], 'evidence': 'name/profile terms (fallback)'}
         return sorted(scored.values(), key=lambda x: (-x['score'], x['deal_id']))[:limit]
 
     @classmethod

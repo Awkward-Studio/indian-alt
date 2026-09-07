@@ -24,11 +24,9 @@ class EmailIngestionActions:
             if not enabled:
                 return Response({'error': 'Email ingestion is not enabled.'}, status=503)
             run = EmailIngestionService.enqueue(email)
-            if run.status in ('needs_review', 'failed', 'waiting_service'):
-                run.status = 'pending'
-                run.next_attempt_at = None
-                run.save(update_fields=['status', 'next_attempt_at'])
-                EmailIngestionService.dispatch(run.id)
+            # Process inline so embedding search, reranking, and LLM deal selection execute immediately
+            EmailIngestionService.process(run.id)
+            run.refresh_from_db()
         else:
             run = email.ingestion_runs.first()
         return Response({**run_status(run, include_content=True), 'enabled': enabled})
@@ -39,12 +37,22 @@ class EmailIngestionActions:
             return Response({'error': 'Email ingestion is not enabled.'}, status=503)
         email = self.get_object()
         try:
+            deal_id = request.data.get('deal_id')
+            if not deal_id:
+                return Response({'error': 'deal_id is required.'}, status=400)
+            deal = get_object_or_404(Deal, pk=deal_id)
+
             run_id = request.data.get('run_id')
             revision = request.data.get('expected_revision')
-            if not run_id or not isinstance(revision, int):
+            if not run_id:
+                run = email.ingestion_runs.first() or EmailIngestionService.enqueue(email)
+                run_id = run.id
+                revision = run.revision
+            elif not isinstance(revision, int):
                 return Response({'error': 'run_id and expected_revision are required.'}, status=400)
-            get_object_or_404(EmailIngestionRun, pk=run_id, email=email)
-            deal = get_object_or_404(Deal, pk=request.data.get('deal_id'))
+            else:
+                get_object_or_404(EmailIngestionRun, pk=run_id, email=email)
+
             run = confirm_decision(run_id, email=email, deal=deal, expected_revision=revision,
                 kind=request.data.get('classification'), actor=request.user)
         except StaleEmailDecision as exc:
