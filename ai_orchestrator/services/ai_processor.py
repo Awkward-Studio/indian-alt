@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Iterator
 from ..models import AIPersonality, AISkill, AIAuditLog
 from .llm_providers import VLLMProviderService, AnthropicProviderService
 from .prompts import PromptBuilderService
+from .deal_visuals import apply_deal_visual_contract
 from .parsers import ResponseParserService
 from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
@@ -170,6 +171,8 @@ class AIProcessorService:
                 system_instructions,
             )
         
+        system_instructions = apply_deal_visual_contract(system_instructions, pipeline_key, stage_key)
+
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
         search_results = []
         if web_search_enabled:

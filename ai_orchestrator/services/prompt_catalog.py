@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ai_orchestrator.models import AISystemSetting
+from .deal_visuals import DEAL_VISUAL_OUTPUT_CONTRACT
 
 
 @dataclass(frozen=True)
@@ -42,28 +43,8 @@ Use bullets or a small table only when it makes the answer easier to scan.
 If the context does not contain enough evidence, say what is missing instead of inventing facts.
 For claims based on [PUBLIC WEB EVIDENCE], cite the matching [S#] and include its supplied URL as a Markdown link. Never cite or invent a URL that is absent from the evidence.
 
-[VISUAL OUTPUT]
-When the user asks for a graph, chart, visual, infographic, timeline, KPI view, comparison, or financial deep dive, include fenced deal_visual JSON blocks when the available evidence supports them.
-Return one visual for a singular request. Return up to three distinct visuals when the user asks for charts/graphs, multiple visuals, or a deep dive and the evidence supports materially different views.
-Put each visual in its own fenced deal_visual block. Do not repeat the same values in multiple visuals merely to reach the limit.
-Do not invent values for a visual. If the data is incomplete, explain what is missing instead of emitting a visual.
-Copy every numeric value at the exact scale stated in the evidence: 214 must remain 214, not 21.4 or 2140. Never rescale, normalize, annualize, interpolate, or convert a value unless the evidence explicitly provides that converted value.
-Each visual block must be valid JSON only, with no comments or trailing commas.
-Every visual object MUST include `"version": 1`, a supported `type`, a non-empty `title`, and a non-empty `data` array.
-Always emit `source_notes` as an array of strings, even when there is only one source. Never emit it as a single string.
-Example skeleton: {"version": 1, "type": "bar", "title": "Revenue trend", "summary": "Revenue increased.", "unit": "INR Cr", "data": [{"label": "FY25", "value": 100}], "source_notes": ["Information memorandum, page 26"]}
-Supported type values are: bar, line, area, pie, donut, kpi_strip, timeline, comparison_matrix.
-Choose the type from the shape of the evidence:
-- line: a chronological trend with at least two comparable numeric periods. When the labels are dates, fiscal years, quarters, or months for the same metric, use line rather than bar unless the user explicitly requests bars.
-- area: a chronological magnitude or cumulative trend with at least two comparable numeric periods.
-- bar: one comparable numeric measure across categories, companies, business units, or periods.
-- pie or donut: non-negative parts of one whole, all measured in the same unit. Do not use these for unrelated KPIs.
-- kpi_strip: a point-in-time snapshot of heterogeneous headline metrics with different units. Do not choose it when a trend, composition, or category comparison is available and more informative.
-- timeline: dated or sequential milestones, transactions, or risks.
-- comparison_matrix: several metrics compared across two or more companies, scenarios, or periods.
-For bar, line, area, pie, and donut, data rows must use {"label": "...", "value": 123.4}. Values must be JSON numbers; put the shared unit in the top-level `unit` field.
-Use concise source_notes that identify the supporting document or context. Wrap every visual with a short Markdown explanation before or after it.
-""",
+
+""" + DEAL_VISUAL_OUTPUT_CONTRACT,
     ),
     PromptDefinition(
         key="query_planner_system",

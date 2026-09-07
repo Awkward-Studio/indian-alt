@@ -5,7 +5,7 @@ from django.core.management import BaseCommand
 
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.universal_chat import UniversalChatService
-from ai_orchestrator.tasks import DEAL_CHAT_CONVERSATIONAL_PROMPT
+from ai_orchestrator.services.prompt_catalog import PromptCatalogService
 from deals.models import Deal
 
 
@@ -55,7 +55,7 @@ class Command(BaseCommand):
                 {
                     "model_provider": "vllm",
                     "personality_only_system": True,
-                    "prompt_template_override": DEAL_CHAT_CONVERSATIONAL_PROMPT,
+                    "prompt_template_override": PromptCatalogService.get("deal_chat_conversational"),
                     "max_tokens": max(1, int(options["max_tokens"])),
                 }
             )
