@@ -5,7 +5,6 @@ from django.utils import timezone
 from ai_orchestrator.models import DocumentChunk, DealRetrievalProfile
 from deals.models import DealAnalysis
 from microsoft.models import Email, EmailIngestionRun, EmailEvidenceLink
-from .email_ingestion import EmailIngestionService
 
 
 class StaleEmailDecision(ValueError):
@@ -141,5 +140,4 @@ def confirm_decision(run_id, *, email, deal, expected_revision, kind=None, actor
     run.error = ''
     run.save()
     Email.objects.filter(pk=email.pk).update(deal=deal, is_indexed=False, processing_status='pending')
-    transaction.on_commit(lambda: EmailIngestionService.dispatch(run.id))
     return run

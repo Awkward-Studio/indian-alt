@@ -16,6 +16,21 @@ class EmailDecisionService:
     MAX_SOURCE_INPUT_BYTES = 18_000
     MAX_DECISION_INPUT_BYTES = 48_000
 
+    @staticmethod
+    def _exact_excerpt(source, proposed):
+        """Map a whitespace-normalized VM quote back to the exact source text."""
+        source = str(source or '')
+        proposed = str(proposed or '').strip()
+        if not proposed:
+            return ''
+        if proposed in source:
+            return proposed
+        tokens = [re.escape(token) for token in proposed.split()]
+        if not tokens:
+            return ''
+        match = re.search(r'\s+'.join(tokens), source, flags=re.IGNORECASE)
+        return match.group(0) if match else ''
+
     @classmethod
     def _bounded_payload(cls, stage, payload, source_id):
         """Reduce oversized private source text without dropping its tail."""
@@ -258,7 +273,8 @@ class EmailDecisionService:
 
         result = cls.ai('route', {'email': text, 'candidates': candidates}, email.id)
         kind = result.get('type')
-        classification_evidence = result.get('classification_evidence') or result.get('evidence') or ''
+        proposed_classification_evidence = result.get('classification_evidence') or result.get('evidence') or ''
+        classification_evidence = cls._exact_excerpt(text, proposed_classification_evidence)
         if kind not in ('NORMAL_EMAIL', 'MEETING_NOTE'):
             raise ValueError('Email route must classify the source as NORMAL_EMAIL or MEETING_NOTE.')
         if not isinstance(classification_evidence, str) or not classification_evidence or classification_evidence not in text:
@@ -268,8 +284,9 @@ class EmailDecisionService:
         candidate_ids = {item['deal_id'] for item in candidates}
         if picked and picked not in candidate_ids:
             raise ValueError('Email route selected an unauthorized or nonexistent candidate.')
-        match_evidence = result.get('match_evidence') or ''
-        if not isinstance(match_evidence, str) or (match_evidence and match_evidence not in text):
+        proposed_match_evidence = result.get('match_evidence') or ''
+        match_evidence = cls._exact_excerpt(text, proposed_match_evidence)
+        if proposed_match_evidence and not match_evidence:
             raise ValueError('Email route match evidence must occur in the email.')
 
         route = str(result.get('route') or '').upper()

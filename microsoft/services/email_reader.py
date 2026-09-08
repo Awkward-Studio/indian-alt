@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db import transaction
 from .graph_service import GraphAPIService
-from .granola_meeting_ingestion import GranolaMeetingEmailIngestionService
 from .email_html_sanitizer import EmailHtmlSanitizer
 from ..models import EmailAccount, Email
 from contacts.models import Contact
@@ -335,19 +334,8 @@ class EmailReaderService:
                                 result['count'] += 1
                                 total_fetched += 1
 
-                            try:
-                                from django.conf import settings
-                                if getattr(settings, 'EMAIL_INGESTION_ENABLED', False):
-                                    from .email_ingestion import EmailIngestionService
-                                    EmailIngestionService.enqueue(email)
-                                else:
-                                    GranolaMeetingEmailIngestionService.process_email(email)
-                            except Exception as granola_err:
-                                logger.exception(
-                                    "Granola meeting ingestion failed for email %s: %s",
-                                    email.id,
-                                    granola_err,
-                                )
+                            # Mailbox sync only stores the source. An analyst starts
+                            # classification from the email page when they are ready.
                                 
                         except Exception as e:
                             error_msg = f"Error processing message {graph_id}: {str(e)}"

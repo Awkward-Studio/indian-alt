@@ -2,8 +2,11 @@ import logging
 import json
 import os
 import uuid
+from urllib.parse import urlsplit
+import requests
 from typing import Dict, Any, Optional, List
 from django.db.models import Q, Count
+from django.conf import settings
 from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
@@ -63,6 +66,26 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = AIAuditLog.objects.all().order_by('-created_at')
     serializer_class = AIAuditLogSerializer
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _task_ids(log, *, include_children=True):
+        metadata = log.source_metadata or {}
+        values = [log.celery_task_id]
+        if include_children:
+            values.extend(metadata.get("child_task_ids") or [])
+            values.append(metadata.get("callback_task_id"))
+        return list(dict.fromkeys(str(value) for value in values if value))
+
+    @staticmethod
+    def _revoke(task_ids):
+        from config.celery import celery_app
+        errors = []
+        for task_id in task_ids:
+            try:
+                celery_app.control.revoke(task_id, terminate=True, signal="SIGKILL")
+            except Exception as exc:
+                errors.append(f"{task_id}: {exc}")
+        return errors
 
     # Standard retrieve will now use the enhanced AIAuditLogSerializer
     # which includes system_prompt, raw fields, and parsed_json automatically.
@@ -136,6 +159,83 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         if revoke_errors:
             response_payload["warnings"] = revoke_errors
         return Response(response_payload)
+
+    @action(detail=True, methods=['post'], url_path='cancel-child')
+    def cancel_child(self, request, pk=None):
+        log = self.get_object()
+        task_id = str(request.data.get('task_id') or '')
+        metadata = log.source_metadata or {}
+        child_ids = [str(value) for value in [
+            *(metadata.get('child_task_ids') or []), metadata.get('callback_task_id'),
+        ] if value]
+        if not task_id or task_id not in child_ids:
+            return Response({'error': 'This task is not a child of the selected workflow.'}, status=400)
+        errors = self._revoke([task_id])
+        cancelled = list(dict.fromkeys([*(metadata.get('cancelled_child_task_ids') or []), task_id]))
+        log.source_metadata = {**metadata, 'cancelled_child_task_ids': cancelled}
+        log.save(update_fields=['source_metadata'])
+        return Response({'status': 'cancelled', 'task_id': task_id, 'warnings': errors})
+
+    @action(detail=False, methods=['post'], url_path='clear-active')
+    def clear_active(self, request):
+        if not _is_ai_admin(request.user):
+            return Response({'error': 'Administrator access is required.'}, status=403)
+
+        active_logs = list(AIAuditLog.objects.filter(status__in=['PENDING', 'PROCESSING']))
+        task_ids = list(dict.fromkeys(
+            task_id for log in active_logs for task_id in self._task_ids(log)
+        ))
+        warnings = self._revoke(task_ids)
+
+        slot_count = 0
+        try:
+            configured_url = getattr(settings, 'VLLM_BASE_URL', '')
+            parsed = urlsplit(configured_url)
+            slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
+            api_key = getattr(settings, 'VLLM_API_KEY', '')
+            headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+            slots_response = requests.get(slot_url, headers=headers, timeout=10)
+            slots_response.raise_for_status()
+            slots = slots_response.json()
+            for slot in slots if isinstance(slots, list) else []:
+                slot_id = slot.get('id')
+                if slot_id is None:
+                    continue
+                try:
+                    response = requests.post(
+                        f'{slot_url}/{slot_id}', params={'action': 'erase'},
+                        headers=headers, timeout=10,
+                    )
+                    response.raise_for_status()
+                    slot_count += 1
+                except Exception as exc:
+                    warnings.append(f'Slot {slot_id}: {exc}')
+        except Exception as exc:
+            warnings.append(f'Slot cleanup: {exc}')
+
+        message = 'Stopped by administrator while clearing active inference work.'
+        now = timezone.now()
+        with transaction.atomic():
+            failed_logs = AIAuditLog.objects.filter(status__in=['PENDING', 'PROCESSING']).update(
+                status='FAILED', is_success=False, error_message=message, completed_at=now,
+            )
+            failed_deals = Deal.objects.filter(processing_status='processing').update(
+                processing_status='failed', processing_error=message,
+            )
+            from microsoft.models import Email, EmailIngestionRun
+            reset_emails = Email.objects.filter(processing_status__in=['pending', 'processing']).update(
+                processing_status='idle', processing_error=message,
+            )
+            failed_ingestion = EmailIngestionRun.objects.filter(
+                status__in=['pending', 'running', 'waiting_service'],
+            ).update(status='failed', error=message, lease_token=None, lease_until=None)
+
+        return Response({
+            'status': 'cleared', 'revoked_task_count': len(task_ids),
+            'erased_slot_count': slot_count, 'failed_log_count': failed_logs,
+            'failed_deal_count': failed_deals, 'reset_email_count': reset_emails,
+            'failed_ingestion_count': failed_ingestion, 'warnings': warnings,
+        })
 
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer

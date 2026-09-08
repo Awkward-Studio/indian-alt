@@ -67,6 +67,12 @@ class EmailIngestionAPITests(TestCase):
     def test_repeated_create_reuses_hydrated_deal(self, dispatch):
         self.email.deal = None
         self.email.save(update_fields=['deal'])
+        self.run.match = {
+            'status': 'needs_review',
+            'route': 'NEW_DEAL',
+            'initialization': {'deal_model_data': {'title': 'Hydrated company'}},
+        }
+        self.run.save(update_fields=['match'])
         AIAuditLog.objects.create(
             source_type='email',
             source_id=str(self.email.id),

@@ -380,9 +380,8 @@ class EmailReaderPipelineTests(TestCase):
             "hasAttachments": attachments,
         }
 
-    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
     @patch("microsoft.services.email_reader.GraphAPIService")
-    def test_paginated_graph_fetch_persists_updates_and_attachment_metadata(self, graph_cls, process_email):
+    def test_paginated_graph_fetch_persists_updates_and_attachment_metadata(self, graph_cls):
         graph = graph_cls.return_value
         first = self._graph_message("graph-1", "FIRST_MARKER original", "2026-08-05T08:00:00Z")
         second = self._graph_message(
@@ -411,7 +410,6 @@ class EmailReaderPipelineTests(TestCase):
             [item.text for item in EmailThreadUnfolder.unfold(Email.objects.all())],
             ["FIRST_MARKER original", "SECOND_MARKER reply"],
         )
-        self.assertEqual(process_email.call_count, 2)
 
         first["body"]["content"] = "FIRST_MARKER corrected original"
         graph.get_messages.side_effect = [{"value": [first]}, {"value": []}]
@@ -419,9 +417,8 @@ class EmailReaderPipelineTests(TestCase):
         self.assertEqual(updated["updated_count"], 1)
         self.assertEqual(Email.objects.get(graph_id="graph-1").body_text, "FIRST_MARKER corrected original")
 
-    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
     @patch("microsoft.services.email_reader.GraphAPIService")
-    def test_graph_failure_is_reported_without_creating_email(self, graph_cls, _process_email):
+    def test_graph_failure_is_reported_without_creating_email(self, graph_cls):
         graph_cls.return_value.get_messages.side_effect = RuntimeError("Graph unavailable")
 
         result = EmailReaderService().fetch_emails_for_account(self.account)
@@ -430,9 +427,8 @@ class EmailReaderPipelineTests(TestCase):
         self.assertEqual(Email.objects.count(), 0)
         self.assertIn("Graph unavailable", result["errors"][0])
 
-    @patch("microsoft.services.email_reader.GranolaMeetingEmailIngestionService.process_email")
     @patch("microsoft.services.email_reader.GraphAPIService")
-    def test_html_graph_body_is_sanitized_before_persistence(self, graph_cls, _process_email):
+    def test_html_graph_body_is_sanitized_before_persistence(self, graph_cls):
         message = self._graph_message(
             "graph-html",
             "unused",

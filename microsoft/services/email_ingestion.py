@@ -37,9 +37,9 @@ class EmailIngestionService:
         return text, extraction
 
     @staticmethod
-    def enqueue(email):
+    def enqueue(email, *, dispatch=True):
         run = Evidence.snapshot(email)
-        if run.status in ('pending', 'waiting_service', 'failed'):
+        if dispatch and run.status in ('pending', 'waiting_service', 'failed'):
             transaction.on_commit(lambda: EmailIngestionService.dispatch(run.id))
         return run
 
@@ -99,9 +99,10 @@ class EmailIngestionService:
                 or not run.match
                 or run.match.get('status') not in ('matched',)
             ):
+                confirmed_match = dict(run.match) if run.match.get('status') == 'matched' else None
                 routing = Decisions.route(run.email, parts, Deal.objects.all(), use_ai=available)
                 run.classification = routing['classification']
-                run.match = routing['match']
+                run.match = confirmed_match or routing['match']
                 if available and run.match.get('route') == 'NEW_DEAL':
                     run.match = {
                         **run.match,

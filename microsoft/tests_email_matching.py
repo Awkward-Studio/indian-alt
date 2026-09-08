@@ -61,3 +61,10 @@ class EmailDecisionTests(TestCase):
         self.assertEqual(result['deal_model_data']['title'], 'New Components')
         self.assertNotIn('deal_summary', result['deal_model_data'])
         self.assertEqual(result['metadata']['ambiguous_points'], ['Exact legal name is unclear.'])
+
+    def test_vm_evidence_with_normalized_whitespace_maps_to_exact_source(self):
+        source = 'I wanted to share details\non 3TenX.'
+        self.assertEqual(
+            Decisions._exact_excerpt(source, 'I wanted to share details on 3TenX.'),
+            source,
+        )

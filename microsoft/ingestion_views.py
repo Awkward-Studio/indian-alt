@@ -93,8 +93,8 @@ class EmailIngestionActions:
         if request.method == 'POST':
             if not enabled:
                 return Response({'error': 'Email ingestion is not enabled.'}, status=503)
-            run = EmailIngestionService.enqueue(email)
-            # Process inline so embedding search, reranking, and LLM deal selection execute immediately
+            run = EmailIngestionService.enqueue(email, dispatch=False)
+            # Each analyst click advances exactly one stage inline.
             EmailIngestionService.process(run.id)
             run.refresh_from_db()
         else:
@@ -117,7 +117,7 @@ class EmailIngestionActions:
                 run_id = request.data.get('run_id')
                 revision = request.data.get('expected_revision')
                 if not run_id:
-                    run = email.ingestion_runs.first() or EmailIngestionService.enqueue(email)
+                    run = email.ingestion_runs.first() or EmailIngestionService.enqueue(email, dispatch=False)
                     run_id = run.id
                     revision = run.revision
                 elif not isinstance(revision, int):
@@ -129,16 +129,14 @@ class EmailIngestionActions:
                     # Treat a repeated create request for the same email as an
                     # idempotent confirmation instead of leaving an orphan deal.
                     deal = email.deal
-                    title = deal.title if deal else new_deal_title
-                    if not title:
-                        initialization = run.match.get('initialization') if isinstance(run.match, dict) else {}
-                        title = str((initialization.get('deal_model_data') or {}).get('title') or '').strip()
-                    if not title:
-                        clean_subject = (email.subject or 'New Deal').strip()
-                        for prefix in ['re:', 'fwd:', 'fw:']:
-                            if clean_subject.lower().startswith(prefix):
-                                clean_subject = clean_subject[len(prefix):].strip()
-                        title = clean_subject[:200] or 'New Deal from Email'
+                    initialization = run.match.get('initialization') if isinstance(run.match, dict) else {}
+                    model_data = initialization.get('deal_model_data') if isinstance(initialization, dict) else {}
+                    vm_title = str((model_data or {}).get('title') or '').strip()
+                    if not deal and not vm_title:
+                        raise ValidationError(
+                            'The VM has not produced a deal name and initial fields. Run the first stage again.'
+                        )
+                    title = deal.title if deal else vm_title
                     if not deal:
                         deal = Deal.objects.create(
                             title=title,
