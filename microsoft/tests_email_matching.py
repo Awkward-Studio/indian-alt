@@ -79,6 +79,23 @@ class EmailDecisionTests(TestCase):
             'I wanted to introduce\nClass24\n, an AI-powered education platform building a differentiated\nSchool-to-Exam ecosystem',
         )
 
+    def test_deal_identity_input_includes_subject_body_and_captured_documents(self):
+        self.email.subject = 'Class24 investment opportunity'
+        parts = EmailContributionParser.parse(
+            {'body_text': 'I wanted to introduce Class24, an education platform.'},
+            email_id=self.email.id,
+        )
+
+        text = Decisions._decision_text(
+            self.email,
+            parts,
+            supplemental_text='--- CAPTURED DOCUMENT: Class24 deck.pdf ---',
+        )
+
+        self.assertIn('Class24 investment opportunity', text)
+        self.assertIn('I wanted to introduce Class24', text)
+        self.assertIn('Class24 deck.pdf', text)
+
     @patch.object(Decisions, 'candidates', return_value=[])
     @patch.object(Decisions, 'ai')
     def test_route_uses_captured_document_context_and_falls_back_to_verbatim_evidence(self, ai, _candidates):
