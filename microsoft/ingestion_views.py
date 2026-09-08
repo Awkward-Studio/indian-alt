@@ -155,6 +155,9 @@ class EmailIngestionActions:
                     )
                     if not run.match.get('initialization') and not deal.deal_summary and not deal.analyses.exists():
                         self._hydrate_new_deal_from_latest_analysis(deal, email)
+                    if not deal.received_at and (email.date_received or email.date_sent):
+                        deal.received_at = (email.date_received or email.date_sent).date()
+                        deal.save(update_fields=['received_at'])
                     if email.graph_id and not deal.source_email_id:
                         deal.source_email_id = email.graph_id
                         deal.save(update_fields=['source_email_id'])
