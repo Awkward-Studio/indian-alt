@@ -3,6 +3,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from accounts.models import Profile
 from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailEvidenceLink
@@ -14,6 +15,7 @@ from microsoft.services.email_ingestion import EmailIngestionService as Ingestio
 class EmailIngestionAPITests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username='email-review', password='test-only')
+        self.profile = Profile.objects.create(user=self.user, email='email-review@example.test', name='Email reviewer')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         account = EmailAccount.objects.create(email='review@example.test')
@@ -112,6 +114,7 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(created.deal_summary, '## Executive Summary\n\nHydrated report.')
         self.assertEqual(created.analyses.count(), 1)
         self.assertEqual(created.source_email_id, self.email.graph_id)
+        self.assertEqual(list(created.responsibility.values_list('id', flat=True)), [self.profile.id])
 
     @patch.object(Ingestion, 'dispatch')
     def test_create_request_hydrates_existing_blank_linked_deal(self, dispatch):

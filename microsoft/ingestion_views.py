@@ -181,8 +181,14 @@ class EmailIngestionActions:
                             source_type=DealFieldProvenance.SourceType.HUMAN,
                             source_id=f'email-ingestion:{run.id}', changed_by=request.user,
                         )
+                    profile = None
                     if responsibility_id:
                         profile = get_object_or_404(Profile, pk=responsibility_id, is_disabled=False)
+                    else:
+                        candidate = getattr(request.user, 'profile', None)
+                        if candidate and not candidate.is_disabled:
+                            profile = candidate
+                    if profile:
                         previous_responsibility = list(deal.responsibility.all())
                         deal.responsibility.set([profile])
                         record_deal_field_changes(
