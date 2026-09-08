@@ -102,3 +102,64 @@ class DealDeletionEmailResetTests(TestCase):
         self.assertFalse(self.email.is_processed)
         self.assertEqual(self.email.processing_status, 'idle')
         self.assertFalse(EmailIngestionRun.objects.filter(email=self.email).exists())
+
+    def test_unlink_onedrive_cleans_documents_and_resets_deal(self):
+        self.deal.source_onedrive_id = 'folder-123'
+        self.deal.source_drive_id = 'drive-123'
+        self.deal.processing_status = 'processing'
+        self.deal.save()
+
+        doc = DealDocument.objects.create(
+            deal=self.deal,
+            title='Pitch.pdf',
+            onedrive_id='file-1',
+        )
+        DocumentChunk.objects.create(
+            deal=self.deal,
+            source_type='document',
+            source_id=str(doc.id),
+            content='Pitch deck chunk',
+        )
+
+        response = self.client.post(f'/api/deals/{self.deal.id}/unlink_onedrive/')
+        self.assertEqual(response.status_code, 200)
+
+        self.deal.refresh_from_db()
+        self.assertIsNone(self.deal.source_onedrive_id)
+        self.assertIsNone(self.deal.source_drive_id)
+        self.assertEqual(self.deal.processing_status, 'idle')
+        self.assertFalse(DealDocument.objects.filter(id=doc.id).exists())
+        self.assertFalse(DocumentChunk.objects.filter(source_id=str(doc.id)).exists())
+
+    @patch('deals.tasks.prepare_linked_folder_vdr_async.apply_async')
+    def test_relink_onedrive_replaces_old_folder_documents(self, mock_apply_async):
+        mock_apply_async.return_value.id = 'task-123'
+        self.deal.source_onedrive_id = 'old-folder'
+        self.deal.source_drive_id = 'old-drive'
+        self.deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
+        old_doc = DealDocument.objects.create(
+            deal=self.deal,
+            title='Old pitch.pdf',
+            onedrive_id='old-file',
+        )
+        old_chunk = DocumentChunk.objects.create(
+            deal=self.deal,
+            source_type='document',
+            source_id=str(old_doc.id),
+            content='Old pitch deck chunk',
+        )
+
+        response = self.client.post(
+            f'/api/deals/{self.deal.id}/connect_onedrive/',
+            {'source_onedrive_id': 'new-folder', 'source_drive_id': 'new-drive'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.source_onedrive_id, 'new-folder')
+        self.assertEqual(self.deal.source_drive_id, 'new-drive')
+        self.assertEqual(self.deal.processing_status, 'processing')
+        self.assertFalse(DealDocument.objects.filter(id=old_doc.id).exists())
+        self.assertFalse(DocumentChunk.objects.filter(id=old_chunk.id).exists())
+        mock_apply_async.assert_called_once()

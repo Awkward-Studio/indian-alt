@@ -1115,7 +1115,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
         doc.last_transcribed_at = timezone.now() if normalized_text else None
         doc.save()
 
-        if transcription_status != TranscriptionStatus.COMPLETE:
+        if transcription_status == TranscriptionStatus.FAILED or not normalized_text:
             raise ValueError(
                 f"Full extraction was not completed for {file_name}: {extraction.get('error') or transcription_status}"
             )

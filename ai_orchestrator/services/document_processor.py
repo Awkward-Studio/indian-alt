@@ -275,6 +275,17 @@ class DocumentProcessorService:
 
     def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict:
         ext = os.path.splitext(filename)[1].lower()
+
+        # Prioritize native text extraction (PDF, DOCX, XLSX, PPTX, TXT, CSV) first.
+        # This takes milliseconds and avoids sending page images to local multimodal LLMs.
+        try:
+            native_res = self.get_native_extraction_result(file_content, filename)
+            if len(native_res.get("normalized_text", "").strip()) > 50:
+                logger.info("[DOC-PROC] Extracted native text for %s (%d chars).", filename, len(native_res.get("normalized_text", "").strip()))
+                return native_res
+        except Exception as native_err:
+            logger.info("[DOC-PROC] Native extraction bypassed or failed for %s: %s", filename, native_err)
+
         images_b64 = self._convert_to_images(file_content, filename, page_limit)
 
         if not images_b64:

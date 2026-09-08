@@ -878,8 +878,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     'id': str(deal.id),
                     'title': deal.title or 'Untitled deal',
                     'source_onedrive_id': deal.source_onedrive_id,
+                    'current_phase': deal.current_phase,
+                    'priority': deal.priority,
                 }
-                for deal in items[:50]
+                for deal in items
             ]
 
         return Response({
@@ -1828,10 +1830,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = serializer.save()
         DealCreationService.process_deal_creation(deal, serializer.validated_data, self.request.user)
 
-    @action(detail=True, methods=['patch'])
+    @action(detail=True, methods=['patch', 'post'])
     def connect_onedrive(self, request, pk=None):
         """
-        Manually link a OneDrive folder to an existing deal.
+        Manually link (or relink) a OneDrive folder to an existing deal.
         """
         from microsoft.services.graph_service import DMS_USER_EMAIL
 
@@ -1841,6 +1843,15 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         
         if not folder_id or not drive_id:
             return Response({"error": "source_onedrive_id and source_drive_id are required"}, status=400)
+
+        # If relinking to a different folder, clean up documents from the old folder
+        if deal.source_onedrive_id and deal.source_onedrive_id != folder_id:
+            old_docs = deal.documents.filter(Q(onedrive_id__isnull=False) & ~Q(onedrive_id=''))
+            old_doc_ids = [str(d.id) for d in old_docs]
+            if old_doc_ids:
+                from ai_orchestrator.models import DocumentChunk
+                DocumentChunk.objects.filter(source_type='document', source_id__in=old_doc_ids).delete()
+                old_docs.delete()
             
         deal.source_onedrive_id = folder_id
         deal.source_drive_id = drive_id
@@ -1868,6 +1879,62 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "source_onedrive_id": deal.source_onedrive_id,
             "source_drive_id": deal.source_drive_id,
             "task_id": task.id,
+        })
+
+    @action(detail=True, methods=['post', 'delete'], url_path='unlink_onedrive')
+    def unlink_onedrive(self, request, pk=None):
+        """
+        Unlink the connected OneDrive folder from the deal and reset processing state.
+        Removes imported OneDrive documents so a clean folder can be connected.
+        """
+        deal = self.get_object()
+
+        # 1. Revoke any active VDR indexing tasks
+        from ai_orchestrator.models import AIAuditLog
+        from config.celery import app as celery_app
+        running_logs = AIAuditLog.objects.filter(
+            source_type='vdr_indexing',
+            source_id=str(deal.id),
+            status__in=['PENDING', 'PROCESSING'],
+        )
+        for log in running_logs:
+            meta = log.source_metadata or {}
+            task_ids = [
+                log.celery_task_id,
+                meta.get('callback_task_id'),
+                *(meta.get('child_task_ids') or []),
+            ]
+            for tid in filter(None, task_ids):
+                try:
+                    celery_app.control.revoke(tid, terminate=True, signal='SIGKILL')
+                except Exception:
+                    pass
+            log.status = 'FAILED'
+            log.error_message = 'VDR cancelled due to folder unlinking.'
+            log.save(update_fields=['status', 'error_message'])
+
+        # 2. Clean up DealDocument records originating from this OneDrive folder
+        from deals.models import DealDocument
+        from ai_orchestrator.models import DocumentChunk
+        onedrive_docs = DealDocument.objects.filter(deal=deal).filter(
+            Q(onedrive_id__isnull=False) & ~Q(onedrive_id='')
+        )
+        doc_ids = [str(d.id) for d in onedrive_docs]
+        if doc_ids:
+            DocumentChunk.objects.filter(source_type='document', source_id__in=doc_ids).delete()
+            onedrive_docs.delete()
+
+        # 3. Reset deal fields
+        deal.source_onedrive_id = None
+        deal.source_drive_id = None
+        deal.processing_status = 'idle'
+        deal.processing_error = None
+        deal.save(update_fields=['source_onedrive_id', 'source_drive_id', 'processing_status', 'processing_error'])
+
+        return Response({
+            'status': 'unlinked',
+            'message': 'OneDrive folder unlinked successfully. Deal documents reset.',
+            'deal_id': str(deal.id),
         })
 
     @extend_schema(

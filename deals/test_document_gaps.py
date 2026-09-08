@@ -26,3 +26,18 @@ class DocumentGapQueueTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual({item["id"] for item in response.json()["missing_folders"]}, {str(no_folder.id)})
         self.assertEqual({item["id"] for item in response.json()["missing_documents"]}, {str(no_documents.id)})
+
+    def test_returns_every_missing_folder_with_dialog_metadata(self):
+        Deal.objects.bulk_create([
+            Deal(title=f"Missing folder {index}", current_phase="Evaluation", priority="high")
+            for index in range(55)
+        ])
+
+        response = self.client.get(reverse("deal-document-gaps"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["counts"]["missing_folders"], 55)
+        self.assertEqual(len(payload["missing_folders"]), 55)
+        self.assertEqual(payload["missing_folders"][0]["current_phase"], "Evaluation")
+        self.assertEqual(payload["missing_folders"][0]["priority"], "high")
