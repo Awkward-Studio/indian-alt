@@ -19,6 +19,24 @@ logger = logging.getLogger(__name__)
 
 class EmailIngestionService:
     @staticmethod
+    def extract_attachment_text(content, title, *, allow_remote):
+        """Extract the complete attachment locally, with remote OCR as fallback."""
+        from ai_orchestrator.services.document_processor import DocumentProcessorService
+
+        ext = Path(title).suffix.lower()
+        extraction = None
+        if ext in ('.txt', '.csv', '.md', '.json', '.xml'):
+            text = content.decode('utf-8-sig', errors='replace')
+        else:
+            processor = DocumentProcessorService()
+            extraction = processor.get_chat_extraction_result(content, title)
+            text = extraction.get('normalized_text') or extraction.get('text') or ''
+            if not text.strip() and allow_remote:
+                extraction = processor.get_extraction_result(content, title)
+                text = extraction.get('normalized_text') or extraction.get('text') or ''
+        return text, extraction
+
+    @staticmethod
     def enqueue(email):
         run = Evidence.snapshot(email)
         if run.status in ('pending', 'waiting_service', 'failed'):
@@ -134,7 +152,6 @@ class EmailIngestionService:
     def index_outputs(run, *, allow_remote):
         from ai_orchestrator.models import DocumentChunk
         from ai_orchestrator.services.embedding_processor import EmbeddingService
-        from ai_orchestrator.services.document_processor import DocumentProcessorService
         service = EmbeddingService()
         embedding_ready = service.is_embedding_available(timeout=1)
         ready = True
@@ -151,27 +168,19 @@ class EmailIngestionService:
                 if doc and link.blob_id and not (doc.normalized_text or '').strip():
                     with link.blob.file.open('rb') as stream:
                         content = stream.read()
-                    ext = Path(doc.title).suffix.lower()
-                    if ext in ('.txt', '.csv', '.md', '.json', '.xml'):
-                        text = content.decode('utf-8-sig')
-                    elif ext == '.pdf':
-                        import pymupdf
-                        with pymupdf.open(stream=content, filetype='pdf') as pdf:
-                            text = '\n\n'.join(page.get_text() for page in pdf)
-                            # Avoid silently calling a mixed text/scanned PDF complete.
-                            if any(not page.get_text().strip() for page in pdf):
-                                text = ''
-                    else:
-                        text = DocumentProcessorService().extract_text_fallback(content, doc.title)
-                    if not text.strip() and allow_remote:
-                        extraction = DocumentProcessorService().get_extraction_result(content, doc.title)
-                        text = extraction.get('normalized_text') or extraction.get('text') or ''
+                    text, extraction = EmailIngestionService.extract_attachment_text(
+                        content, doc.title, allow_remote=allow_remote,
+                    )
                     if not text.strip():
                         raise RuntimeError('Text extraction pending: OCR, unsupported format, or unreadable file.')
                     doc.extracted_text = text
                     doc.normalized_text = text
-                    doc.transcription_status = 'complete'
-                    doc.save(update_fields=['extracted_text', 'normalized_text', 'transcription_status'])
+                    doc.transcription_status = (
+                        extraction.get('transcription_status') if extraction else 'complete'
+                    ) or 'complete'
+                    if extraction:
+                        doc.extraction_mode = extraction.get('mode') or doc.extraction_mode
+                    doc.save(update_fields=['extracted_text', 'normalized_text', 'transcription_status', 'extraction_mode'])
                 if not embedding_ready:
                     raise RuntimeError('Embedding service unavailable; saved evidence will be retried.')
                 success = service.vectorize_document(doc) if doc else service.vectorize_meeting_note(link.meeting_note)

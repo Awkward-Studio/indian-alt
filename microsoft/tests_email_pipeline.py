@@ -635,12 +635,16 @@ class ThreadTaskPayloadTests(TestCase):
         self.assertEqual(log_event.call_args.kwargs["status"], "FAILED")
 
     @patch("deals.tasks._persist_folder_analysis_document")
+    @patch("ai_orchestrator.services.chat_document_chunks.ChatDocumentChunkService")
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
     @patch("ai_orchestrator.services.document_processor.DocumentProcessorService")
     @patch("ai_orchestrator.services.ai_processor.AIProcessorService")
-    def test_body_worker_preserves_delta_and_sends_it_to_normalization(self, ai_cls, _doc_cls, _embed_cls, persist):
+    def test_body_worker_preserves_delta_and_builds_bounded_evidence(
+        self, ai_cls, _doc_cls, _embed_cls, chunk_cls, persist,
+    ):
         ai = ai_cls.return_value
-        ai.process_content.return_value = {"facts": ["SECOND_MARKER reply"]}
+        ai.process_content.return_value = {"metrics": [], "claims": ["SECOND_MARKER reply"]}
+        chunk_cls.return_value.build_context.return_value = ("SECOND_MARKER reply", 1)
         persisted = MagicMock()
         persisted.status = "passed"
         persist.return_value = persisted
@@ -662,9 +666,12 @@ class ThreadTaskPayloadTests(TestCase):
 
         self.assertEqual(result["status"], "passed")
         self.assertEqual(ai.process_content.call_count, 1)
+        documents, _question = chunk_cls.return_value.build_context.call_args.args
+        self.assertEqual(documents[0]["text"], "SECOND_MARKER reply")
         first_call = ai.process_content.call_args.kwargs
         self.assertEqual(first_call["content"], "SECOND_MARKER reply")
-        self.assertEqual(first_call["skill_name"], "document_normalization")
+        self.assertEqual(first_call["skill_name"], "document_evidence_extraction")
+        self.assertTrue(first_call["metadata"]["enforce_context_budget"])
 
 
 class T4EmailPipelineCommandTests(TestCase):

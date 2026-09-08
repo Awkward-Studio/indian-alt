@@ -13,14 +13,63 @@ logger = logging.getLogger(__name__)
 
 
 class EmailDecisionService:
+    MAX_SOURCE_INPUT_BYTES = 18_000
+    MAX_DECISION_INPUT_BYTES = 48_000
+
+    @classmethod
+    def _bounded_payload(cls, stage, payload, source_id):
+        """Reduce oversized private source text without dropping its tail."""
+        field = 'text' if stage == 'classify' else 'email' if stage == 'match' else None
+        bounded = dict(payload)
+        if stage == 'match' and isinstance(payload.get('candidates'), list):
+            bounded['candidates'] = [
+                {
+                    **candidate,
+                    'context': str(candidate.get('context') or '')[:1200],
+                }
+                if isinstance(candidate, dict) else candidate
+                for candidate in payload['candidates']
+            ]
+        source_text = bounded.get(field) if field else None
+        serialized = json.dumps(bounded, ensure_ascii=False)
+        if (
+            len(serialized.encode('utf-8')) <= cls.MAX_DECISION_INPUT_BYTES
+            and len(str(source_text or '').encode('utf-8')) <= cls.MAX_SOURCE_INPUT_BYTES
+        ):
+            return bounded
+
+        if not isinstance(source_text, str) or not source_text:
+            raise ValueError('Email decision input exceeds the safe model context budget.')
+
+        from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
+        question = (
+            'Determine whether this is a normal email or meeting notes/transcript. '
+            'Preserve exact source excerpts that prove the classification.'
+            if stage == 'classify'
+            else 'Identify the company or deal this email concerns. Preserve exact source excerpts '
+                 'containing company names, project names, domains, and relationship evidence.'
+        )
+        reduced, _ = ChatDocumentChunkService(
+            cache_scope=f'email-ingestion:{source_id}:{stage}',
+        ).build_context(
+            [{'id': str(source_id), 'name': 'Email body', 'text': source_text}],
+            question,
+        )
+        bounded[field] = reduced
+        if len(json.dumps(bounded, ensure_ascii=False).encode('utf-8')) > cls.MAX_DECISION_INPUT_BYTES:
+            raise ValueError('Reduced email decision input still exceeds the safe model context budget.')
+        return bounded
+
     @staticmethod
     def ai(stage, payload, source_id):
         from ai_orchestrator.services.ai_processor import AIProcessorService
+        payload = EmailDecisionService._bounded_payload(stage, payload, source_id)
         result = AIProcessorService().process_content(
             content=json.dumps(payload, ensure_ascii=False), source_type='email_ingestion', source_id=str(source_id),
             metadata={'pipeline_key': 'email_evidence', 'stage_key': stage,
                       'response_mode': 'json', 'response_format': {'type': 'json_object'},
-                      'temperature': 0, 'request_timeout': 90, 'max_tokens': 2000})
+                      'temperature': 0, 'request_timeout': 90, 'max_tokens': 2000,
+                      'enforce_context_budget': True})
         value = result.get('parsed_json', result) if isinstance(result, dict) else {}
         if not isinstance(value, dict) or value.get('error'):
             raise ValueError('Email decision service returned no valid decision.')

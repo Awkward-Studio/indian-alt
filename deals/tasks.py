@@ -1551,21 +1551,39 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
             extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
             raw_markdown = extraction.get("normalized_text") or extraction.get("text") or ""
         
-        # 2. Normalization (vLLM Qwen)
-        log_worker_event(audit_log, f"Normalizing extracted evidence: {file_name}", status='PROCESSING')
-        norm_result = ai_service.process_content(
-            content=raw_markdown,
-            skill_name="document_normalization",
-            source_type="normalization",
-            metadata={
-                "chat_template_kwargs": {"enable_thinking": False},
-                "max_tokens": 2048,
-                "request_timeout": 180,
-            }
+        # 2. Build complete, bounded evidence for the structured extraction pass.
+        # The full source remains in normalized_text and is independently chunked
+        # for retrieval. Only the model-facing evidence is reduced and cached.
+        from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
+        log_worker_event(audit_log, f"Extracting bounded evidence: {file_name}", status='PROCESSING')
+        analysis_context, _ = ChatDocumentChunkService(
+            progress=lambda message: log_worker_event(audit_log, f"{file_name}: {message}", status='PROCESSING'),
+            cache_scope=f"email-analysis:{email.email_account_id}:{file_id}",
+        ).build_context(
+            [{"id": str(file_id), "name": file_name, "text": raw_markdown}],
+            (
+                "Extract all investment evidence from this source. Preserve exact numbers, units, company and contact "
+                "names, dates, risks, open questions, conflicts, and source references across every section."
+            ),
         )
-        
-        # FIX: result is already the parsed JSON dict
-        normalized_json = norm_result if isinstance(norm_result, dict) else {}
+        evidence_result = ai_service.process_content(
+            content=analysis_context,
+            skill_name="document_evidence_extraction",
+            source_type="document_evidence",
+            source_id=str(file_id),
+            metadata={
+                "document_name": file_name,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": 4096,
+                "request_timeout": 180,
+                "enforce_context_budget": True,
+            },
+        )
+        normalized_json = (
+            evidence_result.get("parsed_json", evidence_result)
+            if isinstance(evidence_result, dict)
+            else {}
+        )
         
         # 3. Persist as DealDocument & DocumentChunk
         # We repurpose _persist_folder_analysis_document but pass normalized data
@@ -1579,7 +1597,8 @@ def process_single_thread_document_async(self, file_info: dict, deal_id: str, us
         
         return {
             **_analysis_document_to_result(analysis_doc),
-            "normalized_json": normalized_json
+            "normalized_json": normalized_json,
+            "analysis_context": analysis_context,
         }
     except Exception as e:
         logger.error(f"Thread document processing failed for {file_name}: {e}")
@@ -1594,6 +1613,7 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     """
     from ai_orchestrator.models import AIAuditLog
     from ai_orchestrator.services.ai_processor import AIProcessorService
+    from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
     from deals.models import Deal, DealAnalysis
     from deals.services.deal_creation import DealCreationService
 
@@ -1620,10 +1640,15 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     # Gather all normalized data for the final prompt
     intelligence_context = []
     for r in passed_results:
+        artifact = dict(r.get("document_artifact") or r.get("normalized_json") or {})
+        # Full source text is retained in the persisted analysis document and
+        # retrieval chunks. The cached analysis context already covers every
+        # section without duplicating that unbounded text in final synthesis.
+        artifact.pop("normalized_text", None)
         intelligence_context.append({
             "name": r.get("file_name"),
-            "full_text": r.get("normalized_text"), # The unrolled chronological history
-            "intel": r.get("normalized_json")      # The structured metrics/facts
+            "evidence": r.get("analysis_context") or r.get("normalized_text"),
+            "intel": artifact,
         })
 
     # Add proposed intelligence if available
@@ -1634,47 +1659,23 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
             "intel": proposed_intel
         })
 
-    # HIERARCHICAL BUCKETING (Institutional Fusion v46 logic)
-    # Chars limit approx 35k for safe context window
-    CONTEXT_SAFE_CHARS = 35000 
     full_context_json = json.dumps(intelligence_context, default=str)
-    
-    if len(full_context_json) > CONTEXT_SAFE_CHARS:
-        log_worker_event(audit_log, f"Context is too large ({len(full_context_json)} chars). Performing hierarchical synthesis...", status='PROCESSING')
-        
-        # Split into buckets (approx 30k chars each)
-        buckets = []
-        current_bucket = []
-        current_len = 0
-        for item in intelligence_context:
-            item_str = json.dumps(item, default=str)
-            if current_len + len(item_str) > 30000 and current_bucket:
-                buckets.append(current_bucket)
-                current_bucket = []
-                current_len = 0
-            current_bucket.append(item)
-            current_len += len(item_str)
-        if current_bucket:
-            buckets.append(current_bucket)
-            
-        bucket_summaries = []
-        for idx, bucket in enumerate(buckets):
-            log_worker_event(audit_log, f"Fusing intermediate bucket {idx+1}/{len(buckets)}...", status='PROCESSING')
-            bucket_res = ai_service.process_content(
-                content=json.dumps(bucket, default=str),
-                skill_name="email_intermediate_fusion", # Use dedicated fusion skill
-                source_type="email",
-                metadata={
-                    "audit_log_id": audit_log_id, 
-                    "temperature": 0.0,
-                    "chat_template_kwargs": {"enable_thinking": False}
-                }
-            )
-            # We want the text response of the summary
-            summary = bucket_res.get('response') or bucket_res.get('text') or ""
-            bucket_summaries.append(f"[BUCKET {idx+1} SUMMARY]\n{summary}")
-            
-        final_content = "\n\n".join(bucket_summaries)
+    if len(full_context_json.encode('utf-8')) > ChatDocumentChunkService.FINAL_BYTES:
+        log_worker_event(
+            audit_log,
+            f"Context is too large ({len(full_context_json)} chars). Reducing all email evidence...",
+            status='PROCESSING',
+        )
+        final_content, _ = ChatDocumentChunkService(
+            progress=lambda message: log_worker_event(audit_log, message, status='PROCESSING'),
+            cache_scope=f"email-synthesis:{audit_log_id}",
+        ).build_context(
+            [{"id": audit_log_id, "name": "Email thread evidence", "text": full_context_json}],
+            (
+                "Prepare complete evidence for final deal synthesis. Preserve every source name, exact metric, unit, "
+                "date, company and contact identity, risk, conflict, diligence gap, and open question."
+            ),
+        )
     else:
         final_content = full_context_json
 
@@ -1779,6 +1780,7 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
             "audit_log_id": audit_log_id,
             "temperature": 0.0,
             "max_tokens": 4096,
+            "enforce_context_budget": True,
             "chat_template_kwargs": {"enable_thinking": False},
             "response_format": {
                 "type": "json_schema", 
