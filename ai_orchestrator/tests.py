@@ -402,6 +402,38 @@ class ResponseParserServiceTests(TestCase):
         self.assertIsNone(audit_log.error_message)
         self.assertTrue(parsed.get("_salvaged"))
 
+    @patch("ai_orchestrator.services.ai_processor.broadcast_audit_log_update")
+    def test_standard_json_response_returns_vm_fields_at_top_level(self, _broadcast):
+        audit_log = AIAuditLog.objects.create(
+            source_type="email_ingestion",
+            source_id="email-1",
+            status="PROCESSING",
+            is_success=False,
+            system_prompt="system",
+            user_prompt="user",
+        )
+        service = AIProcessorService()
+        service.current_provider = MagicMock()
+        service.current_provider.execute_standard.return_value = {
+            "response": (
+                '{"type":"NORMAL_EMAIL","route":"NEW_DEAL",'
+                '"classification_evidence":"Acme is raising capital",'
+                '"deal_id":null,"match_evidence":""}'
+            ),
+            "thinking": "",
+        }
+
+        parsed = service._standard_response(
+            {"model": "test"}, audit_log, response_mode="json",
+        )
+
+        audit_log.refresh_from_db()
+        self.assertEqual(parsed["type"], "NORMAL_EMAIL")
+        self.assertEqual(parsed["route"], "NEW_DEAL")
+        self.assertEqual(audit_log.parsed_json["type"], "NORMAL_EMAIL")
+        self.assertTrue(audit_log.is_success)
+        self.assertEqual(audit_log.status, "COMPLETED")
+
 
 class UniversalChatServiceTests(TestCase):
     def setUp(self):

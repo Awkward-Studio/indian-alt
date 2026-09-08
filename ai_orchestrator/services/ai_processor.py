@@ -520,9 +520,22 @@ class AIProcessorService:
                 and audit_log.skill.name in extraction_skills
             )
             
-            parsed_json, success, clean_resp, clean_think = ResponseParserService.parse_standard_response(
-                raw_response, thinking, is_extraction_skill=is_extraction
-            )
+            if response_mode == "json" and not is_extraction:
+                _, _, clean_resp, clean_think = ResponseParserService.parse_standard_response(
+                    raw_response, thinking, is_extraction_skill=False
+                )
+                try:
+                    parsed_json = json.loads(ResponseParserService.extract_json(raw_response))
+                    if not isinstance(parsed_json, dict):
+                        raise ValueError("JSON response must be an object.")
+                    success = True
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    parsed_json = {"error": f"JSON parsing error: {exc}"}
+                    success = False
+            else:
+                parsed_json, success, clean_resp, clean_think = ResponseParserService.parse_standard_response(
+                    raw_response, thinking, is_extraction_skill=is_extraction
+                )
 
             # Ensure the result object contains the clean response text 
             # so callers can access it via .get('response')
