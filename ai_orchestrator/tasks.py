@@ -12,7 +12,7 @@ from .services.runtime import AIRuntimeService
 from .services.prompt_catalog import PromptCatalogService
 from .services.chat_documents import ChatDocumentEvidenceService, requests_deal_context
 
-from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update
+from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update, log_worker_event
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,8 @@ def _build_chat_document_context(conversation: AIConversation, question: str | N
     if question is not None and documents:
         from .services.chat_document_chunks import ChatDocumentChunkService
         from .services.realtime import log_worker_event
+        if audit_log:
+            log_worker_event(audit_log, "Reading uploaded documents")
         service = ChatDocumentChunkService(
             progress=lambda message: log_worker_event(audit_log, message) if audit_log else None,
             cache_scope=f"{conversation.user_id}:{conversation.id}",
@@ -218,7 +220,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         audit_log.celery_task_id = self.request.id
         audit_log.status = 'PROCESSING'
         audit_log.save(update_fields=['celery_task_id', 'status'])
-        broadcast_audit_log_update(audit_log)
+        log_worker_event(audit_log, "Starting your request")
 
         # Update triggering user message with audit_log_id
         user_msg = AIMessage.objects.filter(
@@ -239,6 +241,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         
         if skill_name == 'universal_chat':
             chat_service = UniversalChatService(ai_service)
+            chat_service.progress_callback = lambda message: log_worker_event(audit_log, message)
             task_metadata = chat_service.process_intent_and_build_metadata(
                 user_message, conversation_id, history_context, audit_log_id
             )
@@ -254,6 +257,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 task_metadata["chat_document_count"] = document_count
             task_metadata["web_search_enabled"] = web_search_enabled
             if web_search_enabled:
+                log_worker_event(audit_log, "Planning web searches")
                 task_metadata["web_search_context"] = {
                     "purpose": "global chat", "question": user_message,
                     "conversation": history_context,
@@ -302,6 +306,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 )
         elif skill_name == 'deal_chat':
             chat_service = UniversalChatService(ai_service)
+            chat_service.progress_callback = lambda message: log_worker_event(audit_log, message)
             model_provider = (metadata or {}).get("model_provider", "vllm")
             document_context, document_count = _build_chat_document_context(conversation, user_message, audit_log)
             if model_provider == "anthropic" and document_count:
@@ -373,6 +378,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 task_metadata["chat_document_count"] = document_count
             task_metadata["web_search_enabled"] = web_search_enabled
             if web_search_enabled:
+                log_worker_event(audit_log, "Planning web searches")
                 deal_title = ""
                 try:
                     from deals.models import Deal

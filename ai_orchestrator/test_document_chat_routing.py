@@ -71,3 +71,17 @@ class DocumentChatRoutingTests(SimpleTestCase):
         with self.assertRaisesRegex(RuntimeError, 'retrieval reached'):
             service.process_intent_and_build_metadata('Compare this file with the deal',
                 '895a66ae-d765-43f5-91b3-b0a7430a8efa', '', 'audit')
+
+    @patch('ai_orchestrator.services.universal_chat.PromptCatalogService.render', return_value='Rank these candidates')
+    def test_reranking_reports_progress_before_waiting_for_model(self, render):
+        service = object.__new__(UniversalChatService)
+        service.progress_callback = MagicMock()
+        service.ai_service = MagicMock()
+        def answer(**kwargs):
+            service.progress_callback.assert_called_with('Ranking relevant evidence')
+            return {}
+        service.ai_service.process_content.side_effect = answer
+        service._truncate_for_prompt = lambda value, limit: str(value or '')[:limit]
+        service._text_model_rerank(label='deal', query='pharma', active_context='',
+            candidates=[{'title': 'Example', 'summary': 'Evidence'}])
+        service.progress_callback.assert_called_with('Ranking relevant evidence')

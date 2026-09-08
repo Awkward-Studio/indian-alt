@@ -415,6 +415,11 @@ class UniversalChatService:
         self._document_cache[cache_key] = compact
         return compact
 
+    def report_progress(self, message: str) -> None:
+        callback = getattr(self, "progress_callback", None)
+        if callback:
+            callback(message)
+
     def process_intent_and_build_metadata(self, user_message: str, conversation_id: str, history_context: str, audit_log_id: str) -> dict:
         from ..models import AIConversation
         conversation = (
@@ -476,6 +481,7 @@ class UniversalChatService:
                 "selected_sources": [],
             }
 
+        self.report_progress("Understanding your question")
         gate = self._decide_query_builder_usage(user_message, history_context)
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
 
@@ -505,7 +511,9 @@ class UniversalChatService:
             }
 
         plan = self._build_query_plan(user_message, conversation_id, active_context=history_context)
+        self.report_progress("Finding relevant deals")
         deals = self._get_candidate_deals(plan)
+        self.report_progress("Finding relevant document passages")
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         if not isinstance(chunk_diagnostics, dict):
             chunk_diagnostics = {}
@@ -598,6 +606,7 @@ class UniversalChatService:
             }
 
         planner_context = f"Active deal/company: {deal.title}\n{history_context}".strip()
+        self.report_progress("Understanding your question")
         plan = self._build_query_plan(user_message, conversation_id, active_context=planner_context)
         plan["deal_limit"] = 1
         evidence_scope = self._explicit_deal_evidence_scope(deal, user_message)
@@ -607,6 +616,7 @@ class UniversalChatService:
             plan["evidence_scope"] = evidence_scope["label"]
 
         deals = [deal]
+        self.report_progress("Finding relevant document passages")
         chunks, chunk_diagnostics = self._search_ranked_chunks(plan, deals)
         if not isinstance(chunk_diagnostics, dict):
             chunk_diagnostics = {}
@@ -1009,6 +1019,7 @@ class UniversalChatService:
         if not candidates:
             return {}
 
+        self.report_progress("Ranking relevant evidence")
         preview = []
         for index, candidate in enumerate(candidates[:candidate_limit]):
             preview.append({
