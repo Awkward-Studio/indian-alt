@@ -10,7 +10,7 @@ from .services.chat_scope import internal_citation, normalize_web_citation
 from .services.universal_chat import UniversalChatService
 from .services.runtime import AIRuntimeService
 from .services.prompt_catalog import PromptCatalogService
-from .services.chat_documents import ChatDocumentEvidenceService
+from .services.chat_documents import ChatDocumentEvidenceService, requests_deal_context
 
 from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_update
 
@@ -297,7 +297,12 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             document_context, document_count = _build_chat_document_context(conversation)
             if model_provider == "anthropic" and document_count:
                 raise ValueError("Uploaded private documents require Local AI.")
-            if model_provider == "anthropic":
+            if document_count and not requests_deal_context(user_message):
+                task_metadata = chat_service.process_intent_and_build_metadata(
+                    user_message, conversation_id, history_context, audit_log_id,
+                )
+                task_metadata["deal_context"] = task_metadata["context_data"]
+            elif model_provider == "anthropic":
                 from deals.models import Deal
                 deal = Deal.objects.filter(id=metadata.get("deal_id")).first()
                 deal_title = deal.title if deal else ""
@@ -362,7 +367,8 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
                 deal_title = ""
                 try:
                     from deals.models import Deal
-                    deal_title = str(Deal.objects.filter(id=metadata.get("deal_id")).values_list("title", flat=True).first() or "")
+                    if not document_count or requests_deal_context(user_message):
+                        deal_title = str(Deal.objects.filter(id=metadata.get("deal_id")).values_list("title", flat=True).first() or "")
                 except Exception:
                     deal_title = ""
                 planner_context = history_context

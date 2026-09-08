@@ -567,6 +567,13 @@ class UniversalChatDocumentView(APIView):
     def post(self, request):
         uploaded_file = request.FILES.get("file")
         conversation_id = request.data.get("conversation_id")
+        deal_id = request.data.get("deal_id")
+        deal = None
+        if deal_id:
+            try:
+                deal = Deal.objects.get(id=deal_id)
+            except (Deal.DoesNotExist, ValueError, DjangoValidationError):
+                return Response({"error": "Deal not found."}, status=404)
         if not uploaded_file:
             return Response({"error": "file is required"}, status=400)
 
@@ -593,10 +600,14 @@ class UniversalChatDocumentView(APIView):
                 ).first()
                 if not conversation:
                     return Response({"error": "Conversation not found."}, status=404)
+                context = conversation.metadata or {}
+                if deal and (context.get("kind") != "deal_chat" or str(context.get("deal_id")) != str(deal.id)):
+                    return Response({"error": "This conversation belongs to a different chat context."}, status=409)
             else:
                 conversation = AIConversation.objects.create(
                     user=request.user,
                     title=f"Chat with {filename}"[:255],
+                    metadata={"kind": "deal_chat", "deal_id": str(deal.id), "deal_title": deal.title} if deal else {"kind": "universal_chat"},
                 )
 
             metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}

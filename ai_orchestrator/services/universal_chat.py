@@ -26,6 +26,7 @@ from .parsers import ResponseParserService
 from .prompts import PromptBuilderService
 from .prompt_catalog import PromptCatalogService
 from .runtime import AIRuntimeService
+from .chat_documents import requests_deal_context
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +424,23 @@ class UniversalChatService:
         )
         model_provider = conversation.metadata.get('model_provider', 'vllm') if conversation else 'vllm'
         answer_prompt = self._stage_settings("answer_generation").get("prompt_template")
+
+        if conversation and (conversation.metadata or {}).get("chat_documents") and not requests_deal_context(user_message):
+            if model_provider == "anthropic":
+                raise ValueError("Uploaded private documents require Local AI.")
+            return {
+                "history_context": history_context,
+                "context_data": "Answer from the attached documents. Prior assistant claims are not evidence. Do not introduce unrelated deals; state when the documents do not support an answer.",
+                "audit_log_id": audit_log_id,
+                "answer_generation_prompt": answer_prompt,
+                "used_query_builder": False,
+                "gate_mode": "uploaded_documents",
+                "gate_reason": "Attached documents define this conversation's evidence scope.",
+                "deals_considered": 0,
+                "retrieved_chunk_count": 0,
+                "selected_chunk_count": 0,
+                "selected_sources": [],
+            }
 
         if model_provider == 'anthropic':
             from deals.models import Deal

@@ -46,6 +46,6 @@ Before finishing, check that any requested chart is present as a complete deal_v
 
 
 def apply_deal_visual_contract(system_instructions: str, pipeline_key: str, stage_key: str) -> str:
-    if (pipeline_key, stage_key) != ("deal_chat", "answer"):
+    if pipeline_key not in {"deal_chat", "universal_chat"} or stage_key != "answer":
         return system_instructions
     return system_instructions + "\n\n[DEAL CHAT RENDERING CONTRACT]\nThese rules govern visual formatting for this chat response.\n" + DEAL_VISUAL_OUTPUT_CONTRACT

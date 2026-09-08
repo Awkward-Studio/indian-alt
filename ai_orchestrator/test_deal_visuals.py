@@ -14,5 +14,9 @@ class DealVisualContractTests(unittest.TestCase):
         self.assertIn('"values"', result)
 
     def test_other_stages_unchanged(self):
-        for pipeline, stage in [("universal_chat", "answer"), ("deal_chat", "planner"), (None, None)]:
+        for pipeline, stage in [("universal_chat", "planner"), ("deal_chat", "planner"), (None, None)]:
             self.assertEqual(apply_deal_visual_contract("original", pipeline, stage), "original")
+
+    def test_global_chat_receives_chart_contract(self):
+        result = apply_deal_visual_contract("Global instructions", "universal_chat", "answer")
+        self.assertIn(DEAL_VISUAL_OUTPUT_CONTRACT, result)

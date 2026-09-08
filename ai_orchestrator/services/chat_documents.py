@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
 from deals.services.document_artifacts import DocumentArtifactService
+
+
+def requests_deal_context(message: str) -> bool:
+    """Require a direct request in this turn, never an inferred document topic."""
+    text = message.lower()
+    if re.search(r"\b(?:no|without|ignore|exclude)\s+(?:any\s+)?deal|\b(?:only|just)\s+(?:the\s+)?(?:file|document)|\b(?:don't|do not)\s+(?:use|include|attach|add)\s+(?:any\s+)?deal", text):
+        return False
+    return bool(re.search(
+        r"\b(?:use|include|attach|add|fetch|retrieve|show|compare|cross-reference|look up|tell me about)\b[^.!?\n]{0,100}\b(?:deals?|pipeline|portfolio)\b"
+        r"|\b(?:compare|cross-reference)\b[^.!?\n]{0,100}\b(?:company|companies)\b",
+        text,
+    ))
 
 
 class ChatDocumentEvidenceService:
