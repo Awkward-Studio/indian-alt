@@ -36,6 +36,7 @@ services:
       - ${LLAMA_CONTEXT_SIZE:-16384}
       - --parallel
       - ${LLAMA_PARALLEL_SEQUENCES:-1}
+      - --slots
       - --n-gpu-layers
       - ${LLAMA_GPU_LAYERS:-99}
       - --batch-size
