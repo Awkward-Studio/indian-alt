@@ -76,6 +76,7 @@ class DocumentProcessorService:
         """
         sections = []
         failed_pages = []
+        native_warnings = []
         vision_pages = 0
 
         def read_image(image, page_number):
@@ -116,6 +117,10 @@ class DocumentProcessorService:
                 sections.append(read_image(f"data:{mime};base64,{base64.b64encode(file_content).decode('ascii')}", 1))
             elif ext in {".txt", ".csv"}:
                 sections.append(file_content.decode("utf-8-sig", errors="replace"))
+            elif ext in {".docx", ".xlsx", ".pptx"}:
+                native = self.get_native_extraction_result(file_content, filename)
+                sections.append(native["normalized_text"])
+                native_warnings.extend(native.get("quality_flags") or [])
             else:
                 sections.append(self.extract_text_fallback(file_content, filename))
         except Exception:
@@ -123,13 +128,13 @@ class DocumentProcessorService:
             failed_pages.append("document")
 
         text = "\n\n".join(section for section in sections if section.strip()).strip()
-        flags = ["chat_direct_extraction"]
-        if failed_pages:
+        flags = ["chat_direct_extraction", *native_warnings]
+        if failed_pages or native_warnings:
             flags.append("partial_extraction")
         return {
             "text": text, "raw_extracted_text": text, "normalized_text": text,
             "mode": "chat_local_vision" if vision_pages else "chat_native_text",
-            "transcription_status": "partial" if text and failed_pages else "complete" if text else "failed",
+            "transcription_status": "partial" if text and (failed_pages or native_warnings) else "complete" if text else "failed",
             "quality_flags": flags,
             "render_metadata": {"failed_pages": failed_pages, "vision_pages": vision_pages},
             "error": "No readable content was extracted. Scanned pages and images require a working local vision model." if not text else "",

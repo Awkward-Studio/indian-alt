@@ -273,6 +273,19 @@ class VLLMProviderService:
         if max_tokens:
             body["max_tokens"] = max_tokens
 
+        if payload.get("_enforce_context_budget"):
+            # UTF-8 bytes are deliberately more conservative than chars/4 for
+            # multilingual text, CSV, numbers and JSON on our byte-fallback models.
+            # Count the complete message/tool payload, plus output and template reserve.
+            window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65536))
+            reserve = 4096
+            input_bound = len(json.dumps({k: v for k, v in body.items() if k != "stream"}, ensure_ascii=False).encode("utf-8"))
+            if input_bound + int(max_tokens or 8192) + reserve > window:
+                raise ValueError(
+                    "The complete chat request exceeds the safe model context budget. "
+                    "Please shorten the question/history or remove extra context; no document text was silently discarded."
+                )
+
         return body
 
     def _apply_no_think_marker(self, messages: list[dict[str, Any]], payload: dict) -> None:

@@ -269,6 +269,8 @@ class AIProcessorService:
 
         # Support for Phase 3 style strict JSON and thinking control
         if metadata:
+            if metadata.get("enforce_context_budget"):
+                payload["_enforce_context_budget"] = True
             if "response_format" in metadata:
                 payload["response_format"] = metadata["response_format"]
             if "chat_template_kwargs" in metadata:

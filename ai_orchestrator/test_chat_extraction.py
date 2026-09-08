@@ -55,4 +55,16 @@ class ChatExtractionTests(SimpleTestCase):
         workbook.save(output)
         workbook.close()
         result = self.service.get_chat_extraction_result(output.getvalue(), "data.xlsx")
-        self.assertIn("Revenue\t0\tFalse", result["text"])
+        self.assertIn("A1=Revenue\tB1=0\tC1=False", result["text"])
+
+    def test_spreadsheet_includes_formulas_and_last_sheet(self):
+        workbook = Workbook()
+        workbook.active['A1'] = '=SUM(B1:B10)'
+        workbook.create_sheet('Last sheet')['Z200'] = 'LAST_CELL'
+        output = io.BytesIO()
+        workbook.save(output)
+        workbook.close()
+        result = self.service.get_chat_extraction_result(output.getvalue(), 'formulas.xlsx')
+        self.assertIn('A1==SUM(B1:B10) [cached value: unavailable]', result['text'])
+        self.assertIn('[Sheet: Last sheet]', result['text'])
+        self.assertIn('Z200=LAST_CELL', result['text'])

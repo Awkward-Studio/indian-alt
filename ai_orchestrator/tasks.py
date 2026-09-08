@@ -171,11 +171,19 @@ def _truncate_text(value: str | None, limit: int) -> str:
     return f"{text[:head]}\n\n[...TRUNCATED...]\n\n{text[-tail:] if tail else ''}".strip()
 
 
-def _build_chat_document_context(conversation: AIConversation) -> tuple[str, int]:
+def _build_chat_document_context(conversation: AIConversation, question: str | None = None, audit_log=None) -> tuple[str, int]:
     metadata = conversation.metadata if isinstance(conversation.metadata, dict) else {}
     documents = metadata.get("chat_documents")
     if not isinstance(documents, list):
         return "", 0
+    if question is not None and documents:
+        from .services.chat_document_chunks import ChatDocumentChunkService
+        from .services.realtime import log_worker_event
+        service = ChatDocumentChunkService(
+            progress=lambda message: log_worker_event(audit_log, message) if audit_log else None,
+            cache_scope=f"{conversation.user_id}:{conversation.id}",
+        )
+        return service.build_context(documents, question)
     return ChatDocumentEvidenceService.build_context(documents)
 
 @shared_task(bind=True)
@@ -227,13 +235,14 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         ai_service = AIProcessorService()
         history_context, history_messages_used, history_chars_used = _build_history_context(conversation)
         web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
+        document_count = 0
         
         if skill_name == 'universal_chat':
             chat_service = UniversalChatService(ai_service)
             task_metadata = chat_service.process_intent_and_build_metadata(
                 user_message, conversation_id, history_context, audit_log_id
             )
-            document_context, document_count = _build_chat_document_context(conversation)
+            document_context, document_count = _build_chat_document_context(conversation, user_message, audit_log)
             if document_context:
                 task_metadata["context_data"] = (
                     f"{task_metadata.get('context_data', '')}\n\n"
@@ -294,7 +303,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         elif skill_name == 'deal_chat':
             chat_service = UniversalChatService(ai_service)
             model_provider = (metadata or {}).get("model_provider", "vllm")
-            document_context, document_count = _build_chat_document_context(conversation)
+            document_context, document_count = _build_chat_document_context(conversation, user_message, audit_log)
             if model_provider == "anthropic" and document_count:
                 raise ValueError("Uploaded private documents require Local AI.")
             if document_count and not requests_deal_context(user_message):
@@ -438,11 +447,17 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             }
 
         task_metadata['model_provider'] = (metadata or {}).get('model_provider', 'vllm')
+        if document_count:
+            task_metadata['enforce_context_budget'] = True
+            task_metadata['max_tokens'] = 4096
         if skill_name == 'deal_chat':
             task_metadata['personality_only_system'] = True
             task_metadata['prompt_template_override'] = PromptCatalogService.get('deal_chat_conversational')
             task_metadata['max_tokens'] = 4096
             task_metadata['max_input_tokens'] = 11000
+            if document_count:
+                # Evidence has already been reduced; never slice away its sources.
+                task_metadata.pop('max_input_tokens', None)
 
         full_text = ""
         full_thinking = ""

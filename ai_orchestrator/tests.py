@@ -95,8 +95,8 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
             quality_flags=["extractor_flag"],
         )
 
-        self.assertTrue(result["truncated"])
-        self.assertEqual(len(result["text"]), ChatDocumentEvidenceService.MAX_TEXT_CHARS)
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["text"], long_text)
         self.assertEqual(result["artifact_status"], "complete")
         self.assertIn("extractor_flag", result["evidence"]["quality_flags"])
         self.assertIn("chat_direct_text", result["evidence"]["quality_flags"])

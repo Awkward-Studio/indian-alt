@@ -80,8 +80,8 @@ class ChatDocumentEvidenceService:
         }
         evidence["quality_flags"] = combined_flags
         return {
-            "text": text[: cls.MAX_TEXT_CHARS],
-            "truncated": len(text) > cls.MAX_TEXT_CHARS,
+            "text": text,
+            "truncated": False,
             "evidence": evidence,
             "artifact_status": "complete" if text else "failed",
         }

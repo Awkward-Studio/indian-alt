@@ -250,6 +250,9 @@ CELERY_TASK_ROUTES = {
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'
 
+# Total Local AI window, including prompt, template reserve, and completion.
+CHAT_MODEL_CONTEXT_TOKENS = config('CHAT_MODEL_CONTEXT_TOKENS', default=65536, cast=int)
+
 # Enable unified email processing and evidence extraction.
 EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=True, cast=bool)
 EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))
