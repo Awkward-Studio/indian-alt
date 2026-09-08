@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
+import zipfile
 from pathlib import PurePosixPath
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from django.conf import settings
@@ -31,6 +33,7 @@ class ResearchAcquisitionService:
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     }
     REDIRECT_CODES = {301, 302, 303, 307, 308}
+    GENERIC_MIME_TYPES = {"application/octet-stream", "binary/octet-stream"}
 
     def __init__(self, *, http_session=None):
         self.http = http_session or requests.Session()
@@ -61,7 +64,8 @@ class ResearchAcquisitionService:
             if response.status_code != 200:
                 raise ResearchAcquisitionError("HTTP_STATUS", f"The publisher returned HTTP {response.status_code}.")
             content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            if content_type not in self.ALLOWED_MIME_TYPES:
+            generic_content = content_type in self.GENERIC_MIME_TYPES
+            if content_type not in self.ALLOWED_MIME_TYPES and not generic_content:
                 raise ResearchAcquisitionError("MIME_NOT_ALLOWED", f"Content type {content_type or 'unknown'} is not permitted.")
             declared = int(response.headers.get("Content-Length") or 0)
             if declared > self.max_bytes:
@@ -75,13 +79,22 @@ class ResearchAcquisitionService:
                 if total > self.max_bytes:
                     raise ResearchAcquisitionError("FILE_TOO_LARGE", "The streamed source exceeded the configured acquisition size limit.")
                 chunks.append(chunk)
-            return b"".join(chunks), {
+            content = b"".join(chunks)
+            filename = self._response_filename(response) or PurePosixPath(urlparse(current).path).name
+            if generic_content:
+                content_type = self._detect_generic_mime(content, filename)
+                if not content_type:
+                    raise ResearchAcquisitionError(
+                        "MIME_NOT_ALLOWED",
+                        "The server returned generic binary data that is not a supported document.",
+                    )
+            return content, {
                 "final_url": current,
                 "redirects": redirects,
                 "content_type": content_type,
                 "content_length": total,
                 "verified_at": timezone.now().isoformat(),
-                "filename": self._response_filename(response),
+                "filename": filename,
             }
         raise ResearchAcquisitionError("TOO_MANY_REDIRECTS", "The source exceeded the redirect limit.")
 
@@ -89,7 +102,38 @@ class ResearchAcquisitionService:
     def _response_filename(response) -> str:
         disposition = str(response.headers.get("Content-Disposition") or "")
         match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, re.IGNORECASE)
-        return PurePosixPath(match.group(1).strip()).name if match else ""
+        return PurePosixPath(unquote(match.group(1).strip())).name if match else ""
+
+    @staticmethod
+    def _detect_generic_mime(content: bytes, filename: str) -> str | None:
+        """Accept mislabeled downloads only when their bytes prove a supported type."""
+        suffix = PurePosixPath(filename).suffix.casefold()
+        if suffix == ".pdf" and content.lstrip().startswith(b"%PDF-"):
+            return "application/pdf"
+        if suffix in {".docx", ".xlsx", ".pptx"} and content.startswith(b"PK"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    names = set(archive.namelist())
+            except (OSError, zipfile.BadZipFile):
+                return None
+            required_member = {
+                ".docx": "word/document.xml",
+                ".xlsx": "xl/workbook.xml",
+                ".pptx": "ppt/presentation.xml",
+            }[suffix]
+            if required_member in names:
+                return {
+                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                }[suffix]
+        if suffix == ".txt" and b"\x00" not in content:
+            try:
+                content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return None
+            return "text/plain"
+        return None
 
     @transaction.atomic
     def attach(self, acquisition: SectorResearchAcquisition, content: bytes, access: dict) -> DealDocument:

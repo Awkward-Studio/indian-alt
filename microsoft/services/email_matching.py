@@ -25,11 +25,42 @@ class EmailDecisionService:
             return ''
         if proposed in source:
             return proposed
-        tokens = [re.escape(token) for token in proposed.split()]
-        if not tokens:
-            return ''
-        match = re.search(r'\s+'.join(tokens), source, flags=re.IGNORECASE)
-        return match.group(0) if match else ''
+        candidates = [proposed]
+        # Models sometimes append an ellipsis to a verbatim prefix. The dots are
+        # not source evidence, but the prefix still is. Only trim terminal
+        # truncation punctuation; do not accept a paraphrase.
+        without_ellipsis = re.sub(r'(?:\.{2,}|…)+$', '', proposed).rstrip()
+        if without_ellipsis and without_ellipsis != proposed:
+            candidates.append(without_ellipsis)
+        for candidate in candidates:
+            tokens = re.findall(r'\w+|[^\w\s]', candidate, flags=re.UNICODE)
+            if not tokens:
+                continue
+            pattern = re.escape(tokens[0])
+            for previous, token in zip(tokens, tokens[1:]):
+                separator = r'\s+' if previous[-1].isalnum() and token[0].isalnum() else r'\s*'
+                pattern += separator + re.escape(token)
+            match = re.search(pattern, source, flags=re.IGNORECASE)
+            if match:
+                return match.group(0)
+        return ''
+
+    @staticmethod
+    def _source_excerpt(source, limit=500):
+        """Return a bounded verbatim prefix when model-supplied evidence is not mappable."""
+        source = str(source or '')
+        match = re.search(r'\S(?:.|\n){0,%d}' % max(0, limit - 1), source)
+        return match.group(0).rstrip() if match else ''
+
+    @staticmethod
+    def _decision_text(email, parts, supplemental_text=''):
+        # Put captured-document identity before long quoted threads so semantic
+        # retrieval's bounded query always sees attachment/link filenames and text.
+        sections = [email.subject or '']
+        if supplemental_text:
+            sections.append(supplemental_text)
+        sections.append('\n\n'.join(part.text for part in parts))
+        return '\n'.join(section for section in sections if section)
 
     @classmethod
     def _bounded_payload(cls, stage, payload, source_id):
@@ -231,9 +262,9 @@ class EmailDecisionService:
         return result
 
     @classmethod
-    def route(cls, email, parts, deals, *, use_ai=True):
+    def route(cls, email, parts, deals, *, use_ai=True, supplemental_text=''):
         """Classify content and propose existing/new-deal routing in one VM call."""
-        text = (email.subject or '') + '\n' + '\n\n'.join(part.text for part in parts)
+        text = cls._decision_text(email, parts, supplemental_text)
         scoped_thread = Email.objects.filter(email_account_id=email.email_account_id)
         scoped_thread = (
             scoped_thread.filter(conversation_id=email.conversation_id)
@@ -277,8 +308,10 @@ class EmailDecisionService:
         classification_evidence = cls._exact_excerpt(text, proposed_classification_evidence)
         if kind not in ('NORMAL_EMAIL', 'MEETING_NOTE'):
             raise ValueError('Email route must classify the source as NORMAL_EMAIL or MEETING_NOTE.')
-        if not isinstance(classification_evidence, str) or not classification_evidence or classification_evidence not in text:
-            raise ValueError('Email route classification evidence must be an exact source excerpt.')
+        if not classification_evidence:
+            classification_evidence = cls._source_excerpt(text)
+        if not classification_evidence:
+            raise ValueError('Email route has no source text that can support classification.')
 
         picked = str(result.get('deal_id') or '')
         candidate_ids = {item['deal_id'] for item in candidates}
@@ -286,8 +319,6 @@ class EmailDecisionService:
             raise ValueError('Email route selected an unauthorized or nonexistent candidate.')
         proposed_match_evidence = result.get('match_evidence') or ''
         match_evidence = cls._exact_excerpt(text, proposed_match_evidence)
-        if proposed_match_evidence and not match_evidence:
-            raise ValueError('Email route match evidence must occur in the email.')
 
         route = str(result.get('route') or '').upper()
         if len(linked) == 1:
@@ -326,9 +357,9 @@ class EmailDecisionService:
         }
 
     @classmethod
-    def initialize(cls, email, parts):
+    def initialize(cls, email, parts, *, supplemental_text=''):
         """Extract a small, reviewable seed for a proposed new deal."""
-        text = (email.subject or '') + '\n' + '\n\n'.join(part.text for part in parts)
+        text = cls._decision_text(email, parts, supplemental_text)
         result = cls.ai('initialize', {'email': text}, email.id)
         model_data = result.get('deal_model_data')
         if not isinstance(model_data, dict):

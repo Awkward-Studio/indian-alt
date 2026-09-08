@@ -819,20 +819,25 @@ class FolderAnalysisService:
     def deal_analysis_readiness(deal: Deal) -> dict:
         """Summarize the common DealDocument evidence set used by final analysis."""
         from deals.services.document_artifacts import DocumentArtifactService
+        from microsoft.services.email_ingestion_review import deal_email_evidence_gaps
 
         documents = list(deal.documents.all().order_by('title', 'id'))
         ready = [doc for doc in documents if DocumentArtifactService.artifact_complete(doc)]
-        gaps = [
+        document_gaps = [
             {
+                'source_type': 'deal_document',
                 'document_id': str(doc.id),
                 'title': doc.title,
                 'artifact_status': DocumentArtifactService.artifact_status(doc),
                 'transcription_status': doc.transcription_status,
                 'chunking_status': doc.chunking_status,
+                'is_indexed': doc.is_indexed,
             }
             for doc in documents
             if doc not in ready
         ]
+        source_gaps = deal_email_evidence_gaps(deal)
+        gaps = [*document_gaps, *source_gaps]
         return {
             'document_count': len(documents),
             'ready_count': len(ready),
@@ -840,6 +845,7 @@ class FolderAnalysisService:
             'ready': bool(ready) and not gaps,
             'can_build_with_gaps': bool(ready) and bool(gaps),
             'gaps': gaps,
+            'source_gaps': source_gaps,
             'report_sections': 11,
         }
 

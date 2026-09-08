@@ -11,6 +11,49 @@ class StaleEmailDecision(ValueError):
     pass
 
 
+def deal_email_evidence_gaps(deal):
+    """Return captured email sources that do not currently have a usable document."""
+    latest_runs = []
+    seen_email_ids = set()
+    runs = (
+        EmailIngestionRun.objects.filter(email__deal=deal)
+        .exclude(status='superseded')
+        .select_related('email')
+        .prefetch_related('occurrences__evidence__document')
+        .order_by('email_id', '-created_at')
+    )
+    for run in runs:
+        if run.email_id in seen_email_ids:
+            continue
+        seen_email_ids.add(run.email_id)
+        latest_runs.append(run)
+
+    gaps = []
+    for run in latest_runs:
+        for occurrence in run.occurrences.all():
+            link = occurrence.evidence
+            document = link.document if link and link.document_id else None
+            if document:
+                continue
+            source_kind = (
+                link.kind if link else
+                'email_link' if occurrence.source_key.startswith('link:') else
+                'email_attachment' if occurrence.source_key.startswith('attachment:') else
+                'email_body'
+            )
+            metadata = occurrence.metadata if isinstance(occurrence.metadata, dict) else {}
+            gaps.append({
+                'source_id': str(occurrence.id),
+                'email_id': str(run.email_id),
+                'source_kind': source_kind,
+                'title': metadata.get('name') or run.email.subject or 'Email evidence',
+                'status': occurrence.status,
+                'error': occurrence.error or (link.error if link else '') or 'Deal document has not been created.',
+                'source_url': metadata.get('url'),
+            })
+    return gaps
+
+
 def run_status(run, *, include_content=False):
     if not run:
         return {
@@ -49,16 +92,13 @@ def run_status(run, *, include_content=False):
             item['text'] = occurrence.contribution.text
             item['headers'] = occurrence.contribution.headers
         outputs.append(item)
-    # An external href is supplementary. If it cannot be acquired, keep the
-    # visible failure but do not hold the source email and attachments hostage.
-    required_outputs = [
-        item for item in outputs
-        if not (item['source_kind'] == 'email_link' and item['status'] == 'failed')
-    ]
+    # A failed external href does not stop the rest of the email pipeline, but
+    # it remains in the manifest so the deal VDR and report disclose the gap.
+    required_outputs = outputs
     expected = len(required_outputs)
     ready = sum(1 for item in required_outputs if item['index_status'] == 'completed' and item['artifact_status'] == 'complete')
     failed = sum(1 for item in required_outputs if item['status'] == 'failed' or item['index_status'] == 'failed')
-    processing = sum(1 for item in required_outputs if item['index_status'] not in ('completed', 'failed'))
+    processing = sum(1 for item in required_outputs if item['status'] != 'failed' and item['index_status'] not in ('completed', 'failed'))
     deal_id = run.match.get('deal_id') or run.match.get('suggested_deal_id')
     blockers = []
     if not deal_id:

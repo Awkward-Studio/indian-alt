@@ -242,6 +242,25 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         else:
             serializer.save()
 
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        """Delete derived chunks while retaining source provenance as a visible gap."""
+        from ai_orchestrator.models import DealRetrievalProfile
+        from microsoft.models import EmailEvidenceLink
+
+        document_id = str(instance.id)
+        deal_id = instance.deal_id
+        links = list(EmailEvidenceLink.objects.filter(document=instance))
+        for link in links:
+            link.occurrences.update(status='pending', error='')
+        EmailEvidenceLink.objects.filter(id__in=[link.id for link in links]).update(
+            index_status='pending',
+            error='Deal document deleted from the VDR. Reprocess the source to restore it.',
+        )
+        DocumentChunk.objects.filter(source_type='document', source_id=document_id).delete()
+        DealRetrievalProfile.objects.filter(deal_id=deal_id).delete()
+        instance.delete()
+
     @action(detail=False, methods=['post'])
     def search(self, request):
         """

@@ -65,6 +65,33 @@ class ResearchAcquisitionSecurityTests(SimpleTestCase):
         with self.assertRaisesRegex(ResearchAcquisitionError, "exceeded"):
             service.download("https://publisher.example/report.pdf")
 
+    @patch.object(ResearchDiscoveryService, "is_safe_public_url", return_value=True)
+    def test_generic_binary_pdf_is_accepted_only_when_filename_and_bytes_match(self, _safe):
+        http = MagicMock()
+        response = self._response(content_type="application/octet-stream", content=b"%PDF-1.7\nbody")
+        response.headers["Content-Disposition"] = 'attachment; filename="Deal Teaser.pdf"'
+        http.get.return_value = response
+
+        content, access = ResearchAcquisitionService(http_session=http).download(
+            "https://drive.usercontent.google.com/download?id=file-1"
+        )
+
+        self.assertEqual(content, b"%PDF-1.7\nbody")
+        self.assertEqual(access["content_type"], "application/pdf")
+        self.assertEqual(access["filename"], "Deal Teaser.pdf")
+
+    @patch.object(ResearchDiscoveryService, "is_safe_public_url", return_value=True)
+    def test_generic_binary_with_spoofed_document_name_is_rejected(self, _safe):
+        http = MagicMock()
+        response = self._response(content_type="application/octet-stream", content=b"not a pdf")
+        response.headers["Content-Disposition"] = 'attachment; filename="Deal Teaser.pdf"'
+        http.get.return_value = response
+
+        with self.assertRaisesRegex(ResearchAcquisitionError, "not a supported document"):
+            ResearchAcquisitionService(http_session=http).download(
+                "https://drive.usercontent.google.com/download?id=file-1"
+            )
+
 
 class ResearchDiscoveryServiceTests(SimpleTestCase):
     def setUp(self):

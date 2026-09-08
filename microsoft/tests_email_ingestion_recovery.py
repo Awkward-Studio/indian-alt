@@ -7,6 +7,7 @@ from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailIngestionRun
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_ingestion import EmailIngestionService as Ingestion
+from microsoft.services.email_matching import EmailDecisionService as Decisions
 
 
 class EmailRecoveryTests(TestCase):
@@ -61,3 +62,26 @@ class EmailRecoveryTests(TestCase):
         run.save()
         Ingestion.process(run.id, use_ai=False)
         self.assertEqual(self.deal.meeting_notes.count(), 1)
+
+    @patch.object(Ingestion, 'decision_document_context', return_value='--- CAPTURED DOCUMENT: WHP model.xlsx ---')
+    @patch.object(Decisions, 'initialize', return_value={'deal_model_data': {'title': 'WHP Jewellers'}})
+    @patch.object(Decisions, 'route')
+    def test_review_route_still_gets_name_from_captured_documents(self, route, initialize, context):
+        route.return_value = {
+            'classification': {
+                'type': 'NORMAL_EMAIL', 'status': 'completed', 'segment_roles': [],
+            },
+            'match': {
+                'status': 'needs_review', 'deal_id': None, 'suggested_deal_id': None,
+                'candidates': [], 'route': 'REVIEW',
+            },
+        }
+        run = Evidence.snapshot(self.email)
+
+        result = Ingestion.process(run.id, use_ai=True)
+
+        self.assertEqual(result['status'], 'needs_review')
+        run.refresh_from_db()
+        self.assertEqual(run.match['initialization']['deal_model_data']['title'], 'WHP Jewellers')
+        initialize.assert_called_once()
+        self.assertEqual(initialize.call_args.kwargs['supplemental_text'], context.return_value)

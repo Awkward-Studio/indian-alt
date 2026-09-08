@@ -1187,15 +1187,18 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
     )
     from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
     from ai_orchestrator.services.report_sections import ICReportSectionService
+    from microsoft.services.email_ingestion_review import deal_email_evidence_gaps
     all_docs = list(deal.documents.all().order_by("title", "id"))
     ready_docs = [doc for doc in all_docs if DocumentArtifactService.artifact_complete(doc)]
     missing_docs = [doc for doc in all_docs if not DocumentArtifactService.artifact_complete(doc)]
+    source_gaps = deal_email_evidence_gaps(deal)
     if not ready_docs:
         raise ValueError("The report cannot start because this deal has no complete DealDocument artifacts.")
-    if missing_docs and not allow_gaps:
+    if (missing_docs or source_gaps) and not allow_gaps:
         raise ValueError(
-            "The report cannot start until every deal document has a complete artifact "
-            f"({len(ready_docs)}/{len(all_docs)} ready). Use Build with gaps to explicitly continue."
+            "The report cannot start without gap acknowledgement "
+            f"({len(ready_docs)} ready documents, {len(missing_docs) + len(source_gaps)} evidence gaps). "
+            "Use Build with gaps to explicitly continue."
         )
     docs = ready_docs
 
@@ -1276,6 +1279,15 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
                 "reason": f"Artifact status: {DocumentArtifactService.artifact_status(doc)}",
             }
             for doc in missing_docs
+        ] + [
+            {
+                "file_id": gap["source_id"],
+                "file_name": gap["title"],
+                "reason": gap["error"],
+                "source_kind": gap["source_kind"],
+                "source_url": gap.get("source_url"),
+            }
+            for gap in source_gaps
         ],
         documents_analyzed=[doc.title for doc in docs],
     )
@@ -1284,8 +1296,9 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
             "documents_discovered": len(all_docs),
             "documents_in_report": covered_document_count,
             "documents_with_gaps": [str(doc.id) for doc in missing_docs],
+            "email_sources_with_gaps": source_gaps,
             "allow_gaps": allow_gaps,
-            "all_document_chunks_processed": covered_document_count == len(all_docs),
+            "all_document_chunks_processed": covered_document_count == len(all_docs) and not source_gaps,
             "context_strategy": "lossless extraction -> cached bulk-2 artifacts -> hierarchical map/reduce",
         },
         "audit_log_id": str(audit_log.id),

@@ -36,6 +36,37 @@ class EmailIngestionService:
                 text = extraction.get('normalized_text') or extraction.get('text') or ''
         return text, extraction
 
+    @classmethod
+    def decision_document_context(cls, run, *, allow_remote):
+        """Extract captured attachment and linked-file content for routing and naming."""
+        sections = []
+        occurrences = (
+            run.occurrences.filter(blob__isnull=False)
+            .filter(Q(source_key__startswith='attachment:') | Q(source_key__startswith='link:'))
+            .select_related('blob')
+            .order_by('position', 'id')
+        )
+        for occurrence in occurrences:
+            metadata = occurrence.metadata if isinstance(occurrence.metadata, dict) else {}
+            title = metadata.get('name') or 'Attached document'
+            try:
+                with occurrence.blob.file.open('rb') as stream:
+                    content = stream.read()
+                text, _extraction = cls.extract_attachment_text(
+                    content,
+                    title,
+                    allow_remote=allow_remote,
+                )
+            except Exception as exc:
+                logger.warning('Could not prepare %s for email routing: %s', title, exc)
+                text = ''
+            sections.append(
+                f'--- CAPTURED DOCUMENT: {title} ---\n{text.strip()}'
+                if text.strip()
+                else f'--- CAPTURED DOCUMENT: {title} ---'
+            )
+        return '\n\n'.join(sections)
+
     @staticmethod
     def enqueue(email, *, dispatch=True):
         run = Evidence.snapshot(email)
@@ -99,15 +130,38 @@ class EmailIngestionService:
                 or not run.match
                 or run.match.get('status') not in ('matched',)
             ):
+                decision_document_context = cls.decision_document_context(
+                    run,
+                    allow_remote=available,
+                )
+                confirmed_classification = (
+                    dict(run.classification)
+                    if run.classification.get('method') == 'manual'
+                    else None
+                )
                 confirmed_match = dict(run.match) if run.match.get('status') == 'matched' else None
-                routing = Decisions.route(run.email, parts, Deal.objects.all(), use_ai=available)
-                run.classification = routing['classification']
+                routing = Decisions.route(
+                    run.email,
+                    parts,
+                    Deal.objects.all(),
+                    use_ai=available,
+                    supplemental_text=decision_document_context,
+                )
+                run.classification = confirmed_classification or routing['classification']
                 run.match = confirmed_match or routing['match']
-                if available and run.match.get('route') == 'NEW_DEAL':
-                    run.match = {
-                        **run.match,
-                        'initialization': Decisions.initialize(run.email, parts),
-                    }
+                if available and not run.match.get('deal_id') and not run.match.get('suggested_deal_id'):
+                    try:
+                        initialization = Decisions.initialize(
+                            run.email,
+                            parts,
+                            supplemental_text=decision_document_context,
+                        )
+                    except ValueError as exc:
+                        # Not every unresolved message is a deal. Preserve the
+                        # review route instead of turning ambiguity into a job failure.
+                        logger.info('No reviewable deal seed for email run %s: %s', run.id, exc)
+                    else:
+                        run.match = {**run.match, 'initialization': initialization}
             run.stages['classification'] = run.classification.get('status', 'completed')
             run.stages['match'] = run.match['status']
             run.save(update_fields=['classification', 'match', 'stages', 'updated_at'])

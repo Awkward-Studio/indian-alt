@@ -68,3 +68,61 @@ class EmailDecisionTests(TestCase):
             Decisions._exact_excerpt(source, 'I wanted to share details on 3TenX.'),
             source,
         )
+
+    def test_vm_evidence_with_appended_ellipsis_maps_to_exact_source_prefix(self):
+        source = 'I wanted to introduce\nClass24\n, an AI-powered education platform building a differentiated\nSchool-to-Exam ecosystem\nthat integrates K-12 schools.'
+        self.assertEqual(
+            Decisions._exact_excerpt(
+                source,
+                'I wanted to introduce Class24, an AI-powered education platform building a differentiated School-to-Exam ecosystem...',
+            ),
+            'I wanted to introduce\nClass24\n, an AI-powered education platform building a differentiated\nSchool-to-Exam ecosystem',
+        )
+
+    @patch.object(Decisions, 'candidates', return_value=[])
+    @patch.object(Decisions, 'ai')
+    def test_route_uses_captured_document_context_and_falls_back_to_verbatim_evidence(self, ai, _candidates):
+        ai.return_value = {
+            'type': 'NORMAL_EMAIL',
+            'route': 'NEW_DEAL',
+            'deal_id': None,
+            'classification_evidence': 'A paraphrase that is not in the source.',
+            'match_evidence': 'Another paraphrase.',
+        }
+        parts = EmailContributionParser.parse(
+            {'body_text': 'Please review the attached model.'},
+            email_id=self.email.id,
+        )
+
+        result = Decisions.route(
+            self.email,
+            parts,
+            Deal.objects.all(),
+            supplemental_text='--- CAPTURED DOCUMENT: WHP Jewellers model.xlsx ---\nRevenue projection',
+        )
+
+        payload = ai.call_args.args[1]
+        self.assertIn('WHP Jewellers model.xlsx', payload['email'])
+        self.assertLess(
+            payload['email'].index('WHP Jewellers model.xlsx'),
+            payload['email'].index('Please review the attached model.'),
+        )
+        self.assertEqual(result['match']['route'], 'NEW_DEAL')
+        self.assertTrue(payload['email'].startswith(result['classification']['evidence']))
+
+    @patch.object(Decisions, 'ai')
+    def test_initializer_receives_captured_document_context(self, ai):
+        ai.return_value = {'deal_model_data': {'title': 'WHP Jewellers'}}
+        parts = EmailContributionParser.parse(
+            {'body_text': 'Please review the attachment.'},
+            email_id=self.email.id,
+        )
+
+        result = Decisions.initialize(
+            self.email,
+            parts,
+            supplemental_text='--- CAPTURED DOCUMENT: WHP Jewellers model.xlsx ---',
+        )
+
+        self.assertEqual(result['deal_model_data']['title'], 'WHP Jewellers')
+        self.assertIn('WHP Jewellers model.xlsx', ai.call_args.args[1]['email'])
