@@ -70,7 +70,7 @@ class EmailListSerializer(serializers.ModelSerializer):
         source='email_account.email',
         read_only=True
     )
-    deal_title = serializers.CharField(source='deal.title', read_only=True)
+    deal_title = serializers.CharField(source='deal.title', read_only=True, default=None)
     is_meeting_note_email = serializers.SerializerMethodField()
     latest_ingestion = serializers.SerializerMethodField()
     sanitizer_version = serializers.IntegerField(
