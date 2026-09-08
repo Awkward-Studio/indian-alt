@@ -12,7 +12,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from accounts.models import Profile
-from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from deals.models import AnalysisKind, Deal, DealAnalysis, DealFieldProvenance
 from deals.services.deal_creation import DealCreationService
 from deals.services.field_provenance import record_deal_field_changes
@@ -52,7 +52,7 @@ class EmailIngestionActions:
                 celery_task_id='',
             ).values_list('celery_task_id', flat=True))
             if task_ids:
-                from config.celery import celery_app
+                from config.celery import app as celery_app
                 for task_id in task_ids:
                     try:
                         celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')

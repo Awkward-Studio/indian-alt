@@ -78,7 +78,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     @staticmethod
     def _revoke(task_ids):
-        from config.celery import celery_app
+        from config.celery import app as celery_app
         errors = []
         for task_id in task_ids:
             try:
@@ -110,7 +110,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         # 1. Kill the Celery worker thread immediately
         if task_ids_to_revoke:
             try:
-                from config.celery import celery_app
+                from config.celery import app as celery_app
                 for revoke_id in dict.fromkeys(task_ids_to_revoke):
                     try:
                         celery_app.control.revoke(revoke_id, terminate=True, signal='SIGKILL')

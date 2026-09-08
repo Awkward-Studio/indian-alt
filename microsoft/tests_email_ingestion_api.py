@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 from accounts.models import Profile
 from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal, DealDocument
-from microsoft.models import Email, EmailAccount, EmailEvidenceLink
+from microsoft.models import Email, EmailAccount, EmailEvidenceLink, EmailContributionOccurrence
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_ingestion import EmailIngestionService as Ingestion
 
@@ -70,6 +70,14 @@ class EmailIngestionAPITests(TestCase):
         self.email.processing_status = 'pending'
         self.email.is_processed = True
         self.email.save(update_fields=['processing_status', 'is_processed'])
+        document = DealDocument.objects.create(deal=self.deal, title='Reset evidence')
+        link = EmailEvidenceLink.objects.create(
+            email_account=self.email.email_account, deal=self.deal,
+            source_key='reset-body', kind='email_body', document=document,
+        )
+        EmailContributionOccurrence.objects.create(
+            run=self.run, source_key='body:0', evidence=link,
+        )
 
         response = self.client.post(self.url + 'ingestion-reset/', {}, format='json')
 
@@ -79,6 +87,7 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(self.email.processing_status, 'idle')
         self.assertFalse(self.email.is_processed)
         self.assertIsNone(self.email.deal_id)
+        self.assertFalse(DealDocument.objects.filter(pk=document.pk).exists())
 
     @patch.object(Ingestion, 'dispatch')
     def test_repeated_create_reuses_hydrated_deal(self, dispatch):
