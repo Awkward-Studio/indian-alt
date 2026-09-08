@@ -6,6 +6,12 @@ from deals.services.document_artifacts import DocumentArtifactService
 
 
 class FullVDRArtifactTests(SimpleTestCase):
+    def test_document_task_allows_complete_multi_segment_analysis_window(self):
+        from deals.tasks import process_single_document_async
+
+        self.assertEqual(process_single_document_async.soft_time_limit, 5100)
+        self.assertEqual(process_single_document_async.time_limit, 5400)
+
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
     @patch("deals.services.document_artifacts.cache")
     def test_every_segment_is_analyzed_and_merged_into_full_artifact(self, mock_cache):
@@ -58,13 +64,17 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertEqual(artifact["source_metadata"]["artifact_segments_completed"], len(expected_segments))
         self.assertEqual(DocumentArtifactService.artifact_status(artifact), DocumentArtifactService.STATUS_COMPLETE)
         first_prompt = service.process_content.call_args_list[0].kwargs["content"]
+        first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
         self.assertIn("Extract structured internal-document evidence", first_prompt)
+        self.assertEqual(first_metadata["request_timeout"], 600)
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
-    def test_failed_segment_cannot_be_marked_as_complete(self):
+    @patch("deals.services.document_artifacts.cache")
+    def test_failed_segment_cannot_be_marked_as_complete(self, mock_cache):
         from deals.services.document_artifacts import DocumentArtifactService
 
+        mock_cache.get.return_value = None
         service = MagicMock()
         service.process_content.side_effect = [
             {"parsed_json": {"document_summary": "First segment"}},

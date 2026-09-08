@@ -26,8 +26,16 @@ class VDRSyncService:
         email = user_email or "dms-demo@india-alt.com" 
 
         try:
-            # 1. Get all files in the folder
-            items = graph.list_drive_items(email, deal.source_onedrive_id, deal.source_drive_id)
+            # Use the same strict recursive traversal as the ingestion path.
+            # The former list_drive_items method no longer exists and silently
+            # disabled pickup of already-analyzed documents.
+            items = graph.get_folder_tree(
+                deal.source_drive_id,
+                deal.source_onedrive_id,
+                user_email=email,
+                max_depth=None,
+                strict=True,
+            )
             if not items:
                 logger.info(f"No items found in folder {deal.source_onedrive_id}")
                 return

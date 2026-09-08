@@ -1012,7 +1012,12 @@ def preflight_selection_async(self, drive_id: str | None, folder_id: str | None,
         broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         raise e
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(
+    bind=True,
+    max_retries=3,
+    soft_time_limit=settings.VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT,
+    time_limit=settings.VDR_DOCUMENT_TASK_TIME_LIMIT,
+)
 def process_single_document_async(self, file_info, deal_id, user_email, is_preview, audit_log_id=None):
     """
     Atomized task to process a single document from OneDrive.

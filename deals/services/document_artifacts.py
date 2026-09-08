@@ -164,6 +164,7 @@ class DocumentArtifactService:
                 "segment_count": len(segments),
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 5000)),
+                "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 600)),
                 "enforce_context_budget": True,
             }
             result = service.process_content(
