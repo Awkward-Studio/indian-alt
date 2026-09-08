@@ -63,6 +63,23 @@ class EmailIngestionAPITests(TestCase):
             'expected_revision': 1, 'deal_id': 'invalid'}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_reset_returns_email_to_first_manual_stage(self):
+        self.run.status = 'waiting_service'
+        self.run.lease_token = self.run.id
+        self.run.save(update_fields=['status', 'lease_token'])
+        self.email.processing_status = 'pending'
+        self.email.is_processed = True
+        self.email.save(update_fields=['processing_status', 'is_processed'])
+
+        response = self.client.post(self.url + 'ingestion-reset/', {}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(self.email.ingestion_runs.exists())
+        self.email.refresh_from_db()
+        self.assertEqual(self.email.processing_status, 'idle')
+        self.assertFalse(self.email.is_processed)
+        self.assertIsNone(self.email.deal_id)
+
     @patch.object(Ingestion, 'dispatch')
     def test_repeated_create_reuses_hydrated_deal(self, dispatch):
         self.email.deal = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import PurePosixPath
 from urllib.parse import urljoin, urlparse
 
@@ -23,7 +24,12 @@ class ResearchAcquisitionError(ValueError):
 
 
 class ResearchAcquisitionService:
-    ALLOWED_MIME_TYPES = {"application/pdf", "text/plain", "text/html"}
+    ALLOWED_MIME_TYPES = {
+        "application/pdf", "text/plain", "text/html",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
     REDIRECT_CODES = {301, 302, 303, 307, 308}
 
     def __init__(self, *, http_session=None):
@@ -75,8 +81,15 @@ class ResearchAcquisitionService:
                 "content_type": content_type,
                 "content_length": total,
                 "verified_at": timezone.now().isoformat(),
+                "filename": self._response_filename(response),
             }
         raise ResearchAcquisitionError("TOO_MANY_REDIRECTS", "The source exceeded the redirect limit.")
+
+    @staticmethod
+    def _response_filename(response) -> str:
+        disposition = str(response.headers.get("Content-Disposition") or "")
+        match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, re.IGNORECASE)
+        return PurePosixPath(match.group(1).strip()).name if match else ""
 
     @transaction.atomic
     def attach(self, acquisition: SectorResearchAcquisition, content: bytes, access: dict) -> DealDocument:

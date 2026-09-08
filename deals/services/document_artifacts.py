@@ -98,7 +98,7 @@ class DocumentArtifactService:
         source_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
-        source_metadata = source_metadata or {}
+        source_metadata = json.loads(json.dumps(source_metadata or {}, default=str))
         fallback = cls._fallback_artifact(
             file_name=file_name,
             extracted_text=raw_text,

@@ -3,7 +3,7 @@ import base64
 import hashlib
 import json
 from pathlib import PurePath
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -20,6 +20,40 @@ from .email_contributions import EmailContributionParser, digest
 
 
 class EmailEvidenceService:
+    MIME_SUFFIXES = {
+        'application/pdf': '.pdf',
+        'text/plain': '.txt',
+        'text/html': '.html',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    }
+
+    @staticmethod
+    def _provider_download_url(url):
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').casefold()
+        parts = [part for part in parsed.path.split('/') if part]
+        if host == 'drive.google.com':
+            file_id = parts[parts.index('d') + 1] if 'd' in parts and len(parts) > parts.index('d') + 1 else parse_qs(parsed.query).get('id', [None])[0]
+            if file_id:
+                return f'https://drive.usercontent.google.com/download?{urlencode({"id": file_id, "export": "download", "confirm": "t"})}'
+        if host == 'docs.google.com' and 'd' in parts and len(parts) > parts.index('d') + 1:
+            file_id = parts[parts.index('d') + 1]
+            export_format = {'document': 'docx', 'spreadsheets': 'xlsx', 'presentation': 'pptx'}.get(parts[0])
+            if export_format:
+                return urlunparse((parsed.scheme, parsed.netloc, f'/{parts[0]}/d/{file_id}/export', '', urlencode({'format': export_format}), ''))
+        return url
+
+    @classmethod
+    def _linked_filename(cls, occurrence, access):
+        name = PurePath(str(access.get('filename') or occurrence.metadata.get('name') or '')).name
+        suffix = PurePath(name).suffix
+        if not suffix:
+            suffix = cls.MIME_SUFFIXES.get(str(access.get('content_type') or '').casefold(), '')
+            name = f'{name or "Linked document"}{suffix}'
+        return name
+
     @staticmethod
     def snapshot(email):
         source = {field: getattr(email, field) for field in (
@@ -157,6 +191,11 @@ class EmailEvidenceService:
                 occurrence.status = 'failed'
                 occurrence.error = str(exc)[:1500]
                 occurrence.save(update_fields=['status', 'error'])
+                if deal:
+                    EmailEvidenceLink.objects.filter(
+                        email_account_id=run.email.email_account_id,
+                        deal=deal, source_key=key, kind='email_link',
+                    ).update(active=False, index_status='waiting_service', error=str(exc)[:1500])
                 failures.append(str(occurrence.id))
         return failures
 
@@ -194,11 +233,25 @@ class EmailEvidenceService:
                 },
             )
             try:
+                download_url = cls._provider_download_url(url)
+                prior_access = occurrence.metadata.get('access') or {}
+                if (
+                    occurrence.blob_id
+                    and download_url != url
+                    and prior_access.get('content_type') == 'text/html'
+                ):
+                    occurrence.blob = None
+                    occurrence.save(update_fields=['blob'])
                 if not occurrence.blob_id:
-                    content, access = ResearchAcquisitionService().download(url)
+                    content, access = ResearchAcquisitionService().download(download_url)
                     if not content:
                         raise ValueError('Linked document returned no content.')
-                    if supported_host and access.get('content_type') == 'text/html':
+                    provider_host = (urlparse(url).hostname or '').casefold()
+                    is_provider_link = any(token in provider_host for token in (
+                        'sharepoint.com', 'onedrive.live.com', '1drv.ms',
+                        'drive.google.com', 'docs.google.com',
+                    ))
+                    if is_provider_link and access.get('content_type') == 'text/html':
                         raise ValueError(
                             'Linked document requires provider authentication or an exportable public file URL.'
                         )
@@ -212,7 +265,11 @@ class EmailEvidenceService:
                         if not blob.file:
                             blob.file.save(f'{run.email.email_account_id}/{sha}', ContentFile(content), save=True)
                     occurrence.blob = blob
-                    occurrence.metadata = {**occurrence.metadata, 'access': access}
+                    occurrence.metadata = {
+                        **occurrence.metadata, 'access': access,
+                        'download_url': download_url,
+                        'name': cls._linked_filename(occurrence, access),
+                    }
                     occurrence.save(update_fields=['blob', 'metadata'])
                 if deal:
                     with transaction.atomic():
@@ -221,7 +278,7 @@ class EmailEvidenceService:
                             deal=deal, source_key=key, kind='email_link',
                         )
                         link = EmailEvidenceLink.objects.select_for_update().get(pk=link.pk)
-                        name = PurePath(str(occurrence.metadata.get('name') or 'Linked document')).name
+                        name = cls._linked_filename(occurrence, occurrence.metadata.get('access') or {})
                         if not link.document_id:
                             link.document = DealDocument.objects.create(
                                 deal=deal, title=name, file_url=url if len(url) <= 200 else None,

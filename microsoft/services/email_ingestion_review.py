@@ -49,10 +49,16 @@ def run_status(run, *, include_content=False):
             item['text'] = occurrence.contribution.text
             item['headers'] = occurrence.contribution.headers
         outputs.append(item)
-    expected = len(outputs)
-    ready = sum(1 for item in outputs if item['index_status'] == 'completed' and item['artifact_status'] == 'complete')
-    failed = sum(1 for item in outputs if item['status'] == 'failed' or item['index_status'] == 'failed')
-    processing = sum(1 for item in outputs if item['index_status'] not in ('completed', 'failed'))
+    # An external href is supplementary. If it cannot be acquired, keep the
+    # visible failure but do not hold the source email and attachments hostage.
+    required_outputs = [
+        item for item in outputs
+        if not (item['source_kind'] == 'email_link' and item['status'] == 'failed')
+    ]
+    expected = len(required_outputs)
+    ready = sum(1 for item in required_outputs if item['index_status'] == 'completed' and item['artifact_status'] == 'complete')
+    failed = sum(1 for item in required_outputs if item['status'] == 'failed' or item['index_status'] == 'failed')
+    processing = sum(1 for item in required_outputs if item['index_status'] not in ('completed', 'failed'))
     deal_id = run.match.get('deal_id') or run.match.get('suggested_deal_id')
     blockers = []
     if not deal_id:

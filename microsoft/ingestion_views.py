@@ -16,12 +16,60 @@ from ai_orchestrator.models import AIAuditLog
 from deals.models import AnalysisKind, Deal, DealAnalysis, DealFieldProvenance
 from deals.services.deal_creation import DealCreationService
 from deals.services.field_provenance import record_deal_field_changes
-from .models import Email, EmailIngestionRun
+from .models import Email, EmailIngestionRun, EmailEvidenceLink
 from .services.email_ingestion import EmailIngestionService
 from .services.email_ingestion_review import confirm_decision, run_status, StaleEmailDecision
 
 
 class EmailIngestionActions:
+    @action(detail=True, methods=['post'], url_path='ingestion-reset')
+    def ingestion_reset(self, request, pk=None):
+        """Return one source email to the first manual ingestion stage."""
+        with transaction.atomic():
+            email = Email.objects.select_for_update().get(pk=self.get_object().pk)
+            links = list(EmailEvidenceLink.objects.filter(occurrences__run__email=email).distinct())
+            for link in links:
+                link.occurrences.filter(run__email=email).update(evidence=None, status='pending')
+                if link.occurrences.exists():
+                    continue
+                if link.document_id:
+                    DocumentChunk.objects.filter(
+                        source_type='document', source_id=str(link.document_id),
+                    ).delete()
+                    link.document.delete()
+                if link.meeting_note_id:
+                    DocumentChunk.objects.filter(
+                        source_type='meeting_note', source_id=str(link.meeting_note_id), deal=link.deal,
+                    ).delete()
+                    link.meeting_note.deals.remove(link.deal)
+                link.delete()
+
+            active_audits = AIAuditLog.objects.filter(
+                source_type='email_ingestion', source_id=str(email.id),
+                status__in=['PENDING', 'PROCESSING'],
+            )
+            task_ids = list(active_audits.filter(celery_task_id__isnull=False).exclude(
+                celery_task_id='',
+            ).values_list('celery_task_id', flat=True))
+            if task_ids:
+                from config.celery import celery_app
+                for task_id in task_ids:
+                    try:
+                        celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')
+                    except Exception:
+                        # Durable state reset must still work during a broker outage.
+                        pass
+            active_audits.update(
+                status='FAILED', is_success=False,
+                error_message='Email processing was reset by the analyst.', completed_at=timezone.now(),
+            )
+            EmailIngestionRun.objects.filter(email=email).delete()
+            Email.objects.filter(pk=email.pk).update(
+                deal=None, extracted_text=None, is_processed=False, is_indexed=False,
+                analysis_result={}, processing_status='idle', processing_error=None, processed_at=None,
+            )
+        return Response({'status': 'reset', 'email_id': str(email.id)})
+
     @staticmethod
     def _apply_reviewed_initialization(deal, run, *, title, actor=None):
         initialization = run.match.get('initialization') if isinstance(run.match, dict) else None

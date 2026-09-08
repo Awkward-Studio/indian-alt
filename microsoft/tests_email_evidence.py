@@ -1,5 +1,7 @@
 import base64
 import tempfile
+import json
+import uuid
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -9,6 +11,7 @@ from microsoft.models import Email, EmailAccount, EmailEvidenceLink, EmailPrivat
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_matching import EmailDecisionService as Decisions
 from deals.services.research_acquisition import ResearchAcquisitionService
+from deals.services.document_artifacts import DocumentArtifactService
 
 
 class EmailEvidenceTests(TestCase):
@@ -64,6 +67,44 @@ class EmailEvidenceTests(TestCase):
         self.assertEqual(link.document.deal, self.deal)
         self.assertEqual(link.document.title, 'deck.pdf')
         self.assertEqual(run.occurrences.get(source_key__startswith='link:').status, 'saved')
+
+    def test_google_drive_share_url_is_resolved_to_file_download(self):
+        resolved = Evidence._provider_download_url(
+            'https://drive.google.com/file/d/file-123/view?usp=sharing'
+        )
+        self.assertIn('drive.usercontent.google.com/download?', resolved)
+        self.assertIn('id=file-123', resolved)
+
+    @patch.object(ResearchAcquisitionService, 'download')
+    def test_link_uses_downloaded_filename_and_type(self, download):
+        download.return_value = (
+            b'%PDF linked diligence',
+            {
+                'final_url': 'https://drive.usercontent.google.com/download?id=file-123',
+                'content_type': 'application/pdf',
+                'filename': '3TenX Teaser.pdf',
+            },
+        )
+        self.email.body_html = '<a href="https://drive.google.com/file/d/file-123/view">click here</a>'
+        self.email.save(update_fields=['body_html'])
+        run = Evidence.snapshot(self.email)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = EmailPrivateBlob._meta.get_field('file').storage
+            with patch.object(storage, '_location', tmp):
+                storage.__dict__.pop('location', None)
+                self.assertEqual(Evidence.save_links(run, self.deal), [])
+                storage.__dict__.pop('location', None)
+
+        download.assert_called_once()
+        self.assertIn('drive.usercontent.google.com/download?', download.call_args.args[0])
+        self.assertEqual(EmailEvidenceLink.objects.get(kind='email_link').document.title, '3TenX Teaser.pdf')
+
+    def test_document_artifact_metadata_is_json_safe(self):
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name='email.txt', extracted_text='', source_metadata={'source_id': uuid.uuid4()},
+        )
+        json.dumps(artifact)
 
     def test_meeting_uses_meeting_source(self):
         self.email.body_text = 'Summary\nDiscussed expansion\nTranscript\nTeam agreed to launch.'

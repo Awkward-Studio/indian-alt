@@ -136,7 +136,10 @@ class EmailIngestionService:
             Evidence.save_parts(run, deal, parts, classification)
             attachment_failures = Evidence.save_attachments(run, deal)
             link_failures = Evidence.save_links(run, deal)
-            capture_failures = attachment_failures + link_failures
+            # External links are supplementary evidence. Record their failures,
+            # but do not block a valid email body or attachment from advancing.
+            capture_failures = attachment_failures
+            run.stages['links'] = 'partial' if link_failures else 'completed'
             run.stages['save'] = 'partial' if capture_failures else 'completed'
             run.save(update_fields=['classification', 'stages', 'updated_at'])
             indexing = cls.index_outputs(run, allow_remote=available)
