@@ -19,9 +19,9 @@ class EmailDecisionService:
     @classmethod
     def _bounded_payload(cls, stage, payload, source_id):
         """Reduce oversized private source text without dropping its tail."""
-        field = 'text' if stage == 'classify' else 'email' if stage == 'match' else None
+        field = 'text' if stage == 'classify' else 'email' if stage in ('match', 'route') else None
         bounded = dict(payload)
-        if stage == 'match' and isinstance(payload.get('candidates'), list):
+        if stage in ('match', 'route') and isinstance(payload.get('candidates'), list):
             bounded['candidates'] = [
                 {
                     **candidate,
@@ -46,8 +46,8 @@ class EmailDecisionService:
             'Determine whether this is a normal email or meeting notes/transcript. '
             'Preserve exact source excerpts that prove the classification.'
             if stage == 'classify'
-            else 'Identify the company or deal this email concerns. Preserve exact source excerpts '
-                 'containing company names, project names, domains, and relationship evidence.'
+            else 'Classify the email and identify the company or deal it concerns. Preserve exact source '
+                 'excerpts containing meeting structure, company names, project names, domains, and relationship evidence.'
         )
         reduced, _ = ChatDocumentChunkService(
             cache_scope=f'email-ingestion:{source_id}:{stage}',
@@ -214,3 +214,96 @@ class EmailDecisionService:
             if picked:
                 result['status'] = 'needs_review'
         return result
+
+    @classmethod
+    def route(cls, email, parts, deals, *, use_ai=True):
+        """Classify content and propose existing/new-deal routing in one VM call."""
+        text = (email.subject or '') + '\n' + '\n\n'.join(part.text for part in parts)
+        scoped_thread = Email.objects.filter(email_account_id=email.email_account_id)
+        scoped_thread = (
+            scoped_thread.filter(conversation_id=email.conversation_id)
+            if email.conversation_id else scoped_thread.filter(pk=email.pk)
+        )
+        linked = {str(value) for value in scoped_thread.exclude(deal=None).values_list('deal_id', flat=True)}
+        allowed = {str(value) for value in deals.filter(pk__in=linked).values_list('pk', flat=True)}
+        if len(linked) > 1 or linked != allowed:
+            classification = cls.classify(parts, source_id=email.id, use_ai=False)
+            return {
+                'classification': classification,
+                'match': {
+                    'status': 'needs_review', 'deal_id': None, 'candidates': [],
+                    'evidence': 'Conflicting or unavailable linked deal identities.',
+                    'decision_source': 'deterministic',
+                },
+            }
+
+        candidates = cls.candidates(text, deals, use_semantic=use_ai)
+        if len(linked) == 1:
+            linked_id = next(iter(linked))
+            linked_deal = deals.filter(pk=linked_id).first()
+            if linked_deal and linked_id not in {item['deal_id'] for item in candidates}:
+                candidates.insert(0, {
+                    'deal_id': linked_id,
+                    'title': linked_deal.title,
+                    'score': 1000.0,
+                    'context': (linked_deal.deal_summary or '')[:3000],
+                    'evidence': 'Verified mailbox-scoped conversation relationship',
+                })
+
+        if not use_ai:
+            return {
+                'classification': cls.classify(parts, source_id=email.id, use_ai=False),
+                'match': cls.match(email, text, deals, use_ai=False),
+            }
+
+        result = cls.ai('route', {'email': text, 'candidates': candidates}, email.id)
+        kind = result.get('type')
+        classification_evidence = result.get('classification_evidence') or result.get('evidence') or ''
+        if kind not in ('NORMAL_EMAIL', 'MEETING_NOTE'):
+            raise ValueError('Email route must classify the source as NORMAL_EMAIL or MEETING_NOTE.')
+        if not isinstance(classification_evidence, str) or not classification_evidence or classification_evidence not in text:
+            raise ValueError('Email route classification evidence must be an exact source excerpt.')
+
+        picked = str(result.get('deal_id') or '')
+        candidate_ids = {item['deal_id'] for item in candidates}
+        if picked and picked not in candidate_ids:
+            raise ValueError('Email route selected an unauthorized or nonexistent candidate.')
+        match_evidence = result.get('match_evidence') or ''
+        if not isinstance(match_evidence, str) or (match_evidence and match_evidence not in text):
+            raise ValueError('Email route match evidence must occur in the email.')
+
+        route = str(result.get('route') or '').upper()
+        if len(linked) == 1:
+            # A previously confirmed conversation relationship is inherited unless
+            # the deterministic conflict guard above detects more than one identity.
+            linked_id = next(iter(linked))
+            match = {
+                'status': 'matched', 'deal_id': linked_id, 'suggested_deal_id': linked_id,
+                'candidates': candidates, 'evidence': match_evidence or 'Verified mailbox-scoped conversation relationship',
+                'decision_source': 'conversation_inheritance', 'route': 'EXISTING_DEAL',
+            }
+        elif picked:
+            match = {
+                'status': 'needs_review', 'deal_id': None, 'suggested_deal_id': picked,
+                'candidates': candidates, 'evidence': match_evidence,
+                'decision_source': 'ai', 'route': 'EXISTING_DEAL',
+            }
+        else:
+            match = {
+                'status': 'needs_review', 'deal_id': None, 'suggested_deal_id': None,
+                'candidates': candidates, 'evidence': match_evidence,
+                'decision_source': 'ai',
+                'route': 'NEW_DEAL' if route == 'NEW_DEAL' else 'REVIEW',
+            }
+
+        roles = [
+            {'type': kind, 'method': 'ai_route', 'evidence': classification_evidence}
+            for _part in parts
+        ]
+        return {
+            'classification': {
+                'type': kind, 'segment_roles': roles, 'revision': 1,
+                'status': 'completed', 'method': 'ai_route', 'evidence': classification_evidence,
+            },
+            'match': match,
+        }

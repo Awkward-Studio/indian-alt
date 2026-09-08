@@ -1846,30 +1846,28 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal.source_drive_id = drive_id
         deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
 
-        # 1. Pickup existing analyzed files
-        from deals.services.vdr_sync import VDRSyncService
-        user_email = getattr(request.user, 'email', None) or DMS_USER_EMAIL
-        linked_count = VDRSyncService.sync_existing_analyses_to_folder(deal, user_email=user_email)
-        
-        # 2. Synchronously traverse the folder tree to make it "instant" for the VDR dialog
-        try:
-            tree_count = FolderAnalysisService.persist_folder_tree(
-                deal=deal, 
-                folder_id=folder_id, 
-                drive_id=drive_id, 
-                user_email=DMS_USER_EMAIL
-            )
-            message = f"OneDrive folder linked. {tree_count} items discovered."
-        except Exception as e:
-            logger.error(f"Synchronous traversal failed: {e}")
-            message = "OneDrive folder linked, but traversal failed. Folder view may be empty."
+        user_email = DMS_USER_EMAIL
+        from deals.tasks import prepare_linked_folder_vdr_async
+
+        task = prepare_linked_folder_vdr_async.apply_async(
+            kwargs={
+                "deal_id": str(deal.id),
+                "folder_id": folder_id,
+                "drive_id": drive_id,
+                "user_email": user_email,
+            },
+            queue="low_priority",
+        )
+        deal.processing_status = "processing"
+        deal.processing_error = None
+        deal.save(update_fields=["processing_status", "processing_error"])
 
         return Response({
-            "status": "success",
-            "message": f"{message} Picked up {linked_count} existing analyses.",
+            "status": "queued",
+            "message": "Folder linked. Complete VDR artifact processing is queued; report generation will wait for confirmation.",
             "source_onedrive_id": deal.source_onedrive_id,
             "source_drive_id": deal.source_drive_id,
-            "linked_count": linked_count
+            "task_id": task.id,
         })
 
     @extend_schema(
@@ -2069,6 +2067,31 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if "error" in result:
             return Response(result, status=400)
         return Response(result)
+
+    @action(detail=True, methods=['post'])
+    def confirm_vdr_analysis(self, request, pk=None):
+        """Backward-compatible report action using the common deal evidence set."""
+        deal = self.get_object()
+        result = FolderAnalysisService.trigger_vdr_analysis(
+            deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
+        )
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result)
+
+    @action(detail=True, methods=['get'], url_path='analysis-readiness')
+    def analysis_readiness(self, request, pk=None):
+        return Response(FolderAnalysisService.deal_analysis_readiness(self.get_object()))
+
+    @action(detail=True, methods=['post'], url_path='build-analysis-report')
+    def build_analysis_report(self, request, pk=None):
+        deal = self.get_object()
+        result = FolderAnalysisService.trigger_vdr_analysis(
+            deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
+        )
+        if 'error' in result:
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        return Response(result, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['post'])
     def analyze_additional_documents(self, request, pk=None):

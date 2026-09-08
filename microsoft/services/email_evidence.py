@@ -77,10 +77,14 @@ class EmailEvidenceService:
                         meeting_at=run.email.date_sent or run.email.date_received, metadata=provenance)
                     note.deals.add(deal)
                     link.meeting_note = note
-                elif output_kind == 'email_body' and not link.document_id:
+                # Every contribution is also a DealDocument. MeetingNote remains
+                # the calendar-facing representation; DealDocument is the common
+                # artifact/chunk/report substrate used by email, uploads and VDR.
+                if not link.document_id:
                     link.document = DealDocument.objects.create(deal=deal, title=title,
                         extracted_text=part.text, normalized_text=part.text,
-                        source_map_json={'email': provenance}, transcription_status='complete')
+                        source_map_json={'email': provenance, 'source_kind': output_kind},
+                        transcription_status='complete')
                 link.provenance = provenance
                 link.active = True
                 link.save()

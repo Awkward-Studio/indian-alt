@@ -38,6 +38,32 @@ class EmailHtmlSanitizer:
     SAFE_LINK_SCHEMES = {"http", "https", "mailto", "tel"}
 
     @classmethod
+    def text_with_link_targets(cls, value: str | None) -> str:
+        """Render safe email HTML as text without losing embedded URLs."""
+        soup = BeautifulSoup(str(value or ""), "html.parser")
+        for node in soup.select("style, script, head"):
+            node.decompose()
+        for anchor in soup.find_all("a"):
+            href = cls._safe_link(anchor.get("href"))
+            label = anchor.get_text(" ", strip=True)
+            if not href:
+                replacement = label
+            elif href.casefold().startswith(("mailto:", "tel:")) and label.casefold() == href.split(":", 1)[1].casefold():
+                replacement = label
+            elif label and label == href:
+                replacement = href
+            elif label:
+                replacement = f"{label} <{href}>"
+            else:
+                replacement = href
+            anchor.replace_with(replacement)
+        # Tabs preserve table cell boundaries in model-facing evidence.
+        for row in soup.select("tr"):
+            cells = row.select("th, td")
+            row.replace_with("\t".join(cell.get_text(" ", strip=True) for cell in cells) + "\n")
+        return soup.get_text(separator="\n", strip=True)
+
+    @classmethod
     def sanitize(cls, value: str | None) -> SanitizedEmailBody:
         soup = BeautifulSoup(str(value or ""), "html.parser")
 
@@ -76,7 +102,7 @@ class EmailHtmlSanitizer:
                         del tag.attrs[numeric_attribute]
 
         html = str(soup).strip()
-        text = soup.get_text(separator="\n", strip=True)
+        text = cls.text_with_link_targets(html)
         return SanitizedEmailBody(html=html, text=text)
 
     @classmethod

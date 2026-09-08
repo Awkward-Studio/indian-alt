@@ -751,6 +751,13 @@ class OneDriveListView(APIView):
                 required=False,
                 description='Return sample mock data instead of calling Azure',
             ),
+            OpenApiParameter(
+                name='scope',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Root to browse: dms (default) or deal_folders (4. All - 16062026)',
+            ),
         ],
         responses={200: OneDriveListResponseSerializer},
     )
@@ -758,8 +765,19 @@ class OneDriveListView(APIView):
         """List files and folders from the DMS shared folder."""
         user_email = request.query_params.get('user_email') or DMS_USER_EMAIL
         folder_id = request.query_params.get('folder_id')
+        scope = request.query_params.get('scope', 'dms')
         top = request.query_params.get('top', 100)
         use_mock = request.query_params.get('mock', '').lower() in ('true', '1', 'yes')
+
+        if scope not in {'dms', 'deal_folders'}:
+            return Response(
+                {
+                    'error': 'Validation failed',
+                    'details': {'scope': ['Must be dms or deal_folders']},
+                    'status_code': status.HTTP_400_BAD_REQUEST,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             top = int(top)
@@ -800,7 +818,10 @@ class OneDriveListView(APIView):
                 # ROOT VIEW: list only the configured DMS folder.
                 # Previously this merged Graph `/sharedWithMe`, which could surface
                 # unrelated folders before/alongside the configured DMS root.
-                data = graph.get_drive_root_children(user_email=user_email, top=top)
+                if scope == 'deal_folders':
+                    data = graph.get_deal_folder_root_children(user_email=user_email)
+                else:
+                    data = graph.get_drive_root_children(user_email=user_email, top=top)
 
                 if request.query_params.get('include_shared_with_me', '').lower() in ('true', '1', 'yes'):
                     combined_items = []

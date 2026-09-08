@@ -6,7 +6,6 @@ from django.db import transaction
 from ai_orchestrator.services.runtime import AIRuntimeService
 from deals.models import Deal
 from deals.services.deal_creation import DealCreationService
-from deals.tasks import VDR_DOCUMENT_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +93,13 @@ class FolderAnalysisService:
         graph = GraphAPIService()
         
         # 1. Perform Traversal
-        file_tree = graph.get_folder_tree(drive_id, folder_id, user_email=user_email)
+        file_tree = graph.get_folder_tree(
+            drive_id,
+            folder_id,
+            user_email=user_email,
+            max_depth=None,
+            strict=True,
+        )
         
         # 2. Persist in Audit Log so serializers can find it
         AIAuditLog.objects.create(
@@ -807,5 +812,88 @@ class FolderAnalysisService:
         return {
             "status": "queued",
             "task_id": task.id,
-            "message": f"Queued VDR processing for {min(len(file_tree), VDR_DOCUMENT_LIMIT)} of {len(file_tree)} files."
+            "message": f"Queued full VDR processing for all {len(file_tree)} discovered files."
+        }
+
+    @staticmethod
+    def deal_analysis_readiness(deal: Deal) -> dict:
+        """Summarize the common DealDocument evidence set used by final analysis."""
+        from deals.services.document_artifacts import DocumentArtifactService
+
+        documents = list(deal.documents.all().order_by('title', 'id'))
+        ready = [doc for doc in documents if DocumentArtifactService.artifact_complete(doc)]
+        gaps = [
+            {
+                'document_id': str(doc.id),
+                'title': doc.title,
+                'artifact_status': DocumentArtifactService.artifact_status(doc),
+                'transcription_status': doc.transcription_status,
+                'chunking_status': doc.chunking_status,
+            }
+            for doc in documents
+            if doc not in ready
+        ]
+        return {
+            'document_count': len(documents),
+            'ready_count': len(ready),
+            'gap_count': len(gaps),
+            'ready': bool(ready) and not gaps,
+            'can_build_with_gaps': bool(ready) and bool(gaps),
+            'gaps': gaps,
+            'report_sections': 11,
+        }
+
+    @staticmethod
+    def trigger_vdr_analysis(deal: Deal, *, allow_gaps: bool = False) -> dict:
+        """Queue a report from all deal evidence after explicit user confirmation."""
+        from ai_orchestrator.models import AIAuditLog, AIPersonality
+        from deals.tasks import generate_vdr_analysis_async
+
+        readiness = FolderAnalysisService.deal_analysis_readiness(deal)
+        if not readiness['ready'] and not (allow_gaps and readiness['can_build_with_gaps']):
+            return {
+                'error': 'All document artifacts must be ready. You may explicitly Build with gaps when at least one artifact is complete.',
+                'readiness': readiness,
+            }
+        active = AIAuditLog.objects.filter(
+            source_type='deal_full_synthesis', source_id=str(deal.id), status__in=['PENDING', 'PROCESSING'],
+        ).order_by('-created_at').first()
+        if active:
+            return {
+                'status': 'already_running', 'audit_log_id': str(active.id),
+                'task_id': active.celery_task_id, 'readiness': readiness,
+            }
+
+        personality = AIPersonality.objects.filter(is_default=True).first()
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="deal_full_synthesis",
+            source_id=str(deal.id),
+            personality=personality,
+            status="PROCESSING",
+            is_success=False,
+            model_used=AIRuntimeService.get_text_model(personality),
+            system_prompt="Waiting to generate the confirmed 11-section analyst report.",
+            user_prompt=f"Generate the complete analyst report for {deal.title} from all ready DealDocument artifacts.",
+        )
+        task = generate_vdr_analysis_async.apply_async(
+            kwargs={
+                "deal_id": str(deal.id), "audit_log_id": str(audit_log.id),
+                "allow_gaps": allow_gaps,
+            },
+            queue="low_priority",
+        )
+        audit_log.celery_task_id = task.id
+        audit_log.source_metadata = {
+            "workflow_stage": "analysis_queued",
+            "user_confirmation_received": True,
+            "allow_gaps": allow_gaps,
+            "readiness": readiness,
+        }
+        audit_log.save(update_fields=["celery_task_id", "source_metadata"])
+        return {
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "readiness": readiness,
+            "message": "Confirmed. The 11-section analyst report is queued from all deal evidence.",
         }

@@ -9,6 +9,8 @@ from typing import Iterable
 
 from bs4 import BeautifulSoup
 
+from .email_html_sanitizer import EmailHtmlSanitizer
+
 
 @dataclass(frozen=True)
 class ThreadMessageDelta:
@@ -119,7 +121,7 @@ class EmailThreadUnfolder:
                     removed = True
             for node in soup.select("style, script, head"):
                 node.decompose()
-            return soup.get_text(separator="\n", strip=True), removed
+            return EmailHtmlSanitizer.text_with_link_targets(str(soup)), removed
 
         return (
             getattr(message, "body_text", None)

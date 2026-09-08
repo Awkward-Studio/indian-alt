@@ -30,6 +30,17 @@ class EmailEvidenceTests(TestCase):
         self.email.refresh_from_db()
         self.assertEqual(self.email.deal, self.deal)
 
+    def test_html_anchor_destination_is_saved_as_deal_evidence(self):
+        self.email.body_html = '<p>Review the <a href="https://drive.example.test/deck/123">deck</a>.</p>'
+        self.email.save(update_fields=['body_html'])
+
+        self.save_body()
+
+        self.assertIn(
+            'deck <https://drive.example.test/deck/123>',
+            DealDocument.objects.get().normalized_text,
+        )
+
     def test_meeting_uses_meeting_source(self):
         self.email.body_text = 'Summary\nDiscussed expansion\nTranscript\nTeam agreed to launch.'
         self.email.save()

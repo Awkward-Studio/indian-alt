@@ -28,6 +28,7 @@ PHASE2_ARTIFACT_KEYS = PHASE2_ARTIFACT_REQUIRED_KEYS + (
 )
 
 IC_REPORT_HEADERS = (
+    "## Executive Summary",
     "## Company Details",
     "## Promoter and Management Details",
     "## Industry Overview",
@@ -187,25 +188,27 @@ ANALYST_REPORT REQUIREMENTS:
 - Mention source documents in each section where possible.
 - In each major section, include a compact `Next steps / further diligence / red flags` table unless the section itself is the final Next Steps table.
 - Every report must follow this exact section order:
-  1. `## Company Details`
+  1. `## Executive Summary`
+     - Decision-ready synopsis, preliminary verdict, strongest supporting facts, principal risks, and the most important immediate diligence asks.
+  2. `## Company Details`
      - About the company, products/services, core focus, major revenue source, key investor concerns, existing investors, source documents.
-  2. `## Promoter and Management Details`
+  3. `## Promoter and Management Details`
      - Promoter/founder background, designation, prior experience, education if available, why they are suited for the business, and unusual items/red flags visible in internal materials.
-  3. `## Industry Overview`
+  4. `## Industry Overview`
      - Demand, market size/TAM if internally available, competition, peer positioning, moat, supply chain, supply constraints, regulation/pricing/logistics/contracts. Mark missing public market validation as External diligence required.
-  4. `## Transaction Details`
+  5. `## Transaction Details`
      - Fund raise ask, proposed IA investment amount, instrument, pre-money valuation, IA ownership, revenue/EBITDA valuation multiples, source of deal, lead investor, existing investor follow-on, total funds raised till date.
-  5. `## Key Financials`
+  6. `## Key Financials`
      - Condensed historical and projected P&L where available: gross revenue, segment/channel revenue, net revenue, gross margin, segment/channel GM, CM1/CM2/CM3, corporate expenses, EBITDA. Include balance sheet, receivables/days, payables/days on sales, inventory/days, NWC, ROCE/ROIC/ROE formula and result where internally supported.
-  6. `## Transaction / Trading Multiples`
+  7. `## Transaction / Trading Multiples`
      - Transaction multiple table with Company, Acquirer / Investor, Deal Date, Deal Size, Company Valuation - PreMoney, Revenue Multiple, EBITDA Multiple. Trading comparable table with Market Cap, 2 Year Revenue CAGR, Price/Revenue, Total Revenues, EBITDA Margin, PAT Margin, Debt, Cash and cash equivalents. If missing internally, mark External diligence required.
-  7. `## Risk Factors`
+  8. `## Risk Factors`
      - Table with columns: Key Risk, Probability, Mitigants and IA comments. Cover qualitative and quantitative risks supported by internal evidence.
-  8. `## Investment Rationale`
+  9. `## Investment Rationale`
      - 5-10 factual, hard-hitting rationales only if supported by evidence. Do not force positives; negatives belong in Risk Factors.
-  9. `## Exit Considerations`
+  10. `## Exit Considerations`
      - Use available entry valuation, implied multiples, IA stake, dilution assumptions and exit assumptions. Leave blanks / evidence unavailable where not supported.
-  10. `## Next Steps`
+  11. `## Next Steps`
       - Table with columns: Serial Number, Tasks / Next Step, Task Owner, Task assigned to, Status.
 - Do not wrap the markdown in code fences.
 - Keep the report crisp, decision-oriented, evidence-led, and unbiased.
@@ -272,7 +275,7 @@ DEAL_SYNTHESIS_PROMPT_TEMPLATE = f"""Synthesize deal analysis from structured Ph
 
 {REPORT_FORMAT_REQUIREMENTS}
 
-If OUTPUT MODE is `markdown_document`, return only a Markdown document following the 10-section internal IC note structure above. Do not return JSON, metadata, document_evidence, markdown fences, or prompt instructions.
+If OUTPUT MODE is `markdown_document`, return only a Markdown document following the 11-section internal IC note structure above. Do not return JSON, metadata, document_evidence, markdown fences, or prompt instructions.
 
 If OUTPUT MODE is blank or `canonical_json`, return exactly one valid JSON object and nothing else with this top-level shape:
 {{
@@ -308,7 +311,7 @@ If OUTPUT MODE is blank or `canonical_json`, return exactly one valid JSON objec
     "cross_document_conflicts": [],
     "missing_information_requests": []
   }},
-  "analyst_report": "Markdown internal IC memo using the required 10-section structure, with citations/source names",
+  "analyst_report": "Markdown internal IC memo using the required 11-section structure, with citations/source names",
   "document_evidence": [],
   "cross_document_conflicts": [],
   "missing_information_requests": []

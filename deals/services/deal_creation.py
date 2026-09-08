@@ -170,7 +170,15 @@ class DealCreationService:
         return normalized
 
     @staticmethod
-    def apply_analysis_to_deal(deal: Deal, analysis_json: dict | None, *, overwrite: bool = False, overwrite_themes: bool = False):
+    def apply_analysis_to_deal(
+        deal: Deal,
+        analysis_json: dict | None,
+        *,
+        overwrite: bool = False,
+        overwrite_themes: bool = False,
+        source_id: str = 'analysis:deal-model-data',
+        overwrite_ai_owned: bool = False,
+    ):
         if not isinstance(analysis_json, dict):
             return
 
@@ -178,6 +186,18 @@ class DealCreationService:
         analyst_report = analysis_json.get('analyst_report')
         changed_fields = []
         previous_values = {}
+
+        def can_write(field_name, current_value):
+            if overwrite or current_value in (None, '', [], {}):
+                return True
+            if not overwrite_ai_owned:
+                return False
+            latest = deal.field_provenance.filter(field_name=field_name).order_by('-created_at', '-id').first()
+            return bool(latest and latest.source_type == DealFieldProvenance.SourceType.AI)
+
+        def can_write_bool(field_name, current_value):
+            latest = deal.field_provenance.filter(field_name=field_name).order_by('-created_at', '-id').first()
+            return bool(overwrite or latest is None or (overwrite_ai_owned and latest.source_type == DealFieldProvenance.SourceType.AI))
 
         field_mapping = {
             'industry': 'industry',
@@ -207,7 +227,7 @@ class DealCreationService:
                 continue
 
             current_value = getattr(deal, deal_field)
-            if overwrite or not current_value:
+            if can_write(deal_field, current_value):
                 if current_value != normalized_value:
                     previous_values[deal_field] = current_value
                     setattr(deal, deal_field, normalized_value)
@@ -225,7 +245,7 @@ class DealCreationService:
             if value is not None:
                 normalized_bool = str(value).lower() in ('true', 'yes', '1', 'on')
                 current_bool = getattr(deal, deal_field)
-                if overwrite or not current_bool:
+                if can_write_bool(deal_field, current_bool):
                     if current_bool != normalized_bool:
                         previous_values[deal_field] = current_bool
                         setattr(deal, deal_field, normalized_bool)
@@ -233,7 +253,7 @@ class DealCreationService:
 
         if isinstance(analyst_report, str):
             normalized_report = analyst_report.strip()
-            if normalized_report and (overwrite or not deal.deal_summary):
+            if normalized_report and can_write('deal_summary', deal.deal_summary):
                 if deal.deal_summary != normalized_report:
                     previous_values['deal_summary'] = deal.deal_summary
                     deal.deal_summary = normalized_report
@@ -244,7 +264,7 @@ class DealCreationService:
         if source_relationships:
             # Resolve Bank
             bank_data = source_relationships.get("bank")
-            if isinstance(bank_data, dict) and bank_data.get("name") and (overwrite or not deal.bank):
+            if isinstance(bank_data, dict) and bank_data.get("name") and can_write('bank', deal.bank):
                 from banks.models import Bank
                 bank_name = str(bank_data["name"]).strip()
                 bank_domain = (bank_data.get("website_domain") or "").strip() or None
@@ -279,7 +299,7 @@ class DealCreationService:
 
             # Resolve Contact
             contact_data = source_relationships.get("primary_contact")
-            if isinstance(contact_data, dict) and (contact_data.get("name") or contact_data.get("email")) and (overwrite or not deal.primary_contact):
+            if isinstance(contact_data, dict) and (contact_data.get("name") or contact_data.get("email")) and can_write('primary_contact', deal.primary_contact):
                 from contacts.models import Contact
                 email = contact_data.get("email")
                 name = contact_data.get("name")
@@ -303,7 +323,7 @@ class DealCreationService:
                     changed_fields.append('primary_contact')
 
         themes = DealCreationService._normalize_string_list(model_data.get('themes'))
-        if themes and (overwrite_themes or not deal.themes):
+        if themes and (overwrite_themes or can_write('themes', deal.themes)):
             if deal.themes != themes:
                 previous_values['themes'] = deal.themes
                 deal.themes = themes
@@ -318,7 +338,7 @@ class DealCreationService:
                     for field in changed_fields
                 },
                 source_type=DealFieldProvenance.SourceType.AI,
-                source_id='analysis:deal-model-data',
+                source_id=source_id,
             )
 
     @staticmethod

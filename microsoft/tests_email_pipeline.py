@@ -48,6 +48,7 @@ class EmailHtmlSanitizerTests(TestCase):
             self.assertNotIn(marker, lowered)
         self.assertIn("<p>Safe note</p>", result.html)
         self.assertIn('href="https://example.test/deal"', result.html)
+        self.assertIn('Safe link <https://example.test/deal>', result.text)
         self.assertIn('rel="nofollow noopener noreferrer"', result.html)
         self.assertIn('target="_blank"', result.html)
         self.assertNotIn("window.stolen", result.text)
@@ -180,6 +181,17 @@ class EmailThreadUnfolderTests(TestCase):
 
         self.assertEqual(delta.text, "HTML_DELTA approved.")
         self.assertEqual(delta.strategy, "html_quote")
+
+    def test_preserves_hyperlink_targets_hidden_behind_anchor_text(self):
+        message = self._message(
+            "html-link",
+            subject="Deal",
+            html='<p>Download the deck <a href="https://drive.example.test/deck/123">here</a>.</p>',
+        )
+
+        delta = EmailThreadUnfolder.unfold([message])[0]
+
+        self.assertIn("here <https://drive.example.test/deck/123>", delta.text)
 
     def test_removes_repeated_prior_body_without_a_separator(self):
         first = self._message("one", subject="Deal", text="FIRST_MARKER sufficiently long original body")

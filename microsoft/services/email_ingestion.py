@@ -92,12 +92,16 @@ class EmailIngestionService:
             # Capture files before decisions so review or VM outages cannot lose originals.
             attachment_failures = Evidence.save_attachments(run)
             parts = Evidence.parts(run)
-            if not run.classification or run.classification.get('status') == 'waiting_service':
-                run.classification = Decisions.classify(parts, source_id=run.email_id, use_ai=available)
+            if (
+                not run.classification
+                or run.classification.get('status') == 'waiting_service'
+                or not run.match
+                or run.match.get('status') not in ('matched',)
+            ):
+                routing = Decisions.route(run.email, parts, Deal.objects.all(), use_ai=available)
+                run.classification = routing['classification']
+                run.match = routing['match']
             run.stages['classification'] = run.classification.get('status', 'completed')
-            text = (run.source.get('subject') or '') + '\n' + '\n\n'.join(p.text for p in parts)
-            if run.match.get('status') != 'matched':
-                run.match = Decisions.match(run.email, text, Deal.objects.all(), use_ai=available)
             run.stages['match'] = run.match['status']
             run.save(update_fields=['classification', 'match', 'stages', 'updated_at'])
             if run.match['status'] != 'matched':
@@ -107,15 +111,20 @@ class EmailIngestionService:
                 run.status = 'waiting_service'
                 return cls.release(run)
             deal = Deal.objects.get(pk=run.match['deal_id'])
-            # Reclassify the canonical segmentation only when not manually overridden.
+            # The first routing pass is authoritative. Only align segment count
+            # after known contributions have been unfolded for this deal.
             parts = Evidence.parts(run, deal)
-            if run.classification.get('method') == 'manual':
-                classification = {**run.classification, 'segment_roles': []}
-            else:
-                classification = Decisions.classify(parts, source_id=run.email_id, use_ai=available)
-            if classification.get('status') == 'waiting_service':
-                run.status = 'waiting_service'
-                return cls.release(run)
+            classification = dict(run.classification)
+            roles = list(classification.get('segment_roles') or [])
+            if len(roles) != len(parts):
+                classification['segment_roles'] = [
+                    {
+                        'type': classification['type'],
+                        'method': classification.get('method', 'confirmed_route'),
+                        'evidence': classification.get('evidence', ''),
+                    }
+                    for _part in parts
+                ]
             run.classification = classification
             Evidence.save_parts(run, deal, parts, classification)
             attachment_failures = Evidence.save_attachments(run, deal)
@@ -152,6 +161,7 @@ class EmailIngestionService:
     def index_outputs(run, *, allow_remote):
         from ai_orchestrator.models import DocumentChunk
         from ai_orchestrator.services.embedding_processor import EmbeddingService
+        from deals.services.document_artifacts import DocumentArtifactService
         service = EmbeddingService()
         embedding_ready = service.is_embedding_available(timeout=1)
         ready = True
@@ -161,8 +171,6 @@ class EmailIngestionService:
         if links.exists():
             DocumentChunk.objects.filter(source_type='email', source_id=str(run.email_id)).delete()
         for link in links:
-            if link.index_status == 'completed':
-                continue
             try:
                 doc = link.document
                 if doc and link.blob_id and not (doc.normalized_text or '').strip():
@@ -181,8 +189,17 @@ class EmailIngestionService:
                     if extraction:
                         doc.extraction_mode = extraction.get('mode') or doc.extraction_mode
                     doc.save(update_fields=['extracted_text', 'normalized_text', 'transcription_status', 'extraction_mode'])
+                if doc:
+                    link.index_status = 'creating_artifact'
+                    link.error = ''
+                    link.save(update_fields=['index_status', 'error'])
+                    artifact = DocumentArtifactService.ensure_document_artifact(doc)
+                    if DocumentArtifactService.artifact_status(artifact) != DocumentArtifactService.STATUS_COMPLETE:
+                        raise RuntimeError('Detailed document artifact is incomplete and will be retried.')
                 if not embedding_ready:
                     raise RuntimeError('Embedding service unavailable; saved evidence will be retried.')
+                # A meeting contribution has both records; vectorize only the
+                # canonical DealDocument to prevent duplicate retrieval hits.
                 success = service.vectorize_document(doc) if doc else service.vectorize_meeting_note(link.meeting_note)
                 source_type = 'document' if doc else 'meeting_note'
                 source_id = str(doc.id if doc else link.meeting_note_id)
@@ -194,11 +211,21 @@ class EmailIngestionService:
                     raise RuntimeError('Embedding incomplete; output will be retried.')
                 link.index_status = 'completed'
                 link.error = ''
+                link.provenance = {
+                    **(link.provenance or {}),
+                    'artifact_status': DocumentArtifactService.artifact_status(doc) if doc else 'not_applicable',
+                    'transcription_status': doc.transcription_status if doc else 'complete',
+                    'chunking_status': doc.chunking_status if doc else 'chunked',
+                    'chunk_count': chunks.count(),
+                }
             except Exception as exc:
                 link.index_status = 'waiting_service'
                 link.error = str(exc)[:1500]
                 ready = False
-            link.save(update_fields=['index_status', 'error'])
+            link.save(update_fields=['index_status', 'error', 'provenance'])
+        run.stages['artifacts'] = 'completed' if ready else 'waiting_service'
+        run.stages['chunks'] = 'completed' if ready else 'waiting_service'
+        run.save(update_fields=['stages', 'updated_at'])
         return ready
 
     @classmethod

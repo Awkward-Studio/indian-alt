@@ -212,7 +212,7 @@ class PromptSeedTests(TestCase):
         self.assertIn("Do not force the canonical internal IC note structure", directive_skill.system_template)
         self.assertIn("{{ directive }}", directive_skill.prompt_template)
         self.assertIn("{{ document_title }}", directive_skill.prompt_template)
-        self.assertIn("canonical 10-section internal IC note structure", directive_skill.prompt_template)
+        self.assertIn("canonical 11-section internal IC note structure", directive_skill.prompt_template)
 
 
 class DealHelperAnalysisRoutingTests(TestCase):

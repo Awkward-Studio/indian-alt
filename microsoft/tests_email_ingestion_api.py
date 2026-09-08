@@ -3,6 +3,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
+from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailEvidenceLink
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
@@ -59,3 +60,90 @@ class EmailIngestionAPITests(TestCase):
         response = self.client.post(self.url + 'ingestion-confirm/', {'run_id': str(self.run.id),
             'expected_revision': 1, 'deal_id': 'invalid'}, format='json')
         self.assertEqual(response.status_code, 400)
+
+    @patch.object(Ingestion, 'dispatch')
+    def test_repeated_create_reuses_hydrated_deal(self, dispatch):
+        self.email.deal = None
+        self.email.save(update_fields=['deal'])
+        AIAuditLog.objects.create(
+            source_type='email',
+            source_id=str(self.email.id),
+            context_label='Email synthesis',
+            model_used='test-model',
+            system_prompt='test',
+            user_prompt='test',
+            raw_response='{}',
+            status='COMPLETED',
+            is_success=True,
+            parsed_json={
+                'deal_model_data': {
+                    'title': 'Hydrated company',
+                    'industry': 'Professional Haircare',
+                    'sector': 'Consumer',
+                    'funding_ask': 'USD 5m',
+                    'themes': ['Salon distribution'],
+                },
+                'analyst_report': '## Executive Summary\n\nHydrated report.',
+                'metadata': {'ambiguous_points': []},
+            },
+        )
+        initial_count = Deal.objects.count()
+        payload = {
+            'run_id': str(self.run.id),
+            'expected_revision': self.run.revision,
+            'create_new_deal': True,
+            'new_deal_title': 'Hydrated company',
+            'classification': 'NORMAL_EMAIL',
+        }
+
+        first = self.client.post(self.url + 'ingestion-confirm/', payload, format='json')
+        self.assertEqual(first.status_code, 200, first.data)
+        payload['expected_revision'] = first.data['revision']
+        payload['new_deal_title'] = 'Accidental duplicate'
+        second = self.client.post(self.url + 'ingestion-confirm/', payload, format='json')
+
+        self.assertEqual(second.status_code, 200, second.data)
+        self.assertEqual(Deal.objects.count(), initial_count + 1)
+        self.email.refresh_from_db()
+        created = self.email.deal
+        self.assertEqual(created.title, 'Hydrated company')
+        self.assertEqual(created.industry, 'Professional Haircare')
+        self.assertEqual(created.funding_ask, 'USD 5m')
+        self.assertEqual(created.deal_summary, '## Executive Summary\n\nHydrated report.')
+        self.assertEqual(created.analyses.count(), 1)
+        self.assertEqual(created.source_email_id, self.email.graph_id)
+
+    @patch.object(Ingestion, 'dispatch')
+    def test_create_request_hydrates_existing_blank_linked_deal(self, dispatch):
+        linked_deal = self.email.deal
+        AIAuditLog.objects.create(
+            source_type='email',
+            source_id=str(self.email.id),
+            context_label='Email synthesis',
+            model_used='test-model',
+            system_prompt='test',
+            user_prompt='test',
+            raw_response='{}',
+            status='COMPLETED',
+            is_success=True,
+            parsed_json={
+                'deal_model_data': {'industry': 'Professional Haircare'},
+                'analyst_report': '## Executive Summary\n\nRecovered report content.',
+                'metadata': {'ambiguous_points': []},
+            },
+        )
+        initial_count = Deal.objects.count()
+
+        response = self.client.post(self.url + 'ingestion-confirm/', {
+            'run_id': str(self.run.id),
+            'expected_revision': self.run.revision,
+            'create_new_deal': True,
+            'new_deal_title': 'Duplicate title',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(Deal.objects.count(), initial_count)
+        linked_deal.refresh_from_db()
+        self.assertEqual(linked_deal.industry, 'Professional Haircare')
+        self.assertEqual(linked_deal.deal_summary, '## Executive Summary\n\nRecovered report content.')
+        self.assertEqual(linked_deal.analyses.count(), 1)

@@ -4,7 +4,7 @@ from email.utils import parseaddr
 import hashlib
 import re
 
-from bs4 import BeautifulSoup
+from .email_html_sanitizer import EmailHtmlSanitizer
 
 
 def digest(text):
@@ -39,13 +39,7 @@ class EmailContributionParser:
     @staticmethod
     def source_text(source):
         if source.get('body_html'):
-            soup = BeautifulSoup(source['body_html'], 'html.parser')
-            for node in soup.select('style, script, head'):
-                node.decompose()
-            # Retain all quotes. Tabs preserve cell boundaries in source text.
-            for row in soup.select('tr'):
-                row.replace_with('\t'.join(cell.get_text(' ', strip=True) for cell in row.select('th, td')) + '\n')
-            return normalize(soup.get_text('\n', strip=True))
+            return normalize(EmailHtmlSanitizer.text_with_link_targets(source['body_html']))
         return normalize(source.get('body_text') or source.get('body_preview') or '')
 
     @classmethod

@@ -33,6 +33,10 @@ DMS_SHARED_FOLDER_URL = config(
     'DMS_SHARED_FOLDER_URL',
     default=os.environ.get('DMS_SHARED_FOLDER_URL', ''),
 )
+DMS_DEAL_FOLDER_PATH = os.environ.get('DMS_DEAL_FOLDER_PATH') or config(
+    'DMS_DEAL_FOLDER_PATH',
+    default=f"{DMS_FOLDER_PATH.rstrip('/')}/4. Deal Folder/4. All - 16062026",
+)
 
 
 class GraphAPIService:
@@ -373,12 +377,20 @@ class GraphAPIService:
 
         return {'value': all_values}
 
-    def get_folder_tree(self, drive_id: str, item_id: str, user_email: str = DMS_USER_EMAIL, max_depth: Optional[int] = 5) -> List[Dict[str, Any]]:
+    def get_folder_tree(
+        self,
+        drive_id: str,
+        item_id: str,
+        user_email: str = DMS_USER_EMAIL,
+        max_depth: Optional[int] = 5,
+        strict: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Efficiently fetch all files inside a folder tree using a queue-based traversal.
         Limits depth to prevent infinite loops or timeouts on massive structures.
         """
         all_files = []
+        traversal_errors = []
         # Queue stores (folder_id, current_depth, path_prefix)
         queue = [(item_id, 0, "")]
         
@@ -393,7 +405,10 @@ class GraphAPIService:
             try:
                 # Use a single API call per folder level
                 endpoint = f"/drives/{drive_id}/items/{current_id}/children"
-                params = {'$top': 999, '$select': 'id,name,folder,file,size,webUrl'}
+                params = {
+                    '$top': 999,
+                    '$select': 'id,name,folder,file,size,webUrl,eTag,cTag,lastModifiedDateTime',
+                }
                 data = self._make_request('GET', endpoint, token, params)
                 items = data.get('value', [])
                 next_link = data.get('@odata.nextLink')
@@ -413,6 +428,12 @@ class GraphAPIService:
                         all_files.append(item)
             except Exception as e:
                 logger.error(f"Error traversing folder {current_id}: {e}")
+                traversal_errors.append(f"{path_prefix or current_id}: {e}")
+
+        if strict and traversal_errors:
+            raise RuntimeError(
+                "OneDrive folder traversal was incomplete: " + "; ".join(traversal_errors)
+            )
                 
         return all_files
 
@@ -498,6 +519,28 @@ class GraphAPIService:
         raise ValueError(
             "OneDrive is not configured. Set DMS_SHARED_FOLDER_URL or DMS_DRIVE_ID in the environment."
         )
+
+    def get_deal_folder_root_children(self, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
+        """List every company folder below the configured deal-folder corpus root."""
+        if not DMS_DRIVE_ID or not DMS_DEAL_FOLDER_PATH:
+            raise ValueError(
+                "Deal-folder browsing is not configured. Set DMS_DRIVE_ID and DMS_DEAL_FOLDER_PATH."
+            )
+
+        root = self.get_drive_item(
+            DMS_DRIVE_ID,
+            f"root:/{DMS_DEAL_FOLDER_PATH}:",
+            user_email,
+        )
+        data = self.get_drive_item_children(
+            DMS_DRIVE_ID,
+            root['id'],
+            user_email,
+            top=999,
+        )
+        for item in data.get('value', []):
+            item['driveId'] = DMS_DRIVE_ID
+        return data
 
     def get_drive_folder_children(self, user_email: str = DMS_USER_EMAIL,
                                   folder_id: str = '', drive_id: Optional[str] = None,

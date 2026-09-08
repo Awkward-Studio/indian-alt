@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,6 +10,13 @@ from datetime import date, datetime
 from typing import Any, Optional, TYPE_CHECKING
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from django.conf import settings
+from django.core.cache import cache
+
+from ai_orchestrator.services.bulk_prompt_contracts import (
+    BULK2_INTEL_SYSTEM_PROMPT,
+    build_bulk2_segment_prompt,
+)
 
 if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
@@ -74,6 +82,9 @@ class DocumentArtifactService:
     STATUS_DEGRADED = "degraded"
     STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
+    ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v1"
+    SEGMENT_CHARS = 7_000
+    SEGMENT_OVERLAP = 500
 
     @classmethod
     def build_document_artifact(
@@ -104,102 +115,238 @@ class DocumentArtifactService:
             service = AIProcessorService()
         else:
             service = ai_service
-
-        # --- OPTIMIZATION: SLICING & CLEANING (Industrial Flow) ---
-        SAFE_CHAR_LIMIT = 20000
-        CHUNK_OVERLAP = 2000
-        
-        cleaned_parts = []
-        txt_len = len(raw_text)
-        
-        # If document is short, skip complex slicing
-        if txt_len <= SAFE_CHAR_LIMIT:
-            try:
-                norm_res = service.process_content(
-                    content=raw_text,
-                    skill_name="document_normalization",
-                    source_type="cleaning",
-                    metadata={"chat_template_kwargs": {"enable_thinking": False}}
-                )
-                cleaned_text = (
-                    norm_res.get("normalized_text")
-                    or norm_res.get("parsed_json", {}).get("normalized_text")
-                    or norm_res.get("response")
-                    or raw_text
-                )
-            except:
-                cleaned_text = raw_text
-        else:
-            # Slicing loop for industrial normalization
-            segments = []
-            start = 0
-            while start < txt_len:
-                segments.append(raw_text[start:start+SAFE_CHAR_LIMIT])
-                start += (SAFE_CHAR_LIMIT - CHUNK_OVERLAP)
-            
-            # PARALLEL EXECUTION: Blasting chunks to vLLM server
-            logger.info(f"[DOC-ARTIFACT] Blasting {len(segments)} segments in parallel for {file_name}")
-            cleaned_parts = [None] * len(segments)
-            completed_count = 0
-            
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                future_to_idx = {
-                    executor.submit(
-                        service.process_content,
-                        content=segment,
-                        skill_name="document_normalization",
-                        source_type="cleaning_segment",
-                        metadata={"chat_template_kwargs": {"enable_thinking": False}}
-                    ): i for i, segment in enumerate(segments)
-                }
-                
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    completed_count += 1
-                    try:
-                        clean_res = future.result()
-                        part_text = (
-                            clean_res.get("normalized_text")
-                            or clean_res.get("parsed_json", {}).get("normalized_text")
-                            or clean_res.get("response")
-                            or segments[idx]
-                        )
-                        cleaned_parts[idx] = part_text
-                        if completed_count % 5 == 0 or completed_count == len(segments):
-                            logger.info(f"  [{file_name}] Normalization Progress: {completed_count}/{len(segments)} chunks complete.")
-                    except Exception as e:
-                        logger.warning(f"Parallel chunk cleaning failed for {file_name} index {idx}: {e}")
-                        cleaned_parts[idx] = segments[idx]
-            
-            cleaned_text = "\n\n".join([p for p in cleaned_parts if p is not None])
-
-        # --- FINAL INTEL EXTRACTION ---
-        metadata = {
-            "document_name": file_name,
-            "document_type": document_type,
-            "source_metadata_json": json.dumps(source_metadata, default=str),
-            "context_label": f"Document Evidence: {file_name}",
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
-
         try:
-            # We use the cleaned text (capped for performance) for the final structured artifact
+            from ai_orchestrator.services.runtime import AIRuntimeService
+
+            artifact_model = AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
+        except Exception:
+            artifact_model = str(getattr(settings, "VLLM_MODEL", "default"))
+
+        # Match bulk_2's lossless map/merge contract: every bounded segment is
+        # analyzed, cached by content, and merged. The full extracted source is
+        # retained separately and is never replaced by an LLM-cleaned excerpt.
+        segments = cls._split_for_artifact(raw_text)
+        segment_artifacts: list[dict[str, Any] | None] = [None] * len(segments)
+        failures: list[str] = []
+
+        def analyze_segment(index: int, segment: str) -> tuple[int, dict[str, Any], bool]:
+            cache_key = cls._segment_cache_key(
+                file_name=file_name,
+                segment=segment,
+                index=index,
+                total=len(segments),
+                model=artifact_model,
+            )
+            try:
+                cached = cache.get(cache_key)
+            except Exception:
+                cached = None
+            if isinstance(cached, dict) and cached:
+                return index, cached, True
+
+            segment_context = {
+                "document_name": file_name,
+                "heuristic_document_type": document_type,
+                "spreadsheet_profile": source_metadata.get("spreadsheet_profile") or {},
+                "source_metadata": source_metadata,
+                "phase1_quality_flags": source_metadata.get("quality_flags") or [],
+                "segment_index": index + 1,
+                "segment_count": len(segments),
+                "source_location": f"{file_name} | segment {index + 1}/{len(segments)}",
+                "segment_metadata": {},
+            }
+            metadata = {
+                "document_name": file_name,
+                "document_type": document_type,
+                "source_metadata_json": json.dumps(source_metadata, default=str),
+                "context_label": f"Document Evidence: {file_name} [{index + 1}/{len(segments)}]",
+                "segment_index": index,
+                "segment_count": len(segments),
+                "chat_template_kwargs": {"enable_thinking": False},
+                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 5000)),
+                "enforce_context_budget": True,
+            }
             result = service.process_content(
-                content=cleaned_text[:50000], 
+                content=(
+                    f"{BULK2_INTEL_SYSTEM_PROMPT}\n\n"
+                    f"{build_bulk2_segment_prompt(segment=segment, context=segment_context)}"
+                ),
                 skill_name="document_evidence_extraction",
-                source_type="document_evidence",
+                source_type="document_evidence_segment",
                 source_id=str(source_metadata.get("source_id") or file_name),
                 metadata=metadata,
             )
             parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
             artifact = cls._normalize_artifact(parsed, fallback=fallback)
-            artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or ""
-            artifact["normalized_text"] = cleaned_text # Preserve the full cleaned text
-            artifact["source_map"] = artifact.get("source_map") or cls._default_source_map(file_name, extraction_mode, cleaned_text)
-            return artifact
-        except Exception as e:
-            logger.warning("Document intelligence extraction failed for %s: %s", file_name, e)
+            artifact["normalized_text"] = ""
+            artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or "" if isinstance(result, dict) else ""
+            try:
+                cache.set(
+                    cache_key,
+                    artifact,
+                    timeout=int(getattr(settings, "VDR_ARTIFACT_CACHE_TTL", 30 * 24 * 60 * 60)),
+                )
+            except Exception:
+                pass
+            return index, artifact, False
+
+        workers = min(
+            len(segments),
+            max(1, int(getattr(settings, "VDR_ARTIFACT_SEGMENT_WORKERS", 1))),
+        )
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(analyze_segment, index, segment): index
+                for index, segment in enumerate(segments)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    result_index, segment_artifact, _cache_hit = future.result()
+                    segment_artifacts[result_index] = segment_artifact
+                except Exception as exc:
+                    failures.append(f"segment {index + 1}/{len(segments)}: {exc}")
+
+        if failures or any(item is None for item in segment_artifacts):
+            fallback["quality_flags"] = list(dict.fromkeys([
+                *(fallback.get("quality_flags") or []),
+                "artifact_segment_processing_incomplete",
+                *failures,
+            ]))
+            fallback["source_metadata"] = {
+                **source_metadata,
+                "artifact_segment_count": len(segments),
+                "artifact_segments_completed": len([item for item in segment_artifacts if item]),
+            }
             return fallback
+
+        artifact = cls._merge_segment_artifacts(
+            [item for item in segment_artifacts if item],
+            fallback=fallback,
+        )
+        artifact["normalized_text"] = raw_text
+        artifact["source_map"] = artifact.get("source_map") or cls._default_source_map(
+            file_name,
+            extraction_mode,
+            raw_text,
+        )
+        artifact["source_metadata"] = {
+            **source_metadata,
+            "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
+            "artifact_segment_count": len(segments),
+            "artifact_segments_completed": len(segments),
+            "artifact_model": artifact_model,
+        }
+        return artifact
+
+    @classmethod
+    def _split_for_artifact(cls, text: str) -> list[str]:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=cls.SEGMENT_CHARS,
+            chunk_overlap=cls.SEGMENT_OVERLAP,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""],
+        )
+        return splitter.split_text(text) or [text]
+
+    @classmethod
+    def _segment_cache_key(
+        cls,
+        *,
+        file_name: str,
+        segment: str,
+        index: int,
+        total: int,
+        model: str,
+    ) -> str:
+        fingerprint = json.dumps(
+            [cls.ARTIFACT_PIPELINE_VERSION, model, file_name, index, total, segment],
+            ensure_ascii=False,
+        )
+        return "vdr-document-artifact:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _merge_segment_artifacts(
+        cls,
+        artifacts: list[dict[str, Any]],
+        *,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = deepcopy(fallback)
+        list_fields = (
+            "claims",
+            "metrics",
+            "numeric_evidence",
+            "table_definitions",
+            "tables_summary",
+            "contacts_found",
+            "risks",
+            "open_questions",
+            "diligence_gaps",
+            "citations",
+            "quality_flags",
+        )
+        for field in list_fields:
+            merged[field] = []
+        summaries = []
+        reasoning = []
+        for artifact in artifacts:
+            summary = str(artifact.get("document_summary") or "").strip()
+            if summary and summary != "No summary extracted":
+                summaries.append(summary)
+            thought = str(artifact.get("reasoning") or "").strip()
+            if thought:
+                reasoning.append(thought)
+            for field in list_fields:
+                merged[field] = cls._dedupe_values([
+                    *(merged.get(field) or []),
+                    *(artifact.get(field) or []),
+                ])
+
+        merged["industry_overview"] = {
+            field: cls._dedupe_values([
+                item
+                for artifact in artifacts
+                for item in ((artifact.get("industry_overview") or {}).get(field) or [])
+            ])
+            for field in ("findings", "market_figures", "citations")
+        }
+
+        if summaries:
+            merged["document_summary"] = " ".join(cls._dedupe_values(summaries))
+        if reasoning:
+            merged["reasoning"] = "\n\n".join(cls._dedupe_values(reasoning))
+
+        confidence = {"High": 3, "Medium": 2, "Low": 1}
+        suggestions = [
+            item.get("document_type_suggestion")
+            for item in artifacts
+            if isinstance(item.get("document_type_suggestion"), dict)
+        ]
+        if suggestions:
+            merged["document_type_suggestion"] = max(
+                suggestions,
+                key=lambda item: confidence.get(item.get("confidence"), 0),
+            )
+            merged["document_type"] = (
+                merged["document_type_suggestion"].get("display_label")
+                or merged.get("document_type")
+            )
+        return merged
+
+    @staticmethod
+    def _dedupe_values(values: list[Any]) -> list[Any]:
+        deduped = []
+        seen = set()
+        for value in values:
+            if value in (None, "", [], {}):
+                continue
+            key = json.dumps(value, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(value)
+        return deduped
 
     @classmethod
     def persist_artifact(cls, document, artifact: dict[str, Any]) -> None:
@@ -527,7 +674,18 @@ class DocumentArtifactService:
         if not normalized_text:
             return cls.STATUS_MISSING
 
-        if any(flag in {"fallback_artifact", "artifact_missing_text"} for flag in artifact.get("quality_flags") or []):
+        incomplete_flags = {
+            "fallback_artifact",
+            "artifact_missing_text",
+            "artifact_segment_processing_incomplete",
+        }
+        if any(flag in incomplete_flags for flag in artifact.get("quality_flags") or []):
+            return cls.STATUS_DEGRADED
+
+        source_metadata = artifact.get("source_metadata") or {}
+        segment_count = source_metadata.get("artifact_segment_count")
+        segments_completed = source_metadata.get("artifact_segments_completed")
+        if segment_count is not None and segments_completed != segment_count:
             return cls.STATUS_DEGRADED
 
         missing_required = [key for key in cls.REQUIRED_ARTIFACT_KEYS if key not in artifact]
