@@ -91,6 +91,7 @@ class EmailIngestionService:
             available = cls.text_available() if use_ai is None else use_ai
             # Capture files before decisions so review or VM outages cannot lose originals.
             attachment_failures = Evidence.save_attachments(run)
+            link_failures = Evidence.save_links(run)
             parts = Evidence.parts(run)
             if (
                 not run.classification
@@ -101,6 +102,11 @@ class EmailIngestionService:
                 routing = Decisions.route(run.email, parts, Deal.objects.all(), use_ai=available)
                 run.classification = routing['classification']
                 run.match = routing['match']
+                if available and run.match.get('route') == 'NEW_DEAL':
+                    run.match = {
+                        **run.match,
+                        'initialization': Decisions.initialize(run.email, parts),
+                    }
             run.stages['classification'] = run.classification.get('status', 'completed')
             run.stages['match'] = run.match['status']
             run.save(update_fields=['classification', 'match', 'stages', 'updated_at'])
@@ -128,11 +134,13 @@ class EmailIngestionService:
             run.classification = classification
             Evidence.save_parts(run, deal, parts, classification)
             attachment_failures = Evidence.save_attachments(run, deal)
-            run.stages['save'] = 'partial' if attachment_failures else 'completed'
+            link_failures = Evidence.save_links(run, deal)
+            capture_failures = attachment_failures + link_failures
+            run.stages['save'] = 'partial' if capture_failures else 'completed'
             run.save(update_fields=['classification', 'stages', 'updated_at'])
             indexing = cls.index_outputs(run, allow_remote=available)
             run.stages['index'] = 'completed' if indexing else 'waiting_service'
-            run.status = 'completed' if indexing and not attachment_failures else 'waiting_service'
+            run.status = 'completed' if indexing and not capture_failures else 'waiting_service'
             return cls.release(run)
         except ValueError as exc:
             run.error = str(exc)[:1500]

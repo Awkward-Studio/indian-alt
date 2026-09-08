@@ -3,6 +3,9 @@ import base64
 import hashlib
 import json
 from pathlib import PurePath
+from urllib.parse import urlparse
+
+from bs4 import BeautifulSoup
 
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -144,6 +147,89 @@ class EmailEvidenceService:
                                 transcription_status='pending')
                         link.blob = occurrence.blob
                         link.provenance = cls.provenance(run, attachment_id=identifier, filename=name)
+                        link.active = True
+                        link.save()
+                        occurrence.evidence = link
+                occurrence.status = 'saved' if deal else 'captured'
+                occurrence.error = ''
+                occurrence.save()
+            except Exception as exc:
+                occurrence.status = 'failed'
+                occurrence.error = str(exc)[:1500]
+                occurrence.save(update_fields=['status', 'error'])
+                failures.append(str(occurrence.id))
+        return failures
+
+    @classmethod
+    def save_links(cls, run, deal=None):
+        """Capture safe document links embedded in HTML as durable evidence."""
+        from deals.services.research_acquisition import ResearchAcquisitionService
+
+        soup = BeautifulSoup(str(run.source.get('body_html') or ''), 'html.parser')
+        links = []
+        for anchor in soup.find_all('a'):
+            url = str(anchor.get('href') or '').strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in ('http', 'https'):
+                continue
+            host = (parsed.hostname or '').casefold()
+            suffix = PurePath(parsed.path).suffix.casefold()
+            supported_host = any(token in host for token in (
+                'sharepoint.com', 'onedrive.live.com', '1drv.ms',
+                'drive.google.com', 'docs.google.com',
+            ))
+            if not supported_host and suffix not in ('.pdf', '.txt', '.html', '.htm'):
+                continue
+            links.append((url, anchor.get_text(' ', strip=True)))
+
+        failures = []
+        for position, (url, label) in enumerate(dict.fromkeys(links)):
+            url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
+            key = 'link:' + url_hash
+            occurrence, _ = EmailContributionOccurrence.objects.get_or_create(
+                run=run, source_key=key,
+                defaults={
+                    'position': 200000 + position,
+                    'metadata': {'name': label or PurePath(urlparse(url).path).name or 'Linked document', 'url': url},
+                },
+            )
+            try:
+                if not occurrence.blob_id:
+                    content, access = ResearchAcquisitionService().download(url)
+                    if not content:
+                        raise ValueError('Linked document returned no content.')
+                    if supported_host and access.get('content_type') == 'text/html':
+                        raise ValueError(
+                            'Linked document requires provider authentication or an exportable public file URL.'
+                        )
+                    sha = hashlib.sha256(content).hexdigest()
+                    blob, _ = EmailPrivateBlob.objects.get_or_create(
+                        email_account_id=run.email.email_account_id,
+                        sha256=sha, defaults={'size': len(content)},
+                    )
+                    with transaction.atomic():
+                        blob = EmailPrivateBlob.objects.select_for_update().get(pk=blob.pk)
+                        if not blob.file:
+                            blob.file.save(f'{run.email.email_account_id}/{sha}', ContentFile(content), save=True)
+                    occurrence.blob = blob
+                    occurrence.metadata = {**occurrence.metadata, 'access': access}
+                    occurrence.save(update_fields=['blob', 'metadata'])
+                if deal:
+                    with transaction.atomic():
+                        link, _ = EmailEvidenceLink.objects.get_or_create(
+                            email_account_id=run.email.email_account_id,
+                            deal=deal, source_key=key, kind='email_link',
+                        )
+                        link = EmailEvidenceLink.objects.select_for_update().get(pk=link.pk)
+                        name = PurePath(str(occurrence.metadata.get('name') or 'Linked document')).name
+                        if not link.document_id:
+                            link.document = DealDocument.objects.create(
+                                deal=deal, title=name, file_url=url if len(url) <= 200 else None,
+                                source_map_json={'email': cls.provenance(run, source_url=url)},
+                                transcription_status='pending',
+                            )
+                        link.blob = occurrence.blob
+                        link.provenance = cls.provenance(run, source_url=url, access=occurrence.metadata.get('access'))
                         link.active = True
                         link.save()
                         occurrence.evidence = link

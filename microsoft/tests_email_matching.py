@@ -42,3 +42,22 @@ class EmailDecisionTests(TestCase):
     def test_duplicate_explicit_names_require_review(self):
         Deal.objects.create(title=self.deal.title)
         self.assertEqual(Decisions.match(self.email, 'deal_name=Acme Components', Deal.objects.all(), use_ai=False)['status'], 'needs_review')
+
+    @patch.object(Decisions, 'ai')
+    def test_new_deal_initializer_is_small_and_allowlisted(self, ai):
+        ai.return_value = {
+            'deal_model_data': {
+                'title': 'New Components', 'sector': 'Industrials',
+                'funding_ask': 'INR 50 crore', 'deal_summary': 'not allowed here',
+            },
+            'ambiguous_points': ['Exact legal name is unclear.'],
+        }
+        parts = EmailContributionParser.parse(
+            {'body_text': 'New Components is raising INR 50 crore.'}, email_id=self.email.id,
+        )
+
+        result = Decisions.initialize(self.email, parts)
+
+        self.assertEqual(result['deal_model_data']['title'], 'New Components')
+        self.assertNotIn('deal_summary', result['deal_model_data'])
+        self.assertEqual(result['metadata']['ambiguous_points'], ['Exact legal name is unclear.'])

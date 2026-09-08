@@ -19,7 +19,7 @@ class EmailDecisionService:
     @classmethod
     def _bounded_payload(cls, stage, payload, source_id):
         """Reduce oversized private source text without dropping its tail."""
-        field = 'text' if stage == 'classify' else 'email' if stage in ('match', 'route') else None
+        field = 'text' if stage == 'classify' else 'email' if stage in ('match', 'route', 'initialize') else None
         bounded = dict(payload)
         if stage in ('match', 'route') and isinstance(payload.get('candidates'), list):
             bounded['candidates'] = [
@@ -306,4 +306,34 @@ class EmailDecisionService:
                 'status': 'completed', 'method': 'ai_route', 'evidence': classification_evidence,
             },
             'match': match,
+        }
+
+    @classmethod
+    def initialize(cls, email, parts):
+        """Extract a small, reviewable seed for a proposed new deal."""
+        text = (email.subject or '') + '\n' + '\n\n'.join(part.text for part in parts)
+        result = cls.ai('initialize', {'email': text}, email.id)
+        model_data = result.get('deal_model_data')
+        if not isinstance(model_data, dict):
+            raise ValueError('New-deal initialization must return deal_model_data.')
+        allowed = {
+            'title', 'industry', 'sector', 'funding_ask', 'funding_ask_for',
+            'city', 'state', 'country', 'company_details', 'bank_name',
+            'primary_contact_name', 'themes',
+        }
+        cleaned = {
+            key: value for key, value in model_data.items()
+            if key in allowed and value not in (None, '', [], {})
+        }
+        title = str(cleaned.get('title') or '').strip()
+        if not title:
+            raise ValueError('New-deal initialization must identify a title for review.')
+        cleaned['title'] = title[:200]
+        return {
+            'deal_model_data': cleaned,
+            'metadata': {
+                'ambiguous_points': result.get('ambiguous_points')
+                if isinstance(result.get('ambiguous_points'), list) else [],
+                'initialization_source': 'email_evidence',
+            },
         }

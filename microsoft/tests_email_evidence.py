@@ -8,6 +8,7 @@ from meetings.models import MeetingNote
 from microsoft.models import Email, EmailAccount, EmailEvidenceLink, EmailPrivateBlob
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_matching import EmailDecisionService as Decisions
+from deals.services.research_acquisition import ResearchAcquisitionService
 
 
 class EmailEvidenceTests(TestCase):
@@ -41,13 +42,37 @@ class EmailEvidenceTests(TestCase):
             DealDocument.objects.get().normalized_text,
         )
 
+    @patch.object(ResearchAcquisitionService, 'download')
+    def test_supported_embedded_link_becomes_a_deal_document(self, download):
+        download.return_value = (
+            b'linked diligence document',
+            {'final_url': 'https://files.example.test/deck.pdf', 'content_type': 'application/pdf'},
+        )
+        self.email.body_html = '<p>Review the <a href="https://files.example.test/deck.pdf">deck.pdf</a>.</p>'
+        self.email.save(update_fields=['body_html'])
+        run = Evidence.snapshot(self.email)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = EmailPrivateBlob._meta.get_field('file').storage
+            with patch.object(storage, '_location', tmp):
+                storage.__dict__.pop('location', None)
+                self.assertEqual(Evidence.save_links(run), [])
+                self.assertEqual(Evidence.save_links(run, self.deal), [])
+                storage.__dict__.pop('location', None)
+
+        link = EmailEvidenceLink.objects.get(kind='email_link')
+        self.assertEqual(link.document.deal, self.deal)
+        self.assertEqual(link.document.title, 'deck.pdf')
+        self.assertEqual(run.occurrences.get(source_key__startswith='link:').status, 'saved')
+
     def test_meeting_uses_meeting_source(self):
         self.email.body_text = 'Summary\nDiscussed expansion\nTranscript\nTeam agreed to launch.'
         self.email.save()
-        self.save_body()
+        run = self.save_body()
         self.assertEqual(MeetingNote.objects.count(), 1)
-        self.assertEqual(DealDocument.objects.count(), 0)
+        self.assertEqual(DealDocument.objects.count(), 1)
         self.assertEqual(MeetingNote.objects.get().deals.get(), self.deal)
+        self.assertEqual(run.occurrences.get().evidence.document, DealDocument.objects.get())
 
     @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content')
     def test_repeated_attachment_content_reuses_private_blob_and_document(self, download):

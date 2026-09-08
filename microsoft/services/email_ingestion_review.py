@@ -14,25 +14,73 @@ class StaleEmailDecision(ValueError):
 
 def run_status(run, *, include_content=False):
     if not run:
-        return {'run_id': None, 'status': 'not_started', 'revision': 0, 'classification': {}, 'match': {}, 'stages': {}, 'outputs': []}
+        return {
+            'run_id': None, 'status': 'not_started', 'revision': 0,
+            'classification': {}, 'match': {}, 'stages': {}, 'outputs': [],
+            'deal_id': None,
+            'manifest': {'expected': 0, 'ready': 0, 'processing': 0, 'failed': 0},
+            'report_ready': False, 'can_build_with_gaps': False,
+            'blockers': ['Process the email to capture its evidence.'],
+        }
+    from deals.services.document_artifacts import DocumentArtifactService
+
     outputs = []
     for occurrence in run.occurrences.select_related('evidence', 'contribution').all():
         link = occurrence.evidence
+        document = link.document if link and link.document_id else None
+        artifact_status = DocumentArtifactService.artifact_status(document) if document else 'pending'
         item = {'id': str(occurrence.id), 'source_key': occurrence.source_key,
                 'status': occurrence.status, 'error': occurrence.error,
                 'filename': occurrence.metadata.get('name'),
+                'source_kind': link.kind if link else (
+                    'email_link' if occurrence.source_key.startswith('link:')
+                    else 'email_attachment' if occurrence.source_key.startswith('attachment:')
+                    else 'email_body'
+                ),
                 'document_id': str(link.document_id) if link and link.document_id else None,
                 'meeting_note_id': str(link.meeting_note_id) if link and link.meeting_note_id else None,
                 'index_status': link.index_status if link else 'pending',
                 'index_error': link.error if link else '',
+                'transcription_status': document.transcription_status if document else 'pending',
+                'artifact_status': artifact_status,
+                'chunking_status': document.chunking_status if document else 'not_chunked',
+                'chunk_count': int((link.provenance or {}).get('chunk_count') or 0) if link else 0,
                 'reused': bool(link and link.occurrences.exclude(run=run).exists())}
         if include_content and occurrence.contribution_id:
             item['text'] = occurrence.contribution.text
             item['headers'] = occurrence.contribution.headers
         outputs.append(item)
+    expected = len(outputs)
+    ready = sum(1 for item in outputs if item['index_status'] == 'completed' and item['artifact_status'] == 'complete')
+    failed = sum(1 for item in outputs if item['status'] == 'failed' or item['index_status'] == 'failed')
+    processing = sum(1 for item in outputs if item['index_status'] not in ('completed', 'failed'))
+    deal_id = run.match.get('deal_id') or run.match.get('suggested_deal_id')
+    blockers = []
+    if not deal_id:
+        blockers.append('Confirm the target deal before saving evidence.')
+    if failed:
+        blockers.append(f'{failed} evidence item(s) failed and require attention.')
+    if processing:
+        blockers.append(f'{processing} evidence item(s) are still being prepared.')
+    if expected == 0:
+        blockers.append('No evidence items have been captured yet.')
+    stages = {
+        'scan': 'completed',
+        'confirmation': 'completed' if run.match.get('status') == 'matched' else 'needs_review',
+        'capture': run.stages.get('save', 'pending'),
+        'extraction': 'completed' if outputs and all(item['transcription_status'] == 'complete' for item in outputs) else 'pending',
+        'artifact': run.stages.get('artifacts', 'pending'),
+        'index': run.stages.get('chunks', run.stages.get('index', 'pending')),
+        **run.stages,
+    }
     return {'run_id': str(run.id), 'status': run.status, 'revision': run.revision,
-            'classification': run.classification, 'match': run.match, 'stages': run.stages,
+            'classification': run.classification, 'match': run.match, 'stages': stages,
             'error': run.error, 'outputs': outputs,
+            'deal_id': deal_id,
+            'manifest': {'expected': expected, 'ready': ready, 'processing': processing, 'failed': failed},
+            'report_ready': bool(expected) and ready == expected and not failed,
+            'can_build_with_gaps': ready > 0 and ready < expected,
+            'blockers': blockers,
             'original_text': (run.source.get('body_text') or '') if include_content else None}
 
 
