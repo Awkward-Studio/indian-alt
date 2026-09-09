@@ -1,4 +1,5 @@
 from unittest.mock import patch
+from types import SimpleNamespace
 from django.test import TestCase
 from deals.models import Deal
 from microsoft.models import Email, EmailAccount
@@ -61,6 +62,19 @@ class EmailDecisionTests(TestCase):
         self.assertEqual(result['deal_model_data']['title'], 'New Components')
         self.assertNotIn('deal_summary', result['deal_model_data'])
         self.assertEqual(result['metadata']['ambiguous_points'], ['Exact legal name is unclear.'])
+
+    @patch.object(Decisions, 'ai')
+    def test_new_deal_initializer_removes_subject_tagline_from_name(self, ai):
+        ai.return_value = {
+            'deal_model_data': {
+                'title': "Fw: Class24 | Building an integrated education ecosystem | Series A",
+                'sector': 'Education',
+            },
+        }
+
+        result = Decisions.initialize(self.email, [SimpleNamespace(text='Introducing Class24')])
+
+        self.assertEqual(result['deal_model_data']['title'], 'Class24')
 
     def test_vm_evidence_with_normalized_whitespace_maps_to_exact_source(self):
         source = 'I wanted to share details\non 3TenX.'

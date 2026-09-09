@@ -225,6 +225,20 @@ class EmailIngestionService:
             is_indexed=run.stages.get('index') == 'completed',
             processing_status='completed' if run.status == 'completed' else ('failed' if run.status == 'failed' else 'pending'),
             processing_error=run.error or None)
+        # Do not depend solely on a separately deployed Celery Beat service.
+        # A transient VM outage schedules its own durable retry; the run lease
+        # and claim checks prevent overlapping processing.
+        if run.status in ('waiting_service', 'failed'):
+            try:
+                from microsoft.tasks import ingest_email_evidence
+                ingest_email_evidence.apply_async(
+                    args=[str(run.id)],
+                    queue='low_priority',
+                    countdown=delay,
+                    retry=False,
+                )
+            except Exception:
+                logger.exception('Could not schedule recovery for email run %s', run.id)
         return {'run_id': str(run.id), 'status': run.status}
 
     @staticmethod

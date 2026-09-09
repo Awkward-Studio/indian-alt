@@ -22,6 +22,20 @@ class EmailDecisionService:
     MAX_DECISION_INPUT_BYTES = 48_000
 
     @staticmethod
+    def _clean_deal_title(value):
+        """Keep the company/project identifier, not an email-subject tagline."""
+        title = re.sub(r'^(?:(?:re|fw|fwd)\s*:\s*)+', '', str(value or '').strip(), flags=re.I)
+        title = title.splitlines()[0].strip()
+        # Mail subjects commonly use a pipe to separate the entity from a deal
+        # description, round, or marketing sentence. The left side is the
+        # stable identifier and works for any company/project name.
+        if ' | ' in title:
+            identifier = title.split(' | ', 1)[0].strip()
+            if len(identifier) >= 2:
+                title = identifier
+        return title.strip(' \t|:-–—')
+
+    @staticmethod
     def _exact_excerpt(source, proposed):
         """Map a whitespace-normalized VM quote back to the exact source text."""
         source = str(source or '')
@@ -383,7 +397,7 @@ class EmailDecisionService:
             key: value for key, value in model_data.items()
             if key in allowed and value not in (None, '', [], {})
         }
-        title = str(cleaned.get('title') or '').strip()
+        title = cls._clean_deal_title(cleaned.get('title'))
         if not title:
             raise ValueError('New-deal initialization must identify a title for review.')
         cleaned['title'] = title[:200]

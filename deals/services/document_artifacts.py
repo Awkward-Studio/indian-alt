@@ -154,6 +154,7 @@ class DocumentArtifactService:
                 index=index,
                 total=len(segments),
                 model=artifact_model,
+                run_scope=str(source_metadata.get("artifact_run_id") or ""),
             )
             try:
                 cached = cache.get(cache_key)
@@ -291,9 +292,10 @@ class DocumentArtifactService:
         index: int,
         total: int,
         model: str,
+        run_scope: str = "",
     ) -> str:
         fingerprint = json.dumps(
-            [cls.ARTIFACT_PIPELINE_VERSION, model, file_name, index, total, segment],
+            [cls.ARTIFACT_PIPELINE_VERSION, model, run_scope, file_name, index, total, segment],
             ensure_ascii=False,
         )
         return "vdr-document-artifact:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()

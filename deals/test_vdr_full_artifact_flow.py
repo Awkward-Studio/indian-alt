@@ -153,6 +153,49 @@ class FullVDRArtifactTests(SimpleTestCase):
         mock_cache.set.assert_not_called()
         self.assertIn("artifact_segment_processing_incomplete", artifact["quality_flags"])
 
+    def test_complete_artifact_remains_usable_with_partial_source_coverage(self):
+        artifact = DocumentArtifactService._fallback_artifact(
+            file_name="Mixed-content.pdf",
+            extracted_text="Complete available text evidence.",
+            document_type="Other",
+            extraction_mode="fallback_text",
+        )
+        artifact["quality_flags"] = ["Page 1: embedded images were not interpreted."]
+        artifact["source_metadata"] = {
+            "artifact_segment_count": 1,
+            "artifact_segments_completed": 1,
+        }
+
+        document = MagicMock()
+        document.transcription_status = "partial"
+        document.chunking_status = "not_chunked"
+        document.evidence_json = artifact
+
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(document),
+            DocumentArtifactService.STATUS_PARTIAL,
+        )
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(document.evidence_json),
+            DocumentArtifactService.STATUS_COMPLETE,
+        )
+
+    def test_segment_cache_is_scoped_to_the_user_started_vdr_run(self):
+        shared = {
+            "file_name": "Refresh.pdf",
+            "segment": "same source",
+            "index": 0,
+            "total": 1,
+            "model": "model",
+        }
+
+        first_run = DocumentArtifactService._segment_cache_key(**shared, run_scope="audit-1")
+        retry_of_first_run = DocumentArtifactService._segment_cache_key(**shared, run_scope="audit-1")
+        second_run = DocumentArtifactService._segment_cache_key(**shared, run_scope="audit-2")
+
+        self.assertEqual(first_run, retry_of_first_run)
+        self.assertNotEqual(first_run, second_run)
+
     @patch("deals.tasks.synthesize_complete_deal_analysis")
     @patch("deals.tasks._is_cancel_requested", return_value=False)
     @patch("ai_orchestrator.models.AIAuditLog.objects.get")

@@ -1056,8 +1056,8 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
             existing_doc
             and source_unchanged
             and existing_source.get("artifact_pipeline_version") == DocumentArtifactService.ARTIFACT_PIPELINE_VERSION
-            and _is_full_transcription(existing_doc)
-            and DocumentArtifactService.artifact_status(existing_doc) == DocumentArtifactService.STATUS_COMPLETE
+            and (existing_doc.normalized_text or existing_doc.extracted_text or "").strip()
+            and DocumentArtifactService.artifact_status(existing_doc.evidence_json) == DocumentArtifactService.STATUS_COMPLETE
             and existing_doc.is_indexed
         ):
             return {
@@ -1133,6 +1133,10 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                 extraction_mode=doc.extraction_mode,
                 ai_service=ai_service,
                 source_metadata={
+                    # A new user-started VDR run refreshes every segment. Task
+                    # retries keep this audit id and can reuse checkpoints made
+                    # earlier in the same run.
+                    "artifact_run_id": str(audit_log_id or self.request.id),
                     "source_id": str(doc.id),
                     "source_file_id": file_id,
                     "source_drive_id": drive_id,
@@ -1153,7 +1157,12 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                     "reason": "VDR source was cancelled or removed during artifact processing.",
                 }
             DocumentArtifactService.persist_artifact(doc, artifact)
-            if DocumentArtifactService.artifact_status(doc) != DocumentArtifactService.STATUS_COMPLETE:
+            # Artifact completeness and source coverage are separate concerns.
+            # A text-backed PDF can have a complete evidence artifact while its
+            # transcription remains partial because embedded images were not
+            # interpreted. Keep that warning visible, but index the available
+            # evidence and let readiness/report controls describe the gap.
+            if DocumentArtifactService.artifact_status(doc.evidence_json) != DocumentArtifactService.STATUS_COMPLETE:
                 raise ValueError(
                     f"Complete document artifact was not produced for {file_name}; cached segments will be reused on retry."
                 )
