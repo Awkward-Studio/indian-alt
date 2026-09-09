@@ -664,7 +664,7 @@ def process_single_folder_analysis_document_async(self, file_info: dict, drive_i
             log_worker_event(audit_log, f"Processing document {file_name}", status='PROCESSING')
 
         content = graph.get_drive_item_content(user_email, file_info.get("id"), drive_id=drive_id)
-        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
+        extraction = doc_processor.get_evidence_extraction_result(content, file_name)
         ai_service = AIProcessorService()
         analysis_doc = _persist_folder_analysis_document(
             audit_log_id=audit_log_id,
@@ -1088,7 +1088,7 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
 
         # Full extraction is required. The downstream artifact stage splits and
         # caches the complete text in bounded segments, matching bulk_2.
-        extraction = doc_processor.get_extraction_result(content, file_name, page_limit=None)
+        extraction = doc_processor.get_evidence_extraction_result(content, file_name)
         extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
         normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
         reported_transcription_status = extraction.get("transcription_status")

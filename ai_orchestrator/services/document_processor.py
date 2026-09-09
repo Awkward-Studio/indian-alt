@@ -140,6 +140,20 @@ class DocumentProcessorService:
             "error": "No readable content was extracted. Scanned pages and images require a working local vision model." if not text else "",
         }
 
+    def get_evidence_extraction_result(
+        self,
+        file_content: bytes,
+        filename: str,
+        *,
+        allow_remote_fallback: bool = True,
+    ) -> dict:
+        """Use the same lossless extraction order as deal/global chat."""
+        extraction = self.get_chat_extraction_result(file_content, filename)
+        text = extraction.get("normalized_text") or extraction.get("text") or ""
+        if text.strip() or not allow_remote_fallback:
+            return extraction
+        return self.get_extraction_result(file_content, filename, page_limit=None)
+
     def get_native_extraction_result(self, file_content: bytes, filename: str) -> dict:
         """Full native extraction for deal uploads, with no remote or vision calls."""
         from docx.table import Table

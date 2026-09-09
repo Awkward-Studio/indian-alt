@@ -29,11 +29,12 @@ class EmailIngestionService:
             text = content.decode('utf-8-sig', errors='replace')
         else:
             processor = DocumentProcessorService()
-            extraction = processor.get_chat_extraction_result(content, title)
+            extraction = processor.get_evidence_extraction_result(
+                content,
+                title,
+                allow_remote_fallback=allow_remote,
+            )
             text = extraction.get('normalized_text') or extraction.get('text') or ''
-            if not text.strip() and allow_remote:
-                extraction = processor.get_extraction_result(content, title)
-                text = extraction.get('normalized_text') or extraction.get('text') or ''
         return text, extraction
 
     @classmethod
