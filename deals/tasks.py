@@ -1571,7 +1571,8 @@ def generate_vdr_analysis_async(self, deal_id: str, audit_log_id: str, allow_gap
             "workflow_stage": "analysis_complete",
             "analysis_id": str(analysis.id),
         }
-        audit_log.save(update_fields=["status", "is_success", "source_metadata"])
+        audit_log.completed_at = timezone.now()
+        audit_log.save(update_fields=["status", "is_success", "source_metadata", "completed_at"])
         log_worker_event(audit_log, "Confirmed VDR analysis report is complete.", status="COMPLETED", done=True)
         return {"status": "completed", "analysis_id": str(analysis.id)}
     except Exception as exc:
