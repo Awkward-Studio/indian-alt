@@ -77,3 +77,26 @@ class AuditTaskControlTests(TestCase):
             {'status': 'submitted', 'container': 'vllm-text-t4'},
         )
         vm_service_class.return_value.restart_text_inference.assert_called_once_with()
+
+    @patch('ai_orchestrator.views.VMControlService')
+    @patch('ai_orchestrator.views.requests.get')
+    @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke', return_value=[])
+    def test_clear_active_force_restart_releases_processing_without_visible_slot(
+        self, _revoke, get_slots, vm_service_class,
+    ):
+        get_slots.return_value.json.return_value = []
+        get_slots.return_value.raise_for_status.return_value = None
+        vm_service_class.return_value.restart_text_inference.return_value = {
+            'status': 'submitted',
+            'container': 'vllm-text-t4',
+        }
+
+        response = self.client.post(
+            '/api/ai/history/clear-active/',
+            {'force_restart': True},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['inference_restart']['status'], 'submitted')
+        vm_service_class.return_value.restart_text_inference.assert_called_once_with()

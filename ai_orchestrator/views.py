@@ -181,6 +181,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         if not _is_ai_admin(request.user):
             return Response({'error': 'Administrator access is required.'}, status=403)
 
+        force_restart = request.data.get('force_restart') is True
         active_logs = list(AIAuditLog.objects.filter(status__in=['PENDING', 'PROCESSING']))
         task_ids = list(dict.fromkeys(
             task_id for log in active_logs for task_id in self._task_ids(log)
@@ -229,7 +230,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         # Celery worker can leave an orphaned HTTP generation on the VM. Use
         # the verified Azure control path to restart just the text container;
         # Compose's restart policy brings it back without deallocating the VM.
-        if processing_slots_before_clear:
+        if processing_slots_before_clear or force_restart:
             try:
                 inference_restart = VMControlService().restart_text_inference()
             except Exception as exc:
