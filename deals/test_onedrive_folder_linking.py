@@ -5,6 +5,7 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase
 
 from deals.models import Deal
+from deals.management.commands.link_missing_onedrive_folders import Command as LinkFoldersCommand
 from deals.services.onedrive_folder_matching import (
     normalize_folder_deal_name,
     score_folder_deal_name,
@@ -33,6 +34,14 @@ class OneDriveFolderMatchingTests(SimpleTestCase):
         self.assertEqual(score_folder_deal_name("A", "Alpha").score, 0.0)
         self.assertEqual(score_folder_deal_name("Alpha", "Beta").score, 0.0)
         self.assertEqual(score_folder_deal_name("Aayush Hospitals", "NU Hospitals").score, 0.0)
+
+    def test_tui_parser_supports_ranges_and_ambiguous_alternatives(self):
+        self.assertEqual(
+            LinkFoldersCommand._parse_tui_selections("1,3-5,7:2", 20),
+            [(1, None), (3, None), (4, None), (5, None), (7, 2)],
+        )
+        self.assertIsNone(LinkFoldersCommand._parse_tui_selections("21", 20))
+        self.assertIsNone(LinkFoldersCommand._parse_tui_selections("5-2", 20))
 
 
 class LinkMissingOneDriveFoldersCommandTests(TestCase):
@@ -108,3 +117,22 @@ class LinkMissingOneDriveFoldersCommandTests(TestCase):
         self.assertEqual(ambiguous_one.source_onedrive_id, "folder-nova")
         self.assertIsNone(ambiguous_two.source_onedrive_id)
         _input.assert_called_once()
+
+    @patch("deals.management.commands.link_missing_onedrive_folders.GraphAPIService")
+    def test_tui_applies_multiple_rows_from_one_page(self, graph_class):
+        first = Deal.objects.create(title="First TUI Deal")
+        second = Deal.objects.create(title="Second TUI Deal")
+        graph_class.return_value.get_deal_folder_root_children.return_value = {
+            "value": [
+                {"id": "folder-first", "name": "First TUI Deal", "folder": {}, "driveId": "drive-1"},
+                {"id": "folder-second", "name": "Second TUI Deal", "folder": {}, "driveId": "drive-1"},
+            ]
+        }
+
+        with patch("builtins.input", return_value="1,2"):
+            call_command("link_missing_onedrive_folders", "--tui", stdout=StringIO())
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.source_onedrive_id, "folder-first")
+        self.assertEqual(second.source_onedrive_id, "folder-second")

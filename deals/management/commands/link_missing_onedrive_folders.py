@@ -57,6 +57,20 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--tui",
+            action="store_true",
+            help=(
+                "Open a paginated multi-select terminal UI; select several links per page "
+                "and use ROW:ALTERNATIVE for ambiguous matches"
+            ),
+        )
+        parser.add_argument(
+            "--tui-page-size",
+            type=int,
+            default=20,
+            help="Number of matching rows shown per TUI page (default: 20)",
+        )
+        parser.add_argument(
             "--certain-score",
             type=float,
             default=0.98,
@@ -73,11 +87,13 @@ class Command(BaseCommand):
         min_score = options["min_score"]
         if not 0 < min_score <= 1:
             raise CommandError("--min-score must be greater than 0 and at most 1")
+        if options["tui_page_size"] < 1:
+            raise CommandError("--tui-page-size must be at least 1")
         selected_modes = sum(
-            bool(options[name]) for name in ("apply", "interactive", "smart_interactive")
+            bool(options[name]) for name in ("apply", "interactive", "smart_interactive", "tui")
         )
         if selected_modes > 1:
-            raise CommandError("Use only one of --apply, --interactive, or --smart-interactive")
+            raise CommandError("Use only one of --apply, --interactive, --smart-interactive, or --tui")
         if not 0 < options["certain_score"] <= 1:
             raise CommandError("--certain-score must be greater than 0 and at most 1")
         if options["certain_score"] < min_score:
@@ -116,6 +132,8 @@ class Command(BaseCommand):
 
         if options["smart_interactive"]:
             self._smart_interactive_apply(report, certain_score=options["certain_score"])
+        elif options["tui"]:
+            self._tui_apply(report, page_size=options["tui_page_size"])
         elif options["interactive"]:
             self._interactive_apply(report)
         elif options["apply"]:
@@ -124,9 +142,158 @@ class Command(BaseCommand):
         self._write_report(
             report,
             output_json=options["output_json"],
-            apply=options["apply"] or options["interactive"] or options["smart_interactive"],
-            interactive=options["interactive"] or options["smart_interactive"],
+            apply=options["apply"] or options["interactive"] or options["smart_interactive"] or options["tui"],
+            interactive=options["interactive"] or options["smart_interactive"] or options["tui"],
         )
+
+    def _tui_apply(self, report, *, page_size):
+        """Apply several reviewed links per page without adding a dependency."""
+        candidates = [
+            record for record in report
+            if record["status"] in {"ready", "ambiguous"}
+        ]
+        page = 0
+
+        while candidates:
+            total_pages = (len(candidates) + page_size - 1) // page_size
+            page = max(0, min(page, total_pages - 1))
+            start = page * page_size
+            page_records = candidates[start:start + page_size]
+
+            self.stdout.write(
+                f"\nLinking TUI · page {page + 1}/{total_pages} "
+                f"· rows {start + 1}-{start + len(page_records)} of {len(candidates)}"
+            )
+            for index, record in enumerate(page_records, start=1):
+                status = record["status"]
+                suffix = ""
+                if status == "ambiguous":
+                    alternatives = record.get("alternatives", [])
+                    suffix = " · choices: " + "; ".join(
+                        f"{choice_index}:{alternative['deal_title']}"
+                        for choice_index, alternative in enumerate(alternatives, start=1)
+                    )
+                self.stdout.write(
+                    f"  [{index:>2}] {record['folder_name']} -> "
+                    f"{record['deal_title']} ({record['score']:.2f}, {status}){suffix}"
+                )
+
+            self.stdout.write(
+                "Select rows (e.g. 1,3-5; ambiguous: 2:1), "
+                "a=all ready, n=next, p=previous, q=quit: ",
+                ending="",
+            )
+            try:
+                answer = input().strip().lower()
+            except EOFError:
+                answer = "q"
+
+            if answer in {"q", "quit"}:
+                break
+            if answer in {"n", "next"}:
+                if page < total_pages - 1:
+                    page += 1
+                else:
+                    self.stdout.write("Already on the last page.")
+                continue
+            if answer in {"p", "previous", "prev"}:
+                if page > 0:
+                    page -= 1
+                else:
+                    self.stdout.write("Already on the first page.")
+                continue
+            if answer in {"a", "all"}:
+                selections = [(index, None) for index, record in enumerate(page_records, start=1) if record["status"] == "ready"]
+            else:
+                selections = self._parse_tui_selections(answer, len(page_records))
+
+            if selections is None:
+                self.stdout.write("Invalid selection. Use row numbers, ranges, or ROW:ALTERNATIVE.")
+                continue
+            if not selections:
+                self.stdout.write("No rows selected.")
+                continue
+
+            selected_records = []
+            invalid_selection = False
+            for row_number, alternative_number in selections:
+                record = page_records[row_number - 1]
+                if record["status"] == "ready":
+                    if alternative_number is not None:
+                        invalid_selection = True
+                        self.stdout.write(f"Row {row_number} is not ambiguous; select it without :ALTERNATIVE.")
+                        break
+                    selected_records.append(record)
+                    continue
+
+                alternatives = record.get("alternatives", [])
+                if alternative_number is None:
+                    invalid_selection = True
+                    self.stdout.write(f"Row {row_number} is ambiguous; choose it as {row_number}:1, {row_number}:2, etc.")
+                    break
+                if not 1 <= alternative_number <= len(alternatives):
+                    invalid_selection = True
+                    self.stdout.write(f"Row {row_number} has {len(alternatives)} alternatives.")
+                    break
+                selected = alternatives[alternative_number - 1]
+                record.update(
+                    deal_id=selected["deal_id"],
+                    deal_title=selected["deal_title"],
+                    score=selected["score"],
+                    reason=selected.get("reason", "selected from ambiguous candidates"),
+                    status="ready",
+                )
+                selected_records.append(record)
+
+            if invalid_selection:
+                continue
+            self._apply_safe_matches(selected_records)
+            candidates = [
+                record for record in candidates
+                if record["status"] in {"ready", "ambiguous"}
+            ]
+            if page >= (len(candidates) + page_size - 1) // page_size and page > 0:
+                page -= 1
+
+    @staticmethod
+    def _parse_tui_selections(answer, page_size):
+        if not answer:
+            return []
+        selections = []
+        seen = set()
+        for raw_token in answer.replace(" ", "").split(","):
+            if not raw_token:
+                return None
+            if ":" in raw_token:
+                row_token, alternative_token = raw_token.split(":", 1)
+                try:
+                    row = int(row_token)
+                    alternative = int(alternative_token)
+                except ValueError:
+                    return None
+                values = [(row, alternative)]
+            elif "-" in raw_token:
+                try:
+                    first, last = (int(value) for value in raw_token.split("-", 1))
+                except ValueError:
+                    return None
+                if first > last:
+                    return None
+                values = [(row, None) for row in range(first, last + 1)]
+            else:
+                try:
+                    values = [(int(raw_token), None)]
+                except ValueError:
+                    return None
+            for selection in values:
+                row = selection[0]
+                if not 1 <= row <= page_size or selection in seen:
+                    if not 1 <= row <= page_size:
+                        return None
+                    continue
+                seen.add(selection)
+                selections.append(selection)
+        return selections
 
     def _build_report(self, *, folders, missing_deals, all_deals, linked_folder_deals, min_score):
         records = []
