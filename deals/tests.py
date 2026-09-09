@@ -2173,6 +2173,68 @@ class DealStatusSyncTests(TestCase):
 
         self.assertIn("error", result)
 
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("deals.tasks.process_deal_folder_background.apply_async")
+    def test_rerun_vdr_documents_queues_selected_files_through_the_vdr_pipeline(
+        self,
+        mock_apply_async,
+        mock_filter,
+    ):
+        mock_apply_async.return_value = MagicMock(id="task-rerun")
+        mock_filter.return_value.values_list.return_value = []
+
+        deal = Deal.objects.create(
+            title="Rerun VDR",
+            source_onedrive_id="folder-1",
+            source_drive_id="drive-1",
+        )
+        document = DealDocument.objects.create(
+            deal=deal,
+            title="Deck.pdf",
+            onedrive_id="file-1",
+        )
+
+        with patch.object(
+            FolderAnalysisService,
+            "get_persisted_file_tree_for_deal",
+            return_value=[{"id": "file-1", "name": "Deck.pdf"}],
+        ):
+            result = FolderAnalysisService.rerun_vdr_documents(deal, [str(document.id)])
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result["document_count"], 1)
+        mock_apply_async.assert_called_once()
+        task_kwargs = mock_apply_async.call_args.kwargs["kwargs"]
+        self.assertEqual(task_kwargs["coverage_policy"], "selected_documents")
+        self.assertEqual(task_kwargs["file_tree_map"][0]["id"], "file-1")
+        deal.refresh_from_db()
+        self.assertEqual(deal.processing_status, "processing")
+
+    @patch("microsoft.services.graph_service.GraphAPIService")
+    def test_persist_folder_tree_refreshes_the_saved_folder_snapshot(self, mock_graph_service):
+        deal = Deal.objects.create(
+            title="Rescanned Deal",
+            source_onedrive_id="folder-rescan",
+            source_drive_id="drive-rescan",
+        )
+        mock_graph_service.return_value.get_folder_tree.return_value = [
+            {"id": "file-new", "name": "New memo.pdf", "path": "New memo.pdf"},
+        ]
+
+        file_count = FolderAnalysisService.persist_folder_tree(
+            deal=deal,
+            folder_id=deal.source_onedrive_id,
+            drive_id=deal.source_drive_id,
+            user_email="analyst@example.com",
+        )
+
+        self.assertEqual(file_count, 1)
+        latest_log = AIAuditLog.objects.filter(
+            source_type="onedrive_folder",
+            source_id="folder-rescan",
+        ).order_by("-created_at").first()
+        self.assertEqual(latest_log.source_metadata["file_tree"][0]["id"], "file-new")
+
 
 class BulkSyncResolutionAliasTests(TestCase):
     def test_synthesis_canonical_title_prefers_folder_identity_over_synthesized_title(self):

@@ -14,6 +14,7 @@ from .models import (
     VentureIntelligenceIncubationInvestment, VentureIntelligencePEExit, VentureIntelligencePEIPO,
     VentureIntelligenceMergerAcquisition, VentureIntelligenceEpfoData, VentureIntelligenceSimilarCompany
 )
+from ai_orchestrator.models import DocumentChunk
 from accounts.models import Profile
 from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
@@ -161,6 +162,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     latest_supplemental_version = serializers.SerializerMethodField()
     artifact_status = serializers.SerializerMethodField()
     artifact_complete = serializers.SerializerMethodField()
+    chunk_count = serializers.SerializerMethodField()
 
     def _get_initial_analysis_map(self, obj):
         cache = self.context.setdefault('_initial_analysis_map', {})
@@ -264,6 +266,13 @@ class DealDocumentSerializer(serializers.ModelSerializer):
 
     def get_artifact_complete(self, obj):
         return DocumentArtifactService.artifact_complete(obj)
+
+    def get_chunk_count(self, obj):
+        return DocumentChunk.objects.filter(
+            deal_id=obj.deal_id,
+            source_type='document',
+            source_id=str(obj.id),
+        ).count()
     
     class Meta:
         model = DealDocument
@@ -275,7 +284,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'artifact_status', 'artifact_complete',
             'normalized_text', 'evidence_json', 'source_map_json', 'table_json',
             'key_metrics_json', 'reasoning',
-            'extraction_mode', 'transcription_status', 'chunking_status',
+            'extraction_mode', 'transcription_status', 'chunking_status', 'chunk_count',
             'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'
         )

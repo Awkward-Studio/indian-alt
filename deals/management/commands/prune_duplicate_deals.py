@@ -70,25 +70,34 @@ class Command(BaseCommand):
         self.stdout.write(f"Duplicate deal pruning ({mode})")
         self.stdout.write(f"Found {len(groups)} safe duplicate group(s).")
 
-        for group in groups:
-            self._write_group(group)
-
         if options["interactive"]:
-            for group in groups:
-                self.stdout.write("Merge this group into the linked deal? [y]es / [n]o / [q]uit: ", ending="")
+            for index, group in enumerate(groups, start=1):
+                self.stdout.write(f"\nReviewing safe duplicate group {index} of {len(groups)}:")
+                self._write_group(group)
+                self.stdout.write(
+                    "Merge this group into the linked deal? [y]es / [n]o / [q]uit: ",
+                    ending="",
+                )
                 try:
                     answer = input().strip().lower()
                 except EOFError:
                     answer = "q"
                 if answer in {"q", "quit"}:
+                    self.stdout.write("Quit. No further groups were processed.")
                     break
                 if answer in {"y", "yes"}:
                     self._apply_group(group)
+                    self.stdout.write("Merged duplicate(s) into the linked deal.")
+                else:
+                    self.stdout.write("Skipped. No changes made for this group.")
         elif options["apply"]:
             for group in groups:
                 self._apply_group(group)
-        elif groups:
-            self.stdout.write("\nNo database changes made. Re-run with --apply after reviewing the groups.")
+        else:
+            for group in groups:
+                self._write_group(group)
+            if groups:
+                self.stdout.write("\nNo database changes made. Re-run with --apply after reviewing the groups.")
 
     def _find_safe_groups(self):
         grouped = defaultdict(list)

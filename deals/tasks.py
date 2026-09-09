@@ -1407,11 +1407,26 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         errors = [r for r in results if r.get('status') == 'failed']
         processed_count = len([r for r in results if r.get('status') == 'success'])
         cached_count = len([r for r in results if r.get('status') == 'cached'])
+        coverage_policy = (audit_log.source_metadata or {}).get(
+            'coverage_policy',
+        )
+        remaining_documents = []
+        if coverage_policy == 'selected_documents' and not errors:
+            remaining_documents = [
+                document
+                for document in deal.documents.all()
+                if not DocumentArtifactService.artifact_complete(document)
+            ]
 
-        deal.processing_status = 'completed' if not errors else 'failed'
+        deal.processing_status = 'completed' if not errors and not remaining_documents else 'failed'
         if errors:
             error_msgs = [f"{e['file']}: {e['error']}" for e in errors]
             deal.processing_error = "; ".join(error_msgs)
+        elif remaining_documents:
+            deal.processing_error = (
+                f"Selected VDR rerun completed, but {len(remaining_documents)} other "
+                "document(s) still need indexing."
+            )
         else:
             deal.processing_error = None
         deal.save(update_fields=['processing_status', 'processing_error'])
@@ -1419,17 +1434,29 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         audit_log.status = 'COMPLETED' if not errors else 'FAILED'
         audit_log.completed_at = timezone.now()
         audit_log.is_success = True if not errors else False
-        audit_log.system_prompt = (
-            f"Indexed {processed_count} documents and reused {cached_count} cached documents. "
-            "Document artifacts are ready; final analysis is waiting for user confirmation."
-        )
+        if errors:
+            audit_log.system_prompt = (
+                f"Indexed {processed_count} documents and reused {cached_count} cached documents. "
+                f"{len(errors)} document(s) failed during VDR processing."
+            )
+        elif remaining_documents:
+            audit_log.system_prompt = (
+                f"Indexed {processed_count} documents and reused {cached_count} cached documents. "
+                f"{len(remaining_documents)} other document(s) still need indexing."
+            )
+        else:
+            audit_log.system_prompt = (
+                f"Indexed {processed_count} documents and reused {cached_count} cached documents. "
+                "Document artifacts are ready; final analysis is waiting for user confirmation."
+            )
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
             "workflow_stage": "artifacts_ready" if not errors else "artifact_processing_failed",
             "processed_count": processed_count,
             "cached_count": cached_count,
             "failed_count": len(errors),
-            "analysis_confirmation_required": not errors,
+            "remaining_document_count": len(remaining_documents),
+            "analysis_confirmation_required": not errors and not remaining_documents,
         }
         if errors:
             audit_log.error_message = f"Errors encountered in {len(errors)} files."
@@ -1447,7 +1474,8 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             "processed": processed_count,
             "cached": cached_count,
             "errors": len(errors),
-            "analysis_confirmation_required": not errors,
+            "remaining_document_count": len(remaining_documents),
+            "analysis_confirmation_required": not errors and not remaining_documents,
         }
         
     except Exception as e:
@@ -1467,14 +1495,20 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         raise e
 
 @shared_task(bind=True, max_retries=3)
-def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user_email: str):
+def process_deal_folder_background(
+    self,
+    deal_id: str,
+    file_tree_map: list,
+    user_email: str,
+    coverage_policy: str = "all_supported_files",
+):
     """
-    Background task to download and vectorize all remaining files in a folder tree using a chord.
+    Background task to download and vectorize the supplied files using a chord.
     """
     supported_files = [item for item in file_tree_map if _is_supported_analysis_file(item)]
     unsupported_files = [item for item in file_tree_map if not _is_supported_analysis_file(item)]
     logger.info(
-        "Starting complete background processing for Deal %s with %s supported files (%s unsupported).",
+        "Starting VDR background processing for Deal %s with %s supported files (%s unsupported).",
         deal_id,
         len(supported_files),
         len(unsupported_files),
@@ -1541,7 +1575,7 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         "task_count": len(tasks),
         "unsupported_file_count": len(unsupported_files),
         "unsupported_files": [item.get("name") for item in unsupported_files],
-        "coverage_policy": "all_supported_files",
+        "coverage_policy": coverage_policy,
     }
     audit_log.save(update_fields=["source_metadata"])
     log_worker_event(

@@ -816,6 +816,90 @@ class FolderAnalysisService:
         }
 
     @staticmethod
+    def rerun_vdr_documents(deal: Deal, document_ids: list[str]) -> dict:
+        """Queue selected linked documents through the full VDR artifact pipeline."""
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return {"error": "This deal is not linked to a OneDrive folder."}
+        if deal.processing_status == "processing":
+            return {
+                "error": (
+                    "VDR processing is already running for this deal. Wait for it to finish "
+                    "or cancel it before starting a rerun."
+                )
+            }
+
+        requested_ids = list(dict.fromkeys(str(value) for value in document_ids if value))
+        if not requested_ids:
+            return {"error": "Select at least one document to rerun."}
+        if len(requested_ids) > 20:
+            return {"error": "You can rerun up to 20 documents at a time."}
+
+        documents = list(deal.documents.filter(id__in=requested_ids))
+        found_ids = {str(document.id) for document in documents}
+        missing_ids = [value for value in requested_ids if value not in found_ids]
+        if missing_ids:
+            return {"error": "One or more selected documents do not belong to this deal."}
+
+        from ai_orchestrator.models import AIAuditLog
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+        from deals.tasks import process_deal_folder_background
+
+        active_document_ids = {
+            str(value)
+            for value in AIAuditLog.objects.filter(
+                source_type="document_evidence_segment",
+                source_id__in=requested_ids,
+                status__in=["PENDING", "PROCESSING"],
+            ).values_list("source_id", flat=True)
+        }
+        if active_document_ids:
+            active_titles = [
+                document.title for document in documents if str(document.id) in active_document_ids
+            ]
+            return {
+                "error": f"These documents are already being processed: {', '.join(active_titles)}."
+            }
+
+        file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
+        files_by_id = {str(item.get("id")): item for item in file_tree if item.get("id")}
+        selected_files = []
+        unsupported_titles = []
+        for document in documents:
+            file_info = files_by_id.get(str(document.onedrive_id or ""))
+            if not file_info:
+                unsupported_titles.append(document.title)
+                continue
+            selected_files.append(file_info)
+
+        if unsupported_titles:
+            return {
+                "error": (
+                    "These documents are not linked to a current OneDrive file and cannot be rerun "
+                    f"through the VDR pipeline: {', '.join(unsupported_titles)}."
+                )
+            }
+
+        task = process_deal_folder_background.apply_async(
+            kwargs={
+                "deal_id": str(deal.id),
+                "file_tree_map": selected_files,
+                "user_email": DMS_USER_EMAIL,
+                "coverage_policy": "selected_documents",
+            },
+            queue="low_priority",
+        )
+        deal.processing_status = "processing"
+        deal.processing_error = None
+        deal.save(update_fields=["processing_status", "processing_error"])
+
+        return {
+            "status": "queued",
+            "task_id": task.id,
+            "document_count": len(selected_files),
+            "message": f"Queued {len(selected_files)} document(s) through the VDR pipeline.",
+        }
+
+    @staticmethod
     def deal_analysis_readiness(deal: Deal) -> dict:
         """Summarize the common DealDocument evidence set used by final analysis."""
         from deals.services.document_artifacts import DocumentArtifactService

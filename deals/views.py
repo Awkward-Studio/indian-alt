@@ -2,8 +2,10 @@ import logging
 import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlsplit
 
 import django_filters.rest_framework as django_filters
+import requests
 from django.conf import settings
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
@@ -2239,6 +2241,141 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if "error" in result:
             return Response(result, status=400)
         return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='rerun-vdr-documents')
+    def rerun_vdr_documents(self, request, pk=None):
+        """Rerun selected linked documents through the full VDR pipeline."""
+        deal = self.get_object()
+        document_ids = request.data.get("document_ids", [])
+        if not isinstance(document_ids, list):
+            return Response({"error": "document_ids must be a list."}, status=400)
+
+        result = FolderAnalysisService.rerun_vdr_documents(deal, document_ids)
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['post'], url_path='rescan_folder')
+    def rescan_folder(self, request, pk=None):
+        """Refresh the persisted OneDrive file tree without starting VDR processing."""
+        deal = self.get_object()
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return Response(
+                {"error": "This deal is not linked to a OneDrive folder."},
+                status=400,
+            )
+
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+
+        try:
+            file_count = FolderAnalysisService.persist_folder_tree(
+                deal=deal,
+                folder_id=deal.source_onedrive_id,
+                drive_id=deal.source_drive_id,
+                user_email=DMS_USER_EMAIL,
+            )
+        except Exception as exc:
+            logger.exception("Folder rescan failed for deal %s", deal.id)
+            return Response(
+                {"error": f"Folder scan failed: {exc}"},
+                status=502,
+            )
+
+        return Response({
+            "status": "completed",
+            "file_count": file_count,
+            "message": f"Folder scan complete. Found {file_count} files.",
+        })
+
+    @action(detail=True, methods=['get'], url_path='vdr-status')
+    def vdr_status(self, request, pk=None):
+        """Return the live VDR segment, lease owner, and inference slot state."""
+        deal = self.get_object()
+        parent = AIAuditLog.objects.filter(
+            source_type='vdr_indexing',
+            source_id=str(deal.id),
+            status__in=['PENDING', 'PROCESSING'],
+        ).order_by('-created_at').first()
+
+        active_segment = None
+        queued_segments = 0
+        if parent:
+            segments = list(AIAuditLog.objects.filter(
+                source_metadata__vdr_parent_audit_id=str(parent.id),
+                status__in=['PENDING', 'PROCESSING'],
+            ).order_by('created_at'))
+            active_segment_model = next(
+                (segment for segment in segments
+                 if (segment.source_metadata or {}).get('inference_state') == 'active'),
+                None,
+            )
+            active_segment_model = active_segment_model or next(
+                (segment for segment in segments
+                 if (segment.source_metadata or {}).get('inference_state') == 'queued'),
+                None,
+            )
+            queued_segments = sum(
+                1 for segment in segments
+                if (segment.source_metadata or {}).get('inference_state') == 'queued'
+            )
+            if active_segment_model:
+                metadata = active_segment_model.source_metadata or {}
+                active_segment = {
+                    'audit_log_id': str(active_segment_model.id),
+                    'celery_task_id': active_segment_model.celery_task_id,
+                    'context_label': active_segment_model.context_label,
+                    'status': active_segment_model.status,
+                    'inference_state': metadata.get('inference_state'),
+                    'inference_started_at': metadata.get('inference_started_at'),
+                    'inference_queue_entered_at': metadata.get('inference_queue_entered_at'),
+                    'inference_queue_wait_ms': metadata.get('inference_queue_wait_ms'),
+                    'segment_index': (metadata.get('segment_index') or 0) + 1,
+                    'segment_count': metadata.get('segment_count'),
+                }
+
+        lease_owner = cache.get('ai:inference:lease:v1')
+        if not isinstance(lease_owner, dict):
+            lease_owner = None
+
+        slots = []
+        slot_warning = None
+        try:
+            parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
+            slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
+            api_key = getattr(settings, 'VLLM_API_KEY', '')
+            headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+            slot_response = requests.get(slot_url, headers=headers, timeout=3)
+            slot_response.raise_for_status()
+            payload = slot_response.json()
+            slots = [
+                {
+                    key: slot.get(key)
+                    for key in ('id', 'id_task', 'is_processing', 'n_prompt_tokens', 'n_decoded', 'n_remain')
+                }
+                for slot in payload if isinstance(payload, list) and isinstance(slot, dict)
+            ]
+        except Exception as exc:
+            slot_warning = str(exc)
+
+        return Response({
+            'deal_id': str(deal.id),
+            'deal_status': deal.processing_status,
+            'parent': {
+                'audit_log_id': str(parent.id) if parent else None,
+                'celery_task_id': parent.celery_task_id if parent else None,
+                'status': parent.status if parent else None,
+                'created_at': parent.created_at if parent else None,
+            },
+            'active_segment': active_segment,
+            'queued_segment_count': queued_segments,
+            'lease_owner': lease_owner,
+            'lease_matches_active_segment': bool(
+                active_segment and lease_owner
+                and lease_owner.get('audit_log_id') == active_segment['audit_log_id']
+            ),
+            'slots': slots,
+            'slot_warning': slot_warning,
+        })
 
     @action(detail=True, methods=['post'])
     def confirm_vdr_analysis(self, request, pk=None):
