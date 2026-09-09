@@ -2,8 +2,11 @@
 from datetime import timedelta
 import logging
 from pathlib import Path
+from pathlib import PurePath
+from urllib.parse import unquote, urlparse
 import uuid
 
+from bs4 import BeautifulSoup
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -18,6 +21,78 @@ logger = logging.getLogger(__name__)
 
 
 class EmailIngestionService:
+    @staticmethod
+    def decision_source_metadata_context(run):
+        """Return cheap source metadata for the routing/name decision.
+
+        This deliberately reads only the email snapshot. Attachment bytes are
+        still deferred until a route is confirmed, so the first pass cannot
+        invoke DocProc, OCR, or remote file downloads.
+        """
+        source = run.source if isinstance(run.source, dict) else {}
+        sections = [
+            'SOURCE METADATA (filenames and link labels only; no document contents were downloaded).',
+            'Treat a descriptive attachment filename or link label as identity evidence. '
+            'When it names a company or project, prefer it over a generic forwarded email subject.',
+        ]
+        for attachment in source.get('attachments') or []:
+            name = PurePath(str(attachment.get('name') or '')).name
+            if name:
+                sections.append(f'--- ATTACHMENT FILENAME: {name} ---')
+
+        soup = BeautifulSoup(str(source.get('body_html') or ''), 'html.parser')
+        for anchor in soup.find_all('a'):
+            label = ' '.join(anchor.stripped_strings)
+            href = str(anchor.get('href') or '').strip()
+            if not label and not href:
+                continue
+            # Keep link metadata bounded and avoid sending query-string tokens.
+            parsed = urlparse(href)
+            link_name = PurePath(unquote(parsed.path)).name if parsed.path else ''
+            details = [f'label={label[:300]}'] if label else []
+            if link_name:
+                details.append(f'filename={link_name[:200]}')
+            if parsed.hostname:
+                details.append(f'host={parsed.hostname[:200]}')
+            sections.append('--- LINK METADATA: ' + '; '.join(details) + ' ---')
+        return '\n'.join(sections) if len(sections) > 2 else ''
+
+    @staticmethod
+    def attachment_title_hint(run):
+        """Extract a conservative company/project hint from a filename."""
+        source = run.source if isinstance(run.source, dict) else {}
+        for attachment in source.get('attachments') or []:
+            stem = PurePath(str(attachment.get('name') or '')).stem.strip()
+            if not stem:
+                continue
+            # Most deal files use ``Company - document type - qualifier``.
+            candidate = stem.split(' - ', 1)[0].strip(' _–—-')
+            if len(candidate.split()) >= 2 and len(candidate) >= 4:
+                return candidate[:200]
+        return ''
+
+    @classmethod
+    def prefer_attachment_title(cls, run, initialization):
+        """Guard against a generic subject overriding a stronger filename identity."""
+        if not isinstance(initialization, dict):
+            return initialization
+        model_data = initialization.get('deal_model_data')
+        if not isinstance(model_data, dict):
+            return initialization
+        hint = cls.attachment_title_hint(run)
+        current = str(model_data.get('title') or '').strip()
+        subject = Decisions._clean_deal_title(run.email.subject)
+        if not hint or not current or current.casefold() != subject.casefold():
+            return initialization
+        return {
+            **initialization,
+            'deal_model_data': {**model_data, 'title': hint},
+            'metadata': {
+                **(initialization.get('metadata') or {}),
+                'attachment_title_hint': hint,
+            },
+        }
+
     @staticmethod
     def _audit_log_for_run(run):
         audit_id = (run.source or {}).get('_audit_log_id') if isinstance(run.source, dict) else None
@@ -260,10 +335,10 @@ class EmailIngestionService:
                 or not run.match
                 or run.match.get('status') not in ('matched',)
             ):
-                # The first pass only needs the email body, subject, and headers.
-                # Do not walk attachments or links here. OCR/docproc belongs to
-                # the artifact stage after the analyst confirms the route.
-                decision_document_context = ''
+                # The first pass gets only cheap filename/link metadata. Do not
+                # read attachment bytes or call DocProc until the route is
+                # confirmed and the artifact stage starts.
+                decision_document_context = cls.decision_source_metadata_context(run)
                 confirmed_classification = (
                     dict(run.classification)
                     if run.classification.get('method') == 'manual'
@@ -291,7 +366,7 @@ class EmailIngestionService:
                         # review route instead of turning ambiguity into a job failure.
                         logger.info('No reviewable deal seed for email run %s: %s', run.id, exc)
                     else:
-                        run.match = {**run.match, 'initialization': initialization}
+                        run.match = {**run.match, 'initialization': cls.prefer_attachment_title(run, initialization)}
             run.stages['classification'] = run.classification.get('status', 'completed')
             run.stages['match'] = run.match['status']
             run.save(update_fields=['classification', 'match', 'stages', 'updated_at'])

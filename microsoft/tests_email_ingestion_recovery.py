@@ -76,6 +76,13 @@ class EmailRecoveryTests(TestCase):
                 'candidates': [], 'route': 'REVIEW',
             },
         }
+        self.email.attachments = [{
+            'id': 'attachment-1',
+            'name': 'WHP Jewellers - financial projections - clean.xlsx',
+            'size': 71923,
+            'isInline': False,
+        }]
+        self.email.save(update_fields=['attachments'])
         run = Evidence.snapshot(self.email)
 
         result = Ingestion.process(run.id, use_ai=True)
@@ -84,8 +91,25 @@ class EmailRecoveryTests(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.match['initialization']['deal_model_data']['title'], 'WHP Jewellers')
         initialize.assert_called_once()
-        self.assertEqual(initialize.call_args.kwargs['supplemental_text'], '')
+        metadata = initialize.call_args.kwargs['supplemental_text']
+        self.assertIn('WHP Jewellers - financial projections - clean.xlsx', metadata)
+        self.assertIn('filenames and link labels only', metadata)
         document_context.assert_not_called()
+
+    @patch.object(Decisions, 'initialize', return_value={'deal_model_data': {'title': 'Jewellery - Investment opportunity'}})
+    def test_filename_hint_replaces_generic_subject_title(self, initialize):
+        self.email.subject = 'Fw: Jewellery - Investment opportunity'
+        self.email.attachments = [{
+            'id': 'attachment-1',
+            'name': 'WHP Jewellers - financial projections - clean.xlsx',
+        }]
+        self.email.save(update_fields=['subject', 'attachments'])
+        run = Evidence.snapshot(self.email)
+
+        self.assertEqual(
+            Ingestion.prefer_attachment_title(run, initialize.return_value)['deal_model_data']['title'],
+            'WHP Jewellers',
+        )
 
     @patch.object(Decisions, 'route', side_effect=EmailDecisionUnavailable('VM request timed out'))
     def test_transient_decision_failure_is_scheduled_for_retry(self, _route):
