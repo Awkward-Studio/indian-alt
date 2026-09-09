@@ -3,6 +3,7 @@ import json
 import re
 from difflib import SequenceMatcher
 
+from django.conf import settings
 from django.db.models import Q
 from microsoft.models import Email
 from .email_contributions import normalize
@@ -10,6 +11,10 @@ from .email_contributions import normalize
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+class EmailDecisionUnavailable(RuntimeError):
+    """Transient model/provider failure that should be retried, not reviewed."""
 
 
 class EmailDecisionService:
@@ -114,11 +119,16 @@ class EmailDecisionService:
             content=json.dumps(payload, ensure_ascii=False), source_type='email_ingestion', source_id=str(source_id),
             metadata={'pipeline_key': 'email_evidence', 'stage_key': stage,
                       'response_mode': 'json', 'response_format': {'type': 'json_object'},
-                      'temperature': 0, 'request_timeout': 90, 'max_tokens': 2000,
+                      'temperature': 0,
+                      'request_timeout': int(getattr(settings, 'EMAIL_DECISION_TIMEOUT', 300)),
+                      'max_tokens': 2000,
                       'enforce_context_budget': True})
         value = result.get('parsed_json', result) if isinstance(result, dict) else {}
         if not isinstance(value, dict) or value.get('error'):
-            raise ValueError('Email decision service returned no valid decision.')
+            detail = value.get('error') if isinstance(value, dict) else None
+            raise EmailDecisionUnavailable(
+                str(detail or 'Email decision service returned no valid decision.')
+            )
         return value
 
     @classmethod

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, override_settings
 
 from deals.services.document_artifacts import DocumentArtifactService
+from deals.services.document_artifacts import DocumentArtifactCancelled
 
 
 class FullVDRArtifactTests(SimpleTestCase):
@@ -93,6 +94,24 @@ class FullVDRArtifactTests(SimpleTestCase):
             DocumentArtifactService.artifact_status(artifact),
             DocumentArtifactService.STATUS_DEGRADED,
         )
+
+    @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
+    @patch("deals.services.document_artifacts.cache")
+    def test_cancellation_stops_before_remaining_segments(self, mock_cache):
+        mock_cache.get.return_value = None
+        service = MagicMock()
+        service.process_content.return_value = {"parsed_json": {"document_summary": "First"}}
+        source_text = "section evidence " * 2000
+
+        with self.assertRaises(DocumentArtifactCancelled):
+            DocumentArtifactService.build_document_artifact(
+                file_name="Cancelled.pdf",
+                extracted_text=source_text,
+                ai_service=service,
+                cancel_check=lambda: service.process_content.call_count >= 1,
+            )
+
+        self.assertEqual(service.process_content.call_count, 1)
 
     @patch("deals.tasks.synthesize_complete_deal_analysis")
     @patch("deals.tasks._is_cancel_requested", return_value=False)

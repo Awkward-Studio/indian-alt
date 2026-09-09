@@ -22,7 +22,7 @@ from .models import (
     TranscriptionStatus,
 )
 from .services.deal_creation import DealCreationService
-from .services.document_artifacts import DocumentArtifactService
+from .services.document_artifacts import DocumentArtifactCancelled, DocumentArtifactService
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -1144,7 +1144,14 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                     "quality_flags": extraction.get("quality_flags") or [],
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
+                cancel_check=lambda: _is_cancel_requested(audit_log_id),
             )
+            if _is_cancel_requested(audit_log_id) or not DealDocument.objects.filter(pk=doc.pk).exists():
+                return {
+                    "status": "cancelled",
+                    "file": file_name,
+                    "reason": "VDR source was cancelled or removed during artifact processing.",
+                }
             DocumentArtifactService.persist_artifact(doc, artifact)
             if DocumentArtifactService.artifact_status(doc) != DocumentArtifactService.STATUS_COMPLETE:
                 raise ValueError(
@@ -1169,6 +1176,9 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
             "artifact_segments": artifact_source.get("artifact_segment_count", 0),
         }
         
+    except DocumentArtifactCancelled as e:
+        logger.info("Cancelled artifact processing for %s: %s", file_name, e)
+        return {"status": "cancelled", "file": file_name, "reason": str(e)}
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
         if self.request.retries < self.max_retries:

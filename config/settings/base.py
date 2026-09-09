@@ -255,6 +255,7 @@ CHAT_MODEL_CONTEXT_TOKENS = config('CHAT_MODEL_CONTEXT_TOKENS', default=65536, c
 
 # Enable unified email processing and evidence extraction.
 EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=True, cast=bool)
+EMAIL_DECISION_TIMEOUT = config('EMAIL_DECISION_TIMEOUT', default=300, cast=int)
 EMAIL_SYNTHESIS_MAX_TOKENS = config('EMAIL_SYNTHESIS_MAX_TOKENS', default=16384, cast=int)
 EMAIL_REPORT_SECTION_MAX_TOKENS = config('EMAIL_REPORT_SECTION_MAX_TOKENS', default=8192, cast=int)
 EMAIL_REPORT_SECTION_TIMEOUT = config('EMAIL_REPORT_SECTION_TIMEOUT', default=180, cast=int)

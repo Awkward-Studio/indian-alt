@@ -7,7 +7,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import date, datetime
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from django.conf import settings
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
 
 logger = logging.getLogger(__name__)
+
+
+class DocumentArtifactCancelled(RuntimeError):
+    """Raised when a caller cancels a segmented artifact build."""
 
 
 class DocumentArtifactService:
@@ -96,6 +100,7 @@ class DocumentArtifactService:
         extraction_mode: str | None = None,
         ai_service: Optional["AIProcessorService"] = None,
         source_metadata: dict[str, Any] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
         source_metadata = json.loads(json.dumps(source_metadata or {}, default=str))
@@ -130,6 +135,8 @@ class DocumentArtifactService:
         failures: list[str] = []
 
         def analyze_segment(index: int, segment: str) -> tuple[int, dict[str, Any], bool]:
+            if cancel_check and cancel_check():
+                raise DocumentArtifactCancelled("Document artifact processing was cancelled.")
             cache_key = cls._segment_cache_key(
                 file_name=file_name,
                 segment=segment,
@@ -207,6 +214,9 @@ class DocumentArtifactService:
                     segment_artifacts[result_index] = segment_artifact
                 except Exception as exc:
                     failures.append(f"segment {index + 1}/{len(segments)}: {exc}")
+
+        if cancel_check and cancel_check():
+            raise DocumentArtifactCancelled("Document artifact processing was cancelled.")
 
         if failures or any(item is None for item in segment_artifacts):
             fallback["quality_flags"] = list(dict.fromkeys([

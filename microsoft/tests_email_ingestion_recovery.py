@@ -7,7 +7,7 @@ from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailIngestionRun
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_ingestion import EmailIngestionService as Ingestion
-from microsoft.services.email_matching import EmailDecisionService as Decisions
+from microsoft.services.email_matching import EmailDecisionService as Decisions, EmailDecisionUnavailable
 
 
 class EmailRecoveryTests(TestCase):
@@ -85,3 +85,16 @@ class EmailRecoveryTests(TestCase):
         self.assertEqual(run.match['initialization']['deal_model_data']['title'], 'WHP Jewellers')
         initialize.assert_called_once()
         self.assertEqual(initialize.call_args.kwargs['supplemental_text'], context.return_value)
+
+    @patch.object(Decisions, 'route', side_effect=EmailDecisionUnavailable('VM request timed out'))
+    def test_transient_decision_failure_is_scheduled_for_retry(self, _route):
+        run = Evidence.snapshot(self.email)
+
+        result = Ingestion.process(run.id, use_ai=True)
+
+        self.assertEqual(result['status'], 'waiting_service')
+        run.refresh_from_db()
+        self.assertEqual(run.error, 'VM request timed out')
+        self.assertIsNotNone(run.next_attempt_at)
+        self.email.refresh_from_db()
+        self.assertEqual(self.email.processing_status, 'pending')

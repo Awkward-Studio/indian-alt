@@ -37,6 +37,7 @@ class EmailLargeInputTests(SimpleTestCase):
         self.assertLessEqual(len(call['content'].encode('utf-8')), EmailDecisionService.MAX_DECISION_INPUT_BYTES)
         self.assertIn('TAIL_COMPANY_IDENTITY', json.loads(call['content'])['email'])
         self.assertTrue(call['metadata']['enforce_context_budget'])
+        self.assertEqual(call['metadata']['request_timeout'], 300)
 
     @patch('ai_orchestrator.services.chat_document_chunks.ChatDocumentChunkService')
     def test_small_email_decision_does_not_invoke_reducer(self, chunk_service):
@@ -68,4 +69,3 @@ class EmailLargeInputTests(SimpleTestCase):
         self.assertIn('START_VALUE', text)
         self.assertIn('TAIL_WORKBOOK_VALUE', text)
         self.assertEqual(extraction['transcription_status'], 'complete')
-

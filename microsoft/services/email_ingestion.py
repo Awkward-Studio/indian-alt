@@ -12,7 +12,7 @@ from django.utils import timezone
 from deals.models import Deal
 from microsoft.models import Email, EmailIngestionRun, EmailEvidenceLink
 from .email_evidence import EmailEvidenceService as Evidence
-from .email_matching import EmailDecisionService as Decisions
+from .email_matching import EmailDecisionService as Decisions, EmailDecisionUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,10 @@ class EmailIngestionService:
             indexing = cls.index_outputs(run, allow_remote=available)
             run.stages['index'] = 'completed' if indexing else 'waiting_service'
             run.status = 'completed' if indexing and not capture_failures else 'waiting_service'
+            return cls.release(run)
+        except EmailDecisionUnavailable as exc:
+            run.error = str(exc)[:1500]
+            run.status = 'waiting_service'
             return cls.release(run)
         except ValueError as exc:
             run.error = str(exc)[:1500]

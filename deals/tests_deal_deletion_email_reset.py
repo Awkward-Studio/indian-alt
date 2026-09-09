@@ -5,7 +5,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
-from ai_orchestrator.models import DocumentChunk
+from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailIngestionRun, EmailEvidenceLink
 from microsoft.serializers import EmailListSerializer
@@ -120,6 +120,17 @@ class DealDeletionEmailResetTests(TestCase):
             source_id=str(doc.id),
             content='Pitch deck chunk',
         )
+        parent_audit = AIAuditLog.objects.create(
+            source_type='vdr_indexing', source_id=str(self.deal.id),
+            model_used='test', system_prompt='test', user_prompt='test',
+            status='PROCESSING', is_success=False,
+            source_metadata={'child_task_ids': ['child-1']},
+        )
+        segment_audit = AIAuditLog.objects.create(
+            source_type='document_evidence_segment', source_id=str(doc.id),
+            model_used='test', system_prompt='test', user_prompt='test',
+            status='PROCESSING', is_success=False,
+        )
 
         response = self.client.post(f'/api/deals/{self.deal.id}/unlink_onedrive/')
         self.assertEqual(response.status_code, 200)
@@ -130,6 +141,14 @@ class DealDeletionEmailResetTests(TestCase):
         self.assertEqual(self.deal.processing_status, 'idle')
         self.assertFalse(DealDocument.objects.filter(id=doc.id).exists())
         self.assertFalse(DocumentChunk.objects.filter(source_id=str(doc.id)).exists())
+        parent_audit.refresh_from_db()
+        segment_audit.refresh_from_db()
+        self.assertTrue(parent_audit.source_metadata['cancel_requested'])
+        self.assertEqual(parent_audit.source_metadata['cancel_reason'], 'folder_unlinked')
+        self.assertEqual(parent_audit.status, 'FAILED')
+        self.assertIsNotNone(parent_audit.completed_at)
+        self.assertEqual(segment_audit.status, 'FAILED')
+        self.assertIn('linked VDR folder was removed', segment_audit.error_message)
 
     @patch('deals.tasks.prepare_linked_folder_vdr_async.apply_async')
     def test_relink_onedrive_replaces_old_folder_documents(self, mock_apply_async):

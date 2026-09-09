@@ -1911,6 +1911,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         # 1. Revoke any active VDR indexing tasks
         from ai_orchestrator.models import AIAuditLog
         from config.celery import app as celery_app
+        onedrive_docs = DealDocument.objects.filter(deal=deal).filter(
+            Q(onedrive_id__isnull=False) & ~Q(onedrive_id='')
+        )
+        doc_ids = [str(document.id) for document in onedrive_docs]
         running_logs = AIAuditLog.objects.filter(
             source_type='vdr_indexing',
             source_id=str(deal.id),
@@ -1929,16 +1933,33 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 except Exception:
                     pass
             log.status = 'FAILED'
+            log.is_success = False
             log.error_message = 'VDR cancelled due to folder unlinking.'
-            log.save(update_fields=['status', 'error_message'])
+            log.completed_at = timezone.now()
+            log.source_metadata = {
+                **meta,
+                'cancel_requested': True,
+                'cancel_requested_at': timezone.now().isoformat(),
+                'cancel_reason': 'folder_unlinked',
+            }
+            log.save(update_fields=[
+                'status', 'is_success', 'error_message', 'completed_at', 'source_metadata',
+            ])
+
+        if doc_ids:
+            AIAuditLog.objects.filter(
+                source_type='document_evidence_segment',
+                source_id__in=doc_ids,
+                status__in=['PENDING', 'PROCESSING'],
+            ).update(
+                status='FAILED',
+                is_success=False,
+                error_message='Cancelled because the linked VDR folder was removed.',
+                completed_at=timezone.now(),
+            )
 
         # 2. Clean up DealDocument records originating from this OneDrive folder
-        from deals.models import DealDocument
         from ai_orchestrator.models import DocumentChunk
-        onedrive_docs = DealDocument.objects.filter(deal=deal).filter(
-            Q(onedrive_id__isnull=False) & ~Q(onedrive_id='')
-        )
-        doc_ids = [str(d.id) for d in onedrive_docs]
         if doc_ids:
             DocumentChunk.objects.filter(source_type='document', source_id__in=doc_ids).delete()
             onedrive_docs.delete()
