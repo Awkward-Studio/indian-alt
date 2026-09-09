@@ -1807,8 +1807,16 @@ class EmbeddingServiceTests(TestCase):
         self.assertEqual(getattr(chunk_b, "rerank_score", None), 0.95)
 
 
-class DocumentProcessorServiceTests(TestCase):
-    @override_settings(DOC_PROCESSOR_URL="")
+class DocumentProcessorServiceTests(SimpleTestCase):
+    def setUp(self):
+        prompt = patch(
+            "ai_orchestrator.services.document_processor.PipelineRegistryService.render_prompt_stage",
+            return_value=(None, "Transcribe the document faithfully.", None),
+        )
+        prompt.start()
+        self.addCleanup(prompt.stop)
+
+    @override_settings(DOC_PROCESSOR_URL="", ALLOW_SHARED_MODEL_DOCUMENT_VISION=True)
     @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
     @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_text_model", return_value="gemma-shared")
     @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_default_personality", return_value=None)
@@ -1894,7 +1902,7 @@ class DocumentProcessorServiceTests(TestCase):
         self.assertEqual(result["normalized_text"], "Local text")
         mock_local_extract.assert_called_once()
 
-    @override_settings(DOC_PROCESSOR_URL="")
+    @override_settings(DOC_PROCESSOR_URL="", ALLOW_SHARED_MODEL_DOCUMENT_VISION=True)
     @patch.object(DocumentProcessorService, "extract_text_fallback", return_value="Native PDF text")
     @patch.object(DocumentProcessorService, "_convert_to_images", return_value=["rendered-page"])
     @patch("ai_orchestrator.services.document_processor.AIRuntimeService.get_text_model", return_value="")

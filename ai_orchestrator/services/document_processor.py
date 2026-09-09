@@ -71,8 +71,8 @@ class DocumentProcessorService:
     def get_chat_extraction_result(self, file_content: bytes, filename: str) -> dict:
         """Extract chat uploads without depending on the docproc service.
 
-        Preserve native text verbatim. Use the private inference endpoint only
-        for image-only pages, one page at a time to bound GPU memory use.
+        Preserve native text verbatim. Shared-model vision requires explicit
+        opt-in; otherwise report scanned pages as incomplete for dedicated OCR.
         """
         sections = []
         failed_pages = []
@@ -81,8 +81,10 @@ class DocumentProcessorService:
 
         def read_image(image, page_number):
             nonlocal vision_pages
-            vision_pages += 1
             try:
+                if not getattr(settings, "ALLOW_SHARED_MODEL_DOCUMENT_VISION", False):
+                    raise RuntimeError("Shared text-model vision is disabled; dedicated OCR is required")
+                vision_pages += 1
                 model = AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
                 if not model or model == "default":
                     raise ValueError("No local vision model configured")
@@ -137,7 +139,7 @@ class DocumentProcessorService:
             "transcription_status": "partial" if text and (failed_pages or native_warnings) else "complete" if text else "failed",
             "quality_flags": flags,
             "render_metadata": {"failed_pages": failed_pages, "vision_pages": vision_pages},
-            "error": "No readable content was extracted. Scanned pages and images require a working local vision model." if not text else "",
+            "error": "No readable content was extracted. Scanned pages and images require dedicated OCR, or an explicitly enabled vision model." if not text else "",
         }
 
     def get_evidence_extraction_result(
@@ -150,9 +152,15 @@ class DocumentProcessorService:
         """Use the same lossless extraction order as deal/global chat."""
         extraction = self.get_chat_extraction_result(file_content, filename)
         text = extraction.get("normalized_text") or extraction.get("text") or ""
-        if text.strip() or not allow_remote_fallback:
+        if not allow_remote_fallback or (text.strip() and extraction.get("transcription_status") == "complete"):
             return extraction
-        return self.get_extraction_result(file_content, filename, page_limit=None)
+        if self.docproc_url:
+            remote = self.get_extraction_result(
+                file_content, filename, page_limit=None, allow_local_fallback=False,
+            )
+            if remote.get("transcription_status") == "complete" or not text.strip():
+                return remote
+        return extraction
 
     def get_native_extraction_result(self, file_content: bytes, filename: str) -> dict:
         """Full native extraction for deal uploads, with no remote or vision calls."""
@@ -288,6 +296,8 @@ class DocumentProcessorService:
         return result
 
     def _local_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict:
+        if not getattr(settings, "ALLOW_SHARED_MODEL_DOCUMENT_VISION", False):
+            return self.get_chat_extraction_result(file_content, filename)
         ext = os.path.splitext(filename)[1].lower()
 
         # Prioritize native text extraction (PDF, DOCX, XLSX, PPTX, TXT, CSV) first.

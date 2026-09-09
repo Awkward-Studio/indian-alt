@@ -323,6 +323,7 @@ RERANKER_MODEL = config('RERANKER_MODEL', default='')
 RERANKER_TIMEOUT = config('RERANKER_TIMEOUT', default=30, cast=int)
 DOC_PROCESSOR_URL = config('DOC_PROCESSOR_URL', default='')
 DOC_PROCESSOR_API_KEY = config('DOC_PROCESSOR_API_KEY', default='')
+ALLOW_SHARED_MODEL_DOCUMENT_VISION = config('ALLOW_SHARED_MODEL_DOCUMENT_VISION', default=False, cast=bool)
 
 # Anthropic Settings
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default=config('CLAUDE_API_KEY', default=''))

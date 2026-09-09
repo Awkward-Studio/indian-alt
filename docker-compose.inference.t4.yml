@@ -24,6 +24,7 @@ services:
     command:
       - -hf
       - ${LLAMA_MODEL_SOURCE:-bartowski/gemma-4-12B-it-GGUF:Q8_0}
+      - --no-mmproj
       - --alias
       - ${VLLM_TEXT_MODEL:-gemma-4-12b-it-q8}
       - --host
@@ -33,18 +34,24 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --ctx-size
-      - ${LLAMA_CONTEXT_SIZE:-16384}
+      - ${LLAMA_CONTEXT_SIZE:-32768}
       - --parallel
       - ${LLAMA_PARALLEL_SEQUENCES:-1}
       - --slots
       - --n-gpu-layers
-      - ${LLAMA_GPU_LAYERS:-99}
+      # Auto fitting may keep some layers in RAM. Reserve room for both TEI
+      # services and transient CUDA allocations, including on a cold start.
+      - ${LLAMA_GPU_LAYERS:-auto}
+      - --fit
+      - "on"
+      - --fit-target
+      - ${LLAMA_FIT_TARGET:-3072}
       - --batch-size
-      - ${LLAMA_BATCH_SIZE:-2048}
+      - ${LLAMA_BATCH_SIZE:-256}
       - --ubatch-size
       # This is the text endpoint. Document vision must use the dedicated OCR
       # endpoint so its non-causal image batches cannot destabilize this server.
-      - ${LLAMA_UBATCH_SIZE:-512}
+      - ${LLAMA_UBATCH_SIZE:-128}
       - --cache-type-k
       - ${LLAMA_CACHE_TYPE_K:-q8_0}
       - --cache-type-v
