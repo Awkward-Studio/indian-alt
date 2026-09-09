@@ -269,6 +269,25 @@ class SearXNGProviderTests(SimpleTestCase):
         self.assertIn("[S1]", context)
         self.assertEqual(context.count("https://example.com/shared"), 1)
 
+    def test_trusted_preplanned_search_skips_second_model_planner_call(self):
+        service = SearXNGProviderService()
+        service._search_results = MagicMock(return_value=[{
+            "title": "Competitor evidence",
+            "snippet": "Grounded evidence",
+            "url": "https://example.com/competitor",
+        }])
+
+        results = service.search_results(
+            "Acme competitors India",
+            num_results=3,
+            aggregate_engines=True,
+            skip_intent_planning=True,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.planner.assert_not_called()
+        service._search_results.assert_called_once()
+
     def test_research_search_filters_navigation_and_balances_queries(self):
         service = SearXNGProviderService()
         service._search_results = MagicMock(side_effect=[
@@ -2957,6 +2976,7 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(second.data["task_id"], first.data["task_id"])
         self.assertTrue(second.data["reused"])
         self.assertEqual(mock_apply_async.call_count, 1)
+        self.assertEqual(mock_apply_async.call_args.kwargs["queue"], "low_priority")
 
     @patch("celery.result.AsyncResult")
     @patch("deals.tasks.fetch_competitors_async_task.apply_async")

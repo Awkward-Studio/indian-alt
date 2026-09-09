@@ -19,6 +19,7 @@ from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
 from .services.contact_linking import sync_deal_contact_links
 from .services.document_artifacts import DocumentArtifactService
+from .services.report_status import is_complete_analyst_report
 class DealPhaseLogSerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.name', read_only=True)
     
@@ -753,6 +754,7 @@ class DealListSerializer(serializers.ModelSerializer):
         read_only=True,
     )
     has_analysis = serializers.BooleanField(read_only=True)
+    has_complete_analysis = serializers.SerializerMethodField()
     has_vi_data = serializers.BooleanField(read_only=True)
     has_competitors = serializers.SerializerMethodField()
     bank_name = serializers.CharField(source='bank.name', read_only=True)
@@ -832,6 +834,13 @@ class DealListSerializer(serializers.ModelSerializer):
                 break
         return risks
 
+    def get_has_complete_analysis(self, obj):
+        payload = getattr(obj, 'latest_analysis_json', None)
+        if payload is None:
+            latest = getattr(obj, 'latest_analysis', None)
+            payload = getattr(latest, 'analysis_json', None)
+        return is_complete_analyst_report(payload)
+
     def get_ambiguities(self, obj):
         ambiguities = getattr(obj, 'latest_analysis_ambiguities', None)
         if ambiguities is None:
@@ -870,7 +879,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
             'received_at', 'days_since_sourcing', 'receipt_date_state',
             'receipt_date_has_evidence', 'created_at', 'updated_at',
-            'has_analysis', 'has_vi_data', 'has_competitors',
+            'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',

@@ -1241,13 +1241,26 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         }
         for doc in docs
     ]
+    # The provider's context preflight counts the complete serialized request
+    # in its conservative byte budget. Bound the reducer's final evidence pack
+    # to the same window, leaving room for the synthesis completion and the
+    # provider/template reserve. This prevents section completion from being
+    # rejected after the one-shot synthesis has already succeeded.
+    configured_context_bytes = int(getattr(settings, "VDR_REPORT_CONTEXT_BYTES", 135_000))
+    model_window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65_536))
+    synthesis_tokens = int(getattr(settings, "VDR_SYNTHESIS_MAX_TOKENS", 12_000))
+    # Include both the provider's template reserve and the synthesis prompt
+    # wrapper/system instructions, which are not part of the evidence string.
+    request_overhead = 8_192
+    safe_context_bytes = max(1_000, model_window - synthesis_tokens - request_overhead)
+    effective_context_bytes = min(configured_context_bytes, safe_context_bytes)
     evidence_context, covered_document_count = ChatDocumentChunkService(
         progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
         cache_scope=f"deal-report:{deal.id}",
         chunk_bytes=int(getattr(settings, "VDR_REPORT_MAP_BYTES", 16_000)),
         # Conservative 3 chars/token budgeting leaves room for the prompt,
         # schema and a 12k-token report inside the configured 65k window.
-        final_bytes=int(getattr(settings, "VDR_REPORT_CONTEXT_BYTES", 135_000)),
+        final_bytes=effective_context_bytes,
         cache_ttl=int(getattr(settings, "VDR_REPORT_CACHE_TTL", 30 * 24 * 60 * 60)),
         evidence_system_prompt=BULK3_DOCUMENT_SUMMARY_SYSTEM_PROMPT,
         note_max_tokens=int(getattr(settings, "VDR_REPORT_NOTE_MAX_TOKENS", 2500)),
@@ -2871,7 +2884,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         return {"error": str(e)}
 
 
-@shared_task(queue='high_priority')
+@shared_task(queue='low_priority')
 def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
     Execute one public and one private aggregated SearXNG search, enrich evidence

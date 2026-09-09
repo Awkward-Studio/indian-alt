@@ -39,6 +39,7 @@ from .services.document_artifacts import DocumentArtifactService
 from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
 from .services.receipt_date_evidence import ReceiptDateEvidenceService
+from .services.report_status import is_complete_analyst_report
 from ai_orchestrator.models import AIAuditLog, DocumentChunk
 from ai_orchestrator.services.runtime import AIRuntimeService
 
@@ -178,6 +179,9 @@ class DealFilterSet(django_filters.FilterSet):
         choices=FundClassificationState.choices
     )
     has_analysis = django_filters.BooleanFilter(field_name='has_analysis')
+    has_complete_analysis = django_filters.BooleanFilter(
+        method='filter_has_complete_analysis'
+    )
     has_vi_data = django_filters.BooleanFilter(field_name='has_vi_data')
     has_competitors = django_filters.BooleanFilter(
         method='filter_has_competitors'
@@ -199,6 +203,21 @@ class DealFilterSet(django_filters.FilterSet):
     def filter_has_competitors(self, queryset, name, value):
         return queryset.filter(has_vi_competitors=value)
 
+    def filter_has_complete_analysis(self, queryset, name, value):
+        """Filter against the latest report's exact 11-section contract.
+
+        The canonical report is stored in JSON and may live at either the
+        top-level or canonical_snapshot key. The dashboard queryset already
+        exposes the latest payload, so evaluate only when this opt-in filter
+        is requested and then constrain the final SQL queryset by primary key.
+        """
+        complete_ids = [
+            row['pk']
+            for row in queryset.values('pk', 'latest_analysis_json')
+            if is_complete_analyst_report(row.get('latest_analysis_json'))
+        ]
+        return queryset.filter(pk__in=complete_ids) if value else queryset.exclude(pk__in=complete_ids)
+
     def filter_pass_reason_state(self, queryset, name, value):
         normalized = Trim(Coalesce('reasons_for_passing', Value(''), output_field=CharField()))
         queryset = queryset.annotate(_pass_reason_filter=normalized)
@@ -213,7 +232,7 @@ class DealFilterSet(django_filters.FilterSet):
             'industry',
             'bank_name', 'banker_name',
             'fund_classification_state',
-            'has_analysis', 'has_vi_data', 'has_competitors',
+            'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
             'pass_reason', 'pass_reason_state',
         ]
 
@@ -484,7 +503,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
         'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
-        'is_female_led', 'has_analysis', 'has_vi_data', 'bank__name',
+        'is_female_led', 'has_analysis', 'has_complete_analysis', 'has_vi_data', 'bank__name',
         'primary_contact__name',
     ]
     ordering = ['-received_at', '-created_at']
@@ -2427,14 +2446,18 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     'instruction': instruction,
                     'existing_competitors': existing_competitors,
                 },
-                queue='high_priority',
+                # Competitor research calls the same single vLLM model as
+                # document extraction and report generation. Keep it on the
+                # low-priority AI queue so it waits behind the active model
+                # task instead of racing the document queue's inference work.
+                queue='low_priority',
                 task_id=task_id,
             )
             return Response({
                 "status": "queued",
                 "task_id": task.id,
                 "reused": False,
-                "message": "Competitor research background task successfully initialized."
+                "message": "Competitor research queued behind active document/report AI work.",
             })
         except Exception as e:
             if 'cache_key' in locals() and 'task_id' in locals() and cache.get(cache_key) == task_id:

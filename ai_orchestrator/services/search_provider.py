@@ -33,8 +33,32 @@ class SearXNGProviderService:
         aggregate_engines: bool = False,
         engine_subset: list[str] | None = None,
         time_range: str | None = None,
+        skip_intent_planning: bool = False,
     ) -> list[dict[str, Any]]:
-        """All public entry points infer intent before contacting search engines."""
+        """Search one query, optionally using a trusted pre-planned query.
+
+        ``skip_intent_planning`` is reserved for internal callers that already
+        generated and validated the query with the model. It avoids a second
+        planner request immediately before contacting SearXNG, which is
+        important when the single inference worker is busy with another job.
+        Browser/API callers continue through ``search_many`` and are always
+        intent-planned.
+        """
+        if skip_intent_planning:
+            if num_results <= 0:
+                self.last_status = "no_results"
+                return []
+            results = self._search_results(
+                query,
+                num_results=num_results,
+                aggregate_engines=aggregate_engines,
+                engine_subset=engine_subset,
+                time_range=time_range,
+            )
+            return [
+                result for result in results
+                if not self._is_low_value_navigation_result(result)
+            ][:num_results]
         return self.search_many(
             [query], results_per_query=num_results, max_results=num_results,
             context=context, time_range=time_range,
