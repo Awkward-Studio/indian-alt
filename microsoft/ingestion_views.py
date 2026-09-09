@@ -141,13 +141,13 @@ class EmailIngestionActions:
         if request.method == 'POST':
             if not enabled:
                 return Response({'error': 'Email ingestion is not enabled.'}, status=503)
-            run = EmailIngestionService.enqueue(email, dispatch=False)
-            # Each analyst click advances exactly one stage inline.
-            EmailIngestionService.process(run.id)
-            run.refresh_from_db()
+            run, audit = EmailIngestionService.start(email, requested_by=request.user)
         else:
             run = email.ingestion_runs.first()
-        return Response({**run_status(run, include_content=True), 'enabled': enabled})
+            audit = EmailIngestionService._audit_log_for_run(run) if run else None
+        payload = {**run_status(run, include_content=True), 'enabled': enabled}
+        payload['audit_log_id'] = str(audit.id) if audit else None
+        return Response(payload, status=202 if request.method == 'POST' else 200)
 
     @action(detail=True, methods=['post'], url_path='ingestion-confirm')
     def ingestion_confirm(self, request, pk=None):

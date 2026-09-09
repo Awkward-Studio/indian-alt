@@ -19,6 +19,132 @@ logger = logging.getLogger(__name__)
 
 class EmailIngestionService:
     @staticmethod
+    def _audit_log_for_run(run):
+        audit_id = (run.source or {}).get('_audit_log_id') if isinstance(run.source, dict) else None
+        if not audit_id:
+            return None
+        from ai_orchestrator.models import AIAuditLog
+        return AIAuditLog.objects.filter(pk=audit_id).first()
+
+    @classmethod
+    def ensure_audit_log(cls, run, *, requested_by=None):
+        """Create one durable, user-visible audit row for an ingestion run."""
+        from django.db import transaction
+        from ai_orchestrator.services.runtime import AIRuntimeService
+
+        with transaction.atomic():
+            locked_run = EmailIngestionRun.objects.select_for_update().select_related('email').get(pk=run.pk)
+            existing = cls._audit_log_for_run(locked_run)
+            if existing:
+                run.source = locked_run.source
+                return existing
+
+            audit = AIRuntimeService.create_audit_log(
+                source_type='email_ingestion',
+                source_id=str(locked_run.email_id),
+                context_label=f'Email ingestion: {locked_run.email.subject or "Untitled email"}',
+                status='PENDING',
+                is_success=False,
+                system_prompt='Capture, classify, route, and index email evidence.',
+                user_prompt=f'Queue evidence ingestion for email {locked_run.email_id}.',
+                source_metadata={
+                    'run_id': str(locked_run.id),
+                    'input_version': locked_run.input_version,
+                    'workflow': 'email_evidence',
+                },
+                requested_by=requested_by,
+            )
+            locked_run.source = {**(locked_run.source or {}), '_audit_log_id': str(audit.id)}
+            locked_run.save(update_fields=['source', 'updated_at'])
+            run.source = locked_run.source
+            return audit
+
+    @classmethod
+    def _sync_audit_log(cls, run, *, task_id=None):
+        """Mirror durable run state into the AI audit ledger without blocking ingestion."""
+        audit = cls._audit_log_for_run(run)
+        if not audit:
+            return
+
+        from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+        terminal = run.status in ('completed', 'needs_review', 'failed')
+        if run.status == 'failed':
+            status = 'FAILED'
+        elif run.status in ('completed', 'needs_review'):
+            status = 'COMPLETED'
+        else:
+            status = 'PROCESSING'
+        now = timezone.now()
+        audit.status = status
+        audit.is_success = run.status == 'completed'
+        audit.error_message = run.error or ('Manual review required.' if run.status == 'needs_review' else '')
+        audit.source_metadata = {
+            **(audit.source_metadata or {}),
+            'run_id': str(run.id),
+            'run_status': run.status,
+            'stages': run.stages or {},
+            'match': run.match or {},
+        }
+        if task_id:
+            audit.celery_task_id = str(task_id)
+        if terminal:
+            audit.completed_at = now
+            audit.parsed_json = {
+                'run_id': str(run.id),
+                'status': run.status,
+                'stages': run.stages or {},
+                'classification': run.classification or {},
+                'match': run.match or {},
+            }
+        update_fields = [
+            'status', 'is_success', 'error_message', 'source_metadata',
+            'celery_task_id',
+        ]
+        if terminal:
+            update_fields += ['completed_at', 'parsed_json']
+        audit.save(update_fields=update_fields)
+        try:
+            broadcast_audit_log_update(audit, event_type='terminal' if terminal else 'snapshot', done=terminal)
+        except Exception:
+            # Redis is optional for correctness. The history API still exposes the row.
+            logger.warning('Could not broadcast email ingestion audit update for %s', audit.id, exc_info=True)
+
+    @classmethod
+    def requeue_orphaned(cls, run_id):
+        """Release a legacy inline run that has no live Celery task."""
+        from django.db import transaction
+
+        with transaction.atomic():
+            run = EmailIngestionRun.objects.select_for_update().get(pk=run_id)
+            if run.status != 'running':
+                return run
+            audit = cls._audit_log_for_run(run)
+            if audit and audit.status in ('PENDING', 'PROCESSING') and audit.celery_task_id:
+                return run
+            run.status = 'pending'
+            run.lease_until = None
+            run.lease_token = None
+            run.error = 'Recovered an interrupted web-request ingestion.'
+            run.next_attempt_at = None
+            run.save(update_fields=['status', 'lease_until', 'lease_token', 'error', 'next_attempt_at', 'updated_at'])
+            return run
+
+    @classmethod
+    def start(cls, email, *, requested_by=None):
+        """Start ingestion asynchronously and return its run and audit row."""
+        run = cls.enqueue(email, dispatch=False)
+        cls.requeue_orphaned(run.id)
+        run.refresh_from_db()
+        audit = cls.ensure_audit_log(run, requested_by=requested_by)
+        if run.status in ('pending', 'waiting_service', 'failed'):
+            cls.dispatch(run.id, audit_log_id=str(audit.id))
+        else:
+            cls._sync_audit_log(run)
+        run.refresh_from_db()
+        return run, audit
+
+    @staticmethod
     def extract_attachment_text(content, title, *, allow_remote):
         """Extract the complete attachment locally, with remote OCR as fallback."""
         from ai_orchestrator.services.document_processor import DocumentProcessorService
@@ -75,10 +201,16 @@ class EmailIngestionService:
         return run
 
     @staticmethod
-    def dispatch(run_id):
+    def dispatch(run_id, *, audit_log_id=None, countdown=None):
         from microsoft.tasks import ingest_email_evidence
         try:
-            ingest_email_evidence.apply_async(args=[str(run_id)], queue='low_priority', retry=False)
+            result = ingest_email_evidence.apply_async(
+                args=[str(run_id)], queue='low_priority', countdown=countdown, retry=False,
+            )
+            if audit_log_id:
+                from ai_orchestrator.models import AIAuditLog
+                AIAuditLog.objects.filter(pk=audit_log_id).update(celery_task_id=str(result.id))
+            return result
         except Exception:
             # The run is the outbox. Reconciliation retries publication.
             logger.warning('Email ingestion dispatch pending for %s', run_id, exc_info=True)
@@ -114,15 +246,13 @@ class EmailIngestionService:
             return run
 
     @classmethod
-    def process(cls, run_id, *, use_ai=None):
+    def process(cls, run_id, *, use_ai=None, task_id=None, stop_after_decision=False):
         run = cls.claim(run_id)
         if run is None:
             return {'status': 'not_claimed'}
+        cls._sync_audit_log(run, task_id=task_id)
         try:
             available = cls.text_available() if use_ai is None else use_ai
-            # Capture files before decisions so review or VM outages cannot lose originals.
-            attachment_failures = Evidence.save_attachments(run)
-            link_failures = Evidence.save_links(run)
             parts = Evidence.parts(run)
             if (
                 not run.classification
@@ -130,10 +260,10 @@ class EmailIngestionService:
                 or not run.match
                 or run.match.get('status') not in ('matched',)
             ):
-                decision_document_context = cls.decision_document_context(
-                    run,
-                    allow_remote=available,
-                )
+                # The first pass only needs the email body, subject, and headers.
+                # Do not walk attachments or links here. OCR/docproc belongs to
+                # the artifact stage after the analyst confirms the route.
+                decision_document_context = ''
                 confirmed_classification = (
                     dict(run.classification)
                     if run.classification.get('method') == 'manual'
@@ -165,12 +295,26 @@ class EmailIngestionService:
             run.stages['classification'] = run.classification.get('status', 'completed')
             run.stages['match'] = run.match['status']
             run.save(update_fields=['classification', 'match', 'stages', 'updated_at'])
+            if stop_after_decision and run.stages.get('review') == 'pending':
+                run.status = 'needs_review' if available or run.match.get('candidates') else 'waiting_service'
+                return cls.release(run)
             if run.match['status'] != 'matched':
                 run.status = 'needs_review' if available or run.match.get('candidates') else 'waiting_service'
+                return cls.release(run)
+            # A fresh automatic route is the review checkpoint. Stop here even
+            # for an existing-deal match so the first request never processes
+            # every attachment just to discover the deal name.
+            if stop_after_decision and run.stages.get('review') != 'confirmed':
+                run.stages['review'] = 'pending'
+                run.save(update_fields=['stages', 'updated_at'])
+                run.status = 'needs_review' if available or run.match.get('candidates') or run.match.get('status') == 'matched' else 'waiting_service'
                 return cls.release(run)
             if run.classification.get('status') == 'waiting_service':
                 run.status = 'waiting_service'
                 return cls.release(run)
+            # Artifact processing starts only after the route has been confirmed.
+            attachment_failures = Evidence.save_attachments(run)
+            link_failures = Evidence.save_links(run)
             deal = Deal.objects.get(pk=run.match['deal_id'])
             # The first routing pass is authoritative. Only align segment count
             # after known contributions have been unfolded for this deal.
@@ -221,6 +365,7 @@ class EmailIngestionService:
         delay = min(3600, 30 * 2 ** min(run.attempts, 7))
         run.next_attempt_at = timezone.now() + timedelta(seconds=delay) if run.status in ('waiting_service', 'failed') else None
         run.save()
+        EmailIngestionService._sync_audit_log(run)
         Email.objects.filter(pk=run.email_id).update(
             is_indexed=run.stages.get('index') == 'completed',
             processing_status='completed' if run.status == 'completed' else ('failed' if run.status == 'failed' else 'pending'),

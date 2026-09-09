@@ -182,6 +182,7 @@ def confirm_decision(run_id, *, email, deal, expected_revision, kind=None, actor
         'at': timezone.now().isoformat(), 'previous': previous, 'deal_id': str(deal.id), 'kind': kind}]
     run.revision += 1
     run.status = 'pending'
+    run.stages = {**(run.stages or {}), 'review': 'confirmed'}
     run.next_attempt_at = None
     run.error = ''
     run.save()

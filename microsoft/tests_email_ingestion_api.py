@@ -30,6 +30,21 @@ class EmailIngestionAPITests(TestCase):
         self.assertIn(self.client.get(self.url + 'ingestion/').status_code, [401, 403])
 
     @patch.object(Ingestion, 'dispatch')
+    @patch.object(Ingestion, 'process')
+    def test_ingestion_request_queues_worker_and_returns_audit_id(self, process, dispatch):
+        response = self.client.post(self.url + 'ingestion/', {}, format='json')
+
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data['status'], 'pending')
+        self.assertTrue(response.data['audit_log_id'])
+        process.assert_not_called()
+        dispatch.assert_called_once()
+        audit = AIAuditLog.objects.get(pk=response.data['audit_log_id'])
+        self.assertEqual(audit.source_type, 'email_ingestion')
+        self.assertEqual(audit.source_id, str(self.email.id))
+        self.assertEqual(audit.status, 'PENDING')
+
+    @patch.object(Ingestion, 'dispatch')
     @patch.object(Ingestion, 'index_outputs', return_value=False)
     def test_correction_removes_old_owned_documents_and_rejects_stale_revision(self, index, dispatch):
         Ingestion.process(self.run.id, use_ai=False)

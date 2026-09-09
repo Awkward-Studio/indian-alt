@@ -63,10 +63,10 @@ class EmailRecoveryTests(TestCase):
         Ingestion.process(run.id, use_ai=False)
         self.assertEqual(self.deal.meeting_notes.count(), 1)
 
-    @patch.object(Ingestion, 'decision_document_context', return_value='--- CAPTURED DOCUMENT: WHP model.xlsx ---')
+    @patch.object(Ingestion, 'decision_document_context')
     @patch.object(Decisions, 'initialize', return_value={'deal_model_data': {'title': 'WHP Jewellers'}})
     @patch.object(Decisions, 'route')
-    def test_review_route_still_gets_name_from_captured_documents(self, route, initialize, context):
+    def test_review_route_uses_email_body_before_artifact_processing(self, route, initialize, document_context):
         route.return_value = {
             'classification': {
                 'type': 'NORMAL_EMAIL', 'status': 'completed', 'segment_roles': [],
@@ -84,7 +84,8 @@ class EmailRecoveryTests(TestCase):
         run.refresh_from_db()
         self.assertEqual(run.match['initialization']['deal_model_data']['title'], 'WHP Jewellers')
         initialize.assert_called_once()
-        self.assertEqual(initialize.call_args.kwargs['supplemental_text'], context.return_value)
+        self.assertEqual(initialize.call_args.kwargs['supplemental_text'], '')
+        document_context.assert_not_called()
 
     @patch.object(Decisions, 'route', side_effect=EmailDecisionUnavailable('VM request timed out'))
     def test_transient_decision_failure_is_scheduled_for_retry(self, _route):
