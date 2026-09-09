@@ -70,12 +70,57 @@ async def _execute(provider, body, active_timeout, progress):
         async def post(slot_id):
             async with session.post(
                 provider._get_completions_url(),
-                json={**body, "id_slot": slot_id}, timeout=request_timeout,
+                json={**body, "id_slot": slot_id, "stream": True}, timeout=request_timeout,
             ) as response:
                 if response.status == 503:
                     return None
                 response.raise_for_status()
-                return await response.json()
+                response_text = bytearray()
+                response_data = None
+                response_content = []
+                response_thinking = []
+                finish_reason = None
+                async for raw_line in response.content:
+                    response_text.extend(raw_line)
+                    for line in raw_line.decode("utf-8", errors="replace").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            line = line[5:].strip()
+                        if line == "[DONE]":
+                            return {
+                                "choices": [{"message": {"content": "".join(response_content), "reasoning_content": "".join(response_thinking)}, "finish_reason": finish_reason or "stop"}],
+                            }
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("error"):
+                            raise InferenceDeliveryError(str(chunk["error"]))
+                        response_data = chunk
+                        choice = (chunk.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+                        message = choice.get("message") or {}
+                        response_content.append(str(delta.get("content") or message.get("content") or ""))
+                        response_thinking.append(str(delta.get("reasoning_content") or message.get("reasoning_content") or ""))
+                        finish_reason = choice.get("finish_reason") or finish_reason
+                if response_data and response_content:
+                    return {
+                        **response_data,
+                        "choices": [{
+                            "message": {"content": "".join(response_content), "reasoning_content": "".join(response_thinking)},
+                            "finish_reason": finish_reason or "stop",
+                        }],
+                    }
+                # Some llama.cpp builds return one JSON body even when stream
+                # was requested. Keep that compatibility path.
+                if response_text:
+                    try:
+                        return json.loads(response_text.decode("utf-8"))
+                    except json.JSONDecodeError as exc:
+                        raise InferenceDeliveryError("VM returned an incomplete response body.") from exc
+                raise InferenceDeliveryError("VM returned an empty response body.")
 
         while True:
             await notify(inference_state="waiting_for_slot")
