@@ -89,8 +89,12 @@ class Command(BaseCommand):
             raise CommandError("--min-score must be greater than 0 and at most 1")
         if options["tui_page_size"] < 1:
             raise CommandError("--tui-page-size must be at least 1")
+        if options["tui"] and (options["interactive"] or options["smart_interactive"]):
+            raise CommandError("Use --tui with optional --apply, not with --interactive or --smart-interactive")
+        if options["apply"] and (options["interactive"] or options["smart_interactive"]):
+            raise CommandError("Use only one of --apply, --interactive, or --smart-interactive")
         selected_modes = sum(
-            bool(options[name]) for name in ("apply", "interactive", "smart_interactive", "tui")
+            bool(options[name]) for name in ("interactive", "smart_interactive", "tui")
         )
         if selected_modes > 1:
             raise CommandError("Use only one of --apply, --interactive, --smart-interactive, or --tui")
@@ -152,6 +156,13 @@ class Command(BaseCommand):
             record for record in report
             if record["status"] in {"ready", "ambiguous"}
         ]
+        if not candidates:
+            self.stdout.write(
+                "\nTUI: no actionable matches were found. "
+                "Only 'ready' and 'ambiguous' rows appear here; inspect the summary "
+                "for no_match, already_linked_to_deal, and duplicate-folder rows."
+            )
+            return
         page = 0
 
         while candidates:

@@ -130,7 +130,7 @@ class LinkMissingOneDriveFoldersCommandTests(TestCase):
         }
 
         with patch("builtins.input", return_value="1,2"):
-            call_command("link_missing_onedrive_folders", "--tui", stdout=StringIO())
+            call_command("link_missing_onedrive_folders", "--tui", "--apply", stdout=StringIO())
 
         first.refresh_from_db()
         second.refresh_from_db()
