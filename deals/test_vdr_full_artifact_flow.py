@@ -7,6 +7,12 @@ from deals.services.document_artifacts import DocumentArtifactCancelled
 
 
 class FullVDRArtifactTests(SimpleTestCase):
+    def test_report_generation_has_no_wall_clock_deadline(self):
+        from deals.tasks import generate_vdr_analysis_async
+
+        self.assertEqual(generate_vdr_analysis_async.soft_time_limit, 0)
+        self.assertEqual(generate_vdr_analysis_async.time_limit, 0)
+
     def test_document_waiting_has_no_wall_clock_deadline(self):
         from deals.tasks import process_single_document_async
 

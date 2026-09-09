@@ -24,7 +24,10 @@ class ICReportSectionServiceTests(SimpleTestCase):
         self.assertTrue(ICReportSectionService.is_complete(result))
         service.process_content.assert_not_called()
 
-    @override_settings(EMAIL_REPORT_SECTION_MAX_TOKENS=3072)
+    @override_settings(
+        EMAIL_REPORT_SECTION_MAX_TOKENS=3072,
+        EMAIL_REPORT_SECTION_TIMEOUT=1800,
+    )
     @patch("ai_orchestrator.services.report_sections.cache")
     def test_incomplete_tail_is_generated_and_cached_by_section(self, report_cache):
         report_cache.get.return_value = None
@@ -48,6 +51,7 @@ class ICReportSectionServiceTests(SimpleTestCase):
         self.assertEqual(ICReportSectionService.headings(result), list(IC_SECTION_TITLES))
         self.assertEqual(service.process_content.call_count, 4)
         self.assertTrue(all(call.kwargs["metadata"]["max_tokens"] == 3072 for call in service.process_content.call_args_list))
+        self.assertTrue(all(call.kwargs["metadata"]["request_timeout"] == 1800 for call in service.process_content.call_args_list))
         self.assertEqual(report_cache.set.call_count, 4)
 
     @patch("ai_orchestrator.services.report_sections.cache")

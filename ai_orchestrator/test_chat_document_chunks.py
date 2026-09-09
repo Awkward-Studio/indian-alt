@@ -106,12 +106,14 @@ class ChatDocumentChunksTests(SimpleTestCase):
             provider=provider,
             model='local',
             note_max_tokens=0,
+            request_timeout=1800,
         )
         service._process('dense spreadsheet evidence', 'Summarize all evidence')
 
         payload = provider.execute_standard.call_args.args[0]
         self.assertEqual(payload['options'], {'temperature': 0})
         self.assertNotIn('max_tokens', payload['options'])
+        self.assertEqual(provider.execute_standard.call_args.kwargs['timeout'], 1800)
 
     def test_positive_note_limit_is_preserved(self):
         provider = MagicMock()
@@ -126,3 +128,4 @@ class ChatDocumentChunksTests(SimpleTestCase):
 
         payload = provider.execute_standard.call_args.args[0]
         self.assertEqual(payload['options']['max_tokens'], 2500)
+        self.assertEqual(provider.execute_standard.call_args.kwargs['timeout'], 180)

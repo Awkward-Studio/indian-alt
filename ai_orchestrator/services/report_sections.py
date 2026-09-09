@@ -116,7 +116,7 @@ Internal evidence:
                 "response_mode": "markdown",
                 "temperature": 0.0,
                 "max_tokens": int(getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192)),
-                "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 180)),
+                "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
                 "context_label": f"Email report section: {title}",
             },

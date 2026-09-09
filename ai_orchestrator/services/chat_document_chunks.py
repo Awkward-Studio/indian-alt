@@ -43,6 +43,7 @@ class ChatDocumentChunkService:
         cache_ttl=None,
         evidence_system_prompt=None,
         note_max_tokens=None,
+        request_timeout=180,
     ):
         self.provider = provider or VLLMProviderService()
         self.model = model or AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
@@ -59,6 +60,7 @@ class ChatDocumentChunkService:
         self.note_max_tokens = (
             900 if note_max_tokens is None else max(0, int(note_max_tokens))
         )
+        self.request_timeout = max(1, int(request_timeout))
 
     def _process(self, text, question, *, reducing=False):
         system = self.evidence_system_prompt or (
@@ -95,7 +97,7 @@ class ChatDocumentChunkService:
             'options': options,
             'chat_template_kwargs': {'enable_thinking': False},
             '_enforce_context_budget': True,
-        }, timeout=180)
+        }, timeout=self.request_timeout)
         note = str(result.get('response') or '').strip()
         finish = ((result.get('raw') or {}).get('choices') or [{}])[0].get('finish_reason')
         if not note:

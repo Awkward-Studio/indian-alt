@@ -268,7 +268,7 @@ EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=True, cast=b
 EMAIL_DECISION_TIMEOUT = config('EMAIL_DECISION_TIMEOUT', default=300, cast=int)
 EMAIL_SYNTHESIS_MAX_TOKENS = config('EMAIL_SYNTHESIS_MAX_TOKENS', default=16384, cast=int)
 EMAIL_REPORT_SECTION_MAX_TOKENS = config('EMAIL_REPORT_SECTION_MAX_TOKENS', default=8192, cast=int)
-EMAIL_REPORT_SECTION_TIMEOUT = config('EMAIL_REPORT_SECTION_TIMEOUT', default=180, cast=int)
+EMAIL_REPORT_SECTION_TIMEOUT = config('EMAIL_REPORT_SECTION_TIMEOUT', default=1800, cast=int)
 EMAIL_REPORT_SECTION_CACHE_TTL = config('EMAIL_REPORT_SECTION_CACHE_TTL', default=604800, cast=int)
 VDR_ARTIFACT_SEGMENT_MAX_TOKENS = config('VDR_ARTIFACT_SEGMENT_MAX_TOKENS', default=32768, cast=int)
 VDR_ARTIFACT_SEGMENT_WORKERS = config('VDR_ARTIFACT_SEGMENT_WORKERS', default=1, cast=int)
@@ -281,6 +281,7 @@ VDR_REPORT_CONTEXT_BYTES = config('VDR_REPORT_CONTEXT_BYTES', default=135000, ca
 # Zero lets evidence-map notes finish without a fixed output cap. The provider
 # still rejects requests whose complete input exceeds the model context window.
 VDR_REPORT_NOTE_MAX_TOKENS = config('VDR_REPORT_NOTE_MAX_TOKENS', default=0, cast=int)
+VDR_REPORT_NOTE_TIMEOUT = config('VDR_REPORT_NOTE_TIMEOUT', default=1800, cast=int)
 VDR_REPORT_CACHE_TTL = config('VDR_REPORT_CACHE_TTL', default=2592000, cast=int)
 VDR_SYNTHESIS_MAX_TOKENS = config('VDR_SYNTHESIS_MAX_TOKENS', default=12000, cast=int)
 EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))

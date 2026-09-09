@@ -1283,6 +1283,7 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         # output allowance. Zero omits max_tokens from these intermediate map
         # and reduce calls while the provider still enforces the input window.
         note_max_tokens=int(getattr(settings, "VDR_REPORT_NOTE_MAX_TOKENS", 0)),
+        request_timeout=int(getattr(settings, "VDR_REPORT_NOTE_TIMEOUT", 1800)),
     ).build_context(
         context_documents,
         (
@@ -1648,7 +1649,7 @@ def process_deal_folder_background(
     return {"status": "dispatched", "task_count": len(tasks)}
 
 
-@shared_task(bind=True, max_retries=2)
+@shared_task(bind=True, max_retries=2, soft_time_limit=0, time_limit=0)
 def generate_vdr_analysis_async(self, deal_id: str, audit_log_id: str, allow_gaps: bool = False):
     """Generate a new report version after a user confirms the deal evidence set."""
     from ai_orchestrator.models import AIAuditLog
