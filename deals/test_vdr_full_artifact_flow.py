@@ -68,6 +68,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
         self.assertIn("Extract structured internal-document evidence", first_prompt)
+        self.assertEqual(first_metadata["max_tokens"], 32768)
         self.assertEqual(first_metadata["request_timeout"], 1800)
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
