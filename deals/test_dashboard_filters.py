@@ -2,7 +2,11 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal
+from deals.serializers import DealListSerializer
+from deals.views import DealFilterSet, DealViewSet
+from deals.models import DealDocument
 
 
 class DealTableFilterTests(TestCase):
@@ -77,3 +81,49 @@ class DealTableFilterTests(TestCase):
             {row["id"] for row in response.data["results"]},
             {str(active.id), str(stale_secondary_status.id)},
         )
+
+    def test_dashboard_exposes_folder_and_deal_document_counts(self):
+        linked = Deal.objects.create(
+            title="Linked dataroom",
+            source_onedrive_id="folder-1",
+            source_drive_id="drive-1",
+        )
+        unlinked = Deal.objects.create(title="Unlinked dataroom")
+        DealDocument.objects.create(deal=linked, title="Memo")
+        DealDocument.objects.create(deal=linked, title="Model")
+        AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-1",
+            model_used="test",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            source_metadata={
+                "drive_id": "drive-1",
+                "total_files": 7,
+                "file_tree": [{"id": "file-1"}],
+            },
+        )
+
+        queryset = DealViewSet.queryset.filter(pk__in=[linked.pk, unlinked.pk])
+        payload = {
+            row["title"]: row
+            for row in DealListSerializer(queryset, many=True).data
+        }
+
+        self.assertEqual(payload["Linked dataroom"]["folder_linked"], True)
+        self.assertEqual(payload["Linked dataroom"]["deal_document_count"], 2)
+        self.assertEqual(payload["Linked dataroom"]["folder_document_count"], 7)
+        self.assertEqual(payload["Unlinked dataroom"]["folder_linked"], False)
+        self.assertEqual(payload["Unlinked dataroom"]["deal_document_count"], 0)
+        self.assertIsNone(payload["Unlinked dataroom"]["folder_document_count"])
+
+        filtered = DealFilterSet(
+            data={
+                "folder_linked": "true",
+                "deal_document_count_min": "2",
+                "folder_document_count_min": "7",
+            },
+            queryset=DealViewSet.queryset.all(),
+        ).qs
+        self.assertEqual(list(filtered.values_list("title", flat=True)), ["Linked dataroom"])

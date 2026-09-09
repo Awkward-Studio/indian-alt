@@ -762,6 +762,9 @@ class DealListSerializer(serializers.ModelSerializer):
     has_complete_analysis = serializers.SerializerMethodField()
     has_vi_data = serializers.BooleanField(read_only=True)
     has_competitors = serializers.SerializerMethodField()
+    folder_linked = serializers.SerializerMethodField()
+    deal_document_count = serializers.IntegerField(read_only=True)
+    folder_document_count = serializers.IntegerField(read_only=True, allow_null=True)
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
@@ -867,6 +870,9 @@ class DealListSerializer(serializers.ModelSerializer):
     def get_has_competitors(self, obj):
         return bool(getattr(obj, 'has_vi_competitors', False))
 
+    def get_folder_linked(self, obj):
+        return bool((obj.source_onedrive_id or '').strip())
+
     def get_receipt_date_state(self, obj):
         if obj.received_at:
             return 'CANONICAL'
@@ -885,6 +891,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'received_at', 'days_since_sourcing', 'receipt_date_state',
             'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
+            'folder_linked', 'deal_document_count', 'folder_document_count',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',

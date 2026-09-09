@@ -13,7 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.core.cache import cache
-from django.db.models import CharField, Count, Exists, F, JSONField, OuterRef, Prefetch, Q, Subquery, Value
+from django.db.models import CharField, Count, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
 from django.db.models.functions import Coalesce, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -186,6 +186,25 @@ class DealFilterSet(django_filters.FilterSet):
     has_competitors = django_filters.BooleanFilter(
         method='filter_has_competitors'
     )
+    folder_linked = django_filters.BooleanFilter(
+        method='filter_folder_linked'
+    )
+    deal_document_count_min = django_filters.NumberFilter(
+        field_name='deal_document_count',
+        lookup_expr='gte',
+    )
+    deal_document_count_max = django_filters.NumberFilter(
+        field_name='deal_document_count',
+        lookup_expr='lte',
+    )
+    folder_document_count_min = django_filters.NumberFilter(
+        field_name='folder_document_count',
+        lookup_expr='gte',
+    )
+    folder_document_count_max = django_filters.NumberFilter(
+        field_name='folder_document_count',
+        lookup_expr='lte',
+    )
 
     def filter_deal_group(self, queryset, name, value):
         terminal_statuses = ['Passed', 'Invested', 'Portfolio']
@@ -218,6 +237,10 @@ class DealFilterSet(django_filters.FilterSet):
         ]
         return queryset.filter(pk__in=complete_ids) if value else queryset.exclude(pk__in=complete_ids)
 
+    def filter_folder_linked(self, queryset, name, value):
+        linked = Q(source_onedrive_id__isnull=False) & ~Q(source_onedrive_id='')
+        return queryset.filter(linked) if value else queryset.filter(~linked)
+
     def filter_pass_reason_state(self, queryset, name, value):
         normalized = Trim(Coalesce('reasons_for_passing', Value(''), output_field=CharField()))
         queryset = queryset.annotate(_pass_reason_filter=normalized)
@@ -233,7 +256,9 @@ class DealFilterSet(django_filters.FilterSet):
             'bank_name', 'banker_name',
             'fund_classification_state',
             'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
-            'pass_reason', 'pass_reason_state',
+            'pass_reason', 'pass_reason_state', 'folder_linked',
+            'deal_document_count_min', 'deal_document_count_max',
+            'folder_document_count_min', 'folder_document_count_max',
         ]
 
 
@@ -489,6 +514,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 status='REJECTED',
             )
         ),
+        deal_document_count=Count(
+            'documents',
+            distinct=True,
+        ),
+        folder_document_count=Subquery(
+            AIAuditLog.objects.filter(
+                source_type='onedrive_folder',
+                source_id=OuterRef('source_onedrive_id'),
+                source_metadata__drive_id=OuterRef('source_drive_id'),
+                source_metadata__total_files__isnull=False,
+            ).order_by('-created_at').values('source_metadata__total_files')[:1],
+            output_field=IntegerField(),
+        ),
     )
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
@@ -504,7 +542,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
         'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
         'is_female_led', 'has_analysis', 'has_complete_analysis', 'has_vi_data', 'bank__name',
-        'primary_contact__name',
+        'primary_contact__name', 'deal_document_count', 'folder_document_count',
     ]
     ordering = ['-received_at', '-created_at']
     @staticmethod
