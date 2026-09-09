@@ -90,6 +90,17 @@ class DocumentArtifactService:
     SEGMENT_CHARS = 7_000
     SEGMENT_OVERLAP = 500
 
+    @staticmethod
+    def _segment_artifact_usable(artifact: Any) -> bool:
+        if not isinstance(artifact, dict) or not str(artifact.get("document_summary") or "").strip():
+            return False
+        invalid_flags = {
+            "fallback_artifact",
+            "artifact_missing_text",
+            "artifact_segment_processing_incomplete",
+        }
+        return not invalid_flags.intersection(artifact.get("quality_flags") or [])
+
     @classmethod
     def build_document_artifact(
         cls,
@@ -148,8 +159,13 @@ class DocumentArtifactService:
                 cached = cache.get(cache_key)
             except Exception:
                 cached = None
-            if isinstance(cached, dict) and cached:
+            if cls._segment_artifact_usable(cached):
                 return index, cached, True
+            if cached:
+                try:
+                    cache.delete(cache_key)
+                except Exception:
+                    pass
 
             segment_context = {
                 "document_name": file_name,
@@ -185,9 +201,15 @@ class DocumentArtifactService:
                 metadata=metadata,
             )
             parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
+            if not isinstance(parsed, dict) or parsed.get("error"):
+                raise RuntimeError(
+                    str(parsed.get("error") if isinstance(parsed, dict) else "AI segment response was invalid.")
+                )
             artifact = cls._normalize_artifact(parsed, fallback=fallback)
             artifact["normalized_text"] = ""
             artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or "" if isinstance(result, dict) else ""
+            if not cls._segment_artifact_usable(artifact):
+                raise RuntimeError("AI segment response did not produce a complete evidence artifact.")
             try:
                 cache.set(
                     cache_key,

@@ -113,6 +113,46 @@ class FullVDRArtifactTests(SimpleTestCase):
 
         self.assertEqual(service.process_content.call_count, 1)
 
+    @patch("deals.services.document_artifacts.cache")
+    def test_poisoned_cached_segment_is_evicted_and_regenerated(self, mock_cache):
+        mock_cache.get.return_value = {
+            "document_summary": "Fallback",
+            "quality_flags": ["fallback_artifact"],
+        }
+        service = MagicMock()
+        service.process_content.return_value = {
+            "parsed_json": {
+                "document_name": "Retry.pdf",
+                "document_summary": "Recovered evidence",
+                "quality_flags": [],
+            },
+        }
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Retry.pdf",
+            extracted_text="Complete source evidence for retry.",
+            ai_service=service,
+        )
+
+        mock_cache.delete.assert_called_once()
+        service.process_content.assert_called_once()
+        self.assertEqual(DocumentArtifactService.artifact_status(artifact), "complete")
+
+    @patch("deals.services.document_artifacts.cache")
+    def test_provider_error_is_not_cached_as_segment_evidence(self, mock_cache):
+        mock_cache.get.return_value = None
+        service = MagicMock()
+        service.process_content.return_value = {"error": "model request timed out"}
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Timeout.pdf",
+            extracted_text="Complete source evidence that needs model processing.",
+            ai_service=service,
+        )
+
+        mock_cache.set.assert_not_called()
+        self.assertIn("artifact_segment_processing_incomplete", artifact["quality_flags"])
+
     @patch("deals.tasks.synthesize_complete_deal_analysis")
     @patch("deals.tasks._is_cancel_requested", return_value=False)
     @patch("ai_orchestrator.models.AIAuditLog.objects.get")
