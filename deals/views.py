@@ -14,7 +14,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.core.cache import cache
 from django.db.models import CharField, Count, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
-from django.db.models.functions import Coalesce, Trim
+from django.db.models.functions import Cast, Coalesce, Trim
+from django.db.models.fields.json import KeyTextTransform
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from drf_spectacular.utils import extend_schema, extend_schema_view
@@ -522,9 +523,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             AIAuditLog.objects.filter(
                 source_type='onedrive_folder',
                 source_id=OuterRef('source_onedrive_id'),
-                source_metadata__drive_id=OuterRef('source_drive_id'),
-                source_metadata__total_files__isnull=False,
-            ).order_by('-created_at').values('source_metadata__total_files')[:1],
+            ).annotate(
+                audit_drive_id=KeyTextTransform('drive_id', 'source_metadata'),
+                audit_total_files=Cast(
+                    KeyTextTransform('total_files', 'source_metadata'),
+                    IntegerField(),
+                ),
+            ).filter(
+                audit_drive_id=OuterRef('source_drive_id'),
+                audit_total_files__isnull=False,
+            ).order_by('-created_at').values('audit_total_files')[:1],
             output_field=IntegerField(),
         ),
     )
