@@ -278,7 +278,9 @@ VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT = config('VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT', 
 VDR_DOCUMENT_TASK_TIME_LIMIT = config('VDR_DOCUMENT_TASK_TIME_LIMIT', default=0, cast=int)
 VDR_REPORT_MAP_BYTES = config('VDR_REPORT_MAP_BYTES', default=16000, cast=int)
 VDR_REPORT_CONTEXT_BYTES = config('VDR_REPORT_CONTEXT_BYTES', default=135000, cast=int)
-VDR_REPORT_NOTE_MAX_TOKENS = config('VDR_REPORT_NOTE_MAX_TOKENS', default=2500, cast=int)
+# Zero lets evidence-map notes finish without a fixed output cap. The provider
+# still rejects requests whose complete input exceeds the model context window.
+VDR_REPORT_NOTE_MAX_TOKENS = config('VDR_REPORT_NOTE_MAX_TOKENS', default=0, cast=int)
 VDR_REPORT_CACHE_TTL = config('VDR_REPORT_CACHE_TTL', default=2592000, cast=int)
 VDR_SYNTHESIS_MAX_TOKENS = config('VDR_SYNTHESIS_MAX_TOKENS', default=12000, cast=int)
 EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))

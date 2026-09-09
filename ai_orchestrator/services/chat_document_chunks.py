@@ -52,7 +52,13 @@ class ChatDocumentChunkService:
         self.final_bytes = int(final_bytes or self.FINAL_BYTES)
         self.cache_ttl = int(cache_ttl or 3600)
         self.evidence_system_prompt = evidence_system_prompt
-        self.note_max_tokens = int(note_max_tokens or 900)
+        # Most callers use the conservative 900-token default. A caller can
+        # explicitly pass 0 to let the model finish the note without an output
+        # cap. This is useful for dense spreadsheet evidence where a valid,
+        # concise response can still exceed a fixed token allowance.
+        self.note_max_tokens = (
+            900 if note_max_tokens is None else max(0, int(note_max_tokens))
+        )
 
     def _process(self, text, question, *, reducing=False):
         system = self.evidence_system_prompt or (
@@ -79,18 +85,28 @@ class ChatDocumentChunkService:
                     return cached
             except Exception:
                 pass  # Cache outages must not skip evidence processing.
+        options = {'temperature': 0}
+        if self.note_max_tokens > 0:
+            options['max_tokens'] = self.note_max_tokens
         result = self.provider.execute_standard({
             'model': self.model, 'system': system,
             # Stable document prefix is reusable across follow-up questions by APC.
             'prompt': f'EVIDENCE:\n{text}\n\nQUESTION:\n{question}',
-            'options': {'max_tokens': self.note_max_tokens, 'temperature': 0},
+            'options': options,
             'chat_template_kwargs': {'enable_thinking': False},
             '_enforce_context_budget': True,
         }, timeout=180)
         note = str(result.get('response') or '').strip()
         finish = ((result.get('raw') or {}).get('choices') or [{}])[0].get('finish_reason')
-        if not note or finish == 'length':
-            raise ValueError('Document analysis returned incomplete evidence. Please retry with a narrower question.')
+        if not note:
+            raise ValueError('Document analysis returned incomplete evidence because the model response was empty.')
+        if finish == 'length':
+            limit = (
+                f'the configured {self.note_max_tokens}-token output limit'
+                if self.note_max_tokens > 0
+                else 'the model context limit'
+            )
+            raise ValueError(f'Document analysis returned incomplete evidence because it reached {limit}.')
         if cache_key:
             try:
                 cache.set(cache_key, note, timeout=self.cache_ttl)

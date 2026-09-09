@@ -1279,7 +1279,10 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         final_bytes=effective_context_bytes,
         cache_ttl=int(getattr(settings, "VDR_REPORT_CACHE_TTL", 30 * 24 * 60 * 60)),
         evidence_system_prompt=BULK3_DOCUMENT_SUMMARY_SYSTEM_PROMPT,
-        note_max_tokens=int(getattr(settings, "VDR_REPORT_NOTE_MAX_TOKENS", 2500)),
+        # Dense spreadsheet sections can legitimately need more than a fixed
+        # output allowance. Zero omits max_tokens from these intermediate map
+        # and reduce calls while the provider still enforces the input window.
+        note_max_tokens=int(getattr(settings, "VDR_REPORT_NOTE_MAX_TOKENS", 0)),
     ).build_context(
         context_documents,
         (

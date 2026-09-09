@@ -94,3 +94,35 @@ class ChatDocumentChunksTests(SimpleTestCase):
         provider.execute_standard.return_value = {'response': 'partial', 'raw': {'choices': [{'finish_reason': 'length'}]}}
         with self.assertRaisesRegex(ValueError, 'incomplete evidence'):
             ChatDocumentChunkService(provider=provider, model='local')._process('source', 'question')
+
+    def test_zero_note_limit_omits_max_tokens_from_provider_request(self):
+        provider = MagicMock()
+        provider.execute_standard.return_value = {
+            'response': 'Complete uncapped evidence note.',
+            'raw': {'choices': [{'finish_reason': 'stop'}]},
+        }
+
+        service = ChatDocumentChunkService(
+            provider=provider,
+            model='local',
+            note_max_tokens=0,
+        )
+        service._process('dense spreadsheet evidence', 'Summarize all evidence')
+
+        payload = provider.execute_standard.call_args.args[0]
+        self.assertEqual(payload['options'], {'temperature': 0})
+        self.assertNotIn('max_tokens', payload['options'])
+
+    def test_positive_note_limit_is_preserved(self):
+        provider = MagicMock()
+        provider.execute_standard.return_value = {'response': 'Complete capped note.'}
+
+        service = ChatDocumentChunkService(
+            provider=provider,
+            model='local',
+            note_max_tokens=2500,
+        )
+        service._process('source', 'question')
+
+        payload = provider.execute_standard.call_args.args[0]
+        self.assertEqual(payload['options']['max_tokens'], 2500)
