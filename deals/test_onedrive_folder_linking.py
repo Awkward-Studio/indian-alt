@@ -85,3 +85,26 @@ class LinkMissingOneDriveFoldersCommandTests(TestCase):
         self.assertEqual(accepted.source_onedrive_id, "folder-accepted")
         self.assertIsNone(declined.source_onedrive_id)
         self.assertIn("INTERACTIVE", output.getvalue())
+
+    @patch("deals.management.commands.link_missing_onedrive_folders.GraphAPIService")
+    @patch("builtins.input", return_value="1")
+    def test_smart_interactive_auto_links_certain_and_asks_for_ambiguous(self, _input, graph_class):
+        certain = Deal.objects.create(title="Certain Deal")
+        ambiguous_one = Deal.objects.create(title="Nova Health")
+        ambiguous_two = Deal.objects.create(title="Nova Health India")
+        graph_class.return_value.get_deal_folder_root_children.return_value = {
+            "value": [
+                {"id": "folder-certain", "name": "Certain Deal", "folder": {}, "driveId": "drive-1"},
+                {"id": "folder-nova", "name": "Nova Health", "folder": {}, "driveId": "drive-1"},
+            ]
+        }
+
+        call_command("link_missing_onedrive_folders", "--smart-interactive", stdout=StringIO())
+
+        certain.refresh_from_db()
+        ambiguous_one.refresh_from_db()
+        ambiguous_two.refresh_from_db()
+        self.assertEqual(certain.source_onedrive_id, "folder-certain")
+        self.assertEqual(ambiguous_one.source_onedrive_id, "folder-nova")
+        self.assertIsNone(ambiguous_two.source_onedrive_id)
+        _input.assert_called_once()

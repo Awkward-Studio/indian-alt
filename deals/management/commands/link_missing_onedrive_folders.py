@@ -50,6 +50,19 @@ class Command(BaseCommand):
             help="Prompt before applying each safe match",
         )
         parser.add_argument(
+            "--smart-interactive",
+            action="store_true",
+            help=(
+                "Automatically apply exact/compact matches and prompt for fuzzy or ambiguous matches"
+            ),
+        )
+        parser.add_argument(
+            "--certain-score",
+            type=float,
+            default=0.98,
+            help="Score threshold for automatic smart-mode linking (default: 0.98)",
+        )
+        parser.add_argument(
             "--json",
             action="store_true",
             dest="output_json",
@@ -60,8 +73,15 @@ class Command(BaseCommand):
         min_score = options["min_score"]
         if not 0 < min_score <= 1:
             raise CommandError("--min-score must be greater than 0 and at most 1")
-        if options["apply"] and options["interactive"]:
-            raise CommandError("Use either --apply or --interactive, not both")
+        selected_modes = sum(
+            bool(options[name]) for name in ("apply", "interactive", "smart_interactive")
+        )
+        if selected_modes > 1:
+            raise CommandError("Use only one of --apply, --interactive, or --smart-interactive")
+        if not 0 < options["certain_score"] <= 1:
+            raise CommandError("--certain-score must be greater than 0 and at most 1")
+        if options["certain_score"] < min_score:
+            raise CommandError("--certain-score cannot be lower than --min-score")
 
         try:
             graph = GraphAPIService()
@@ -94,7 +114,9 @@ class Command(BaseCommand):
             min_score=min_score,
         )
 
-        if options["interactive"]:
+        if options["smart_interactive"]:
+            self._smart_interactive_apply(report, certain_score=options["certain_score"])
+        elif options["interactive"]:
             self._interactive_apply(report)
         elif options["apply"]:
             self._apply_safe_matches(report)
@@ -102,8 +124,8 @@ class Command(BaseCommand):
         self._write_report(
             report,
             output_json=options["output_json"],
-            apply=options["apply"] or options["interactive"],
-            interactive=options["interactive"],
+            apply=options["apply"] or options["interactive"] or options["smart_interactive"],
+            interactive=options["interactive"] or options["smart_interactive"],
         )
 
     def _build_report(self, *, folders, missing_deals, all_deals, linked_folder_deals, min_score):
@@ -147,7 +169,12 @@ class Command(BaseCommand):
             elif len(ranked) > 1 and ranked[1][0].score >= best_match.score - 0.08:
                 record["status"] = "ambiguous"
                 record["alternatives"] = [
-                    {"deal_id": str(deal.id), "deal_title": deal.title, "score": match.score}
+                    {
+                        "deal_id": str(deal.id),
+                        "deal_title": deal.title,
+                        "score": match.score,
+                        "reason": match.reason,
+                    }
                     for match, deal in ranked[:5]
                 ]
             else:
@@ -200,6 +227,70 @@ class Command(BaseCommand):
                 record["status"] = "declined"
                 continue
 
+            self._apply_safe_matches([record])
+
+    def _smart_interactive_apply(self, report, *, certain_score):
+        for record in report:
+            if record["status"] == "ready" and record["score"] >= certain_score:
+                self._apply_safe_matches([record])
+                continue
+
+            if record["status"] == "ready":
+                self.stdout.write(
+                    "\nProposed fuzzy link:\n"
+                    f"  OneDrive folder: {record['folder_name']}\n"
+                    f"  Deal:             {record['deal_title']}\n"
+                    f"  Match:            {record['score']:.2f} ({record['reason']})"
+                )
+                self.stdout.write("Accept this link? [y]es / [n]o / [q]uit: ", ending="")
+                try:
+                    answer = input().strip().lower()
+                except EOFError:
+                    answer = "q"
+                if answer in {"q", "quit"}:
+                    break
+                if answer in {"y", "yes"}:
+                    self._apply_safe_matches([record])
+                else:
+                    record["status"] = "declined"
+                continue
+
+            if record["status"] != "ambiguous":
+                continue
+
+            alternatives = record.get("alternatives", [])
+            self.stdout.write(
+                "\nAmbiguous folder match:\n"
+                f"  OneDrive folder: {record['folder_name']}\n"
+            )
+            for index, alternative in enumerate(alternatives, start=1):
+                self.stdout.write(
+                    f"  {index}. {alternative['deal_title']} "
+                    f"({alternative['score']:.2f}, {alternative.get('reason', 'match')})"
+                )
+            self.stdout.write("Choose a deal number, [s]kip, or [q]uit: ", ending="")
+            try:
+                answer = input().strip().lower()
+            except EOFError:
+                answer = "q"
+            if answer in {"q", "quit"}:
+                break
+            if answer in {"s", "skip", "n", "no"}:
+                record["status"] = "declined"
+                continue
+            try:
+                selected = alternatives[int(answer) - 1]
+            except (ValueError, IndexError):
+                record["status"] = "declined"
+                continue
+
+            record.update(
+                deal_id=selected["deal_id"],
+                deal_title=selected["deal_title"],
+                score=selected["score"],
+                reason=selected.get("reason", "selected from ambiguous candidates"),
+                status="ready",
+            )
             self._apply_safe_matches([record])
 
     @staticmethod
