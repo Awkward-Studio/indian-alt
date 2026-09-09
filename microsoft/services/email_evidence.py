@@ -8,7 +8,6 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from bs4 import BeautifulSoup
 
 from django.conf import settings
-from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
@@ -147,7 +146,17 @@ class EmailEvidenceService:
             try:
                 if not identifier:
                     raise ValueError('Attachment has no Graph identity.')
-                if not occurrence.blob_id:
+                blob_is_durable = False
+                if occurrence.blob_id:
+                    try:
+                        existing_content = occurrence.blob.read_bytes()
+                        blob_is_durable = bool(existing_content)
+                        if blob_is_durable and not occurrence.blob.payload:
+                            occurrence.blob.payload = existing_content
+                            occurrence.blob.save(update_fields=['payload'])
+                    except (OSError, ValueError):
+                        blob_is_durable = False
+                if not blob_is_durable:
                     limit = int(getattr(settings, 'EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES', 25 * 1024 * 1024))
                     if int(attachment.get('size') or 0) > limit:
                         raise ValueError('Attachment exceeds configured capture limit; review required.')
@@ -161,12 +170,14 @@ class EmailEvidenceService:
                         raise ValueError('Attachment bytes unavailable; embedded/reference attachment requires review.')
                     sha = hashlib.sha256(content).hexdigest()
                     blob, _ = EmailPrivateBlob.objects.get_or_create(email_account_id=run.email.email_account_id,
-                        sha256=sha, defaults={'size': len(content)})
+                        sha256=sha, defaults={'size': len(content), 'payload': content})
                     # Unique blob row serializes writers of the same attachment.
                     with transaction.atomic():
                         blob = EmailPrivateBlob.objects.select_for_update().get(pk=blob.pk)
-                        if not blob.file:
-                            blob.file.save(f'{run.email.email_account_id}/{sha}', ContentFile(content), save=True)
+                        if not blob.payload:
+                            blob.payload = content
+                            blob.size = len(content)
+                            blob.save(update_fields=['payload', 'size'])
                     occurrence.blob = blob
                     occurrence.save(update_fields=['blob'])
                 if deal:
@@ -242,7 +253,17 @@ class EmailEvidenceService:
                 ):
                     occurrence.blob = None
                     occurrence.save(update_fields=['blob'])
-                if not occurrence.blob_id:
+                blob_is_durable = False
+                if occurrence.blob_id:
+                    try:
+                        existing_content = occurrence.blob.read_bytes()
+                        blob_is_durable = bool(existing_content)
+                        if blob_is_durable and not occurrence.blob.payload:
+                            occurrence.blob.payload = existing_content
+                            occurrence.blob.save(update_fields=['payload'])
+                    except (OSError, ValueError):
+                        blob_is_durable = False
+                if not blob_is_durable:
                     content, access = ResearchAcquisitionService().download(download_url)
                     if not content:
                         raise ValueError('Linked document returned no content.')
@@ -258,12 +279,14 @@ class EmailEvidenceService:
                     sha = hashlib.sha256(content).hexdigest()
                     blob, _ = EmailPrivateBlob.objects.get_or_create(
                         email_account_id=run.email.email_account_id,
-                        sha256=sha, defaults={'size': len(content)},
+                        sha256=sha, defaults={'size': len(content), 'payload': content},
                     )
                     with transaction.atomic():
                         blob = EmailPrivateBlob.objects.select_for_update().get(pk=blob.pk)
-                        if not blob.file:
-                            blob.file.save(f'{run.email.email_account_id}/{sha}', ContentFile(content), save=True)
+                        if not blob.payload:
+                            blob.payload = content
+                            blob.size = len(content)
+                            blob.save(update_fields=['payload', 'size'])
                     occurrence.blob = blob
                     occurrence.metadata = {
                         **occurrence.metadata, 'access': access,

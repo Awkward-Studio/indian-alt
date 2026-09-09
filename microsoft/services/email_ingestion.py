@@ -50,8 +50,7 @@ class EmailIngestionService:
             metadata = occurrence.metadata if isinstance(occurrence.metadata, dict) else {}
             title = metadata.get('name') or 'Attached document'
             try:
-                with occurrence.blob.file.open('rb') as stream:
-                    content = stream.read()
+                content = occurrence.blob.read_bytes()
                 text, _extraction = cls.extract_attachment_text(
                     content,
                     title,
@@ -258,8 +257,7 @@ class EmailIngestionService:
             try:
                 doc = link.document
                 if doc and link.blob_id and not (doc.normalized_text or '').strip():
-                    with link.blob.file.open('rb') as stream:
-                        content = stream.read()
+                    content = link.blob.read_bytes()
                     text, extraction = EmailIngestionService.extract_attachment_text(
                         content, doc.title, allow_remote=allow_remote,
                     )

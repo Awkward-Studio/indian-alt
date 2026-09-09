@@ -128,8 +128,10 @@ class EmailEvidenceTests(TestCase):
                 self.assertEqual(Evidence.save_attachments(run, self.deal), [])
                 self.assertEqual(EmailPrivateBlob.objects.count(), 1)
                 self.assertEqual(DealDocument.objects.count(), 1)
-                with EmailPrivateBlob.objects.get().file.open('rb') as stream:
-                    self.assertEqual(stream.read(), b'private financial schedule')
+                self.assertEqual(
+                    EmailPrivateBlob.objects.get().read_bytes(),
+                    b'private financial schedule',
+                )
                 storage.__dict__.pop('location', None)
 
     @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content', side_effect=ValueError('unavailable'))

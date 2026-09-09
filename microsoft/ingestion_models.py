@@ -58,11 +58,18 @@ class EmailPrivateBlob(models.Model):
     email_account = models.ForeignKey('microsoft.EmailAccount', on_delete=models.CASCADE)
     sha256 = models.CharField(max_length=64)
     file = models.FileField(storage=PrivateEmailStorage(), upload_to='attachments', max_length=500)
+    payload = models.BinaryField(null=True, editable=False)
     size = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['email_account', 'sha256'], name='email_blob_unique')]
+
+    def read_bytes(self):
+        if self.payload:
+            return bytes(self.payload)
+        with self.file.open('rb') as stream:
+            return stream.read()
 
 
 class EmailEvidenceLink(models.Model):
