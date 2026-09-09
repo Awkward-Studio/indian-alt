@@ -19,7 +19,7 @@ from contacts.models import Contact
 from api_requests.serializers import RequestSerializer
 from .services.contact_linking import sync_deal_contact_links
 from .services.document_artifacts import DocumentArtifactService
-from .services.report_status import is_complete_analyst_report
+from .services.report_status import is_complete_analyst_report, report_status_for_deal
 class DealPhaseLogSerializer(serializers.ModelSerializer):
     changed_by_name = serializers.CharField(source='changed_by.name', read_only=True)
     
@@ -673,6 +673,7 @@ class DealDetailSerializer(DealSerializer):
     file_tree = serializers.SerializerMethodField()
     vi_relations = VentureIntelligenceCompanyRelationSerializer(many=True, read_only=True)
     competitor_candidates = serializers.SerializerMethodField()
+    report_status = serializers.SerializerMethodField()
 
     def get_file_tree(self, obj):
         from .services.folder_analysis import FolderAnalysisService
@@ -684,6 +685,9 @@ class DealDetailSerializer(DealSerializer):
             return []
         from .services.competitor_intelligence import annotate_existing_competitors
         return annotate_existing_competitors(obj, obj.competitor_candidates)
+
+    def get_report_status(self, obj):
+        return report_status_for_deal(obj)
     
     class Meta:
         model = Deal
@@ -699,6 +703,7 @@ class DealDetailSerializer(DealSerializer):
             'phase_logs', 'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree', 'vi_relations', 'competitor_candidates',
+            'report_status',
             'field_provenance', 'can_manage_responsibility',
         )
         read_only_fields = ('id',)

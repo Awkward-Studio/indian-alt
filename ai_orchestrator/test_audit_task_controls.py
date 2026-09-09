@@ -46,3 +46,34 @@ class AuditTaskControlTests(TestCase):
         self.assertEqual(deal.processing_status, 'failed')
         self.assertEqual(email.processing_status, 'idle')
         self.assertEqual(run.status, 'failed')
+
+    @patch('ai_orchestrator.views.VMControlService')
+    @patch('ai_orchestrator.views.requests.post')
+    @patch('ai_orchestrator.views.requests.get')
+    @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke', return_value=[])
+    def test_clear_active_restarts_text_container_for_decoding_slot(
+        self, _revoke, get_slots, post_slot, vm_service_class,
+    ):
+        get_slots.return_value.json.return_value = [
+            {'id': 0, 'id_task': 74751, 'is_processing': True},
+        ]
+        get_slots.return_value.raise_for_status.return_value = None
+        post_slot.return_value.raise_for_status.return_value = None
+        vm_service_class.return_value.restart_text_inference.return_value = {
+            'status': 'submitted',
+            'container': 'vllm-text-t4',
+        }
+
+        response = self.client.post('/api/ai/history/clear-active/', {}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['erased_slot_count'], 0)
+        self.assertEqual(
+            response.data['processing_slots_before_clear'],
+            [{'id': 0, 'id_task': 74751}],
+        )
+        self.assertEqual(
+            response.data['inference_restart'],
+            {'status': 'submitted', 'container': 'vllm-text-t4'},
+        )
+        vm_service_class.return_value.restart_text_inference.assert_called_once_with()

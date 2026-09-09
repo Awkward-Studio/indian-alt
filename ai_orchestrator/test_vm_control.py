@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
+from azure.mgmt.compute.models import RunCommandInput
 
 from ai_orchestrator.models import AIAuditLog, VMControlOperation
 from ai_orchestrator.services.vm_service import VMControlService, VMControlSnapshot
@@ -95,6 +96,24 @@ class VMControlServiceTests(SimpleTestCase):
             VMControlService._startup_phase("running", {"text": "ready"}),
             "ready",
         )
+
+    def test_restart_text_inference_submits_container_restart(self):
+        service = self.service()
+        service.enabled = True
+        service.text_container = "vllm-text-t4"
+        service.get_status = MagicMock(return_value="running")
+
+        result = service.restart_text_inference()
+
+        self.assertEqual(
+            result,
+            {"status": "submitted", "container": "vllm-text-t4"},
+        )
+        call = service.compute_client.virtual_machines.begin_run_command.call_args
+        self.assertEqual(call.args[:2], (service.resource_group, service.vm_name))
+        self.assertIsInstance(call.args[2], RunCommandInput)
+        self.assertEqual(call.args[2].command_id, "RunShellScript")
+        self.assertEqual(call.args[2].script, ["docker restart --time 2 vllm-text-t4"])
 
 
 class VMControlViewTests(TestCase):

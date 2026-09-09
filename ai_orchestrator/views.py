@@ -188,6 +188,8 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         warnings = self._revoke(task_ids)
 
         slot_count = 0
+        processing_slots_before_clear = []
+        inference_restart = None
         try:
             configured_url = getattr(settings, 'VLLM_BASE_URL', '')
             parsed = urlsplit(configured_url)
@@ -201,17 +203,37 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 slot_id = slot.get('id')
                 if slot_id is None:
                     continue
+                if slot.get('is_processing'):
+                    processing_slots_before_clear.append({
+                        'id': slot_id,
+                        'id_task': slot.get('id_task'),
+                    })
                 try:
                     response = requests.post(
                         f'{slot_url}/{slot_id}', params={'action': 'erase'},
                         headers=headers, timeout=10,
                     )
                     response.raise_for_status()
-                    slot_count += 1
+                    # llama.cpp accepts the erase request while decoding but
+                    # defers the actual erase until the slot becomes idle.
+                    # Count only slots that were idle at the time of cleanup.
+                    if not slot.get('is_processing'):
+                        slot_count += 1
                 except Exception as exc:
                     warnings.append(f'Slot {slot_id}: {exc}')
         except Exception as exc:
             warnings.append(f'Slot cleanup: {exc}')
+
+        # `/slots/:id?action=erase` only clears an idle slot. If a request is
+        # actively decoding, llama.cpp defers that operation, so a revoked
+        # Celery worker can leave an orphaned HTTP generation on the VM. Use
+        # the verified Azure control path to restart just the text container;
+        # Compose's restart policy brings it back without deallocating the VM.
+        if processing_slots_before_clear:
+            try:
+                inference_restart = VMControlService().restart_text_inference()
+            except Exception as exc:
+                warnings.append(f'Inference container restart: {exc}')
 
         message = 'Stopped by administrator while clearing active inference work.'
         now = timezone.now()
@@ -235,6 +257,8 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             'erased_slot_count': slot_count, 'failed_log_count': failed_logs,
             'failed_deal_count': failed_deals, 'reset_email_count': reset_emails,
             'failed_ingestion_count': failed_ingestion, 'warnings': warnings,
+            'processing_slots_before_clear': processing_slots_before_clear,
+            'inference_restart': inference_restart,
         })
 
 class AIConversationViewSet(viewsets.ModelViewSet):

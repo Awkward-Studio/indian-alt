@@ -4,19 +4,18 @@ The September 9 crash reports CUDA allocation failure with llama-server using
 13,704 MiB and the embedding services using another 2,184 MiB. Check live usage
 before treating the deployment as recovered.
 
-The T4 Compose defaults disable the multimodal projector, use automatic GPU
-layer fitting with a 3,072 MiB margin, and reduce batch/ubatch sizes to 256/128.
-The context is fixed at 32,768 tokens. Automatic fitting may put
-layers in system RAM and increase response latency. The margin is a starting
-point to validate under simultaneous embedding and text workloads.
+The T4 Compose defaults disable the multimodal projector, offload all model
+layers to GPU, and use batch/ubatch sizes of 256/128. The context is 65,536
+tokens. Automatic fitting is disabled, so it cannot reduce the context or move
+layers to CPU. The Q8_0 model and both GPU TEI services are retained.
+Validate this configuration under simultaneous embedding and text workloads.
 
 Existing deployment environment values override Compose defaults. Set these in
 the inference deployment environment before recreating the text container:
 
 ```dotenv
-LLAMA_CONTEXT_SIZE=32768
-LLAMA_GPU_LAYERS=auto
-LLAMA_FIT_TARGET=3072
+LLAMA_CONTEXT_SIZE=65536
+LLAMA_GPU_LAYERS=all
 LLAMA_BATCH_SIZE=256
 LLAMA_UBATCH_SIZE=128
 LLAMA_PARALLEL_SEQUENCES=1
@@ -29,7 +28,7 @@ checked to ensure it does not forward images to this text-only endpoint.
 
 Before rollout, record the current container image digest and environment for
 rollback without publishing credentials. Check the deployed llama-server help
-for `--no-mmproj`, `--fit`, `--fit-target`, and `--n-gpu-layers auto`. The Compose
+for `--no-mmproj`, `--fit off`, and `--n-gpu-layers all`. The Compose
 image tag is mutable; pin a tested digest after live validation.
 
 After applying the deployment configuration:
@@ -42,8 +41,9 @@ After applying the deployment configuration:
    retry actions. Include a native PDF, a mixed PDF, and an image-only document.
 4. Verify extraction completeness, artifact completion, and worker errors. Check
    that OCR failure preserves partial evidence without sending images to llama.
-5. Resume wider processing only after these checks pass. If memory remains tight,
-   increase the fitting margin and measure latency against worker time limits.
+5. Resume wider processing only after these checks pass. If CUDA runs out of
+   memory, record peak usage and the failing request size before changing the
+   configuration. This profile does not fall back to CPU layers.
 
 Do not clear queues, stored evidence, or caches as part of this configuration
 change. A container restart alone does not prove pipeline recovery.

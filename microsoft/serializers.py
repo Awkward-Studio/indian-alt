@@ -4,6 +4,7 @@ Serializers for email and OneDrive models.
 from rest_framework import serializers
 from .models import EmailAccount, Email
 from .services.granola_meeting_ingestion import GranolaMeetingEmailIngestionService
+from deals.services.report_status import report_status_for_deal
 
 
 class EmailAccountSerializer(serializers.ModelSerializer):
@@ -77,6 +78,7 @@ class EmailListSerializer(serializers.ModelSerializer):
         source='body_html_sanitizer_version',
         read_only=True,
     )
+    deal_report_status = serializers.SerializerMethodField()
 
     def get_is_meeting_note_email(self, obj):
         runs = getattr(obj, 'prefetched_ingestion_runs', None)
@@ -118,6 +120,22 @@ class EmailListSerializer(serializers.ModelSerializer):
             'stages': run.stages or {},
             'error': run.error or '',
         }
+
+    def get_deal_report_status(self, obj):
+        if not obj.deal_id or not getattr(obj, 'deal', None):
+            return {
+                'state': 'not_started', 'analysis_id': None, 'version': None,
+                'generated_at': None, 'audit_log_id': None, 'error': None,
+            }
+        # An email page commonly contains several messages linked to the same
+        # deal. Reuse the status within one serializer invocation so the new
+        # state contract does not issue the same audit/analysis queries once
+        # per email row.
+        cache = self.context.setdefault('_deal_report_status_cache', {})
+        key = str(obj.deal_id)
+        if key not in cache:
+            cache[key] = report_status_for_deal(obj.deal)
+        return cache[key]
     
     class Meta:
         model = Email
@@ -127,7 +145,7 @@ class EmailListSerializer(serializers.ModelSerializer):
             'body_text', 'body_html', 'sanitizer_version', 'date_received', 'date_sent',
             'importance', 'is_read', 'has_attachments', 'body_preview', 
             'attachments', 'created_at', 'is_processed', 'is_indexed', 'deal_id',
-            'deal_title', 'is_meeting_note_email', 'latest_ingestion'
+            'deal_title', 'is_meeting_note_email', 'latest_ingestion', 'deal_report_status'
         )
         read_only_fields = ('id', 'created_at')
 

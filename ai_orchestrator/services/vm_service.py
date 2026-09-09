@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import shlex
 from dataclasses import dataclass, field
 from typing import Dict
 from urllib.error import HTTPError, URLError
@@ -8,6 +9,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from azure.identity import ClientSecretCredential
 from azure.mgmt.compute import ComputeManagementClient
+from azure.mgmt.compute.models import RunCommandInput
 from decouple import config
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ class VMControlService:
             "embedding": self._env('EMBEDDING_BASE_URL'),
             "reranker": self._env('RERANKER_BASE_URL'),
         }
+        self.text_container = self._env('INFERENCE_TEXT_CONTAINER') or 'vllm-text-t4'
         self.configured = bool(self.target_label and all([
             self.subscription_id, self.resource_group, self.vm_name,
             self.tenant_id, self.client_id, self.client_secret,
@@ -212,3 +215,28 @@ class VMControlService:
         except Exception as e:
             logger.warning("Failed to deallocate VM: %s", type(e).__name__)
             raise RuntimeError("Azure rejected the deallocate request") from e
+
+    def restart_text_inference(self):
+        """Restart only the llama.cpp text container through Azure Run Command.
+
+        llama.cpp's slot erase endpoint intentionally defers while a slot is
+        decoding, so it cannot interrupt an orphaned HTTP generation. A
+        container restart releases that generation without powering off the
+        entire GPU VM; the compose restart policy brings the service back.
+        """
+        if not self.available:
+            raise RuntimeError("VM control is not available")
+        if self.get_status() != "running":
+            return {"status": "vm_not_running"}
+        try:
+            command = f"docker restart --time 2 {shlex.quote(self.text_container)}"
+            self.compute_client.virtual_machines.begin_run_command(
+                self.resource_group,
+                self.vm_name,
+                RunCommandInput(command_id="RunShellScript", script=[command]),
+            )
+            logger.info("Submitted inference container restart for %s", self.text_container)
+            return {"status": "submitted", "container": self.text_container}
+        except Exception as exc:
+            logger.warning("Failed to restart inference container: %s", type(exc).__name__)
+            raise RuntimeError("Azure rejected the inference container restart") from exc

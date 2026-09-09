@@ -34,18 +34,15 @@ services:
       - --api-key
       - ${VLLM_API_KEY:-local-dev-key}
       - --ctx-size
-      - ${LLAMA_CONTEXT_SIZE:-32768}
+      - ${LLAMA_CONTEXT_SIZE:-65536}
       - --parallel
       - ${LLAMA_PARALLEL_SEQUENCES:-1}
       - --slots
       - --n-gpu-layers
-      # Auto fitting may keep some layers in RAM. Reserve room for both TEI
-      # services and transient CUDA allocations, including on a cold start.
-      - ${LLAMA_GPU_LAYERS:-auto}
+      # Keep all model layers on GPU and preserve the requested context.
+      - ${LLAMA_GPU_LAYERS:-all}
       - --fit
-      - "on"
-      - --fit-target
-      - ${LLAMA_FIT_TARGET:-3072}
+      - "off"
       - --batch-size
       - ${LLAMA_BATCH_SIZE:-256}
       - --ubatch-size

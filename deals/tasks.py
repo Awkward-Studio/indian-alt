@@ -1295,7 +1295,10 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         source_type="deal_full_synthesis",
         source_id=str(deal.id),
         metadata={
-            "audit_log_id": str(audit_log.id),
+            # Keep the workflow audit PROCESSING until section completion
+            # finishes. AIProcessorService owns its own model-call audit; if
+            # it reused the workflow row it would mark the parent complete
+            # before the section fallback had persisted the report.
             "context_label": f"Complete deal evidence report: {deal.title}",
             "document_manifest_json": json.dumps(input_files, default=str),
             "chat_template_kwargs": {"enable_thinking": False},
@@ -1346,6 +1349,7 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         evidence=evidence_context,
         analysis=normalized,
         source_id=str(audit_log.id),
+        progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
     )
 
     latest = deal.analyses.order_by("-version").first()
@@ -2138,7 +2142,8 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         metadata={
             "deal_title": deal.title if deal else proposed_intel.get("company_name"),
             "deal_summary": deal.deal_summary if deal else "",
-            "audit_log_id": audit_log_id,
+            # The parent email workflow must remain PROCESSING while the
+            # optional per-section completion pass runs.
             "temperature": 0.0,
             "max_tokens": int(getattr(settings, "EMAIL_SYNTHESIS_MAX_TOKENS", 16384)),
             "enforce_context_budget": True,
@@ -2190,6 +2195,7 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
                 evidence=final_content,
                 analysis=analysis,
                 source_id=str(audit_log.source_id or audit_log_id),
+                progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
             )
         except Exception as exc:
             error_msg = f"Incomplete IC report: {exc}"

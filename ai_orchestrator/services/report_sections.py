@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 
 from django.conf import settings
 from django.core.cache import cache
@@ -132,7 +133,16 @@ Internal evidence:
         return section
 
     @classmethod
-    def complete(cls, *, ai_service, report: str, evidence: str, analysis: dict, source_id: str) -> str:
+    def complete(
+        cls,
+        *,
+        ai_service,
+        report: str,
+        evidence: str,
+        analysis: dict,
+        source_id: str,
+        progress: Callable[[str], None] | None = None,
+    ) -> str:
         if cls.is_complete(report):
             return str(report).strip()
         existing = cls._split(report)
@@ -142,6 +152,8 @@ Internal evidence:
             if index < stable_prefix and existing.get(title):
                 sections.append(existing[title])
                 continue
+            if progress:
+                progress(f"Generating report section {index + 1} of {len(IC_SECTION_TITLES)}: {title}")
             sections.append(cls._generate_section(
                 ai_service=ai_service,
                 evidence=evidence,
@@ -149,6 +161,8 @@ Internal evidence:
                 title=title,
                 source_id=source_id,
             ))
+            if progress:
+                progress(f"Completed report section {index + 1} of {len(IC_SECTION_TITLES)}: {title}")
         completed = "\n\n".join(sections)
         if not cls.is_complete(completed):
             raise ValueError("Email synthesis did not produce the complete 11-section IC report.")
