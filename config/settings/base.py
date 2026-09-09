@@ -204,6 +204,13 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 CELERY_WORKER_PREFETCH_MULTIPLIER = config('CELERY_WORKER_PREFETCH_MULTIPLIER', default=1, cast=int)
 CELERY_TASK_ACKS_LATE = config('CELERY_TASK_ACKS_LATE', default=True, cast=bool)
+# A multi-file chord and its successful checkpoints can live for days. Broker
+# delivery visibility must exceed the longest document execution, and chord
+# results must survive while later documents wait for the single worker.
+CELERY_VISIBILITY_TIMEOUT = config('CELERY_VISIBILITY_TIMEOUT', default=7 * 24 * 3600, cast=int)
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': CELERY_VISIBILITY_TIMEOUT}
+CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {'visibility_timeout': CELERY_VISIBILITY_TIMEOUT}
+CELERY_RESULT_EXPIRES = config('CELERY_RESULT_EXPIRES', default=30 * 24 * 3600, cast=int)
 CELERY_WORKER_MAX_TASKS_PER_CHILD = config('CELERY_WORKER_MAX_TASKS_PER_CHILD', default=25, cast=int)
 CELERY_IMPORTS = (
     'ai_orchestrator.tasks',
@@ -267,8 +274,8 @@ VDR_ARTIFACT_SEGMENT_MAX_TOKENS = config('VDR_ARTIFACT_SEGMENT_MAX_TOKENS', defa
 VDR_ARTIFACT_SEGMENT_WORKERS = config('VDR_ARTIFACT_SEGMENT_WORKERS', default=1, cast=int)
 VDR_ARTIFACT_SEGMENT_TIMEOUT = config('VDR_ARTIFACT_SEGMENT_TIMEOUT', default=1800, cast=int)
 VDR_ARTIFACT_CACHE_TTL = config('VDR_ARTIFACT_CACHE_TTL', default=2592000, cast=int)
-VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT = config('VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT', default=43200, cast=int)
-VDR_DOCUMENT_TASK_TIME_LIMIT = config('VDR_DOCUMENT_TASK_TIME_LIMIT', default=45000, cast=int)
+VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT = config('VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT', default=0, cast=int)
+VDR_DOCUMENT_TASK_TIME_LIMIT = config('VDR_DOCUMENT_TASK_TIME_LIMIT', default=0, cast=int)
 VDR_REPORT_MAP_BYTES = config('VDR_REPORT_MAP_BYTES', default=16000, cast=int)
 VDR_REPORT_CONTEXT_BYTES = config('VDR_REPORT_CONTEXT_BYTES', default=135000, cast=int)
 VDR_REPORT_NOTE_MAX_TOKENS = config('VDR_REPORT_NOTE_MAX_TOKENS', default=2500, cast=int)
@@ -303,6 +310,9 @@ VLLM_PLANNER_TIMEOUT = config('VLLM_PLANNER_TIMEOUT', default=600, cast=int)
 AI_INFERENCE_QUEUE_ENABLED = config('AI_INFERENCE_QUEUE_ENABLED', default=True, cast=bool)
 AI_INFERENCE_QUEUE_POLL_SECONDS = config('AI_INFERENCE_QUEUE_POLL_SECONDS', default=2.0, cast=float)
 AI_INFERENCE_QUEUE_LEASE_TTL = config('AI_INFERENCE_QUEUE_LEASE_TTL', default=3600, cast=int)
+AI_SLOT_POLL_SECONDS = config('AI_SLOT_POLL_SECONDS', default=1.0, cast=float)
+AI_SLOT_RESPONSE_GRACE_SECONDS = config('AI_SLOT_RESPONSE_GRACE_SECONDS', default=60.0, cast=float)
+AI_AUDIT_BROADCAST_TIMEOUT = config('AI_AUDIT_BROADCAST_TIMEOUT', default=3.0, cast=float)
 SEARXNG_BASE_URL = config('SEARXNG_BASE_URL', default='http://localhost:8081').rstrip('/')
 SEARXNG_TIMEOUT = config('SEARXNG_TIMEOUT', default=15, cast=float)
 SEARXNG_MAX_RESULTS = config('SEARXNG_MAX_RESULTS', default=30, cast=int)

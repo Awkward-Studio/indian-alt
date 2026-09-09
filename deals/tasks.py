@@ -106,8 +106,12 @@ def _is_cancel_requested(audit_log_id: str | None) -> bool:
         return False
     from ai_orchestrator.models import AIAuditLog
 
-    meta = AIAuditLog.objects.filter(id=audit_log_id).values_list("source_metadata", flat=True).first() or {}
-    return bool(meta.get("cancel_requested"))
+    row = AIAuditLog.objects.filter(id=audit_log_id).values("status", "source_metadata").first()
+    # A cleared, completed, or deleted workflow must not be revived by a
+    # late-ack broker redelivery or a document retry.
+    return row is None or row["status"] not in {"PENDING", "PROCESSING"} or bool(
+        (row["source_metadata"] or {}).get("cancel_requested")
+    )
 
 
 def _mark_vdr_cancelled(audit_log_id: str, deal_id: str, message: str) -> None:
@@ -1015,8 +1019,10 @@ def preflight_selection_async(self, drive_id: str | None, folder_id: str | None,
 @shared_task(
     bind=True,
     max_retries=3,
-    soft_time_limit=settings.VDR_DOCUMENT_TASK_SOFT_TIME_LIMIT,
-    time_limit=settings.VDR_DOCUMENT_TASK_TIME_LIMIT,
+    # Only observed VM processing consumes the segment allowance. A document
+    # wall-clock deadline would also kill legitimate slot/service waiting.
+    soft_time_limit=0,
+    time_limit=0,
 )
 def process_single_document_async(self, file_info, deal_id, user_email, is_preview, audit_log_id=None):
     """
@@ -1386,16 +1392,17 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
         cancellation_message = "Task manually terminated by forensic user."
 
+        if _is_cancel_requested(audit_log_id) or any(r.get('status') == 'cancelled' for r in results):
+            if audit_log.status in {"PENDING", "PROCESSING"}:
+                _mark_vdr_cancelled(audit_log_id, deal_id, cancellation_message)
+            logger.info("VDR indexing cancelled for Deal %s", deal_id)
+            return {"processed": 0, "errors": 0, "cancelled": True}
+
         log_worker_event(
             audit_log,
             f"Finalizer received {len(results or [])} document task results.",
             status="PROCESSING",
         )
-
-        if _is_cancel_requested(audit_log_id) or any(r.get('status') == 'cancelled' for r in results):
-            _mark_vdr_cancelled(audit_log_id, deal_id, cancellation_message)
-            logger.info("VDR indexing cancelled for Deal %s", deal_id)
-            return {"processed": 0, "errors": 0, "cancelled": True}
         
         errors = [r for r in results if r.get('status') == 'failed']
         processed_count = len([r for r in results if r.get('status') == 'success'])
@@ -1410,6 +1417,7 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         deal.save(update_fields=['processing_status', 'processing_error'])
         
         audit_log.status = 'COMPLETED' if not errors else 'FAILED'
+        audit_log.completed_at = timezone.now()
         audit_log.is_success = True if not errors else False
         audit_log.system_prompt = (
             f"Indexed {processed_count} documents and reused {cached_count} cached documents. "

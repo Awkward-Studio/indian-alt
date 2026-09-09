@@ -252,7 +252,7 @@ class AIProcessorService:
         audit_log.user_prompt = user_prompt
         audit_log.save(update_fields=['system_prompt', 'user_prompt'])
         
-        log_worker_event(audit_log, "Sending request to AI model server.")
+        log_worker_event(audit_log, "Model request prepared; waiting for inference admission.")
 
         payload = {
             "model": resolved_text_model,
@@ -515,19 +515,27 @@ class AIProcessorService:
         )
         max_queue_wait = payload.pop("_inference_queue_max_wait", 0)
         try:
-            def execute_request():
+            def execute_request(lease=None):
                 request_timeout = payload.pop("_request_timeout", None)
+                if lease is not None and audit_log.source_type == "document_evidence_segment":
+                    return self.current_provider.execute_standard(
+                        payload, timeout=int(request_timeout or 1800), slot_progress=lease.record_slot_progress,
+                    )
                 if request_timeout is None:
                     return self.current_provider.execute_standard(payload)
                 return self.current_provider.execute_standard(payload, timeout=int(request_timeout))
 
             if serialize_inference:
-                with InferenceQueueLease(audit_log, max_wait_seconds=max_queue_wait):
-                    data = execute_request()
+                with InferenceQueueLease(audit_log, max_wait_seconds=max_queue_wait) as lease:
+                    data = execute_request(lease)
             else:
                 data = execute_request()
             
             raw_response = data.get("response") or data.get("thinking", "")
+            if audit_log.source_type == "document_evidence_segment":
+                finish = ((data.get("raw") or {}).get("choices") or [{}])[0].get("finish_reason")
+                if finish in {"length", "content_filter"}:
+                    raise ValueError(f"Incomplete segment response: finish_reason={finish}.")
             thinking = data.get("thinking", "")
             
             extraction_skills = {
@@ -546,7 +554,19 @@ class AIProcessorService:
                 and audit_log.skill.name in extraction_skills
             )
             
-            if response_mode == "json" and not is_extraction:
+            if audit_log.source_type == "document_evidence_segment":
+                _, _, clean_resp, clean_think = ResponseParserService.parse_standard_response(
+                    raw_response, thinking, is_extraction_skill=False,
+                )
+                # The general parser repairs incomplete JSON for display.
+                # A segment checkpoint requires an actually complete object.
+                candidate = raw_response.split("</think>")[-1].split("</thinking>")[-1]
+                start = candidate.find("{")
+                if start < 0:
+                    raise ValueError("Segment response contains no JSON object.")
+                parsed_json, _ = json.JSONDecoder().raw_decode(candidate[start:])
+                success = isinstance(parsed_json, dict)
+            elif response_mode == "json" and not is_extraction:
                 _, _, clean_resp, clean_think = ResponseParserService.parse_standard_response(
                     raw_response, thinking, is_extraction_skill=False
                 )
@@ -571,6 +591,16 @@ class AIProcessorService:
 
             audit_log.raw_response = clean_resp
             audit_log.raw_thinking = clean_think
+            if audit_log.source_type == "document_evidence_segment" and (
+                not isinstance(parsed_json, dict)
+                or not str(parsed_json.get("document_summary") or "").strip()
+                or parsed_json.get("_salvaged")
+                or {"fallback_artifact", "artifact_missing_text", "artifact_segment_processing_incomplete"}.intersection(
+                    parsed_json.get("quality_flags") or []
+                )
+            ):
+                success = False
+                parsed_json = {"error": "Segment response did not contain complete evidence."}
             
             if success:
                 audit_log.parsed_json = parsed_json
@@ -613,7 +643,19 @@ class AIProcessorService:
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             if audit_log.status in ['COMPLETED', 'FAILED']:
                 audit_log.completed_at = timezone.now()
-            audit_log.save()
+            if audit_log.source_type == "document_evidence_segment":
+                fields = (
+                    "raw_response", "raw_thinking", "parsed_json", "is_success", "status",
+                    "error_message", "tokens_used", "source_metadata", "request_duration_ms", "completed_at",
+                )
+                updated = AIAuditLog.objects.filter(
+                    pk=audit_log.pk, status__in=["PENDING", "PROCESSING"],
+                ).update(**{field: getattr(audit_log, field) for field in fields})
+                if not updated:
+                    parsed_json = {"error": "Segment was cancelled or already terminal before completion."}
+                    audit_log.refresh_from_db()
+            else:
+                audit_log.save()
             broadcast_audit_log_update(
                 audit_log,
                 event_type="terminal" if audit_log.status in ['COMPLETED', 'FAILED'] else "snapshot",

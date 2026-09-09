@@ -1,7 +1,9 @@
+import asyncio
 import logging
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,23 @@ def serialize_audit_log(log) -> dict:
 
 
 def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool = False) -> None:
+    """Notification failures must not block or invalidate persisted work."""
+    try:
+        _broadcast_audit_log_update(log, event_type=event_type, done=done)
+    except Exception:
+        logger.warning("Audit notification failed for %s", getattr(log, "id", None), exc_info=True)
+
+
+def _send_audit_event(channel_layer, group, payload):
+    async def send():
+        await asyncio.wait_for(
+            channel_layer.group_send(group, payload),
+            timeout=float(getattr(settings, "AI_AUDIT_BROADCAST_TIMEOUT", 3)),
+        )
+    async_to_sync(send)()
+
+
+def _broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool = False) -> None:
     channel_layer = get_channel_layer()
     if not channel_layer or not log:
         return
@@ -51,7 +70,7 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
         "audit_log": serialize_audit_log(log),
     }
 
-    async_to_sync(channel_layer.group_send)(
+    _send_audit_event(channel_layer,
         f"ai_stream_{str(log.id)}",
         detail_data,
     )
@@ -83,7 +102,7 @@ def broadcast_audit_log_update(log, *, event_type: str = "snapshot", done: bool 
         "active_runs": active_runs,
     }
 
-    async_to_sync(channel_layer.group_send)(
+    _send_audit_event(channel_layer,
         "audit_logs_general",
         ledger_data,
     )

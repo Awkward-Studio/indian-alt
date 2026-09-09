@@ -1,0 +1,231 @@
+import asyncio
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from aiohttp import web
+from django.test import SimpleTestCase, TestCase, override_settings
+
+from ai_orchestrator.services.slot_request import (
+    SlotClock, SlotProcessingTimeout, InferenceDeliveryError, _execute,
+)
+from ai_orchestrator.services.realtime import _send_audit_event, broadcast_audit_log_update
+
+
+class SlotClockTests(SimpleTestCase):
+    def test_waiting_idle_and_unknown_intervals_do_not_consume_processing_budget(self):
+        clock = SlotClock(7)
+        clock.observe({"is_processing": False, "id_task": 7}, 0)
+        clock.observe({"is_processing": False, "id_task": 7}, 5000)
+        clock.observe({"is_processing": True, "id_task": 8}, 5001)
+        clock.observe({"is_processing": True, "id_task": 8}, 5003)
+        clock.observe(None, 5100)
+        clock.observe({"is_processing": True, "id_task": 8}, 5200)
+        clock.observe({"is_processing": True, "id_task": 8}, 5203)
+        clock.observe({"is_processing": False, "id_task": 8}, 6000)
+        self.assertEqual(clock.active_seconds, 5)
+        self.assertEqual(clock.task_id, 8)
+
+    def test_other_task_is_not_charged_to_current_request(self):
+        clock = SlotClock(1)
+        clock.observe({"is_processing": True, "id_task": 1}, 0)
+        clock.observe({"is_processing": True, "id_task": 1}, 100)
+        self.assertEqual(clock.active_seconds, 0)
+
+    @override_settings(AI_AUDIT_BROADCAST_TIMEOUT=0.01)
+    def test_stalled_notification_is_bounded(self):
+        layer = MagicMock()
+        async def stalled(*args):
+            await asyncio.Event().wait()
+        layer.group_send = stalled
+        with self.assertRaises(TimeoutError):
+            _send_audit_event(layer, "audit", {})
+
+    @patch("ai_orchestrator.services.realtime._broadcast_audit_log_update", side_effect=RuntimeError("Redis offline"))
+    def test_notification_failure_does_not_escape_completion(self, send):
+        broadcast_audit_log_update(MagicMock(), done=True)
+
+
+class SlotTransportTests(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        config = override_settings(AI_SLOT_POLL_SECONDS=0.1, AI_SLOT_RESPONSE_GRACE_SECONDS=0.3)
+        config.enable()
+        self.addCleanup(config.disable)
+        self.task_id = 1
+        self.active = False
+        self.mode = "success"
+        self.posts = 0
+        self.events = []
+        self.loading = 0
+        async def slots(request):
+            if self.loading:
+                self.loading -= 1
+                return web.json_response({}, status=503)
+            return web.json_response([{"id": 0, "id_task": self.task_id, "is_processing": self.active}])
+        async def complete(request):
+            body = await request.json()
+            self.assertEqual(body["id_slot"], 0)
+            self.posts += 1
+            self.task_id += 1
+            self.active = True
+            try:
+                await asyncio.sleep(0.22)
+                if self.mode == "active_hang":
+                    await asyncio.sleep(1)
+                self.active = False
+                if self.mode == "idle_hang":
+                    await asyncio.sleep(1)
+                return web.json_response({"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]})
+            finally:
+                self.active = False
+        app = web.Application()
+        app.router.add_get("/slots", slots)
+        app.router.add_post("/v1/chat/completions", complete)
+        self.runner = web.AppRunner(app, shutdown_timeout=0.01)
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        self.provider = MagicMock(base_url=f"http://127.0.0.1:{port}/v1", connect_timeout=1)
+        self.provider._headers.return_value = {}
+        self.provider._get_completions_url.return_value = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+    async def asyncTearDown(self):
+        await self.runner.cleanup()
+
+    def progress(self, **event):
+        self.events.append(event)
+
+    async def test_loading_wait_does_not_exhaust_active_allowance_and_next_request_runs(self):
+        self.loading = 5
+        for _ in range(2):
+            result = await _execute(self.provider, {}, 0.4, self.progress)
+            self.assertEqual(result["choices"][0]["message"]["content"], "done")
+        self.assertEqual(self.posts, 2)
+        self.assertEqual(sum(e.get("inference_state") == "response_received" for e in self.events), 2)
+
+    async def test_active_hang_is_processing_timeout(self):
+        self.mode = "active_hang"
+        with self.assertRaises(SlotProcessingTimeout):
+            await _execute(self.provider, {}, 0.15, self.progress)
+
+    async def test_idle_without_response_is_delivery_failure(self):
+        self.mode = "idle_hang"
+        with self.assertRaises(InferenceDeliveryError):
+            await _execute(self.provider, {}, 20, self.progress)
+        self.assertFalse(any(e.get("inference_failure_kind") == "slot_processing_timeout" for e in self.events))
+
+    async def test_cancellation_while_waiting_never_submits(self):
+        self.loading = 100
+        def cancelled(**event):
+            raise RuntimeError("cancelled")
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            await _execute(self.provider, {}, 1, cancelled)
+        self.assertEqual(self.posts, 0)
+
+
+class WorkflowGuardTests(SimpleTestCase):
+    @patch("ai_orchestrator.models.AIAuditLog.objects")
+    def test_terminal_and_deleted_workflows_stop_redelivery(self, objects):
+        from deals.tasks import _is_cancel_requested
+        for row in (None, {"status": "FAILED", "source_metadata": {}}, {"status": "COMPLETED", "source_metadata": {}}):
+            objects.filter.return_value.values.return_value.first.return_value = row
+            self.assertTrue(_is_cancel_requested("parent"))
+        objects.filter.return_value.values.return_value.first.return_value = {"status": "PROCESSING", "source_metadata": {}}
+        self.assertFalse(_is_cancel_requested("parent"))
+
+
+@override_settings(
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+    CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}},
+)
+class SegmentPersistenceTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.ai_processor import AIProcessorService
+        cache.clear()
+        self.audit = AIAuditLog.objects.create(source_type="document_evidence_segment", status="PROCESSING")
+        self.service = AIProcessorService.__new__(AIProcessorService)
+        self.service.current_provider = MagicMock()
+        self.service.current_provider.execute_standard.return_value = {
+            "response": '{"document_summary":"Complete evidence"}', "raw": {"choices": [{"finish_reason": "stop"}]},
+        }
+
+    def run_segment(self):
+        return self.service._standard_response(
+            {"model": "test", "_serialize_inference": True, "_request_timeout": 10}, self.audit, "json",
+        )
+
+    def test_success_is_persisted_and_releases_lease_before_next_segment(self):
+        from django.core.cache import cache
+        from ai_orchestrator.models import AIAuditLog
+        self.assertNotIn("error", self.run_segment())
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "COMPLETED")
+        self.assertIsNotNone(self.audit.completed_at)
+        self.assertEqual(self.audit.source_metadata["inference_state"], "completed")
+        self.assertIsNone(cache.get("ai:inference:lease:v1"))
+        self.audit = AIAuditLog.objects.create(source_type="document_evidence_segment", status="PROCESSING")
+        self.assertNotIn("error", self.run_segment())
+        self.assertEqual(self.service.current_provider.execute_standard.call_count, 2)
+
+    def test_processing_timeout_is_persisted_and_releases_lease(self):
+        from django.core.cache import cache
+        self.service.current_provider.execute_standard.side_effect = SlotProcessingTimeout("active limit")
+        self.assertIn("error", self.run_segment())
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "FAILED")
+        self.assertIsNotNone(self.audit.completed_at)
+        self.assertIsNone(cache.get("ai:inference:lease:v1"))
+
+    def test_truncated_response_is_not_completed(self):
+        self.service.current_provider.execute_standard.return_value["raw"]["choices"][0]["finish_reason"] = "length"
+        self.assertIn("error", self.run_segment())
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "FAILED")
+
+    def test_incomplete_json_cannot_be_repaired_into_completed_checkpoint(self):
+        self.service.current_provider.execute_standard.return_value["response"] = '{"document_summary":"Partial evidence"'
+        self.assertIn("error", self.run_segment())
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "FAILED")
+
+    def test_admin_cancellation_is_not_overwritten_by_late_success(self):
+        from ai_orchestrator.models import AIAuditLog
+        def response(*args, **kwargs):
+            AIAuditLog.objects.filter(pk=self.audit.pk).update(status="FAILED", error_message="admin cancelled")
+            return {"response": '{"document_summary":"Late result"}'}
+        self.service.current_provider.execute_standard.side_effect = response
+        self.assertIn("error", self.run_segment())
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.error_message, "admin cancelled")
+        self.assertEqual(self.audit.status, "FAILED")
+
+    @patch("ai_orchestrator.services.inference_queue.time.sleep")
+    def test_terminal_owner_does_not_block_next_segment(self, sleep):
+        from django.core.cache import cache
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.inference_queue import InferenceQueueLease
+        old = AIAuditLog.objects.create(source_type="document_evidence_segment", status="FAILED")
+        cache.set(InferenceQueueLease.KEY, {"audit_log_id": str(old.pk), "lease_token": "old"})
+        self.assertNotIn("error", self.run_segment())
+        self.assertIsNone(cache.get(InferenceQueueLease.KEY))
+
+    def test_completed_audit_recovers_checkpoint_without_another_model_request(self):
+        from ai_orchestrator.models import AIAuditLog
+        from deals.services.document_artifacts import DocumentArtifactService
+        from django.core.cache import cache
+        service = MagicMock()
+        with patch.object(DocumentArtifactService, "_segment_cache_key", return_value="checkpoint"):
+            AIAuditLog.objects.create(
+                source_type="document_evidence_segment", status="COMPLETED", is_success=True,
+                source_metadata={"artifact_segment_cache_key": "checkpoint"},
+                parsed_json={"document_summary": "Recovered evidence", "quality_flags": []},
+            )
+            cache.clear()
+            artifact = DocumentArtifactService.build_document_artifact(
+                file_name="memo.pdf", extracted_text="Complete evidence", ai_service=service,
+                source_metadata={"artifact_run_id": "run"},
+            )
+        service.process_content.assert_not_called()
+        self.assertEqual(artifact["source_metadata"]["artifact_segments_completed"], 1)

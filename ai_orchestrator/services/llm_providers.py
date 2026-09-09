@@ -168,9 +168,15 @@ class VLLMProviderService:
             done = choice.get("finish_reason") is not None
             yield json.dumps({"response": text, "thinking": self._flatten_content(thinking), "done": done})
 
-    def execute_standard(self, payload: dict, timeout: int | None = None) -> dict:
+    def execute_standard(self, payload: dict, timeout: int | None = None, *, slot_progress=None) -> dict:
         body = self._build_chat_body(payload, stream=False)
         effective_timeout = timeout if (timeout is not None and timeout > 0) else self.read_timeout
+        if slot_progress is not None:
+            from .slot_request import execute_slot_request
+            data = execute_slot_request(
+                self, body, active_timeout=float(effective_timeout or 1800), progress=slot_progress,
+            )
+            return self._standard_data(data)
         response = requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),
@@ -184,7 +190,13 @@ class VLLMProviderService:
             if len(detail) > 1000:
                 detail = f"{detail[:1000]}..."
             raise requests.HTTPError(f"{exc}. Response body: {detail}", response=response) from exc
-        data = response.json()
+        try:
+            data = response.json()
+        finally:
+            response.close()
+        return self._standard_data(data)
+
+    def _standard_data(self, data):
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content") or ""

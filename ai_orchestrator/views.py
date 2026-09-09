@@ -289,15 +289,23 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'inference_started_at': metadata.get('inference_started_at'),
                 'inference_queue_entered_at': metadata.get('inference_queue_entered_at'),
                 'inference_queue_wait_ms': metadata.get('inference_queue_wait_ms'),
+                'inference_active_ms': metadata.get('inference_active_ms'),
+                'inference_slot_id': metadata.get('inference_slot_id'),
+                'inference_vm_task_id': metadata.get('inference_vm_task_id'),
+                'inference_slot_processing': metadata.get('inference_slot_processing'),
                 'segment_index': metadata.get('segment_index'),
                 'segment_count': metadata.get('segment_count'),
                 'vdr_parent_audit_id': metadata.get('vdr_parent_audit_id'),
             }
 
-        queued = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') == 'queued']
-        active = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') == 'active']
+        waiting_states = {'queued', 'waiting_for_slot', 'waiting_for_service'}
+        request_states = {'active', 'lease_acquired', 'submitted', 'processing', 'awaiting_response', 'response_received', 'slot_status_unavailable'}
+        queued = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') in waiting_states]
+        active = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') in request_states]
 
         lease_owner = cache.get('ai:inference:lease:v1')
+        if isinstance(lease_owner, dict):
+            lease_owner = {key: value for key, value in lease_owner.items() if key != 'lease_token'}
         slots = []
         slot_warning = None
         try:

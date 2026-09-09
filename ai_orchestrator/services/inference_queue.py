@@ -12,6 +12,10 @@ from django.core.cache import cache
 from django.utils import timezone
 
 
+class InferenceCancelled(RuntimeError):
+    pass
+
+
 class InferenceQueueLease:
     """Serialize model requests and persist queue ownership on the audit row."""
 
@@ -48,6 +52,47 @@ class InferenceQueueLease:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
+    def check_cancelled(self):
+        from ai_orchestrator.models import AIAuditLog
+        ids = [self.audit_log.id]
+        parent = (self.audit_log.source_metadata or {}).get("vdr_parent_audit_id")
+        if parent:
+            ids.append(parent)
+        rows = list(AIAuditLog.objects.filter(id__in=ids).values("status", "source_metadata"))
+        if len(rows) != len(set(str(value) for value in ids)) or any(
+            row["status"] not in {"PENDING", "PROCESSING"}
+            or (row["source_metadata"] or {}).get("cancel_requested") for row in rows
+        ):
+            raise InferenceCancelled("Inference workflow was cancelled or is already terminal.")
+
+    def record_slot_progress(self, **updates):
+        self.check_cancelled()
+        current = cache.get(self.KEY)
+        if not isinstance(current, dict) or current.get("lease_token") != self.owner["lease_token"]:
+            raise InferenceCancelled("Inference lease ownership was lost; closing the model request.")
+        if updates.get("inference_state") == "processing" and not (self.audit_log.source_metadata or {}).get("inference_started_at"):
+            updates["inference_started_at"] = timezone.now().isoformat()
+        self._update_audit(**updates)
+
+    def _mutate_owned_lease(self, *, renew=False, owner=None):
+        # Compare the serialized owner and mutate in one Redis operation.
+        # A get/delete or get/set pair can otherwise erase a successor's lease.
+        owner = self.owner if owner is None else owner
+        backend = getattr(cache, "client", None)
+        if backend is not None:
+            client = backend.get_client(write=True)
+            script = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                + ("return redis.call('expire', KEYS[1], ARGV[2]) " if renew else "return redis.call('del', KEYS[1]) ")
+                + "else return 0 end"
+            )
+            return bool(client.eval(script, 1, cache.make_key(self.KEY), backend.encode(owner), self.lease_ttl))
+        # Local-memory cache is used by local tests, never distributed workers.
+        current = cache.get(self.KEY)
+        if isinstance(current, dict) and current.get("lease_token") == owner["lease_token"]:
+            return cache.touch(self.KEY, self.lease_ttl) if renew else cache.delete(self.KEY)
+        return False
+
     def _update_audit(self, **updates: Any) -> None:
         metadata = dict(self.audit_log.source_metadata or {})
         metadata.update(updates)
@@ -59,10 +104,8 @@ class InferenceQueueLease:
         interval = max(15.0, min(60.0, self.lease_ttl / 3))
         while not self._heartbeat_stop.wait(interval):
             try:
-                current = cache.get(self.KEY)
-                if not isinstance(current, dict) or current.get("lease_token") != self.owner.get("lease_token"):
+                if not self._mutate_owned_lease(renew=True):
                     return
-                cache.set(self.KEY, self.owner, timeout=self.lease_ttl)
             except Exception:
                 # The lease expiry remains the safety valve if Redis is briefly
                 # unavailable. Never replace another worker's lease here.
@@ -104,27 +147,46 @@ class InferenceQueueLease:
             else None
         )
         while True:
+            self.check_cancelled()
             try:
                 acquired = cache.add(self.KEY, self.owner, timeout=self.lease_ttl)
                 if acquired:
                     self.acquired = True
                     acquired_at = timezone.now()
-                    self._update_audit(
-                        inference_state="active",
-                        inference_started_at=acquired_at.isoformat(),
-                        inference_queue_wait_ms=max(
-                            0, int((acquired_at - self.wait_started_at).total_seconds() * 1000)
-                        ),
-                        inference_lease_owner=self.owner,
-                    )
-                    self._start_heartbeat()
+                    try:
+                        self._update_audit(
+                            inference_state="lease_acquired",
+                            inference_lease_acquired_at=acquired_at.isoformat(),
+                            inference_queue_wait_ms=max(
+                                0, int((acquired_at - self.wait_started_at).total_seconds() * 1000)
+                            ),
+                            inference_lease_owner=self.owner,
+                        )
+                        self._start_heartbeat()
+                    except Exception:
+                        self._mutate_owned_lease()
+                        raise
                     return self
                 # A false cache result with no visible owner means Redis may
                 # be unavailable. Waiting is safer than sending a second
                 # request to a single-slot model server.
                 if cache.get(self.KEY) is None:
                     self._update_audit(inference_queue_unavailable=True)
+                elif self.audit_log.source_type == "document_evidence_segment":
+                    from ai_orchestrator.models import AIAuditLog
+                    owner = cache.get(self.KEY)
+                    if isinstance(owner, dict) and owner.get("audit_log_id"):
+                        live = AIAuditLog.objects.filter(
+                            pk=owner["audit_log_id"], status__in=["PENDING", "PROCESSING"],
+                        ).exists()
+                        if not live:
+                            # Segment transport also waits for an idle VM slot
+                            # before posting, so a cancelled remote decode is
+                            # allowed to drain even after this lease is removed.
+                            self._mutate_owned_lease(owner=owner)
             except Exception as exc:
+                if self.acquired:
+                    raise
                 self._update_audit(
                     inference_queue_unavailable=True,
                     inference_queue_error=str(exc)[:500],
@@ -145,9 +207,7 @@ class InferenceQueueLease:
         self._stop_heartbeat()
         if self.acquired:
             try:
-                current = cache.get(self.KEY)
-                if isinstance(current, dict) and current.get("lease_token") == self.owner.get("lease_token"):
-                    cache.delete(self.KEY)
+                self._mutate_owned_lease()
             except Exception:
                 pass
         self._update_audit(

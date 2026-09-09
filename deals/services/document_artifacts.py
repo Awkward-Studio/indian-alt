@@ -4,7 +4,6 @@ import json
 import hashlib
 import logging
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Any, Callable, Optional, TYPE_CHECKING
@@ -101,6 +100,23 @@ class DocumentArtifactService:
         }
         return not invalid_flags.intersection(artifact.get("quality_flags") or [])
 
+    @staticmethod
+    def _process_segment(service, **kwargs):
+        try:
+            return service.process_content(**kwargs)
+        except Exception as exc:
+            # Prompt preparation can fail after audit creation but before the
+            # model response handler takes responsibility for terminal state.
+            metadata = kwargs["metadata"]["_source_metadata"]
+            if metadata.get("artifact_run_id"):
+                from ai_orchestrator.models import AIAuditLog
+                from django.utils import timezone
+                AIAuditLog.objects.filter(
+                    source_type="document_evidence_segment", status__in=["PENDING", "PROCESSING"],
+                    source_metadata__artifact_segment_cache_key=metadata["artifact_segment_cache_key"],
+                ).update(status="FAILED", is_success=False, error_message=str(exc), completed_at=timezone.now())
+            raise
+
     @classmethod
     def build_document_artifact(
         cls,
@@ -168,6 +184,21 @@ class DocumentArtifactService:
                 except Exception:
                     pass
 
+            # A worker can exit after saving the completed model audit but
+            # before writing Redis. Recover that response using the same
+            # content/model/run checksum instead of sending it again.
+            if source_metadata.get("artifact_run_id"):
+                from ai_orchestrator.models import AIAuditLog
+                completed = AIAuditLog.objects.filter(
+                    source_type="document_evidence_segment", status="COMPLETED", is_success=True,
+                    source_metadata__artifact_segment_cache_key=cache_key,
+                ).order_by("-completed_at").values_list("parsed_json", flat=True).first()
+                if isinstance(completed, dict):
+                    recovered = cls._normalize_artifact(completed, fallback=fallback)
+                    recovered["normalized_text"] = ""
+                    if cls._segment_artifact_usable(recovered):
+                        return index, recovered, True
+
             segment_context = {
                 "document_name": file_name,
                 "heuristic_document_type": document_type,
@@ -187,6 +218,7 @@ class DocumentArtifactService:
                     **source_metadata,
                     "segment_index": index,
                     "segment_count": len(segments),
+                    "artifact_segment_cache_key": cache_key,
                 },
                 "context_label": f"Document Evidence: {file_name} [{index + 1}/{len(segments)}]",
                 "segment_index": index,
@@ -199,7 +231,7 @@ class DocumentArtifactService:
                 "celery_task_id": source_metadata.get("celery_task_id"),
                 "vdr_parent_audit_id": source_metadata.get("vdr_parent_audit_id"),
             }
-            result = service.process_content(
+            result = cls._process_segment(service,
                 content=(
                     f"{BULK2_INTEL_SYSTEM_PROMPT}\n\n"
                     f"{build_bulk2_segment_prompt(segment=segment, context=segment_context)}"
@@ -229,22 +261,18 @@ class DocumentArtifactService:
                 pass
             return index, artifact, False
 
-        workers = min(
-            len(segments),
-            max(1, int(getattr(settings, "VDR_ARTIFACT_SEGMENT_WORKERS", 1))),
-        )
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(analyze_segment, index, segment): index
-                for index, segment in enumerate(segments)
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    result_index, segment_artifact, _cache_hit = future.result()
-                    segment_artifacts[result_index] = segment_artifact
-                except Exception as exc:
-                    failures.append(f"segment {index + 1}/{len(segments)}: {exc}")
+        # Keep Celery context and database connections on the document thread.
+        # Checkpoint each success before submitting the next segment. On a
+        # failure the document retry reuses these completed checkpoints.
+        for index, segment in enumerate(segments):
+            try:
+                result_index, segment_artifact, _cache_hit = analyze_segment(index, segment)
+                segment_artifacts[result_index] = segment_artifact
+            except DocumentArtifactCancelled:
+                raise
+            except Exception as exc:
+                failures.append(f"segment {index + 1}/{len(segments)}: {exc}")
+                break
 
         if cancel_check and cancel_check():
             raise DocumentArtifactCancelled("Document artifact processing was cancelled.")

@@ -7,11 +7,11 @@ from deals.services.document_artifacts import DocumentArtifactCancelled
 
 
 class FullVDRArtifactTests(SimpleTestCase):
-    def test_document_task_allows_complete_multi_segment_analysis_window(self):
+    def test_document_waiting_has_no_wall_clock_deadline(self):
         from deals.tasks import process_single_document_async
 
-        self.assertEqual(process_single_document_async.soft_time_limit, 43200)
-        self.assertEqual(process_single_document_async.time_limit, 45000)
+        self.assertEqual(process_single_document_async.soft_time_limit, 0)
+        self.assertEqual(process_single_document_async.time_limit, 0)
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
     @patch("deals.services.document_artifacts.cache")

@@ -36,6 +36,7 @@ whitenoise
 
 # Microsoft Graph API
 requests
+aiohttp>=3.9,<4
 msal
 
 # Vector Search & RAG
