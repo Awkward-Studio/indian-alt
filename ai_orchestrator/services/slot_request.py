@@ -1,6 +1,7 @@
 """Cancellable llama.cpp requests with separately measured slot activity."""
 
 import asyncio
+import json
 import time
 from contextlib import suppress
 from urllib.parse import urlsplit
@@ -16,6 +17,43 @@ class SlotProcessingTimeout(TimeoutError):
 
 class InferenceDeliveryError(RuntimeError):
     pass
+
+
+def _merge_completion_chunk(chunk, content, thinking):
+    """Append text from either an SSE delta or a complete chat response."""
+    if not isinstance(chunk, dict):
+        return None
+    if chunk.get("error"):
+        raise InferenceDeliveryError(str(chunk["error"]))
+    choices = chunk.get("choices") or [{}]
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    delta = choice.get("delta") or {}
+    message = choice.get("message") or {}
+    content.append(str(delta.get("content") or message.get("content") or ""))
+    thinking.append(str(
+        delta.get("reasoning_content")
+        or delta.get("reasoning")
+        or message.get("reasoning_content")
+        or message.get("reasoning")
+        or ""
+    ))
+    return choice.get("finish_reason")
+
+
+def _completed_completion(response_data, content, thinking, finish_reason):
+    """Return the internal response shape assembled from streamed chunks."""
+    if response_data is None:
+        return None
+    return {
+        **response_data,
+        "choices": [{
+            "message": {
+                "content": "".join(content),
+                "reasoning_content": "".join(thinking),
+            },
+            "finish_reason": finish_reason or "stop",
+        }],
+    }
 
 
 class SlotClock:
@@ -80,46 +118,69 @@ async def _execute(provider, body, active_timeout, progress):
                 response_content = []
                 response_thinking = []
                 finish_reason = None
-                async for raw_line in response.content:
+                pending_line = ""
+
+                async for raw_line in response.content.iter_chunked(8192):
                     response_text.extend(raw_line)
-                    for line in raw_line.decode("utf-8", errors="replace").splitlines():
+                    pending_line += raw_line.decode("utf-8", errors="replace")
+                    while "\n" in pending_line:
+                        line, pending_line = pending_line.split("\n", 1)
                         line = line.strip()
                         if not line:
+                            continue
+                        if line.startswith(":") or line.startswith("event:"):
                             continue
                         if line.startswith("data:"):
                             line = line[5:].strip()
                         if line == "[DONE]":
-                            return {
-                                "choices": [{"message": {"content": "".join(response_content), "reasoning_content": "".join(response_thinking)}, "finish_reason": finish_reason or "stop"}],
-                            }
+                            return _completed_completion(
+                                response_data, response_content, response_thinking, finish_reason,
+                            )
                         try:
                             chunk = json.loads(line)
                         except json.JSONDecodeError:
-                            continue
-                        if chunk.get("error"):
-                            raise InferenceDeliveryError(str(chunk["error"]))
+                            raise InferenceDeliveryError("VM returned malformed SSE data.")
                         response_data = chunk
-                        choice = (chunk.get("choices") or [{}])[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        response_content.append(str(delta.get("content") or message.get("content") or ""))
-                        response_thinking.append(str(delta.get("reasoning_content") or message.get("reasoning_content") or ""))
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                if response_data and response_content:
-                    return {
-                        **response_data,
-                        "choices": [{
-                            "message": {"content": "".join(response_content), "reasoning_content": "".join(response_thinking)},
-                            "finish_reason": finish_reason or "stop",
-                        }],
-                    }
+                        finish_reason = _merge_completion_chunk(
+                            chunk, response_content, response_thinking,
+                        ) or finish_reason
+                        # llama.cpp can finish generation while keeping the
+                        # HTTP connection open. The finish marker is enough
+                        # to hand the result to the segment checkpoint.
+                        if finish_reason:
+                            return _completed_completion(
+                                response_data, response_content, response_thinking, finish_reason,
+                            )
+
+                if pending_line.strip():
+                    line = pending_line.strip()
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if line == "[DONE]":
+                        return _completed_completion(
+                            response_data, response_content, response_thinking, finish_reason,
+                        )
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise InferenceDeliveryError("VM returned an incomplete response body.") from exc
+                    response_data = chunk
+                    finish_reason = _merge_completion_chunk(
+                        chunk, response_content, response_thinking,
+                    ) or finish_reason
+
+                if response_data and (response_content or finish_reason):
+                    return _completed_completion(
+                        response_data, response_content, response_thinking, finish_reason,
+                    )
                 # Some llama.cpp builds return one JSON body even when stream
                 # was requested. Keep that compatibility path.
                 if response_text:
                     try:
-                        return json.loads(response_text.decode("utf-8"))
+                        response_data = json.loads(response_text.decode("utf-8"))
                     except json.JSONDecodeError as exc:
                         raise InferenceDeliveryError("VM returned an incomplete response body.") from exc
+                    return response_data
                 raise InferenceDeliveryError("VM returned an empty response body.")
 
         while True:

@@ -74,6 +74,17 @@ class SlotTransportTests(IsolatedAsyncioTestCase):
                 self.active = False
                 if self.mode == "idle_hang":
                     await asyncio.sleep(1)
+                if body.get("stream"):
+                    response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+                    await response.prepare(request)
+                    # Split the first JSON object across writes. Real SSE
+                    # responses do not guarantee one network chunk per line.
+                    await response.write(b'data: {"choices":[{"delta":{"content":"d')
+                    await response.write(b'one"}}]}\n\n')
+                    await response.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n')
+                    await response.write(b"data: [DONE]\n\n")
+                    await response.write_eof()
+                    return response
                 return web.json_response({"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]})
             finally:
                 self.active = False
