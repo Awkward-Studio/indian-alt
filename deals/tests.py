@@ -2173,6 +2173,31 @@ class DealStatusSyncTests(TestCase):
 
         self.assertIn("error", result)
 
+    @patch("deals.tasks.process_deal_folder_background.apply_async")
+    def test_resume_vdr_processing_reuses_cached_document_segments(self, mock_apply_async):
+        mock_apply_async.return_value = MagicMock(id="task-resume")
+        deal = Deal.objects.create(
+            title="Resume VDR",
+            source_onedrive_id="folder-resume",
+            source_drive_id="drive-resume",
+            processing_status="failed",
+            processing_error="Worker stopped after two documents.",
+        )
+
+        with patch.object(
+            FolderAnalysisService,
+            "get_persisted_file_tree_for_deal",
+            return_value=[{"id": "file-1", "name": "Deck.pdf"}],
+        ):
+            result = FolderAnalysisService.resume_vdr_processing(deal)
+
+        self.assertEqual(result["status"], "queued")
+        task_kwargs = mock_apply_async.call_args.kwargs["kwargs"]
+        self.assertTrue(task_kwargs["resume_cached"])
+        self.assertEqual(task_kwargs["coverage_policy"], "resume_cached")
+        deal.refresh_from_db()
+        self.assertEqual(deal.processing_status, "processing")
+
     @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
     @patch("deals.tasks.process_deal_folder_background.apply_async")
     def test_rerun_vdr_documents_queues_selected_files_through_the_vdr_pipeline(

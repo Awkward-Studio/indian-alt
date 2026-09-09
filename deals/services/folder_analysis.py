@@ -816,6 +816,43 @@ class FolderAnalysisService:
         }
 
     @staticmethod
+    def resume_vdr_processing(deal: Deal) -> dict:
+        """Resume a failed VDR run while reusing persisted document checkpoints."""
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return {"error": "This deal is not linked to a OneDrive folder."}
+
+        if deal.processing_status == 'processing':
+            return {"error": "VDR processing is already running for this deal."}
+
+        from deals.tasks import process_deal_folder_background
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+
+        file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
+        if not file_tree:
+            return {"error": "No persisted folder tree was found for this deal. Scan the folder before resuming VDR."}
+
+        task = process_deal_folder_background.apply_async(
+            kwargs={
+                'deal_id': str(deal.id),
+                'file_tree_map': file_tree,
+                'user_email': DMS_USER_EMAIL,
+                'coverage_policy': 'resume_cached',
+                'resume_cached': True,
+            },
+            queue='low_priority'
+        )
+
+        deal.processing_status = 'processing'
+        deal.processing_error = None
+        deal.save(update_fields=['processing_status', 'processing_error'])
+
+        return {
+            "status": "queued",
+            "task_id": task.id,
+            "message": f"Resuming VDR for {len(file_tree)} discovered files. Cached document segments will be reused.",
+        }
+
+    @staticmethod
     def rerun_vdr_documents(deal: Deal, document_ids: list[str]) -> dict:
         """Queue selected linked documents through the full VDR artifact pipeline."""
         if not deal.source_onedrive_id or not deal.source_drive_id:

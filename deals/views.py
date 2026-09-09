@@ -2242,6 +2242,15 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return Response(result, status=400)
         return Response(result)
 
+    @action(detail=True, methods=['post'], url_path='resume-vdr-processing')
+    def resume_vdr_processing(self, request, pk=None):
+        """Resume failed VDR processing using cached document segments."""
+        deal = self.get_object()
+        result = FolderAnalysisService.resume_vdr_processing(deal)
+        if "error" in result:
+            return Response(result, status=400)
+        return Response(result, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=['post'], url_path='rerun-vdr-documents')
     def rerun_vdr_documents(self, request, pk=None):
         """Rerun selected linked documents through the full VDR pipeline."""

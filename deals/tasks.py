@@ -1024,7 +1024,15 @@ def preflight_selection_async(self, drive_id: str | None, folder_id: str | None,
     soft_time_limit=0,
     time_limit=0,
 )
-def process_single_document_async(self, file_info, deal_id, user_email, is_preview, audit_log_id=None):
+def process_single_document_async(
+    self,
+    file_info,
+    deal_id,
+    user_email,
+    is_preview,
+    audit_log_id=None,
+    resume_artifact_run_id=None,
+):
     """
     Atomized task to process a single document from OneDrive.
     """
@@ -1139,10 +1147,10 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                 extraction_mode=doc.extraction_mode,
                 ai_service=ai_service,
                 source_metadata={
-                    # A new user-started VDR run refreshes every segment. Task
-                    # retries keep this audit id and can reuse checkpoints made
-                    # earlier in the same run.
-                    "artifact_run_id": str(audit_log_id or self.request.id),
+                    # Normal runs use their parent audit id as the cache scope.
+                    # Resume runs pass the prior artifact scope so completed
+                    # segments survive a failed parent run.
+                    "artifact_run_id": str(resume_artifact_run_id or audit_log_id or self.request.id),
                     "celery_task_id": str(self.request.id),
                     "vdr_parent_audit_id": str(audit_log_id or ""),
                     "source_id": str(doc.id),
@@ -1501,6 +1509,7 @@ def process_deal_folder_background(
     file_tree_map: list,
     user_email: str,
     coverage_policy: str = "all_supported_files",
+    resume_cached: bool = False,
 ):
     """
     Background task to download and vectorize the supplied files using a chord.
@@ -1562,8 +1571,54 @@ def process_deal_folder_background(
         _mark_vdr_cancelled(str(audit_log.id), deal_id, "Task manually terminated by forensic user.")
         return {"status": "cancelled", "task_count": 0}
 
-    # Dispatch chord
-    tasks = [process_single_document_async.s(f, deal_id, user_email, False, str(audit_log.id)) for f in supported_files]
+    # Dispatch chord. A resume keeps each document's previous artifact run
+    # scope so completed segment checkpoints can be read from Redis or the
+    # completed segment audit records.
+    resume_artifact_run_ids = {}
+    if resume_cached:
+        from ai_orchestrator.models import AIAuditLog
+
+        existing_documents = DealDocument.objects.filter(
+            deal_id=deal_id,
+            onedrive_id__in=[item.get('id') for item in supported_files if item.get('id')],
+        )
+        document_by_id = {str(document.id): document for document in existing_documents}
+        for document in existing_documents:
+            source_metadata = document.evidence_json.get('source_metadata', {}) if isinstance(document.evidence_json, dict) else {}
+            artifact_run_id = source_metadata.get('artifact_run_id')
+            if artifact_run_id:
+                resume_artifact_run_ids[str(document.onedrive_id)] = str(artifact_run_id)
+
+        missing_scope_document_ids = [
+            str(document.id)
+            for document in existing_documents
+            if str(document.onedrive_id) not in resume_artifact_run_ids
+        ]
+        if missing_scope_document_ids:
+            completed_segments = AIAuditLog.objects.filter(
+                source_type='document_evidence_segment',
+                source_id__in=missing_scope_document_ids,
+                status='COMPLETED',
+                is_success=True,
+            ).order_by('-completed_at')
+            for segment_audit in completed_segments:
+                metadata = segment_audit.source_metadata or {}
+                artifact_run_id = metadata.get('artifact_run_id') or metadata.get('vdr_parent_audit_id')
+                document = document_by_id.get(str(segment_audit.source_id))
+                if artifact_run_id and document and str(document.onedrive_id) not in resume_artifact_run_ids:
+                    resume_artifact_run_ids[str(document.onedrive_id)] = str(artifact_run_id)
+
+    tasks = [
+        process_single_document_async.s(
+            f,
+            deal_id,
+            user_email,
+            False,
+            str(audit_log.id),
+            resume_artifact_run_ids.get(str(f.get('id'))),
+        )
+        for f in supported_files
+    ]
     callback = finalize_folder_background.s(deal_id, str(audit_log.id))
     _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
     audit_log.source_metadata = {
@@ -1576,6 +1631,7 @@ def process_deal_folder_background(
         "unsupported_file_count": len(unsupported_files),
         "unsupported_files": [item.get("name") for item in unsupported_files],
         "coverage_policy": coverage_policy,
+        "resume_cached": resume_cached,
     }
     audit_log.save(update_fields=["source_metadata"])
     log_worker_event(
