@@ -92,12 +92,23 @@ def report_status_for_deal(deal) -> dict:
     latest_evidence_at = latest.created_at
     documents = getattr(deal, "prefetched_report_documents", None)
     if documents is None:
-        documents = deal.documents.only("updated_at").all()
+        # DealDocument has no updated_at column. Load the timestamps that can
+        # change when extraction or chunking refreshes its evidence instead of
+        # asking Django for a field that does not exist.
+        documents = deal.documents.only(
+            "created_at", "last_transcribed_at", "last_chunked_at",
+        ).all()
     emails = getattr(deal, "prefetched_report_emails", None)
     if emails is None:
         emails = deal.emails.only("updated_at").all()
     for source in [*documents, *emails]:
-        changed_at = getattr(source, "updated_at", None)
+        timestamps = [
+            getattr(source, "updated_at", None),
+            getattr(source, "last_transcribed_at", None),
+            getattr(source, "last_chunked_at", None),
+            getattr(source, "created_at", None),
+        ]
+        changed_at = max((timestamp for timestamp in timestamps if timestamp), default=None)
         if changed_at and (latest_evidence_at is None or changed_at > latest_evidence_at):
             return {
                 "state": "needs_regeneration",
