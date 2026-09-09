@@ -183,13 +183,21 @@ class DocumentArtifactService:
                 "document_name": file_name,
                 "document_type": document_type,
                 "source_metadata_json": json.dumps(source_metadata, default=str),
+                "_source_metadata": {
+                    **source_metadata,
+                    "segment_index": index,
+                    "segment_count": len(segments),
+                },
                 "context_label": f"Document Evidence: {file_name} [{index + 1}/{len(segments)}]",
                 "segment_index": index,
                 "segment_count": len(segments),
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 5000)),
-                "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 600)),
+                "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
+                "serialize_inference": True,
+                "celery_task_id": source_metadata.get("celery_task_id"),
+                "vdr_parent_audit_id": source_metadata.get("vdr_parent_audit_id"),
             }
             result = service.process_content(
                 content=(

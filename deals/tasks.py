@@ -1137,6 +1137,8 @@ def process_single_document_async(self, file_info, deal_id, user_email, is_previ
                     # retries keep this audit id and can reuse checkpoints made
                     # earlier in the same run.
                     "artifact_run_id": str(audit_log_id or self.request.id),
+                    "celery_task_id": str(self.request.id),
+                    "vdr_parent_audit_id": str(audit_log_id or ""),
                     "source_id": str(doc.id),
                     "source_file_id": file_id,
                     "source_drive_id": drive_id,
@@ -1384,6 +1386,12 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         audit_log = AIAuditLog.objects.get(id=audit_log_id)
         cancellation_message = "Task manually terminated by forensic user."
 
+        log_worker_event(
+            audit_log,
+            f"Finalizer received {len(results or [])} document task results.",
+            status="PROCESSING",
+        )
+
         if _is_cancel_requested(audit_log_id) or any(r.get('status') == 'cancelled' for r in results):
             _mark_vdr_cancelled(audit_log_id, deal_id, cancellation_message)
             logger.info("VDR indexing cancelled for Deal %s", deal_id)
@@ -1419,6 +1427,13 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             audit_log.error_message = f"Errors encountered in {len(errors)} files."
             
         audit_log.save()
+        log_worker_event(
+            audit_log,
+            f"VDR indexing finished: {processed_count} processed, {cached_count} cached, {len(errors)} failed.",
+            status=audit_log.status,
+            event_type="terminal",
+            done=True,
+        )
         logger.info(f"Finished VDR Indexing for Deal {deal_id}. Processed {processed_count} files.")
         return {
             "processed": processed_count,
@@ -1429,6 +1444,18 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         
     except Exception as e:
         logger.error(f"Failed to finalize deal {deal_id}: {str(e)}")
+        audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(e)
+            audit_log.completed_at = timezone.now()
+            audit_log.save(update_fields=["status", "is_success", "error_message", "completed_at"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        Deal.objects.filter(id=deal_id).update(
+            processing_status="failed",
+            processing_error=str(e),
+        )
         raise e
 
 @shared_task(bind=True, max_retries=3)
@@ -1509,6 +1536,11 @@ def process_deal_folder_background(self, deal_id: str, file_tree_map: list, user
         "coverage_policy": "all_supported_files",
     }
     audit_log.save(update_fields=["source_metadata"])
+    log_worker_event(
+        audit_log,
+        f"Queued {len(tasks)} document tasks; each segment will wait for the single inference lease before calling llama.cpp.",
+        status="PROCESSING",
+    )
     chord(tasks)(callback)
     
     logger.info(f"Dispatched chord with {len(tasks)} tasks for Deal {deal_id}")

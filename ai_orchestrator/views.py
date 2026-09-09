@@ -262,6 +262,70 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             'inference_restart': inference_restart,
         })
 
+    @action(detail=False, methods=['get'], url_path='queue-status')
+    def queue_status(self, request):
+        """Return the Celery and single-slot inference queue state together."""
+        if not _is_ai_admin(request.user):
+            return Response({'error': 'Administrator access is required.'}, status=403)
+
+        processing_logs = AIAuditLog.objects.filter(status='PROCESSING').order_by('created_at')
+
+        def audit_summary(log):
+            metadata = log.source_metadata or {}
+            return {
+                'audit_log_id': str(log.id),
+                'celery_task_id': log.celery_task_id,
+                'source_type': log.source_type,
+                'source_id': log.source_id,
+                'context_label': log.context_label,
+                'created_at': log.created_at,
+                'inference_state': metadata.get('inference_state'),
+                'inference_started_at': metadata.get('inference_started_at'),
+                'inference_queue_entered_at': metadata.get('inference_queue_entered_at'),
+                'inference_queue_wait_ms': metadata.get('inference_queue_wait_ms'),
+                'segment_index': metadata.get('segment_index'),
+                'segment_count': metadata.get('segment_count'),
+                'vdr_parent_audit_id': metadata.get('vdr_parent_audit_id'),
+            }
+
+        queued = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') == 'queued']
+        active = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') == 'active']
+
+        lease_owner = cache.get('ai:inference:lease:v1')
+        slots = []
+        slot_warning = None
+        try:
+            parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
+            slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
+            headers = {'Authorization': f"Bearer {getattr(settings, 'VLLM_API_KEY', '')}"} if getattr(settings, 'VLLM_API_KEY', '') else {}
+            response = requests.get(slot_url, headers=headers, timeout=5)
+            response.raise_for_status()
+            slot_payload = response.json()
+            slots = slot_payload if isinstance(slot_payload, list) else []
+        except Exception as exc:
+            slot_warning = str(exc)
+
+        celery_state = {'active': {}, 'reserved': {}, 'scheduled': {}, 'warning': None}
+        try:
+            from config.celery import app as celery_app
+            inspector = celery_app.control.inspect(timeout=2)
+            celery_state['active'] = inspector.active() or {}
+            celery_state['reserved'] = inspector.reserved() or {}
+            celery_state['scheduled'] = inspector.scheduled() or {}
+        except Exception as exc:
+            celery_state['warning'] = str(exc)
+
+        return Response({
+            'inference': {
+                'slots': slots,
+                'lease_owner': lease_owner,
+                'active_audits': active,
+                'queued_audits': queued,
+            },
+            'celery': celery_state,
+            'warnings': [warning for warning in [slot_warning, celery_state['warning']] if warning],
+        })
+
 class AIConversationViewSet(viewsets.ModelViewSet):
     serializer_class = AIConversationSerializer
     permission_classes = [IsAuthenticated]

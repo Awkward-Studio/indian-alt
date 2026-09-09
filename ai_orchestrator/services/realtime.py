@@ -1,5 +1,9 @@
+import logging
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+
+logger = logging.getLogger(__name__)
 
 
 def serialize_audit_log(log) -> dict:
@@ -125,4 +129,9 @@ def log_worker_event(log, message: str, *, status: str = None, event_type: str =
     log.save(update_fields=['worker_logs', 'status'] if status else ['worker_logs'])
 
     # Broadcast
-    broadcast_audit_log_update(log, event_type=event_type, done=done)
+    try:
+        broadcast_audit_log_update(log, event_type=event_type, done=done)
+    except Exception as exc:
+        # Websocket delivery is observability only; a malformed/stale channel
+        # layer must never turn a completed Celery task into a failed task.
+        logger.warning("Could not broadcast audit update for %s: %s", getattr(log, "id", None), exc)

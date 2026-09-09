@@ -10,8 +10,8 @@ class FullVDRArtifactTests(SimpleTestCase):
     def test_document_task_allows_complete_multi_segment_analysis_window(self):
         from deals.tasks import process_single_document_async
 
-        self.assertEqual(process_single_document_async.soft_time_limit, 5100)
-        self.assertEqual(process_single_document_async.time_limit, 5400)
+        self.assertEqual(process_single_document_async.soft_time_limit, 43200)
+        self.assertEqual(process_single_document_async.time_limit, 45000)
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
     @patch("deals.services.document_artifacts.cache")
@@ -68,7 +68,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
         self.assertIn("Extract structured internal-document evidence", first_prompt)
-        self.assertEqual(first_metadata["request_timeout"], 600)
+        self.assertEqual(first_metadata["request_timeout"], 1800)
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
     @patch("deals.services.document_artifacts.cache")

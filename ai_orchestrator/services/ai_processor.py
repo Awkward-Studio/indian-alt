@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from typing import Dict, Any, Optional, Iterator
+from celery import current_task
 
 from ..models import AIPersonality, AISkill, AIAuditLog
 from .llm_providers import VLLMProviderService, AnthropicProviderService
@@ -11,6 +12,7 @@ from .deal_visuals import apply_deal_visual_contract
 from .parsers import ResponseParserService
 from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
+from .inference_queue import InferenceQueueLease
 from .runtime import AIRuntimeService
 from .pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .search_provider import SearXNGProviderService
@@ -72,7 +74,17 @@ class AIProcessorService:
         model_override: Optional[str] = None,
         stream: bool = False
     ) -> Any:
-        
+        # Attach the surrounding Celery execution to every model audit when
+        # this call originates from a worker. This enables queue-status to
+        # correlate audit rows with active/reserved Celery tasks.
+        task_id = None
+        try:
+            task_id = getattr(getattr(current_task, "request", None), "id", None)
+        except Exception:
+            task_id = None
+        if task_id and not (metadata or {}).get("celery_task_id"):
+            metadata = {**(metadata or {}), "celery_task_id": str(task_id)}
+
         model_provider = (metadata or {}).get("model_provider", "vllm")
         if model_provider == "anthropic":
             self.current_provider = self.anthropic_provider
@@ -279,6 +291,10 @@ class AIProcessorService:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
             if "request_timeout" in metadata:
                 payload["_request_timeout"] = metadata["request_timeout"]
+            if model_provider != "anthropic" and metadata.get("serialize_inference", True):
+                payload["_serialize_inference"] = True
+            if metadata.get("inference_queue_max_wait") is not None:
+                payload["_inference_queue_max_wait"] = metadata["inference_queue_max_wait"]
             if "web_search_enabled" in metadata:
                 # Retrieval is centralized in SearXNG above. Provider-native
                 # search stays disabled so every query follows the same route.
@@ -494,12 +510,22 @@ class AIProcessorService:
         Orchestrates standard execution and delegates parsing.
         """
         start_time = time.time()
+        serialize_inference = bool(payload.pop("_serialize_inference", False)) and bool(
+            getattr(settings, "AI_INFERENCE_QUEUE_ENABLED", True)
+        )
+        max_queue_wait = payload.pop("_inference_queue_max_wait", 0)
         try:
-            request_timeout = payload.pop("_request_timeout", None)
-            if request_timeout is None:
-                data = self.current_provider.execute_standard(payload)
+            def execute_request():
+                request_timeout = payload.pop("_request_timeout", None)
+                if request_timeout is None:
+                    return self.current_provider.execute_standard(payload)
+                return self.current_provider.execute_standard(payload, timeout=int(request_timeout))
+
+            if serialize_inference:
+                with InferenceQueueLease(audit_log, max_wait_seconds=max_queue_wait):
+                    data = execute_request()
             else:
-                data = self.current_provider.execute_standard(payload, timeout=int(request_timeout))
+                data = execute_request()
             
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
@@ -577,6 +603,13 @@ class AIProcessorService:
             audit_log.error_message = str(e)
             parsed_json = {"error": str(e)}
         finally:
+            if serialize_inference:
+                metadata = dict(audit_log.source_metadata or {})
+                metadata.update({
+                    "inference_state": "completed" if audit_log.status == "COMPLETED" else "failed",
+                    "inference_finished_at": timezone.now().isoformat(),
+                })
+                audit_log.source_metadata = metadata
             audit_log.request_duration_ms = int((time.time() - start_time) * 1000)
             if audit_log.status in ['COMPLETED', 'FAILED']:
                 audit_log.completed_at = timezone.now()
