@@ -125,48 +125,53 @@ class VLLMProviderService:
 
     def execute_stream(self, payload: dict) -> Iterator[str]:
         body = self._build_chat_body(payload, stream=True)
-        response = requests.post(
+        with requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),
             json=body,
             stream=True,
             timeout=(self.connect_timeout, self.stream_timeout),
-        )
-        response.raise_for_status()
+        ) as response:
+            response.raise_for_status()
 
-        current_event = ""
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if not raw_line or raw_line.startswith(":"):
-                continue
-            if raw_line.startswith("event: "):
-                current_event = raw_line[7:].strip()
-                continue
-            if raw_line.startswith("data: "):
-                raw_line = raw_line[6:]
-            if raw_line == "[DONE]":
-                yield json.dumps({"response": "", "done": True})
-                break
-            try:
-                chunk = json.loads(raw_line)
-            except json.JSONDecodeError:
-                logger.warning("Skipping malformed vLLM stream chunk: %s", raw_line)
-                continue
-
-            if current_event == "error" or chunk.get("error"):
-                error_payload = chunk.get("error") or chunk
-                if isinstance(error_payload, dict):
-                    message = error_payload.get("message") or error_payload.get("detail") or json.dumps(error_payload)
-                else:
-                    message = str(error_payload)
-                raise RuntimeError(f"vLLM stream error: {message}")
             current_event = ""
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                raw_line = raw_line.strip()
+                if raw_line.startswith(":"):
+                    continue
+                if raw_line.startswith("event:"):
+                    current_event = raw_line[6:].strip()
+                    continue
+                if raw_line.startswith("data:"):
+                    raw_line = raw_line[5:].strip()
+                if raw_line == "[DONE]":
+                    yield json.dumps({"response": "", "done": True})
+                    return
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed vLLM stream chunk: %s", raw_line)
+                    continue
 
-            choice = (chunk.get("choices") or [{}])[0]
-            delta = choice.get("delta") or {}
-            text = delta.get("content") or ""
-            thinking = delta.get("reasoning_content") or delta.get("reasoning") or ""
-            done = choice.get("finish_reason") is not None
-            yield json.dumps({"response": text, "thinking": self._flatten_content(thinking), "done": done})
+                if current_event == "error" or chunk.get("error"):
+                    error_payload = chunk.get("error") or chunk
+                    if isinstance(error_payload, dict):
+                        message = error_payload.get("message") or error_payload.get("detail") or json.dumps(error_payload)
+                    else:
+                        message = str(error_payload)
+                    raise RuntimeError(f"vLLM stream error: {message}")
+                current_event = ""
+
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                text = delta.get("content") or ""
+                thinking = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                done = choice.get("finish_reason") is not None
+                yield json.dumps({"response": text, "thinking": self._flatten_content(thinking), "done": done})
+                if done:
+                    return
 
     def execute_standard(self, payload: dict, timeout: int | None = None, *, slot_progress=None) -> dict:
         body = self._build_chat_body(payload, stream=False)

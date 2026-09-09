@@ -1,4 +1,5 @@
 import asyncio
+import json
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,6 +9,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from ai_orchestrator.services.slot_request import (
     SlotClock, SlotProcessingTimeout, InferenceDeliveryError, _execute,
 )
+from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.realtime import _send_audit_event, broadcast_audit_log_update
 
 
@@ -132,6 +134,26 @@ class SlotTransportTests(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "cancelled"):
             await _execute(self.provider, {}, 1, cancelled)
         self.assertEqual(self.posts, 0)
+
+
+class ChatStreamTransportTests(SimpleTestCase):
+    def test_finish_chunk_ends_stream_without_waiting_for_done_marker(self):
+        response = MagicMock()
+        response.iter_lines.return_value = [
+            'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        ]
+        response.__enter__.return_value = response
+        provider = VLLMProviderService()
+        with patch("ai_orchestrator.services.llm_providers.requests.post", return_value=response):
+            chunks = [json.loads(chunk) for chunk in provider.execute_stream({"prompt": "Reply with OK."})]
+
+        self.assertEqual(chunks, [
+            {"response": "OK", "thinking": "", "done": False},
+            {"response": "", "thinking": "", "done": True},
+        ])
+        response.__enter__.assert_called_once_with()
+        response.__exit__.assert_called_once()
 
 
 class WorkflowGuardTests(SimpleTestCase):
