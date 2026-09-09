@@ -42,10 +42,9 @@ services:
       - --batch-size
       - ${LLAMA_BATCH_SIZE:-2048}
       - --ubatch-size
-      # Gemma 4 vision produces image decode batches above 1K tokens. For
-      # non-causal attention llama.cpp requires n_ubatch >= that entire batch;
-      # a smaller value triggers GGML_ASSERT and terminates the server.
-      - ${LLAMA_UBATCH_SIZE:-1536}
+      # This is the text endpoint. Document vision must use the dedicated OCR
+      # endpoint so its non-causal image batches cannot destabilize this server.
+      - ${LLAMA_UBATCH_SIZE:-512}
       - --cache-type-k
       - ${LLAMA_CACHE_TYPE_K:-q8_0}
       - --cache-type-v
