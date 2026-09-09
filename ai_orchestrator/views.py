@@ -41,6 +41,7 @@ from .services.universal_chat import UniversalChatService
 from .services.document_processor import DocumentProcessorService
 from .services.chat_documents import ChatDocumentEvidenceService
 from .services.vm_service import VMControlService
+from .services.inference_queue import InferenceQueueLease
 from deals.models import Deal, DealDocument, DealAnalysis, AnalysisKind, DealGeneratedDocument, DealRelationshipContext
 from meetings.models import MeetingNote
 
@@ -236,6 +237,10 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             except Exception as exc:
                 warnings.append(f'Inference container restart: {exc}')
 
+        lease_released = InferenceQueueLease.force_release()
+        if not lease_released:
+            warnings.append('Inference queue lease could not be released.')
+
         message = 'Stopped by administrator while clearing active inference work.'
         now = timezone.now()
         with transaction.atomic():
@@ -260,6 +265,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             'failed_ingestion_count': failed_ingestion, 'warnings': warnings,
             'processing_slots_before_clear': processing_slots_before_clear,
             'inference_restart': inference_restart,
+            'inference_lease_released': lease_released,
         })
 
     @action(detail=False, methods=['get'], url_path='queue-status')

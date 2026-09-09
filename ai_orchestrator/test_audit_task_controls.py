@@ -100,3 +100,18 @@ class AuditTaskControlTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data['inference_restart']['status'], 'submitted')
         vm_service_class.return_value.restart_text_inference.assert_called_once_with()
+
+    @patch('ai_orchestrator.services.inference_queue.cache')
+    @patch('ai_orchestrator.views.requests.get')
+    @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke', return_value=[])
+    def test_clear_active_releases_stale_inference_lease(self, _revoke, get_slots, queue_cache):
+        get_slots.return_value.json.return_value = []
+        get_slots.return_value.raise_for_status.return_value = None
+        queue_cache.get.return_value = {'lease_token': 'stale-token'}
+        queue_cache.delete.return_value = True
+
+        response = self.client.post('/api/ai/history/clear-active/', {}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['inference_lease_released'])
+        queue_cache.delete.assert_called_once_with('ai:inference:lease:v1')
