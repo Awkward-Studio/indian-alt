@@ -115,8 +115,13 @@ def _next_unit(metadata: dict) -> tuple[str, str, dict] | None:
     return None
 
 
-def _high_priority_busy() -> bool:
+def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
     """Report whether interactive work is queued or currently running."""
+    excluded = str(exclude_task_id or "")
+
+    def is_other_task(task: dict, id_key: str) -> bool:
+        return not excluded or str(task.get(id_key) or "") != excluded
+
     try:
         from config.celery import app as celery_app
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
@@ -124,22 +129,26 @@ def _high_priority_busy() -> bool:
         if sum(item["ready_count"] for item in snapshot["queues"]):
             return True
         if any(
-            item.get("queue") == "high_priority"
+            item.get("queue") == "high_priority" and is_other_task(item, "task_id")
             for item in snapshot.get("unacked", {}).get("messages", [])
         ):
             return True
         inspector = celery_app.control.inspect(timeout=0.5)
         for tasks in (inspector.active() or {}).values():
-            if any((task.get("delivery_info") or {}).get("routing_key") == "high_priority" for task in tasks or []):
+            if any(
+                (task.get("delivery_info") or {}).get("routing_key") == "high_priority"
+                and is_other_task(task, "id")
+                for task in tasks or []
+            ):
                 return True
     except Exception:
         pass
     return False
 
 
-def interactive_work_waiting() -> bool:
+def interactive_work_waiting(*, exclude_task_id: str | None = None) -> bool:
     """Public segment-boundary check used by long-running VDR document tasks."""
-    return _high_priority_busy()
+    return _high_priority_busy(exclude_task_id=exclude_task_id)
 
 
 def dispatch() -> dict:

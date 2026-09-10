@@ -1,12 +1,89 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal
 from deals.services import vdr_queue
+
+
+class HighPriorityBusyTests(SimpleTestCase):
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_current_vdr_delivery_does_not_block_itself(self, snapshot, inspect):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 0}],
+            "unacked": {"messages": [{
+                "queue": "high_priority",
+                "task_id": "current-vdr-task",
+            }]},
+        }
+        inspect.return_value.active.return_value = {
+            "worker": [{
+                "id": "current-vdr-task",
+                "delivery_info": {"routing_key": "high_priority"},
+            }],
+        }
+
+        self.assertFalse(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_different_high_priority_delivery_still_blocks_vdr(self, snapshot, inspect):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 0}],
+            "unacked": {"messages": [{
+                "queue": "high_priority",
+                "task_id": "interactive-task",
+            }]},
+        }
+
+        self.assertTrue(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+        inspect.assert_not_called()
+
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_active_interactive_delivery_still_blocks_vdr(self, snapshot, inspect):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 0}],
+            "unacked": {"messages": []},
+        }
+        inspect.return_value.active.return_value = {
+            "worker": [{
+                "id": "interactive-task",
+                "delivery_info": {"routing_key": "high_priority"},
+            }],
+        }
+
+        self.assertTrue(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_ready_interactive_delivery_still_blocks_vdr(self, snapshot, inspect):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 1}],
+            "unacked": {"messages": []},
+        }
+
+        self.assertTrue(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+        inspect.assert_not_called()
+
+    def test_document_retry_keeps_non_interactive_queue(self):
+        from deals.tasks import _document_retry_queue
+
+        request = MagicMock(delivery_info={"routing_key": "low_priority"})
+        self.assertEqual(
+            _document_retry_queue(request, durable_delivery=False),
+            "low_priority",
+        )
+
+        request.delivery_info = {"routing_key": "high_priority"}
+        self.assertEqual(
+            _document_retry_queue(request, durable_delivery=True),
+            "vdr_work",
+        )
 
 
 @override_settings(VDR_DURABLE_QUEUE_ENABLED=True)

@@ -353,6 +353,26 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertEqual(service.process_content.call_count, 1)
         mock_cache.set.assert_called_once()
 
+        completed_key, completed_artifact = mock_cache.set.call_args.args[:2]
+        mock_cache.get.side_effect = lambda key: (
+            completed_artifact if key == completed_key else None
+        )
+        service.process_content.reset_mock()
+
+        resumed = DocumentArtifactService.build_document_artifact(
+            file_name="Long VDR.pdf",
+            extracted_text=source_text,
+            ai_service=service,
+            yield_check=lambda: False,
+        )
+
+        expected_segments = DocumentArtifactService._split_for_artifact(source_text)
+        self.assertEqual(service.process_content.call_count, len(expected_segments) - 1)
+        self.assertEqual(
+            resumed["source_metadata"]["artifact_segments_completed"],
+            len(expected_segments),
+        )
+
     @patch("deals.services.document_artifacts.cache")
     def test_poisoned_cached_segment_is_evicted_and_regenerated(self, mock_cache):
         mock_cache.get.return_value = {

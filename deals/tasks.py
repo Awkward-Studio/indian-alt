@@ -38,6 +38,15 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 logger = logging.getLogger(__name__)
 
 
+def _document_retry_queue(request, *, durable_delivery: bool) -> str:
+    """Keep document retries on their original non-interactive queue."""
+    delivery_info = getattr(request, "delivery_info", None)
+    routing_key = delivery_info.get("routing_key") if isinstance(delivery_info, dict) else None
+    if routing_key in {"low_priority", "vdr_work"}:
+        return routing_key
+    return "vdr_work" if durable_delivery else "low_priority"
+
+
 @shared_task
 def process_manual_document(document_id):
     """Enrich persisted native text with Gemma; no docproc, vision or embeddings."""
@@ -1256,6 +1265,11 @@ def process_single_document_async(
             unit_key=str(queue_unit_key or file_id),
         )
 
+    def interactive_work_is_waiting() -> bool:
+        from deals.services.vdr_queue import interactive_work_waiting
+
+        return interactive_work_waiting(exclude_task_id=str(self.request.id))
+
     try:
         _update_vdr_document_queue(
             audit_log_id,
@@ -1358,6 +1372,10 @@ def process_single_document_async(
 
         if delivery_cancelled():
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+        if interactive_work_is_waiting():
+            raise DocumentArtifactYielded(
+                "Interactive AI work is waiting; yielding before VDR extraction."
+            )
 
         # Download content
         content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
@@ -1406,8 +1424,6 @@ def process_single_document_async(
             )
 
         if normalized_text:
-            from deals.services.vdr_queue import interactive_work_waiting
-
             artifact = DocumentArtifactService.build_document_artifact(
                 file_name=doc.title,
                 extracted_text=normalized_text,
@@ -1434,7 +1450,7 @@ def process_single_document_async(
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
                 cancel_check=delivery_cancelled,
-                yield_check=interactive_work_waiting,
+                yield_check=interactive_work_is_waiting,
                 force_fresh=force_fresh,
             )
             if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():
@@ -1490,7 +1506,15 @@ def process_single_document_async(
     except DocumentArtifactYielded as e:
         logger.info("Yielding VDR document %s for interactive AI work", file_name)
         _update_vdr_document_queue(audit_log_id, file_info, status="queued")
-        raise self.retry(exc=e, countdown=1)
+        retry_queue = _document_retry_queue(
+            self.request,
+            durable_delivery=queue_generation is not None,
+        )
+        raise self.retry(
+            exc=e,
+            countdown=max(1, int(getattr(settings, "VDR_INTERACTIVE_YIELD_RETRY_SECONDS", 5))),
+            queue=retry_queue,
+        )
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
         if failure_retries < 3:
@@ -1503,6 +1527,10 @@ def process_single_document_async(
                 exc=e,
                 countdown=min(60, 5 * (2 ** failure_retries)),
                 kwargs=retry_kwargs,
+                queue=_document_retry_queue(
+                    self.request,
+                    durable_delivery=queue_generation is not None,
+                ),
             )
         _update_vdr_document_queue(audit_log_id, file_info, status="failed", error=str(e))
         return {"status": "failed", "file": file_name, "error": str(e)}
