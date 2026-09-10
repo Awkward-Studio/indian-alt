@@ -91,7 +91,11 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertTrue(complete_sections.call_args.kwargs["force_regenerate"])
         self.assertEqual(create_analysis.call_args.kwargs["thinking"], "")
 
-    @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_WORKERS=1,
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=2_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
     @patch("deals.services.document_artifacts.cache")
     def test_every_segment_is_analyzed_and_merged_into_full_artifact(self, mock_cache):
         mock_cache.get.return_value = None
@@ -145,11 +149,16 @@ class FullVDRArtifactTests(SimpleTestCase):
         first_prompt = service.process_content.call_args_list[0].kwargs["content"]
         first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
-        self.assertIn("Extract structured internal-document evidence", first_prompt)
-        self.assertEqual(first_metadata["max_tokens"], 32768)
+        self.assertIn("Build a complete structured evidence artifact", first_prompt)
+        self.assertEqual(first_metadata["max_input_tokens"], 40960)
+        self.assertEqual(first_metadata["max_tokens"], 16384)
         self.assertEqual(first_metadata["request_timeout"], 1800)
 
-    @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_WORKERS=1,
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=4_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
     @patch("deals.services.document_artifacts.cache")
     def test_failed_segment_cannot_be_marked_as_complete(self, mock_cache):
         from deals.services.document_artifacts import DocumentArtifactService
@@ -174,7 +183,11 @@ class FullVDRArtifactTests(SimpleTestCase):
             DocumentArtifactService.STATUS_DEGRADED,
         )
 
-    @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_WORKERS=1,
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=4_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
     @patch("deals.services.document_artifacts.cache")
     def test_cancellation_stops_before_remaining_segments(self, mock_cache):
         mock_cache.get.return_value = None

@@ -16,6 +16,7 @@ from ai_orchestrator.services.bulk_prompt_contracts import (
     BULK2_INTEL_SYSTEM_PROMPT,
     build_bulk2_segment_prompt,
 )
+from ai_orchestrator.services.token_budget import estimate_tokens
 
 if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
@@ -85,9 +86,7 @@ class DocumentArtifactService:
     STATUS_DEGRADED = "degraded"
     STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
-    ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v1"
-    SEGMENT_CHARS = 7_000
-    SEGMENT_OVERLAP = 500
+    ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v2"
 
     @staticmethod
     def _segment_artifact_usable(artifact: Any) -> bool:
@@ -212,6 +211,10 @@ class DocumentArtifactService:
                 "segment_count": len(segments),
                 "source_location": f"{file_name} | segment {index + 1}/{len(segments)}",
                 "segment_metadata": {},
+                "segment_estimated_tokens": estimate_tokens(segment),
+                "segment_source_token_budget": int(
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)
+                ),
             }
             metadata = {
                 "document_name": file_name,
@@ -221,13 +224,24 @@ class DocumentArtifactService:
                     **source_metadata,
                     "segment_index": index,
                     "segment_count": len(segments),
+                    "segment_estimated_tokens": estimate_tokens(segment),
+                    "segment_input_token_budget": int(
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+                    ),
+                    "segment_output_token_budget": int(
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)
+                    ),
+                    "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
                     "artifact_segment_cache_key": cache_key,
                 },
                 "context_label": f"Document Evidence: {file_name} [{index + 1}/{len(segments)}]",
                 "segment_index": index,
                 "segment_count": len(segments),
                 "chat_template_kwargs": {"enable_thinking": False},
-                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 5000)),
+                "max_input_tokens": int(
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+                ),
+                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)),
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
                 "serialize_inference": True,
@@ -309,15 +323,35 @@ class DocumentArtifactService:
             "artifact_segment_count": len(segments),
             "artifact_segments_completed": len(segments),
             "artifact_model": artifact_model,
+            "artifact_segment_input_token_budget": int(
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+            ),
+            "artifact_segment_output_token_budget": int(
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)
+            ),
+            "artifact_segment_source_token_budget": int(
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)
+            ),
         }
         return artifact
 
     @classmethod
     def _split_for_artifact(cls, text: str) -> list[str]:
+        source_tokens = max(
+            4_000,
+            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)),
+        )
+        overlap_tokens = max(
+            0,
+            min(
+                int(getattr(settings, "VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS", 768)),
+                source_tokens // 4,
+            ),
+        )
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=cls.SEGMENT_CHARS,
-            chunk_overlap=cls.SEGMENT_OVERLAP,
-            length_function=len,
+            chunk_size=source_tokens,
+            chunk_overlap=overlap_tokens,
+            length_function=estimate_tokens,
             separators=["\n\n", "\n", " ", ""],
         )
         return splitter.split_text(text) or [text]

@@ -8,7 +8,9 @@ import json
 BULK2_INTEL_SYSTEM_PROMPT = """[SYSTEM: INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION]
 Use only the supplied internal document content and metadata. Do not use public knowledge, web knowledge, or assumptions.
 Return JSON only. Extract investor-grade evidence for a PE analyst preparing an IC note.
-Be precise with numbers and preserve source locations such as sheet/range/row references."""
+Read the complete segment before writing. Coverage matters more than brevity.
+Copy numbers and factual values exactly. Preserve currency, units, period, actual/budget/forecast status, standalone/consolidated basis, and source locations such as page, section, sheet, range, and row.
+Do not turn management claims into verified facts. Record contradictions, unclear labels, missing periods, and broken reconciliations instead of resolving them by assumption."""
 
 
 def build_bulk2_segment_prompt(*, segment: str, context: dict, compact: bool = False) -> str:
@@ -21,11 +23,24 @@ def build_bulk2_segment_prompt(*, segment: str, context: dict, compact: bool = F
         else ""
     )
     return (
-        "Extract structured internal-document evidence from this segment for PE IC-note synthesis.\n"
-        "Use only this supplied segment and metadata. Do not add web/public facts.\n"
-        "Preserve material numbers, table/range definitions, risks, claims, and diligence gaps visible in this segment.\n"
-        "Cite sheet/range/row/part locations using the provided source_location.\n"
-        "Be concise; do not repeat the same fact in multiple fields.\n"
+        "Build a complete structured evidence artifact from this internal-document segment for downstream PE underwriting.\n"
+        "Use only the supplied segment and metadata. Do not add public facts, general knowledge, estimates, or inferred values.\n\n"
+        "Coverage requirements:\n"
+        "1. Financials: capture every disclosed period and material line item across P&L, balance sheet, cash flow, MIS, budget, forecast, unit economics, working capital, debt, cash, capex, valuation, and transaction schedules. Preserve labels, signs, currency, scale, units, period, and actual/budget/forecast status exactly.\n"
+        "2. Tables: reconstruct table_definitions with title, headers, period columns, metric rows, units, sheet/range/page location, and key observations. Do not reduce a multi-period table to one headline number.\n"
+        "3. Business evidence: capture products, pricing, business model, customers, concentration, channels, geographies, suppliers, facilities, capacity, technology, regulation, market claims, and operating KPIs when stated.\n"
+        "4. People and transaction evidence: capture founders, management, ownership, cap table, funding history, proposed security, cheque size, valuation, dilution, use of funds, rights, and conditions when stated.\n"
+        "5. Underwriting issues: record risks, inconsistencies, unsupported management claims, open questions, and concrete diligence asks. Do not manufacture a risk unless the segment contains a fact that supports it.\n"
+        "6. Industry evidence: keep market size, growth, share, competitor, and regulatory claims tied to an internal citation and the stated period, geography, and methodology.\n\n"
+        "Output requirements:\n"
+        "- Return one JSON object using exactly these top-level keys: document_name, document_type, document_type_suggestion, document_summary, claims, metrics, numeric_evidence, table_definitions, tables_summary, contacts_found, risks, open_questions, diligence_gaps, citations, industry_overview, reasoning, quality_flags, normalized_text, source_map.\n"
+        "- Keep document_summary to four to eight precise sentences about this segment.\n"
+        "- Put each distinct reported KPI in metrics and each material financial line item in numeric_evidence. A fact may appear in both only when the KPI and statement-line-item uses are both needed downstream.\n"
+        "- Every claim, metric, numeric item, table, risk, and industry finding must carry or name the most specific available source location. Use the supplied source_location when the segment has no finer page, sheet, range, or row marker.\n"
+        "- Use confidence High only for directly stated, clearly labelled evidence. Use Medium or Low for ambiguous extraction and explain the ambiguity in notes or quality_flags.\n"
+        "- Keep normalized_text empty for segment responses. The pipeline retains the complete source text separately.\n"
+        "- Before returning, check silently that no disclosed financial period, table, transaction term, material risk, or named entity in the segment was skipped.\n"
+        "- Do not repeat the same fact under several aliases and do not pad empty fields with generic prose.\n"
         f"{compact_instruction}\n"
         f"[SEGMENT CONTEXT JSON]\n{json.dumps(context, default=str)}\n\n"
         f"[CLEANED INTERNAL DOCUMENT SEGMENT]\n{segment}"
