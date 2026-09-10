@@ -1,4 +1,5 @@
 import uuid
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 
@@ -15,6 +16,9 @@ class Bank(models.Model):
         ordering = ['name']
         verbose_name = 'Bank'
         verbose_name_plural = 'Banks'
+        indexes = [
+            GinIndex(fields=['name'], name='bank_name_trgm', opclasses=['gin_trgm_ops']),
+        ]
 
     def __str__(self):
         return self.name or f'Bank {self.id}'

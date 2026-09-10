@@ -543,10 +543,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, DealOrderingFilter]
     filterset_class = DealFilterSet
     search_fields = [
-        'title', 'deal_summary', 'industry', 'sector', 'city', 'state',
-        'country', 'fund', 'priority', 'deal_status', 'current_phase',
-        'funding_ask_for', 'bank__name',
-        'legacy_investment_bank', 'primary_contact__name'
+        'title', 'industry', 'sector', 'city', 'state',
+        'country', 'bank__name', 'legacy_investment_bank',
+        'primary_contact__name'
     ]
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
