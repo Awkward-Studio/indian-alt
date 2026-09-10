@@ -430,6 +430,9 @@ class AIAuditLog(models.Model):
     # Performance
     request_duration_ms = models.IntegerField(null=True, blank=True)
     tokens_used = models.IntegerField(null=True, blank=True)
+    input_tokens = models.IntegerField(null=True, blank=True)
+    output_tokens = models.IntegerField(null=True, blank=True)
+    token_count_is_estimate = models.BooleanField(null=True, blank=True)
     
     # Context Preservation
     source_metadata = models.JSONField(null=True, blank=True, help_text='Extra context like file trees or drive IDs')

@@ -184,6 +184,49 @@ class StandardTransportSelectionTests(SimpleTestCase):
         self.assertIs(kwargs["slot_progress"], lease.record_slot_progress)
 
 
+class TokenUsageTests(SimpleTestCase):
+    def setUp(self):
+        from ai_orchestrator.services.ai_processor import AIProcessorService
+        self.service = AIProcessorService
+        self.audit = MagicMock(system_prompt="System rules", user_prompt="User evidence")
+
+    def test_provider_usage_is_split_and_marked_exact(self):
+        self.service._record_token_usage(
+            self.audit,
+            {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+            "answer",
+            "",
+        )
+        self.assertEqual(self.audit.input_tokens, 120)
+        self.assertEqual(self.audit.output_tokens, 30)
+        self.assertEqual(self.audit.tokens_used, 150)
+        self.assertFalse(self.audit.token_count_is_estimate)
+
+    def test_missing_provider_usage_estimates_input_and_output_separately(self):
+        self.service._record_token_usage(self.audit, {}, "answer", "reasoning")
+        self.assertGreater(self.audit.input_tokens, 0)
+        self.assertGreater(self.audit.output_tokens, 0)
+        self.assertEqual(self.audit.tokens_used, self.audit.input_tokens + self.audit.output_tokens)
+        self.assertTrue(self.audit.token_count_is_estimate)
+
+    def test_parent_usage_sums_child_calls_and_marks_mixed_counts(self):
+        from ai_orchestrator.serializers import token_usage
+
+        parent = MagicMock(
+            input_tokens=None, output_tokens=None, tokens_used=None,
+            token_count_is_estimate=None,
+        )
+        children = [
+            MagicMock(input_tokens=100, output_tokens=20, tokens_used=120, token_count_is_estimate=False),
+            MagicMock(input_tokens=80, output_tokens=30, tokens_used=110, token_count_is_estimate=True),
+        ]
+        result = token_usage(parent, children)
+        self.assertEqual(result["aggregate"]["input_tokens"], 180)
+        self.assertEqual(result["aggregate"]["output_tokens"], 50)
+        self.assertEqual(result["aggregate"]["total_tokens"], 230)
+        self.assertEqual(result["aggregate"]["method"], "mixed")
+
+
 class WorkflowGuardTests(SimpleTestCase):
     @patch("ai_orchestrator.models.AIAuditLog.objects")
     def test_terminal_and_deleted_workflows_stop_redelivery(self, objects):

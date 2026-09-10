@@ -323,6 +323,40 @@ class AIProcessorService:
         return estimate_tokens(value)
 
     @classmethod
+    def _record_token_usage(cls, audit_log, usage: dict | None, response: str, thinking: str) -> None:
+        usage = usage if isinstance(usage, dict) else {}
+
+        def count(*keys):
+            for key in keys:
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and value >= 0:
+                    return int(value)
+            return None
+
+        input_tokens = count("prompt_tokens", "input_tokens")
+        output_tokens = count("completion_tokens", "output_tokens")
+        total_tokens = count("total_tokens")
+        provider_counted = any(value is not None for value in (input_tokens, output_tokens, total_tokens))
+
+        if provider_counted:
+            if total_tokens is None and input_tokens is not None and output_tokens is not None:
+                total_tokens = input_tokens + output_tokens
+            audit_log.input_tokens = input_tokens
+            audit_log.output_tokens = output_tokens
+            audit_log.tokens_used = total_tokens
+            audit_log.token_count_is_estimate = False
+            return
+
+        audit_log.input_tokens = cls._estimated_tokens("\n".join(filter(None, [
+            str(audit_log.system_prompt or ""), str(audit_log.user_prompt or ""),
+        ])))
+        audit_log.output_tokens = cls._estimated_tokens("\n".join(filter(None, [
+            str(thinking or ""), str(response or ""),
+        ])))
+        audit_log.tokens_used = audit_log.input_tokens + audit_log.output_tokens
+        audit_log.token_count_is_estimate = True
+
+    @classmethod
     def _truncate_prompt_to_token_budget(cls, prompt: str, system: str, max_input_tokens: int) -> str:
         prompt = str(prompt or "")
         available = max(1000, int(max_input_tokens) - cls._estimated_tokens(system))
@@ -444,8 +478,7 @@ class AIProcessorService:
 
             # Finalize metrics
             duration_ms = int((time.time() - start_time) * 1000)
-            # Estimate tokens: ~4 chars per token for average English text
-            estimated_tokens = (len(full_response) + len(full_thinking) + len(audit_log.user_prompt or "")) // 4
+            self._record_token_usage(audit_log, None, full_response, full_thinking)
 
             # Finalize audit log
             audit_log.raw_response = full_response
@@ -454,7 +487,6 @@ class AIProcessorService:
             audit_log.status = 'COMPLETED'
             audit_log.completed_at = timezone.now()
             audit_log.request_duration_ms = duration_ms
-            audit_log.tokens_used = estimated_tokens
             if collected_citations:
                 audit_log.source_metadata = {
                     **(audit_log.source_metadata or {}),
@@ -621,9 +653,7 @@ class AIProcessorService:
                     audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')
                     logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
                 
-            # Estimate tokens
-            usage = data.get("usage") or {}
-            audit_log.tokens_used = usage.get("total_tokens") or (len(clean_resp) + len(clean_think) + len(audit_log.user_prompt or "")) // 4
+            self._record_token_usage(audit_log, data.get("usage"), clean_resp, clean_think)
                 
         except Exception as e:
             logger.error(f"Standard execution failed: {str(e)}")
@@ -645,7 +675,8 @@ class AIProcessorService:
             if audit_log.source_type == "document_evidence_segment":
                 fields = (
                     "raw_response", "raw_thinking", "parsed_json", "is_success", "status",
-                    "error_message", "tokens_used", "source_metadata", "request_duration_ms", "completed_at",
+                    "error_message", "tokens_used", "input_tokens", "output_tokens",
+                    "token_count_is_estimate", "source_metadata", "request_duration_ms", "completed_at",
                 )
                 updated = AIAuditLog.objects.filter(
                     pk=audit_log.pk, status__in=["PENDING", "PROCESSING"],

@@ -1,21 +1,70 @@
+from django.db.models import Q
 from rest_framework import serializers
 from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog, AIFlowDefinition, AIFlowVersion
 
 
+def related_audits(obj):
+    query = Q(source_metadata__vdr_parent_audit_id=str(obj.pk))
+    if obj.celery_task_id:
+        query |= Q(celery_task_id=obj.celery_task_id)
+    return AIAuditLog.objects.filter(query).exclude(pk=obj.pk).order_by('created_at')
+
+
+def token_usage(log, children=()):
+    own_method = (
+        'estimated' if log.token_count_is_estimate is True
+        else 'provider' if log.token_count_is_estimate is False
+        else 'legacy'
+    )
+    child_rows = [child for child in children if child.tokens_used is not None]
+    methods = {
+        'estimated' if child.token_count_is_estimate is True
+        else 'provider' if child.token_count_is_estimate is False
+        else 'legacy'
+        for child in child_rows
+    }
+    aggregate_method = next(iter(methods)) if len(methods) == 1 else 'mixed' if methods else None
+
+    def summed(field):
+        values = [getattr(child, field) for child in child_rows if getattr(child, field) is not None]
+        return sum(values) if values else None
+
+    return {
+        'input_tokens': log.input_tokens,
+        'output_tokens': log.output_tokens,
+        'total_tokens': log.tokens_used,
+        'method': own_method,
+        'aggregate': {
+            'input_tokens': summed('input_tokens'),
+            'output_tokens': summed('output_tokens'),
+            'total_tokens': summed('tokens_used'),
+            'method': aggregate_method,
+            'child_count': len(child_rows),
+        } if child_rows else None,
+    }
+
+
 class AIAuditChildLogSerializer(serializers.ModelSerializer):
+    token_usage = serializers.SerializerMethodField()
+
     class Meta:
         model = AIAuditLog
         fields = [
             'id', 'source_type', 'source_id', 'context_label', 'model_provider',
             'model_used', 'status', 'is_success', 'created_at', 'completed_at',
-            'request_duration_ms', 'tokens_used', 'error_message', 'worker_logs',
+            'request_duration_ms', 'tokens_used', 'input_tokens', 'output_tokens',
+            'token_count_is_estimate', 'token_usage', 'error_message', 'worker_logs',
         ]
+
+    def get_token_usage(self, obj):
+        return token_usage(obj)
 
 class AIAuditLogSerializer(serializers.ModelSerializer):
     personality_name = serializers.SerializerMethodField()
     skill_name = serializers.SerializerMethodField()
     requested_by_name = serializers.SerializerMethodField()
     child_audits = serializers.SerializerMethodField()
+    token_usage = serializers.SerializerMethodField()
     
     class Meta:
         model = AIAuditLog
@@ -24,19 +73,21 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'skill', 'skill_name', 'model_provider', 'model_used', 
             'requested_by', 'requested_by_name', 'skill_version',
             'pipeline', 'pipeline_stage', 'prompt_revision', 'skill_revision',
-            'request_duration_ms', 'tokens_used', 'is_success', 'status',
+            'request_duration_ms', 'tokens_used', 'input_tokens', 'output_tokens',
+            'token_count_is_estimate', 'token_usage', 'is_success', 'status',
             'celery_task_id', 'created_at', 'completed_at', 'error_message', 'worker_logs',
             'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json',
             'source_metadata', 'child_audits'
         ]
 
     def get_child_audits(self, obj):
-        if not self.context.get('include_child_audits') or not obj.celery_task_id:
+        if not self.context.get('include_child_audits'):
             return []
-        related_logs = AIAuditLog.objects.filter(
-            celery_task_id=obj.celery_task_id,
-        ).exclude(pk=obj.pk).order_by('created_at')
-        return AIAuditChildLogSerializer(related_logs, many=True).data
+        return AIAuditChildLogSerializer(related_audits(obj), many=True).data
+
+    def get_token_usage(self, obj):
+        children = related_audits(obj) if self.context.get('include_child_audits') else ()
+        return token_usage(obj, children)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

@@ -20,6 +20,20 @@ def serialize_audit_log(log) -> dict:
         "created_at": log.created_at.isoformat() if log.created_at else None,
         "request_duration_ms": log.request_duration_ms,
         "tokens_used": log.tokens_used,
+        "input_tokens": log.input_tokens,
+        "output_tokens": log.output_tokens,
+        "token_count_is_estimate": log.token_count_is_estimate,
+        "token_usage": {
+            "input_tokens": log.input_tokens,
+            "output_tokens": log.output_tokens,
+            "total_tokens": log.tokens_used,
+            "method": (
+                "estimated" if log.token_count_is_estimate is True
+                else "provider" if log.token_count_is_estimate is False
+                else "legacy"
+            ),
+            "aggregate": None,
+        },
         "error_message": log.error_message,
         "raw_response": log.raw_response,
         "raw_thinking": log.raw_thinking,
