@@ -281,8 +281,11 @@ EMAIL_SYNTHESIS_MAX_TOKENS = config('EMAIL_SYNTHESIS_MAX_TOKENS', default=16384,
 EMAIL_REPORT_SECTION_MAX_TOKENS = config('EMAIL_REPORT_SECTION_MAX_TOKENS', default=8192, cast=int)
 EMAIL_REPORT_SECTION_TIMEOUT = config('EMAIL_REPORT_SECTION_TIMEOUT', default=1800, cast=int)
 EMAIL_REPORT_SECTION_CACHE_TTL = config('EMAIL_REPORT_SECTION_CACHE_TTL', default=604800, cast=int)
-VDR_ARTIFACT_SEGMENT_INPUT_TOKENS = config('VDR_ARTIFACT_SEGMENT_INPUT_TOKENS', default=16384, cast=int)
-VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS = config('VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS', default=12000, cast=int)
+# Keep an explicit 2K-token margin inside the 65K model window for the
+# serialized chat envelope. The provider validates the complete request body,
+# not only the system/user prompt counted by AIProcessorService.
+VDR_ARTIFACT_SEGMENT_INPUT_TOKENS = config('VDR_ARTIFACT_SEGMENT_INPUT_TOKENS', default=14336, cast=int)
+VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS = config('VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS', default=10000, cast=int)
 VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS = config('VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS', default=768, cast=int)
 VDR_ARTIFACT_SEGMENT_MAX_TOKENS = config('VDR_ARTIFACT_SEGMENT_MAX_TOKENS', default=45056, cast=int)
 VDR_ARTIFACT_SEGMENT_WORKERS = config('VDR_ARTIFACT_SEGMENT_WORKERS', default=1, cast=int)

@@ -213,7 +213,7 @@ class DocumentArtifactService:
                 "segment_metadata": {},
                 "segment_estimated_tokens": estimate_tokens(segment),
                 "segment_source_token_budget": int(
-                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
                 ),
             }
             metadata = {
@@ -226,7 +226,7 @@ class DocumentArtifactService:
                     "segment_count": len(segments),
                     "segment_estimated_tokens": estimate_tokens(segment),
                     "segment_input_token_budget": int(
-                        getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                     ),
                     "segment_output_token_budget": int(
                         getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
@@ -239,7 +239,7 @@ class DocumentArtifactService:
                 "segment_count": len(segments),
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_input_tokens": int(
-                    getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                 ),
                 "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)),
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
@@ -324,13 +324,13 @@ class DocumentArtifactService:
             "artifact_segments_completed": len(segments),
             "artifact_model": artifact_model,
             "artifact_segment_input_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
             ),
             "artifact_segment_output_token_budget": int(
                 getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
             ),
             "artifact_segment_source_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
             ),
         }
         return artifact
@@ -339,7 +339,7 @@ class DocumentArtifactService:
     def _split_for_artifact(cls, text: str) -> list[str]:
         source_tokens = max(
             4_000,
-            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)),
+            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)),
         )
         overlap_tokens = max(
             0,
@@ -470,6 +470,7 @@ class DocumentArtifactService:
         document.table_json = normalized_artifact.get("table_definitions") or normalized_artifact.get("tables_summary") or []
         document.key_metrics_json = normalized_artifact.get("metrics") or []
         document.reasoning = normalized_artifact.get("reasoning") or ""
+        document.is_ai_analyzed = cls.artifact_complete(normalized_artifact)
         document.save(
             update_fields=[
                 "normalized_text",
@@ -478,6 +479,7 @@ class DocumentArtifactService:
                 "table_json",
                 "key_metrics_json",
                 "reasoning",
+                "is_ai_analyzed",
             ]
         )
 

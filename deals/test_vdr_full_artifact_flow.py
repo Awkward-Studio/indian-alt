@@ -7,6 +7,51 @@ from deals.services.document_artifacts import DocumentArtifactCancelled
 
 
 class FullVDRArtifactTests(SimpleTestCase):
+    @patch("deals.tasks.broadcast_audit_log_update")
+    @patch("deals.tasks.AIRuntimeService.create_audit_log")
+    @patch("deals.tasks.DocumentChunk.objects.filter")
+    def test_document_embedding_has_its_own_completed_audit(
+        self,
+        chunk_filter,
+        create_audit,
+        broadcast,
+    ):
+        from deals.tasks import _vectorize_document_and_capture
+
+        chunk_filter.return_value.count.return_value = 17
+        audit = MagicMock()
+        create_audit.return_value = audit
+        document = MagicMock(
+            id="document-1",
+            title="Pebble IM.pdf",
+            document_type="memo",
+            deal_id="deal-1",
+        )
+        document.deal.id = "deal-1"
+        document.deal.title = "Pebble"
+        embed_service = MagicMock(
+            model_name="embedding-model",
+            chunk_size=1000,
+            chunk_overlap=150,
+        )
+        embed_service.vectorize_document.return_value = True
+
+        count = _vectorize_document_and_capture(
+            document,
+            embed_service,
+            parent_audit_id="parent-1",
+            celery_task_id="task-1",
+        )
+
+        self.assertEqual(count, 17)
+        self.assertEqual(create_audit.call_args.kwargs["source_type"], "document_embedding")
+        self.assertEqual(create_audit.call_args.kwargs["source_id"], "document-1")
+        self.assertEqual(create_audit.call_args.kwargs["model_used"], "embedding-model")
+        self.assertEqual(audit.status, "COMPLETED")
+        self.assertEqual(audit.source_metadata["chunk_count"], 17)
+        self.assertNotIn("tokens_used", audit.save.call_args.kwargs["update_fields"])
+        broadcast.assert_called()
+
     def test_report_generation_has_no_wall_clock_deadline(self):
         from deals.tasks import generate_vdr_analysis_async
 
@@ -150,9 +195,60 @@ class FullVDRArtifactTests(SimpleTestCase):
         first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
         self.assertIn("Build a complete structured evidence artifact", first_prompt)
-        self.assertEqual(first_metadata["max_input_tokens"], 16384)
+        self.assertEqual(first_metadata["max_input_tokens"], 14336)
         self.assertEqual(first_metadata["max_tokens"], 45056)
         self.assertEqual(first_metadata["request_timeout"], 1800)
+
+    def test_default_artifact_budget_leaves_room_for_complete_chat_envelope(self):
+        from django.conf import settings
+
+        provider_reserve = 4096
+        envelope_margin = 2048
+        self.assertLessEqual(
+            settings.VDR_ARTIFACT_SEGMENT_INPUT_TOKENS
+            + settings.VDR_ARTIFACT_SEGMENT_MAX_TOKENS
+            + provider_reserve
+            + envelope_margin,
+            settings.CHAT_MODEL_CONTEXT_TOKENS,
+        )
+
+    def test_complete_artifact_is_reused_when_only_embedding_is_missing(self):
+        from deals.tasks import _has_reusable_document_artifact
+
+        artifact = DocumentArtifactService._fallback_artifact(
+            file_name="Pebble IM.pdf",
+            extracted_text="Complete source evidence",
+            document_type="memo",
+            extraction_mode="fallback_text",
+        )
+        artifact["quality_flags"] = []
+        artifact["source_metadata"] = {
+            "source_etag": "etag-1",
+            "artifact_pipeline_version": DocumentArtifactService.ARTIFACT_PIPELINE_VERSION,
+            "artifact_segment_count": 1,
+            "artifact_segments_completed": 1,
+        }
+        document = MagicMock(
+            is_indexed=False,
+            normalized_text="Complete normalized evidence",
+            extracted_text="Complete source evidence",
+            evidence_json=artifact,
+        )
+
+        self.assertTrue(
+            _has_reusable_document_artifact(
+                document,
+                source_etag="etag-1",
+                force_fresh=False,
+            )
+        )
+        self.assertFalse(
+            _has_reusable_document_artifact(
+                document,
+                source_etag="etag-1",
+                force_fresh=True,
+            )
+        )
 
     @override_settings(
         VDR_ARTIFACT_SEGMENT_WORKERS=1,

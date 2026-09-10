@@ -470,15 +470,121 @@ def _prepare_document_update_from_extraction(extraction: dict, *, full: bool) ->
     }
 
 
-def _vectorize_document_and_capture(doc: DealDocument, embed_service: EmbeddingService) -> int:
-    success = embed_service.vectorize_document(doc)
-    if not success:
-        return 0
-    return DocumentChunk.objects.filter(
-        deal=doc.deal,
-        source_type='document',
-        source_id=str(doc.id),
-    ).count()
+def _vectorize_document_and_capture(
+    doc: DealDocument,
+    embed_service: EmbeddingService,
+    *,
+    parent_audit_id: str | None = None,
+    celery_task_id: str | None = None,
+) -> int:
+    """Vectorize one document and expose the operation as its own audit run."""
+    started_at = time.monotonic()
+    audit_log = None
+    base_metadata = {
+        "workflow_stage": "document_embedding",
+        "parent_audit_id": str(parent_audit_id or ""),
+        "deal_id": str(doc.deal_id),
+        "deal_title": doc.deal.title,
+        "document_id": str(doc.id),
+        "document_title": doc.title,
+        "document_type": doc.document_type,
+        "artifact_pipeline_version": DocumentArtifactService.ARTIFACT_PIPELINE_VERSION,
+        "chunk_size_chars": getattr(embed_service, "chunk_size", None),
+        "chunk_overlap_chars": getattr(embed_service, "chunk_overlap", None),
+    }
+    try:
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="document_embedding",
+            source_id=str(doc.id),
+            context_label=f"Document Embedding: {doc.title}",
+            status="PROCESSING",
+            is_success=False,
+            model_used=embed_service.model_name,
+            system_prompt="Create retrieval chunks and vector embeddings for one completed VDR document artifact.",
+            user_prompt=f"Embed document {doc.title} for deal {doc.deal.title}.",
+            source_metadata=base_metadata,
+            celery_task_id=celery_task_id,
+        )
+        broadcast_audit_log_update(audit_log, event_type="snapshot", done=False)
+    except Exception as exc:
+        # Audit visibility must not make document indexing unavailable.
+        logger.warning("Could not create document embedding audit log for %s: %s", doc.id, exc)
+
+    try:
+        success = embed_service.vectorize_document(doc)
+        chunk_count = 0
+        if success:
+            chunk_count = DocumentChunk.objects.filter(
+                deal=doc.deal,
+                source_type='document',
+                source_id=str(doc.id),
+            ).count()
+        if not chunk_count:
+            detail = getattr(embed_service, "_last_embedding_error", "") or "No retrieval chunks were created."
+            raise ValueError(detail)
+    except Exception as exc:
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(exc)
+            audit_log.request_duration_ms = int((time.monotonic() - started_at) * 1000)
+            audit_log.completed_at = timezone.now()
+            audit_log.source_metadata = {
+                **base_metadata,
+                "embedding_status": "failed",
+                "embedding_error": str(exc),
+            }
+            audit_log.save(update_fields=[
+                "status", "is_success", "error_message", "request_duration_ms",
+                "completed_at", "source_metadata",
+            ])
+            try:
+                broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+            except Exception as broadcast_exc:
+                logger.warning("Could not broadcast failed embedding audit %s: %s", audit_log.id, broadcast_exc)
+        raise
+
+    if audit_log:
+        audit_log.status = "COMPLETED"
+        audit_log.is_success = True
+        audit_log.error_message = None
+        audit_log.raw_response = json.dumps({"chunk_count": chunk_count})
+        audit_log.request_duration_ms = int((time.monotonic() - started_at) * 1000)
+        audit_log.completed_at = timezone.now()
+        audit_log.source_metadata = {
+            **base_metadata,
+            "embedding_status": "completed",
+            "chunk_count": chunk_count,
+        }
+        audit_log.save(update_fields=[
+            "status", "is_success", "error_message", "raw_response",
+            "request_duration_ms", "completed_at", "source_metadata",
+        ])
+        try:
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        except Exception as exc:
+            logger.warning("Could not broadcast completed embedding audit %s: %s", audit_log.id, exc)
+    return chunk_count
+
+
+def _has_reusable_document_artifact(
+    document: DealDocument | None,
+    *,
+    source_etag: str,
+    force_fresh: bool,
+) -> bool:
+    """Return whether inference is complete and only indexing may remain."""
+    if not document or force_fresh:
+        return False
+    source = document.evidence_json.get("source_metadata", {}) if isinstance(document.evidence_json, dict) else {}
+    source_unchanged = not source_etag or source_etag == str(source.get("source_etag") or "")
+    return bool(
+        source_unchanged
+        and source.get("artifact_pipeline_version") == DocumentArtifactService.ARTIFACT_PIPELINE_VERSION
+        and (document.normalized_text or document.extracted_text or "").strip()
+        and DocumentArtifactService.artifact_status(document.evidence_json)
+        == DocumentArtifactService.STATUS_COMPLETE
+    )
 
 
 def _sync_deal_extracted_text_for_documents(deal: Deal, docs: list[DealDocument]) -> None:
@@ -1187,27 +1293,50 @@ def process_single_document_async(
             if existing_doc and isinstance(existing_doc.evidence_json, dict)
             else {}
         )
-        source_unchanged = not source_etag or source_etag == str(existing_source.get("source_etag") or "")
-        if (
-            existing_doc
-            and source_unchanged
-            and existing_source.get("artifact_pipeline_version") == DocumentArtifactService.ARTIFACT_PIPELINE_VERSION
-            and (existing_doc.normalized_text or existing_doc.extracted_text or "").strip()
-            and DocumentArtifactService.artifact_status(existing_doc.evidence_json) == DocumentArtifactService.STATUS_COMPLETE
-            and existing_doc.is_indexed
-            and not force_fresh
+        if _has_reusable_document_artifact(
+            existing_doc,
+            source_etag=source_etag,
+            force_fresh=force_fresh,
         ):
+            if existing_doc.is_indexed:
+                _update_vdr_document_queue(
+                    audit_log_id,
+                    file_info,
+                    status="cached",
+                    document_id=str(existing_doc.id),
+                )
+                return {
+                    "status": "cached",
+                    "file": file_name,
+                    "document_id": str(existing_doc.id),
+                    "artifact_segments": existing_source.get("artifact_segment_count", 0),
+                }
+
+            # Artifact inference is already durably complete. Retry only the
+            # independent embedding/indexing checkpoint instead of downloading,
+            # extracting and generating the document artifact again.
+            if delivery_cancelled():
+                return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+            chunk_count = _vectorize_document_and_capture(
+                existing_doc,
+                embed_service,
+                parent_audit_id=str(audit_log_id or ""),
+                celery_task_id=str(self.request.id),
+            )
+            if chunk_count < 1:
+                raise ValueError(f"No retrieval chunks were persisted for {file_name}.")
             _update_vdr_document_queue(
                 audit_log_id,
                 file_info,
-                status="cached",
+                status="completed",
                 document_id=str(existing_doc.id),
             )
             return {
-                "status": "cached",
+                "status": "success",
                 "file": file_name,
                 "document_id": str(existing_doc.id),
                 "artifact_segments": existing_source.get("artifact_segment_count", 0),
+                "artifact_reused": True,
             }
             
         # Determine document type
@@ -1317,7 +1446,12 @@ def process_single_document_async(
         
         # Vectorize for RAG
         if normalized_text and len(normalized_text.strip()) > 50 and not delivery_cancelled():
-            chunk_count = _vectorize_document_and_capture(doc, embed_service)
+            chunk_count = _vectorize_document_and_capture(
+                doc,
+                embed_service,
+                parent_audit_id=str(audit_log_id or ""),
+                celery_task_id=str(self.request.id),
+            )
             if chunk_count < 1:
                 raise ValueError(f"No retrieval chunks were persisted for {file_name}.")
             
@@ -2196,7 +2330,12 @@ def analyze_additional_documents_async(self, deal_id: str, document_ids: list, a
                 document_text = (doc.normalized_text or doc.extracted_text or "").strip()
                 if document_text:
                     DocumentArtifactService.ensure_document_artifact(doc, ai_service=ai_service, force=requires_full_transcription)
-                    chunk_count = _vectorize_document_and_capture(doc, embed_service)
+                    chunk_count = _vectorize_document_and_capture(
+                        doc,
+                        embed_service,
+                        parent_audit_id=str(audit_log_id or ""),
+                        celery_task_id=str(self.request.id),
+                    )
                     file_diag["chunk_count"] = chunk_count
                     file_diag["chunking_status"] = doc.chunking_status
                     file_diag["analysis_included"] = True
