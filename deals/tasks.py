@@ -2035,6 +2035,8 @@ def generate_vdr_analysis_async(
     from ai_orchestrator.models import AIAuditLog
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
+    if _is_cancel_requested(audit_log_id):
+        return {"status": "cancelled", "reason": "VDR report workflow is already terminal."}
     try:
         deal = Deal.objects.get(id=deal_id)
         analysis = synthesize_complete_deal_analysis(
@@ -2043,6 +2045,8 @@ def generate_vdr_analysis_async(
             allow_gaps=allow_gaps,
             force_regenerate=force_regenerate,
         )
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "reason": "VDR report workflow was cancelled."}
         audit_log.status = "COMPLETED"
         audit_log.is_success = True
         audit_log.source_metadata = {
@@ -2055,6 +2059,8 @@ def generate_vdr_analysis_async(
         log_worker_event(audit_log, "Confirmed VDR analysis report is complete.", status="COMPLETED", done=True)
         return {"status": "completed", "analysis_id": str(analysis.id)}
     except Exception as exc:
+        if _is_cancel_requested(audit_log_id):
+            return {"status": "cancelled", "reason": str(exc)}
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
         audit_log.status = "FAILED"

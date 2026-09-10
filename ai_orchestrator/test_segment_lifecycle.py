@@ -156,6 +156,34 @@ class ChatStreamTransportTests(SimpleTestCase):
         response.__exit__.assert_called_once()
 
 
+class StandardTransportSelectionTests(SimpleTestCase):
+    @patch("ai_orchestrator.services.ai_processor.InferenceQueueLease")
+    @patch("ai_orchestrator.services.ai_processor.broadcast_audit_log_update")
+    def test_report_section_uses_slot_watchdog(self, _broadcast, lease_class):
+        from ai_orchestrator.services.ai_processor import AIProcessorService
+
+        audit = MagicMock(
+            source_type="vdr_report_section", source_metadata={}, status="PROCESSING",
+            skill=None, user_prompt="", context_label="VDR report section",
+        )
+        lease = lease_class.return_value.__enter__.return_value
+        service = AIProcessorService.__new__(AIProcessorService)
+        service.current_provider = MagicMock()
+        service.current_provider.execute_standard.return_value = {
+            "response": "## Executive Summary\n\nComplete evidence-backed report section.",
+        }
+
+        service._standard_response(
+            {"model": "test", "_serialize_inference": True, "_request_timeout": 1800},
+            audit,
+            "markdown",
+        )
+
+        kwargs = service.current_provider.execute_standard.call_args.kwargs
+        self.assertEqual(kwargs["timeout"], 1800)
+        self.assertIs(kwargs["slot_progress"], lease.record_slot_progress)
+
+
 class WorkflowGuardTests(SimpleTestCase):
     @patch("ai_orchestrator.models.AIAuditLog.objects")
     def test_terminal_and_deleted_workflows_stop_redelivery(self, objects):

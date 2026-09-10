@@ -84,6 +84,12 @@ def kick(*, countdown: int = 0) -> bool:
     """Best-effort wake-up. The periodic beat task is the durable fallback."""
     if not enabled():
         return False
+    try:
+        from deals.tasks import coordinate_vdr_queue
+        coordinate_vdr_queue.apply_async(queue="vdr_control", countdown=countdown)
+        return True
+    except Exception:
+        return False
 
 
 def _broadcast(audit_log_id: str, *, done: bool = False) -> None:
@@ -95,12 +101,6 @@ def _broadcast(audit_log_id: str, *, done: bool = False) -> None:
             broadcast_audit_log_update(audit, event_type="terminal" if done else "progress", done=done)
     except Exception:
         pass
-    try:
-        from deals.tasks import coordinate_vdr_queue
-        coordinate_vdr_queue.apply_async(queue="vdr_control", countdown=countdown)
-        return True
-    except Exception:
-        return False
 
 
 def _next_unit(metadata: dict) -> tuple[str, str, dict] | None:

@@ -21,6 +21,15 @@ class InferenceQueueLease:
 
     KEY = "ai:inference:lease:v1"
     DEFAULT_LEASE_TTL = 3600
+    SLOT_MONITORED_SOURCE_TYPES = frozenset({
+        "document_evidence_segment",
+        "email_report_section",
+        "vdr_report_section",
+    })
+
+    @classmethod
+    def uses_slot_transport(cls, source_type: str) -> bool:
+        return source_type in cls.SLOT_MONITORED_SOURCE_TYPES
 
     def __init__(self, audit_log, *, max_wait_seconds: int | float = 0) -> None:
         self.audit_log = audit_log
@@ -184,7 +193,7 @@ class InferenceQueueLease:
                 # request to a single-slot model server.
                 if cache.get(self.KEY) is None:
                     self._update_audit(inference_queue_unavailable=True)
-                elif self.audit_log.source_type == "document_evidence_segment":
+                elif self.uses_slot_transport(self.audit_log.source_type):
                     from ai_orchestrator.models import AIAuditLog
                     owner = cache.get(self.KEY)
                     if isinstance(owner, dict) and owner.get("audit_log_id"):
@@ -192,9 +201,9 @@ class InferenceQueueLease:
                             pk=owner["audit_log_id"], status__in=["PENDING", "PROCESSING"],
                         ).exists()
                         if not live:
-                            # Segment transport also waits for an idle VM slot
-                            # before posting, so a cancelled remote decode is
-                            # allowed to drain even after this lease is removed.
+                            # Slot-aware transports wait for an idle VM before
+                            # posting, so a terminal owner cannot block the
+                            # next serialized request until the lease expires.
                             self._mutate_owned_lease(owner=owner)
             except Exception as exc:
                 if self.acquired:

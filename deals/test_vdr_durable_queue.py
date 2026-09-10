@@ -27,6 +27,11 @@ class DurableVdrQueueTests(TestCase):
         )
         return deal, audit
 
+    @patch("deals.tasks.coordinate_vdr_queue.apply_async")
+    def test_kick_publishes_coordinator_task(self, apply_async):
+        self.assertTrue(vdr_queue.kick(countdown=3))
+        apply_async.assert_called_once_with(queue="vdr_control", countdown=3)
+
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
     @patch("deals.tasks.process_single_document_async.apply_async")
     def test_dispatches_only_first_document_and_records_generation(self, apply_async, _busy):

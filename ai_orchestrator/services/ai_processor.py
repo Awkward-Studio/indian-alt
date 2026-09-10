@@ -516,7 +516,7 @@ class AIProcessorService:
         try:
             def execute_request(lease=None):
                 request_timeout = payload.pop("_request_timeout", None)
-                if lease is not None and audit_log.source_type == "document_evidence_segment":
+                if lease is not None and lease.uses_slot_transport(audit_log.source_type):
                     return self.current_provider.execute_standard(
                         payload, timeout=int(request_timeout or 1800), slot_progress=lease.record_slot_progress,
                     )
