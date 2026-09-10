@@ -99,6 +99,23 @@ class DocumentArtifactService:
         }
         return not invalid_flags.intersection(artifact.get("quality_flags") or [])
 
+    @classmethod
+    def _normalize_segment_artifact(
+        cls,
+        artifact: dict[str, Any],
+        *,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Normalize segment evidence without requiring duplicated source text."""
+        normalized = cls._normalize_artifact(artifact, fallback=fallback)
+        normalized["normalized_text"] = ""
+        normalized["quality_flags"] = [
+            flag
+            for flag in normalized.get("quality_flags") or []
+            if flag != "artifact_missing_text"
+        ]
+        return normalized
+
     @staticmethod
     def _process_segment(service, **kwargs):
         try:
@@ -196,8 +213,7 @@ class DocumentArtifactService:
                     source_metadata__artifact_segment_cache_key=cache_key,
                 ).order_by("-completed_at").values_list("parsed_json", flat=True).first()
                 if isinstance(completed, dict):
-                    recovered = cls._normalize_artifact(completed, fallback=fallback)
-                    recovered["normalized_text"] = ""
+                    recovered = cls._normalize_segment_artifact(completed, fallback=fallback)
                     if cls._segment_artifact_usable(recovered):
                         return index, recovered, True
 
@@ -263,8 +279,7 @@ class DocumentArtifactService:
                 raise RuntimeError(
                     str(parsed.get("error") if isinstance(parsed, dict) else "AI segment response was invalid.")
                 )
-            artifact = cls._normalize_artifact(parsed, fallback=fallback)
-            artifact["normalized_text"] = ""
+            artifact = cls._normalize_segment_artifact(parsed, fallback=fallback)
             artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or "" if isinstance(result, dict) else ""
             if not cls._segment_artifact_usable(artifact):
                 raise RuntimeError("AI segment response did not produce a complete evidence artifact.")

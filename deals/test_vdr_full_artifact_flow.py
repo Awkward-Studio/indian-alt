@@ -250,6 +250,28 @@ class FullVDRArtifactTests(SimpleTestCase):
             )
         )
 
+    def test_segment_artifact_does_not_require_duplicated_normalized_text(self):
+        fallback = DocumentArtifactService._fallback_artifact(
+            file_name="Pebble Financial Model.xlsx",
+            extracted_text="Raw source remains on the document checkpoint.",
+            document_type="financials",
+            extraction_mode="fallback_text",
+        )
+        parsed = {
+            "document_name": "Pebble Financial Model.xlsx",
+            "document_summary": "Revenue and profitability evidence from this workbook segment.",
+            "normalized_text": "",
+            "quality_flags": ["chat_direct_extraction"],
+        }
+
+        segment = DocumentArtifactService._normalize_segment_artifact(
+            parsed,
+            fallback=fallback,
+        )
+
+        self.assertNotIn("artifact_missing_text", segment["quality_flags"])
+        self.assertTrue(DocumentArtifactService._segment_artifact_usable(segment))
+
     @override_settings(
         VDR_ARTIFACT_SEGMENT_WORKERS=1,
         VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=4_000,
