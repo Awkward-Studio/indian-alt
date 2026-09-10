@@ -2717,18 +2717,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     'instruction': instruction,
                     'existing_competitors': existing_competitors,
                 },
-                # Competitor research calls the same single vLLM model as
-                # document extraction and report generation. Keep it on the
-                # low-priority AI queue so it waits behind the active model
-                # task instead of racing the document queue's inference work.
-                queue='low_priority',
+                queue='high_priority',
                 task_id=task_id,
             )
             return Response({
                 "status": "queued",
                 "task_id": task.id,
                 "reused": False,
-                "message": "Competitor research queued behind active document/report AI work.",
+                "message": "Competitor research queued as interactive AI work.",
             })
         except Exception as e:
             if 'cache_key' in locals() and 'task_id' in locals() and cache.get(cache_key) == task_id:

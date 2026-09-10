@@ -2,8 +2,11 @@ from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-from deals.services.document_artifacts import DocumentArtifactService
-from deals.services.document_artifacts import DocumentArtifactCancelled
+from deals.services.document_artifacts import (
+    DocumentArtifactCancelled,
+    DocumentArtifactService,
+    DocumentArtifactYielded,
+)
 
 
 class FullVDRArtifactTests(SimpleTestCase):
@@ -311,7 +314,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         mock_cache.get.return_value = None
         service = MagicMock()
         service.process_content.return_value = {"parsed_json": {"document_summary": "First"}}
-        source_text = "section evidence " * 2000
+        source_text = "section evidence " * 10_000
 
         with self.assertRaises(DocumentArtifactCancelled):
             DocumentArtifactService.build_document_artifact(
@@ -322,6 +325,33 @@ class FullVDRArtifactTests(SimpleTestCase):
             )
 
         self.assertEqual(service.process_content.call_count, 1)
+
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=4_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("deals.services.document_artifacts.cache")
+    def test_interactive_work_yields_before_next_uncached_segment(self, mock_cache):
+        mock_cache.get.return_value = None
+        service = MagicMock()
+        service.process_content.return_value = {
+            "parsed_json": {
+                "document_summary": "Completed segment",
+                "quality_flags": [],
+            },
+        }
+        source_text = "section evidence " * 10_000
+
+        with self.assertRaises(DocumentArtifactYielded):
+            DocumentArtifactService.build_document_artifact(
+                file_name="Long VDR.pdf",
+                extracted_text=source_text,
+                ai_service=service,
+                yield_check=lambda: service.process_content.call_count >= 1,
+            )
+
+        self.assertEqual(service.process_content.call_count, 1)
+        mock_cache.set.assert_called_once()
 
     @patch("deals.services.document_artifacts.cache")
     def test_poisoned_cached_segment_is_evicted_and_regenerated(self, mock_cache):

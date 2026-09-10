@@ -116,7 +116,7 @@ def _next_unit(metadata: dict) -> tuple[str, str, dict] | None:
 
 
 def _high_priority_busy() -> bool:
-    """Let interactive work enter between VDR units without pre-empting a unit."""
+    """Report whether interactive work is queued or currently running."""
     try:
         from config.celery import app as celery_app
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
@@ -135,6 +135,11 @@ def _high_priority_busy() -> bool:
     except Exception:
         pass
     return False
+
+
+def interactive_work_waiting() -> bool:
+    """Public segment-boundary check used by long-running VDR document tasks."""
+    return _high_priority_busy()
 
 
 def dispatch() -> dict:

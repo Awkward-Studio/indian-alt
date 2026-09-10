@@ -255,9 +255,7 @@ CELERY_TASK_ROUTES = {
     'deals.tasks.preflight_selection_async': {'queue': 'high_priority'},
     'deals.tasks.analyze_selection_async': {'queue': 'high_priority'},
     'deals.tasks.analyze_additional_documents_async': {'queue': 'high_priority'},
-    # Competitor discovery uses the same single inference model as VDR/email
-    # processing. Keep it behind the serialized document/report workload.
-    'deals.tasks.fetch_competitors_async_task': {'queue': 'low_priority'},
+    'deals.tasks.fetch_competitors_async_task': {'queue': 'high_priority'},
     'deals.tasks.process_deal_folder_background': {'queue': 'low_priority'},
     'deals.tasks.process_single_document_async': {'queue': 'low_priority'},
     'deals.tasks.finalize_folder_background': {'queue': 'low_priority'},

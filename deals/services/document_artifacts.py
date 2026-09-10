@@ -28,6 +28,10 @@ class DocumentArtifactCancelled(RuntimeError):
     """Raised when a caller cancels a segmented artifact build."""
 
 
+class DocumentArtifactYielded(RuntimeError):
+    """Raised between segments when interactive AI work is waiting."""
+
+
 class DocumentArtifactService:
     """
     Builds and persists normalized document artifacts so deal synthesis can
@@ -144,6 +148,7 @@ class DocumentArtifactService:
         ai_service: Optional["AIProcessorService"] = None,
         source_metadata: dict[str, Any] | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        yield_check: Callable[[], bool] | None = None,
         force_fresh: bool = False,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
@@ -216,6 +221,14 @@ class DocumentArtifactService:
                     recovered = cls._normalize_segment_artifact(completed, fallback=fallback)
                     if cls._segment_artifact_usable(recovered):
                         return index, recovered, True
+
+            # Yield only after all durable recovery checks. This ensures a
+            # resumed document walks past completed checkpoints without
+            # blocking interactive work or repeating model inference.
+            if yield_check and yield_check():
+                raise DocumentArtifactYielded(
+                    "Interactive AI work is waiting; yielding before the next VDR segment."
+                )
 
             segment_context = {
                 "document_name": file_name,
@@ -300,7 +313,7 @@ class DocumentArtifactService:
             try:
                 result_index, segment_artifact, _cache_hit = analyze_segment(index, segment)
                 segment_artifacts[result_index] = segment_artifact
-            except DocumentArtifactCancelled:
+            except (DocumentArtifactCancelled, DocumentArtifactYielded):
                 raise
             except Exception as exc:
                 failures.append(f"segment {index + 1}/{len(segments)}: {exc}")

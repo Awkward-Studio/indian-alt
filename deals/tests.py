@@ -3074,7 +3074,7 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(second.data["task_id"], first.data["task_id"])
         self.assertTrue(second.data["reused"])
         self.assertEqual(mock_apply_async.call_count, 1)
-        self.assertEqual(mock_apply_async.call_args.kwargs["queue"], "low_priority")
+        self.assertEqual(mock_apply_async.call_args.kwargs["queue"], "high_priority")
 
     @patch("celery.result.AsyncResult")
     @patch("deals.tasks.fetch_competitors_async_task.apply_async")

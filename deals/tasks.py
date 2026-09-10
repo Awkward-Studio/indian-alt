@@ -23,7 +23,11 @@ from .models import (
     TranscriptionStatus,
 )
 from .services.deal_creation import DealCreationService
-from .services.document_artifacts import DocumentArtifactCancelled, DocumentArtifactService
+from .services.document_artifacts import (
+    DocumentArtifactCancelled,
+    DocumentArtifactService,
+    DocumentArtifactYielded,
+)
 from microsoft.services.graph_service import GraphAPIService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -205,7 +209,7 @@ def _update_vdr_document_queue(
             entry["document_id"] = str(document_id)
         if error:
             entry["error"] = str(error)[:500]
-        elif status in {"processing", "completed", "cached"}:
+        elif status in {"queued", "processing", "completed", "cached"}:
             entry.pop("error", None)
         metadata["document_queue"] = queue
         audit.source_metadata = metadata
@@ -1181,7 +1185,9 @@ def preflight_selection_async(self, drive_id: str | None, folder_id: str | None,
 
 @shared_task(
     bind=True,
-    max_retries=3,
+    # Segment-boundary yields are Celery retries too, but must not consume the
+    # three attempts reserved for genuine document failures.
+    max_retries=None,
     # Only observed VM processing consumes the segment allowance. A document
     # wall-clock deadline would also kill legitimate slot/service waiting.
     soft_time_limit=0,
@@ -1198,6 +1204,7 @@ def process_single_document_async(
     force_fresh=False,
     queue_generation=None,
     queue_unit_key=None,
+    failure_retries=0,
 ):
     """
     Atomized task to process a single document from OneDrive.
@@ -1399,6 +1406,8 @@ def process_single_document_async(
             )
 
         if normalized_text:
+            from deals.services.vdr_queue import interactive_work_waiting
+
             artifact = DocumentArtifactService.build_document_artifact(
                 file_name=doc.title,
                 extracted_text=normalized_text,
@@ -1425,6 +1434,7 @@ def process_single_document_async(
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
                 cancel_check=delivery_cancelled,
+                yield_check=interactive_work_waiting,
                 force_fresh=force_fresh,
             )
             if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():
@@ -1477,11 +1487,23 @@ def process_single_document_async(
         logger.info("Cancelled artifact processing for %s: %s", file_name, e)
         _update_vdr_document_queue(audit_log_id, file_info, status="cancelled", error=str(e))
         return {"status": "cancelled", "file": file_name, "reason": str(e)}
+    except DocumentArtifactYielded as e:
+        logger.info("Yielding VDR document %s for interactive AI work", file_name)
+        _update_vdr_document_queue(audit_log_id, file_info, status="queued")
+        raise self.retry(exc=e, countdown=1)
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
-        if self.request.retries < self.max_retries:
+        if failure_retries < 3:
             _update_vdr_document_queue(audit_log_id, file_info, status="retrying", error=str(e))
-            raise self.retry(exc=e, countdown=min(60, 5 * (2 ** self.request.retries)))
+            retry_kwargs = {
+                **(self.request.kwargs or {}),
+                "failure_retries": failure_retries + 1,
+            }
+            raise self.retry(
+                exc=e,
+                countdown=min(60, 5 * (2 ** failure_retries)),
+                kwargs=retry_kwargs,
+            )
         _update_vdr_document_queue(audit_log_id, file_info, status="failed", error=str(e))
         return {"status": "failed", "file": file_name, "error": str(e)}
 
@@ -3561,7 +3583,7 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
         return {"error": str(e)}
 
 
-@shared_task(queue='low_priority')
+@shared_task(queue='high_priority')
 def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_competitors: list[dict] | None = None) -> dict:
     """
     Execute one public and one private aggregated SearXNG search, enrich evidence
