@@ -433,7 +433,13 @@ class AIAuditLog(models.Model):
     
     # Context Preservation
     source_metadata = models.JSONField(null=True, blank=True, help_text='Extra context like file trees or drive IDs')
-    celery_task_id = models.CharField(max_length=255, null=True, blank=True, help_text='ID of the associated Celery task')
+    celery_task_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text='ID of the associated Celery task',
+    )
     
     error_message = models.TextField(blank=True, null=True)
     worker_logs = models.JSONField(default=list, blank=True, help_text='Execution logs from celery workers')

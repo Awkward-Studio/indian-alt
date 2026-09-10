@@ -68,6 +68,11 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AIAuditLogSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['include_child_audits'] = self.action == 'retrieve'
+        return context
+
     @staticmethod
     def _task_ids(log, *, include_children=True):
         metadata = log.source_metadata or {}

@@ -16,6 +16,43 @@ class AuditTaskControlTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
+    def test_audit_detail_includes_worker_progress_and_related_child_logs(self):
+        parent = AIAuditLog.objects.create(
+            source_type='deal_full_synthesis', model_used='test',
+            system_prompt='test', user_prompt='test', status='PROCESSING',
+            celery_task_id='report-task',
+            worker_logs=['Reading document section 44 of 51'],
+        )
+        child = AIAuditLog.objects.create(
+            source_type='email_report_section', model_used='test',
+            system_prompt='test', user_prompt='test', status='PROCESSING',
+            celery_task_id='report-task', context_label='Email report section: Executive Summary',
+            worker_logs=['Model request prepared; waiting for inference admission.'],
+        )
+
+        response = self.client.get(f'/api/ai/history/{parent.id}/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['worker_logs'], ['Reading document section 44 of 51'])
+        self.assertEqual(len(response.data['child_audits']), 1)
+        self.assertEqual(response.data['child_audits'][0]['id'], str(child.id))
+        self.assertEqual(
+            response.data['child_audits'][0]['worker_logs'],
+            ['Model request prepared; waiting for inference admission.'],
+        )
+
+    def test_audit_list_keeps_child_logs_out_of_ledger_payload(self):
+        AIAuditLog.objects.create(
+            source_type='deal_full_synthesis', model_used='test',
+            system_prompt='test', user_prompt='test', status='PROCESSING',
+            celery_task_id='report-task',
+        )
+
+        response = self.client.get('/api/ai/history/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertNotIn('child_audits', response.data['results'][0])
+
     @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke', return_value=[])
     @patch('ai_orchestrator.views.requests.get')
     def test_clear_active_fails_durable_work_even_without_slots(self, get_slots, _revoke):

@@ -1,10 +1,21 @@
 from rest_framework import serializers
 from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog, AIFlowDefinition, AIFlowVersion
 
+
+class AIAuditChildLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AIAuditLog
+        fields = [
+            'id', 'source_type', 'source_id', 'context_label', 'model_provider',
+            'model_used', 'status', 'is_success', 'created_at', 'completed_at',
+            'request_duration_ms', 'tokens_used', 'error_message', 'worker_logs',
+        ]
+
 class AIAuditLogSerializer(serializers.ModelSerializer):
     personality_name = serializers.SerializerMethodField()
     skill_name = serializers.SerializerMethodField()
     requested_by_name = serializers.SerializerMethodField()
+    child_audits = serializers.SerializerMethodField()
     
     class Meta:
         model = AIAuditLog
@@ -14,10 +25,24 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'requested_by', 'requested_by_name', 'skill_version',
             'pipeline', 'pipeline_stage', 'prompt_revision', 'skill_revision',
             'request_duration_ms', 'tokens_used', 'is_success', 'status',
-            'celery_task_id', 'created_at', 'completed_at', 'error_message',
+            'celery_task_id', 'created_at', 'completed_at', 'error_message', 'worker_logs',
             'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json',
-            'source_metadata'
+            'source_metadata', 'child_audits'
         ]
+
+    def get_child_audits(self, obj):
+        if not self.context.get('include_child_audits') or not obj.celery_task_id:
+            return []
+        related_logs = AIAuditLog.objects.filter(
+            celery_task_id=obj.celery_task_id,
+        ).exclude(pk=obj.pk).order_by('created_at')
+        return AIAuditChildLogSerializer(related_logs, many=True).data
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self.context.get('include_child_audits'):
+            data.pop('child_audits', None)
+        return data
 
     def get_personality_name(self, obj):
         return obj.personality.name if obj.personality else "Direct Inference"
