@@ -128,6 +128,7 @@ class DocumentArtifactService:
         ai_service: Optional["AIProcessorService"] = None,
         source_metadata: dict[str, Any] | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        force_fresh: bool = False,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
         source_metadata = json.loads(json.dumps(source_metadata or {}, default=str))
@@ -172,22 +173,24 @@ class DocumentArtifactService:
                 model=artifact_model,
                 run_scope=str(source_metadata.get("artifact_run_id") or ""),
             )
-            try:
-                cached = cache.get(cache_key)
-            except Exception:
-                cached = None
-            if cls._segment_artifact_usable(cached):
-                return index, cached, True
-            if cached:
+            cached = None
+            if not force_fresh:
                 try:
-                    cache.delete(cache_key)
+                    cached = cache.get(cache_key)
                 except Exception:
-                    pass
+                    cached = None
+                if cls._segment_artifact_usable(cached):
+                    return index, cached, True
+                if cached:
+                    try:
+                        cache.delete(cache_key)
+                    except Exception:
+                        pass
 
             # A worker can exit after saving the completed model audit but
             # before writing Redis. Recover that response using the same
             # content/model/run checksum instead of sending it again.
-            if source_metadata.get("artifact_run_id"):
+            if not force_fresh and source_metadata.get("artifact_run_id"):
                 from ai_orchestrator.models import AIAuditLog
                 completed = AIAuditLog.objects.filter(
                     source_type="document_evidence_segment", status="COMPLETED", is_success=True,

@@ -1032,6 +1032,7 @@ def process_single_document_async(
     is_preview,
     audit_log_id=None,
     resume_artifact_run_id=None,
+    force_fresh=False,
 ):
     """
     Atomized task to process a single document from OneDrive.
@@ -1057,8 +1058,22 @@ def process_single_document_async(
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
         deal = Deal.objects.get(id=deal_id)
-        
         existing_doc = DealDocument.objects.filter(deal=deal, onedrive_id=file_id).first()
+
+        if (
+            force_fresh
+            and existing_doc
+            and existing_doc.is_indexed
+            and DocumentArtifactService.artifact_complete(existing_doc)
+        ):
+            return {
+                "status": "cached",
+                "file": file_name,
+                "document_id": str(existing_doc.id),
+                "fresh_skipped": True,
+                "reason": "Document is already fully indexed.",
+            }
+
         source_etag = str(file_info.get("eTag") or file_info.get("cTag") or "")
         existing_source = (
             existing_doc.evidence_json.get("source_metadata", {})
@@ -1073,6 +1088,7 @@ def process_single_document_async(
             and (existing_doc.normalized_text or existing_doc.extracted_text or "").strip()
             and DocumentArtifactService.artifact_status(existing_doc.evidence_json) == DocumentArtifactService.STATUS_COMPLETE
             and existing_doc.is_indexed
+            and not force_fresh
         ):
             return {
                 "status": "cached",
@@ -1165,6 +1181,7 @@ def process_single_document_async(
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
                 cancel_check=lambda: _is_cancel_requested(audit_log_id),
+                force_fresh=force_fresh,
             )
             if _is_cancel_requested(audit_log_id) or not DealDocument.objects.filter(pk=doc.pk).exists():
                 return {
@@ -1514,6 +1531,7 @@ def process_deal_folder_background(
     user_email: str,
     coverage_policy: str = "all_supported_files",
     resume_cached: bool = False,
+    force_fresh: bool = False,
 ):
     """
     Background task to download and vectorize the supplied files using a chord.
@@ -1538,7 +1556,10 @@ def process_deal_folder_background(
         status='PROCESSING',
         is_success=False,
         model_used=AIRuntimeService.get_embedding_model(),
-        system_prompt=f"Starting full extraction, artifact capture and vectorization for {len(supported_files)} files.",
+        system_prompt=(
+            f"Starting {'fresh ' if force_fresh else ''}full extraction, artifact capture and vectorization "
+            f"for {len(supported_files)} files."
+        ),
         user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
         celery_task_id=self.request.id,
     )
@@ -1620,6 +1641,7 @@ def process_deal_folder_background(
             False,
             str(audit_log.id),
             resume_artifact_run_ids.get(str(f.get('id'))),
+            force_fresh,
         )
         for f in supported_files
     ]
@@ -1636,6 +1658,7 @@ def process_deal_folder_background(
         "unsupported_files": [item.get("name") for item in unsupported_files],
         "coverage_policy": coverage_policy,
         "resume_cached": resume_cached,
+        "force_fresh": force_fresh,
     }
     audit_log.save(update_fields=["source_metadata"])
     log_worker_event(

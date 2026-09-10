@@ -778,7 +778,7 @@ class FolderAnalysisService:
         }
 
     @staticmethod
-    def trigger_vdr_processing(deal: Deal) -> dict:
+    def trigger_vdr_processing(deal: Deal, *, force_fresh: bool = False) -> dict:
         """
         Queues the deferred VDR indexing job using persisted OneDrive audit-log metadata.
         """
@@ -796,11 +796,36 @@ class FolderAnalysisService:
         if not file_tree:
             return {"error": "No persisted folder tree was found for this deal. Re-run the folder analysis to enable VDR processing."}
 
+        if force_fresh:
+            from deals.services.document_artifacts import DocumentArtifactService
+
+            existing_documents = {
+                str(document.onedrive_id): document
+                for document in deal.documents.all()
+                if document.onedrive_id
+            }
+            file_tree = [
+                file_info
+                for file_info in file_tree
+                if not (
+                    (document := existing_documents.get(str(file_info.get("id"))))
+                    and document.is_indexed
+                    and DocumentArtifactService.artifact_complete(document)
+                )
+            ]
+            if not file_tree:
+                return {
+                    "status": "completed",
+                    "task_id": None,
+                    "message": "All discovered documents are already fully indexed. Nothing was rerun.",
+                }
+
         task = process_deal_folder_background.apply_async(
             kwargs={
                 'deal_id': str(deal.id),
                 'file_tree_map': file_tree,
                 'user_email': DMS_USER_EMAIL,
+                'force_fresh': force_fresh,
             },
             queue='low_priority'
         )
@@ -812,7 +837,11 @@ class FolderAnalysisService:
         return {
             "status": "queued",
             "task_id": task.id,
-            "message": f"Queued full VDR processing for all {len(file_tree)} discovered files."
+            "message": (
+                f"Queued fresh VDR processing for all {len(file_tree)} discovered files."
+                if force_fresh
+                else f"Queued full VDR processing for all {len(file_tree)} discovered files."
+            )
         }
 
     @staticmethod
