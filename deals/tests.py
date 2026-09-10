@@ -2162,7 +2162,16 @@ class DealStatusSyncTests(TestCase):
         result = FolderAnalysisService.trigger_vdr_processing(deal)
 
         self.assertEqual(result["status"], "queued")
+        audit = AIAuditLog.objects.get(id=result["audit_log_id"])
+        self.assertEqual(audit.status, "PENDING")
+        self.assertEqual(audit.celery_task_id, result["task_id"])
+        self.assertEqual(audit.source_metadata["document_queue"][0]["name"], "Deck.pdf")
         mock_apply_async.assert_called_once()
+        self.assertEqual(mock_apply_async.call_args.kwargs["task_id"], result["task_id"])
+        self.assertEqual(
+            mock_apply_async.call_args.kwargs["kwargs"]["audit_log_id"],
+            str(audit.id),
+        )
         deal.refresh_from_db()
         self.assertEqual(deal.processing_status, "processing")
 
@@ -2195,6 +2204,7 @@ class DealStatusSyncTests(TestCase):
         task_kwargs = mock_apply_async.call_args.kwargs["kwargs"]
         self.assertTrue(task_kwargs["resume_cached"])
         self.assertEqual(task_kwargs["coverage_policy"], "resume_cached")
+        self.assertTrue(task_kwargs["audit_log_id"])
         deal.refresh_from_db()
         self.assertEqual(deal.processing_status, "processing")
 
@@ -2232,6 +2242,7 @@ class DealStatusSyncTests(TestCase):
         task_kwargs = mock_apply_async.call_args.kwargs["kwargs"]
         self.assertEqual(task_kwargs["coverage_policy"], "selected_documents")
         self.assertEqual(task_kwargs["file_tree_map"][0]["id"], "file-1")
+        self.assertTrue(task_kwargs["audit_log_id"])
         deal.refresh_from_db()
         self.assertEqual(deal.processing_status, "processing")
 

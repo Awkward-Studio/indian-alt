@@ -19,6 +19,71 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertEqual(process_single_document_async.soft_time_limit, 0)
         self.assertEqual(process_single_document_async.time_limit, 0)
 
+    @patch("deals.tasks.DealCreationService.apply_analysis_to_deal")
+    @patch("deals.tasks.DealAnalysis.objects.create")
+    @patch("ai_orchestrator.services.report_sections.ICReportSectionService.complete")
+    @patch("ai_orchestrator.services.chat_document_chunks.ChatDocumentChunkService")
+    @patch("microsoft.services.email_ingestion_review.deal_email_evidence_gaps", return_value=[])
+    @patch("deals.tasks.DocumentArtifactService.artifact_from_document")
+    @patch("deals.tasks.DocumentArtifactService.artifact_status", return_value="complete")
+    @patch("deals.tasks.DocumentArtifactService.artifact_complete", return_value=True)
+    @patch("ai_orchestrator.services.ai_processor.AIProcessorService")
+    @patch("deals.tasks.log_worker_event")
+    def test_vdr_report_uses_sections_without_one_shot_report_call(
+        self,
+        _log_worker_event,
+        ai_service_class,
+        _artifact_complete,
+        _artifact_status,
+        artifact_from_document,
+        _email_gaps,
+        chunk_service_class,
+        complete_sections,
+        create_analysis,
+        _apply_analysis,
+    ):
+        from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS
+        from deals.tasks import synthesize_complete_deal_analysis
+
+        report = "\n\n".join(f"{header}\n\nSection content with sufficient detail." for header in IC_REPORT_HEADERS)
+        complete_sections.return_value = report
+        chunk_service_class.return_value.build_context.return_value = ("Bounded evidence", 1)
+        artifact_from_document.return_value = {"document_name": "Deck.pdf", "claims": []}
+        created = MagicMock()
+        create_analysis.return_value = created
+
+        document = MagicMock(
+            id="document-1",
+            title="Deck.pdf",
+            onedrive_id="file-1",
+            document_type="pitch_deck",
+            transcription_status="complete",
+            evidence_json={},
+            normalized_text="Extracted document evidence",
+            extracted_text="Extracted document evidence",
+        )
+        deal = MagicMock(id="deal-1", title="Section Deal", sector="Consumer", industry="Food")
+        for field in (
+            "funding_ask", "funding_ask_for", "priority", "city", "state", "country",
+            "comments", "deal_details", "company_details", "reasons_for_passing",
+            "bank_name", "primary_contact_name", "priority_rationale",
+        ):
+            setattr(deal, field, None)
+        for field in (
+            "is_female_led", "management_meeting", "business_proposal_stage", "ic_stage",
+        ):
+            setattr(deal, field, False)
+        deal.documents.all.return_value.order_by.return_value = [document]
+        deal.analyses.order_by.return_value.first.return_value = None
+        audit = MagicMock(id="audit-1")
+
+        result = synthesize_complete_deal_analysis(deal, audit)
+
+        self.assertIs(result, created)
+        ai_service_class.return_value.process_content.assert_not_called()
+        self.assertEqual(complete_sections.call_args.kwargs["report"], "")
+        self.assertEqual(create_analysis.call_args.kwargs["thinking"], "")
+
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
     @patch("deals.services.document_artifacts.cache")
     def test_every_segment_is_analyzed_and_merged_into_full_artifact(self, mock_cache):

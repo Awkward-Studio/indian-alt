@@ -125,10 +125,14 @@ def _mark_vdr_cancelled(audit_log_id: str, deal_id: str, message: str) -> None:
         source_metadata = audit_log.source_metadata or {}
         audit_log.source_metadata = {
             **source_metadata,
+            "queue_state": "cancelled",
             "cancel_requested": True,
             "cancel_reason": source_metadata.get("cancel_reason", "manual"),
         }
-        audit_log.save(update_fields=["status", "is_success", "error_message", "source_metadata"])
+        audit_log.completed_at = timezone.now()
+        audit_log.save(update_fields=[
+            "status", "is_success", "error_message", "source_metadata", "completed_at",
+        ])
         broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
 
     deal = Deal.objects.filter(id=deal_id).first()
@@ -153,6 +157,51 @@ def _prepare_vdr_task_ids(signatures, callback_signature) -> tuple[list, object,
         callback_task_id = str(frozen_callback.id)
 
     return frozen_signatures, callback_signature, child_task_ids, callback_task_id
+
+
+def _update_vdr_document_queue(
+    audit_log_id: str | None,
+    file_info: dict,
+    *,
+    status: str,
+    celery_task_id: str | None = None,
+    document_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    if not audit_log_id:
+        return
+    from ai_orchestrator.models import AIAuditLog
+
+    with transaction.atomic():
+        audit = AIAuditLog.objects.select_for_update().filter(id=audit_log_id).first()
+        if not audit:
+            return
+        metadata = dict(audit.source_metadata or {})
+        queue = [dict(item) for item in metadata.get("document_queue") or []]
+        source_file_id = str(file_info.get("id") or "")
+        entry = next(
+            (item for item in queue if str(item.get("source_file_id") or "") == source_file_id),
+            None,
+        )
+        if entry is None:
+            entry = {
+                "source_file_id": source_file_id,
+                "name": file_info.get("name") or "Untitled document",
+            }
+            queue.append(entry)
+        entry["status"] = status
+        entry["updated_at"] = timezone.now().isoformat()
+        if celery_task_id:
+            entry["celery_task_id"] = str(celery_task_id)
+        if document_id:
+            entry["document_id"] = str(document_id)
+        if error:
+            entry["error"] = str(error)[:500]
+        elif status in {"processing", "completed", "cached"}:
+            entry.pop("error", None)
+        metadata["document_queue"] = queue
+        audit.source_metadata = metadata
+        audit.save(update_fields=["source_metadata"])
 
 
 def _extract_selected_files(drive_id: str | None, user_email: str, selected_file_ids: list, email_id: str | None = None) -> dict:
@@ -1054,7 +1103,14 @@ def process_single_document_async(
         return {"status": "skipped", "reason": "missing file info"}
 
     try:
+        _update_vdr_document_queue(
+            audit_log_id,
+            file_info,
+            status="processing",
+            celery_task_id=str(self.request.id),
+        )
         if _is_cancel_requested(audit_log_id):
+            _update_vdr_document_queue(audit_log_id, file_info, status="cancelled")
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
         deal = Deal.objects.get(id=deal_id)
@@ -1066,6 +1122,12 @@ def process_single_document_async(
             and existing_doc.is_indexed
             and DocumentArtifactService.artifact_complete(existing_doc)
         ):
+            _update_vdr_document_queue(
+                audit_log_id,
+                file_info,
+                status="cached",
+                document_id=str(existing_doc.id),
+            )
             return {
                 "status": "cached",
                 "file": file_name,
@@ -1090,6 +1152,12 @@ def process_single_document_async(
             and existing_doc.is_indexed
             and not force_fresh
         ):
+            _update_vdr_document_queue(
+                audit_log_id,
+                file_info,
+                status="cached",
+                document_id=str(existing_doc.id),
+            )
             return {
                 "status": "cached",
                 "file": file_name,
@@ -1211,6 +1279,12 @@ def process_single_document_async(
             if isinstance(doc.evidence_json, dict)
             else {}
         )
+        _update_vdr_document_queue(
+            audit_log_id,
+            file_info,
+            status="completed",
+            document_id=str(doc.id),
+        )
         return {
             "status": "success",
             "file": file_name,
@@ -1220,11 +1294,14 @@ def process_single_document_async(
         
     except DocumentArtifactCancelled as e:
         logger.info("Cancelled artifact processing for %s: %s", file_name, e)
+        _update_vdr_document_queue(audit_log_id, file_info, status="cancelled", error=str(e))
         return {"status": "cancelled", "file": file_name, "reason": str(e)}
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
         if self.request.retries < self.max_retries:
+            _update_vdr_document_queue(audit_log_id, file_info, status="retrying", error=str(e))
             raise self.retry(exc=e, countdown=min(60, 5 * (2 ** self.request.retries)))
+        _update_vdr_document_queue(audit_log_id, file_info, status="failed", error=str(e))
         return {"status": "failed", "file": file_name, "error": str(e)}
 
 
@@ -1276,23 +1353,22 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
     ]
     # The provider's context preflight counts the complete serialized request
     # in its conservative byte budget. Bound the reducer's final evidence pack
-    # to the same window, leaving room for the synthesis completion and the
-    # provider/template reserve. This prevents section completion from being
-    # rejected after the one-shot synthesis has already succeeded.
+    # to the same window, leaving room for each section completion and the
+    # provider/template reserve.
     configured_context_bytes = int(getattr(settings, "VDR_REPORT_CONTEXT_BYTES", 135_000))
     model_window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65_536))
-    synthesis_tokens = int(getattr(settings, "VDR_SYNTHESIS_MAX_TOKENS", 12_000))
-    # Include both the provider's template reserve and the synthesis prompt
+    section_tokens = int(getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8_192))
+    # Include both the provider's template reserve and the section prompt
     # wrapper/system instructions, which are not part of the evidence string.
     request_overhead = 8_192
-    safe_context_bytes = max(1_000, model_window - synthesis_tokens - request_overhead)
+    safe_context_bytes = max(1_000, model_window - section_tokens - request_overhead)
     effective_context_bytes = min(configured_context_bytes, safe_context_bytes)
     evidence_context, covered_document_count = ChatDocumentChunkService(
         progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
         cache_scope=f"deal-report:{deal.id}",
         chunk_bytes=int(getattr(settings, "VDR_REPORT_MAP_BYTES", 16_000)),
         # Conservative 3 chars/token budgeting leaves room for the prompt,
-        # schema and a 12k-token report inside the configured 65k window.
+        # schema and a section response inside the configured model window.
         final_bytes=effective_context_bytes,
         cache_ttl=int(getattr(settings, "VDR_REPORT_CACHE_TTL", 30 * 24 * 60 * 60)),
         evidence_system_prompt=BULK3_DOCUMENT_SUMMARY_SYSTEM_PROMPT,
@@ -1322,31 +1398,27 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         }
         for doc in docs
     ]
-    ai_service = AIProcessorService()
-    result = ai_service.process_content(
-        content=(
-            "Synthesize the final deal analysis from the context-safe evidence pack below. Every source "
-            f"document was processed in bounded chunks.\n\n{evidence_context}"
-        ),
-        skill_name="deal_synthesis",
-        source_type="deal_full_synthesis",
-        source_id=str(deal.id),
-        metadata={
-            # Keep the workflow audit PROCESSING until section completion
-            # finishes. AIProcessorService owns its own model-call audit; if
-            # it reused the workflow row it would mark the parent complete
-            # before the section fallback had persisted the report.
-            "context_label": f"Complete deal evidence report: {deal.title}",
-            "document_manifest_json": json.dumps(input_files, default=str),
-            "chat_template_kwargs": {"enable_thinking": False},
-            "max_tokens": int(getattr(settings, "VDR_SYNTHESIS_MAX_TOKENS", 12_000)),
-            "enforce_context_budget": True,
-        },
+    latest = deal.analyses.order_by("-version").first()
+    previous_snapshot = (
+        (latest.analysis_json or {}).get("canonical_snapshot")
+        if latest and isinstance(latest.analysis_json, dict)
+        else None
     )
-    parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
+    deal_model_data = {
+        field: getattr(deal, field)
+        for field in (
+            "title", "industry", "sector", "funding_ask", "funding_ask_for",
+            "priority", "city", "state", "country", "comments", "deal_details",
+            "company_details", "reasons_for_passing", "bank_name",
+            "primary_contact_name", "priority_rationale", "is_female_led",
+            "management_meeting", "business_proposal_stage", "ic_stage",
+        )
+        if getattr(deal, field, None) not in (None, "")
+    }
+    analysis_kind = AnalysisKind.INITIAL if not latest else AnalysisKind.SUPPLEMENTAL
     normalized = _normalize_synthesis_result(
-        parsed if isinstance(parsed, dict) else {},
-        analysis_kind=AnalysisKind.INITIAL if not deal.analyses.exists() else AnalysisKind.SUPPLEMENTAL,
+        {"deal_model_data": deal_model_data, "analyst_report": ""},
+        analysis_kind=analysis_kind,
         document_evidence=document_evidence,
         analysis_input_files=input_files,
         failed_files=[
@@ -1367,6 +1439,7 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
             for gap in source_gaps
         ],
         documents_analyzed=[doc.title for doc in docs],
+        previous_snapshot=previous_snapshot,
     )
     normalized.setdefault("metadata", {}).update({
         "evidence_coverage": {
@@ -1380,21 +1453,26 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         },
         "audit_log_id": str(audit_log.id),
     })
+    ai_service = AIProcessorService()
     normalized["analyst_report"] = ICReportSectionService.complete(
         ai_service=ai_service,
-        report=normalized.get("analyst_report") or "",
+        report="",
         evidence=evidence_context,
         analysis=normalized,
         source_id=str(audit_log.id),
         progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
     )
+    normalized["canonical_snapshot"] = DealCreationService.build_canonical_snapshot(
+        normalized,
+        previous_snapshot=previous_snapshot,
+        analysis_kind=analysis_kind,
+    )
 
-    latest = deal.analyses.order_by("-version").first()
     analysis = DealAnalysis.objects.create(
         deal=deal,
         version=(latest.version + 1) if latest else 1,
-        analysis_kind=normalized.get("analysis_kind") or AnalysisKind.INITIAL,
-        thinking=result.get("thinking", "") if isinstance(result, dict) else "",
+        analysis_kind=normalized.get("analysis_kind") or analysis_kind,
+        thinking="",
         ambiguities=normalized.get("metadata", {}).get("ambiguous_points", []),
         analysis_json=normalized,
     )
@@ -1480,6 +1558,7 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             )
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
+            "queue_state": "completed" if not errors else "failed",
             "workflow_stage": "artifacts_ready" if not errors else "artifact_processing_failed",
             "processed_count": processed_count,
             "cached_count": cached_count,
@@ -1532,6 +1611,7 @@ def process_deal_folder_background(
     coverage_policy: str = "all_supported_files",
     resume_cached: bool = False,
     force_fresh: bool = False,
+    audit_log_id: str | None = None,
 ):
     """
     Background task to download and vectorize the supplied files using a chord.
@@ -1548,29 +1628,51 @@ def process_deal_folder_background(
     from ai_orchestrator.models import AIAuditLog, AIPersonality, AISkill
     personality = AIPersonality.objects.filter(is_default=True).first()
     
-    # 1. Create PENDING audit log for indexing
-    audit_log = AIRuntimeService.create_audit_log(
-        source_type='vdr_indexing',
-        source_id=deal_id,
-        personality=personality,
-        status='PROCESSING',
-        is_success=False,
-        model_used=AIRuntimeService.get_embedding_model(),
-        system_prompt=(
-            f"Starting {'fresh ' if force_fresh else ''}full extraction, artifact capture and vectorization "
-            f"for {len(supported_files)} files."
-        ),
-        user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
-        celery_task_id=self.request.id,
-    )
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first() if audit_log_id else None
+    if audit_log and _is_cancel_requested(str(audit_log.id)):
+        return {"status": "cancelled", "task_count": 0}
+    if audit_log:
+        audit_log.status = "PROCESSING"
+        audit_log.celery_task_id = str(self.request.id)
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "queue_state": "root_active",
+            "worker_started_at": timezone.now().isoformat(),
+        }
+        audit_log.save(update_fields=["status", "celery_task_id", "source_metadata"])
+        broadcast_audit_log_update(audit_log)
+    else:
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type='vdr_indexing',
+            source_id=deal_id,
+            personality=personality,
+            status='PROCESSING',
+            is_success=False,
+            model_used=AIRuntimeService.get_embedding_model(),
+            system_prompt=(
+                f"Starting {'fresh ' if force_fresh else ''}full extraction, artifact capture and vectorization "
+                f"for {len(supported_files)} files."
+            ),
+            user_prompt=f"Indexing dataroom for deal ID: {deal_id}",
+            celery_task_id=self.request.id,
+        )
 
     try:
         deal = Deal.objects.get(id=deal_id)
     except Deal.DoesNotExist:
         logger.error(f"Deal {deal_id} not found. Aborting task.")
         audit_log.status = 'FAILED'
+        audit_log.is_success = False
         audit_log.error_message = "Deal not found"
-        audit_log.save()
+        audit_log.completed_at = timezone.now()
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "queue_state": "failed",
+        }
+        audit_log.save(update_fields=[
+            "status", "is_success", "error_message", "completed_at", "source_metadata",
+        ])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return
 
     # Update status to processing
@@ -1588,8 +1690,17 @@ def process_deal_folder_background(
         deal.save()
         
         audit_log.status = 'FAILED'
+        audit_log.is_success = False
         audit_log.error_message = f"Auth Error: {str(e)}"
-        audit_log.save()
+        audit_log.completed_at = timezone.now()
+        audit_log.source_metadata = {
+            **(audit_log.source_metadata or {}),
+            "queue_state": "failed",
+        }
+        audit_log.save(update_fields=[
+            "status", "is_success", "error_message", "completed_at", "source_metadata",
+        ])
+        broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return
 
     if _is_cancel_requested(str(audit_log.id)):
@@ -1647,8 +1758,24 @@ def process_deal_folder_background(
     ]
     callback = finalize_folder_background.s(deal_id, str(audit_log.id))
     _, _, child_task_ids, callback_task_id = _prepare_vdr_task_ids(tasks, callback)
+    document_queue = []
+    existing_queue = {
+        str(item.get("source_file_id") or ""): dict(item)
+        for item in (audit_log.source_metadata or {}).get("document_queue") or []
+    }
+    for file_info, child_task_id in zip(supported_files, child_task_ids):
+        source_file_id = str(file_info.get("id") or "")
+        entry = existing_queue.get(source_file_id, {
+            "source_file_id": source_file_id,
+            "name": file_info.get("name") or "Untitled document",
+            "path": file_info.get("path") or "",
+            "size": file_info.get("size"),
+        })
+        entry.update({"status": "queued", "celery_task_id": child_task_id})
+        document_queue.append(entry)
     audit_log.source_metadata = {
         **(audit_log.source_metadata or {}),
+        "queue_state": "documents_dispatched",
         "child_task_ids": child_task_ids,
         "callback_task_id": callback_task_id,
         "document_limit": None,
@@ -1659,6 +1786,7 @@ def process_deal_folder_background(
         "coverage_policy": coverage_policy,
         "resume_cached": resume_cached,
         "force_fresh": force_fresh,
+        "document_queue": document_queue,
     }
     audit_log.save(update_fields=["source_metadata"])
     log_worker_event(

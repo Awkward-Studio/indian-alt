@@ -3,6 +3,7 @@ import traceback
 import logging
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
 from ai_orchestrator.services.runtime import AIRuntimeService
 from deals.models import Deal
 from deals.services.deal_creation import DealCreationService
@@ -788,9 +789,6 @@ class FolderAnalysisService:
         if deal.processing_status == 'processing':
             return {"error": "VDR processing is already running for this deal."}
 
-        from deals.tasks import process_deal_folder_background
-        from microsoft.services.graph_service import DMS_USER_EMAIL
-
         file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
 
         if not file_tree:
@@ -820,28 +818,104 @@ class FolderAnalysisService:
                     "message": "All discovered documents are already fully indexed. Nothing was rerun.",
                 }
 
-        task = process_deal_folder_background.apply_async(
-            kwargs={
-                'deal_id': str(deal.id),
-                'file_tree_map': file_tree,
-                'user_email': DMS_USER_EMAIL,
-                'force_fresh': force_fresh,
-            },
-            queue='low_priority'
-        )
-
-        deal.processing_status = 'processing'
-        deal.processing_error = None
-        deal.save(update_fields=['processing_status', 'processing_error'])
-
-        return {
-            "status": "queued",
-            "task_id": task.id,
-            "message": (
+        return FolderAnalysisService._enqueue_vdr_processing(
+            deal,
+            file_tree,
+            force_fresh=force_fresh,
+            message=(
                 f"Queued fresh VDR processing for all {len(file_tree)} discovered files."
                 if force_fresh
                 else f"Queued full VDR processing for all {len(file_tree)} discovered files."
+            ),
+        )
+
+    @staticmethod
+    def _enqueue_vdr_processing(
+        deal: Deal,
+        file_tree: list[dict],
+        *,
+        coverage_policy: str = "all_supported_files",
+        resume_cached: bool = False,
+        force_fresh: bool = False,
+        message: str,
+    ) -> dict:
+        """Persist a VDR queue record before publishing its Redis message."""
+        from ai_orchestrator.models import AIAuditLog
+        from deals.tasks import process_deal_folder_background
+        from microsoft.services.graph_service import DMS_USER_EMAIL
+
+        task_id = str(uuid.uuid4())
+        document_queue = [
+            {
+                "source_file_id": str(item.get("id") or ""),
+                "name": item.get("name") or "Untitled document",
+                "path": item.get("path") or "",
+                "size": item.get("size"),
+                "status": "queued",
+                "celery_task_id": None,
+            }
+            for item in file_tree
+        ]
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="vdr_indexing",
+            source_id=str(deal.id),
+            context_label=f"VDR indexing: {deal.title or deal.id}",
+            status="PENDING",
+            is_success=False,
+            model_used=AIRuntimeService.get_embedding_model(),
+            system_prompt=(
+                f"Queued {'fresh ' if force_fresh else ''}full extraction, artifact capture "
+                f"and vectorization for {len(file_tree)} discovered files."
+            ),
+            user_prompt=f"Indexing dataroom for deal ID: {deal.id}",
+            celery_task_id=task_id,
+            source_metadata={
+                "queue_name": "low_priority",
+                "queue_state": "broker_queued",
+                "queued_at": timezone.now().isoformat(),
+                "requested_task_count": len(file_tree),
+                "coverage_policy": coverage_policy,
+                "resume_cached": resume_cached,
+                "force_fresh": force_fresh,
+                "document_queue": document_queue,
+            },
+        )
+        try:
+            process_deal_folder_background.apply_async(
+                kwargs={
+                    "deal_id": str(deal.id),
+                    "file_tree_map": file_tree,
+                    "user_email": DMS_USER_EMAIL,
+                    "coverage_policy": coverage_policy,
+                    "resume_cached": resume_cached,
+                    "force_fresh": force_fresh,
+                    "audit_log_id": str(audit_log.id),
+                },
+                queue="low_priority",
+                task_id=task_id,
             )
+        except Exception as exc:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = f"Could not publish VDR task to Redis: {exc}"
+            audit_log.completed_at = timezone.now()
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "queue_state": "publish_failed",
+            }
+            audit_log.save(update_fields=[
+                "status", "is_success", "error_message", "completed_at", "source_metadata",
+            ])
+            return {"error": audit_log.error_message}
+
+        deal.processing_status = "processing"
+        deal.processing_error = None
+        deal.save(update_fields=["processing_status", "processing_error"])
+        return {
+            "status": "queued",
+            "task_id": task_id,
+            "audit_log_id": str(audit_log.id),
+            "message": message,
         }
 
     @staticmethod
@@ -853,33 +927,17 @@ class FolderAnalysisService:
         if deal.processing_status == 'processing':
             return {"error": "VDR processing is already running for this deal."}
 
-        from deals.tasks import process_deal_folder_background
-        from microsoft.services.graph_service import DMS_USER_EMAIL
-
         file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
         if not file_tree:
             return {"error": "No persisted folder tree was found for this deal. Scan the folder before resuming VDR."}
 
-        task = process_deal_folder_background.apply_async(
-            kwargs={
-                'deal_id': str(deal.id),
-                'file_tree_map': file_tree,
-                'user_email': DMS_USER_EMAIL,
-                'coverage_policy': 'resume_cached',
-                'resume_cached': True,
-            },
-            queue='low_priority'
+        return FolderAnalysisService._enqueue_vdr_processing(
+            deal,
+            file_tree,
+            coverage_policy="resume_cached",
+            resume_cached=True,
+            message=f"Resuming VDR for {len(file_tree)} discovered files. Cached document segments will be reused.",
         )
-
-        deal.processing_status = 'processing'
-        deal.processing_error = None
-        deal.save(update_fields=['processing_status', 'processing_error'])
-
-        return {
-            "status": "queued",
-            "task_id": task.id,
-            "message": f"Resuming VDR for {len(file_tree)} discovered files. Cached document segments will be reused.",
-        }
 
     @staticmethod
     def rerun_vdr_documents(deal: Deal, document_ids: list[str]) -> dict:
@@ -907,9 +965,6 @@ class FolderAnalysisService:
             return {"error": "One or more selected documents do not belong to this deal."}
 
         from ai_orchestrator.models import AIAuditLog
-        from microsoft.services.graph_service import DMS_USER_EMAIL
-        from deals.tasks import process_deal_folder_background
-
         active_document_ids = {
             str(value)
             for value in AIAuditLog.objects.filter(
@@ -945,25 +1000,15 @@ class FolderAnalysisService:
                 )
             }
 
-        task = process_deal_folder_background.apply_async(
-            kwargs={
-                "deal_id": str(deal.id),
-                "file_tree_map": selected_files,
-                "user_email": DMS_USER_EMAIL,
-                "coverage_policy": "selected_documents",
-            },
-            queue="low_priority",
+        result = FolderAnalysisService._enqueue_vdr_processing(
+            deal,
+            selected_files,
+            coverage_policy="selected_documents",
+            message=f"Queued {len(selected_files)} document(s) through the VDR pipeline.",
         )
-        deal.processing_status = "processing"
-        deal.processing_error = None
-        deal.save(update_fields=["processing_status", "processing_error"])
-
-        return {
-            "status": "queued",
-            "task_id": task.id,
-            "document_count": len(selected_files),
-            "message": f"Queued {len(selected_files)} document(s) through the VDR pipeline.",
-        }
+        if "error" not in result:
+            result["document_count"] = len(selected_files)
+        return result
 
     @staticmethod
     def deal_analysis_readiness(deal: Deal) -> dict:

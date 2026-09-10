@@ -275,11 +275,17 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='queue-status')
     def queue_status(self, request):
-        """Return the Celery and single-slot inference queue state together."""
+        """Return Redis order, Celery execution, and durable VDR hierarchy."""
         if not _is_ai_admin(request.user):
             return Response({'error': 'Administrator access is required.'}, status=403)
 
-        processing_logs = AIAuditLog.objects.filter(status='PROCESSING').order_by('created_at')
+        from config.celery import app as celery_app
+        from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
+
+        redis_state = CeleryQueueSnapshotService.snapshot(celery_app)
+        processing_logs = AIAuditLog.objects.filter(
+            status__in=['PENDING', 'PROCESSING'],
+        ).order_by('created_at')
 
         def audit_summary(log):
             metadata = log.source_metadata or {}
@@ -324,17 +330,256 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as exc:
             slot_warning = str(exc)
 
-        celery_state = {'active': {}, 'reserved': {}, 'scheduled': {}, 'warning': None}
+        celery_state = {'active': [], 'reserved': [], 'scheduled': [], 'warning': None}
+
+        def flatten_worker_tasks(worker_payload, state):
+            flattened = []
+            for worker, tasks in (worker_payload or {}).items():
+                for task in tasks or []:
+                    task_data = task.get('request') or task
+                    delivery = task_data.get('delivery_info') or {}
+                    flattened.append({
+                        'task_id': task_data.get('id'),
+                        'task_name': task_data.get('name'),
+                        'worker': worker,
+                        'state': state,
+                        'queue': delivery.get('routing_key') or delivery.get('exchange'),
+                        'time_start': task_data.get('time_start'),
+                    })
+            return flattened
+
         try:
-            from config.celery import app as celery_app
             inspector = celery_app.control.inspect(timeout=2)
-            celery_state['active'] = inspector.active() or {}
-            celery_state['reserved'] = inspector.reserved() or {}
-            celery_state['scheduled'] = inspector.scheduled() or {}
+            celery_state['active'] = flatten_worker_tasks(inspector.active(), 'active')
+            celery_state['reserved'] = flatten_worker_tasks(inspector.reserved(), 'reserved')
+            celery_state['scheduled'] = flatten_worker_tasks(inspector.scheduled(), 'scheduled')
         except Exception as exc:
             celery_state['warning'] = str(exc)
 
+        worker_tasks = [
+            *celery_state['active'],
+            *celery_state['reserved'],
+            *celery_state['scheduled'],
+        ]
+        worker_state_by_id = {
+            str(task['task_id']): task['state']
+            for task in worker_tasks
+            if task.get('task_id')
+        }
+        redis_message_by_id = {
+            str(message['task_id']): message
+            for message in redis_state['messages']
+            if message.get('task_id')
+        }
+
+        active_parents = list(
+            AIAuditLog.objects.filter(
+                source_type='vdr_indexing',
+                status__in=['PENDING', 'PROCESSING'],
+            ).order_by('created_at')
+        )
+        parent_ids = [str(parent.id) for parent in active_parents]
+        parent_deal_ids = [parent.source_id for parent in active_parents if parent.source_id]
+        deals_by_id = {
+            str(deal.id): deal
+            for deal in Deal.objects.filter(
+                Q(id__in=parent_deal_ids) | Q(processing_status='processing')
+            )
+        }
+        documents_by_deal = {}
+        for document in DealDocument.objects.filter(deal_id__in=deals_by_id).order_by('created_at'):
+            documents_by_deal.setdefault(str(document.deal_id), []).append(document)
+        segments_by_parent = {}
+        if parent_ids:
+            segment_logs = AIAuditLog.objects.filter(
+                source_type='document_evidence_segment',
+                source_metadata__vdr_parent_audit_id__in=parent_ids,
+            ).order_by('created_at')
+            for segment in segment_logs:
+                parent_id = str((segment.source_metadata or {}).get('vdr_parent_audit_id') or '')
+                segments_by_parent.setdefault(parent_id, []).append(segment)
+
+        def segment_summary(segment):
+            metadata = segment.source_metadata or {}
+            return {
+                'audit_log_id': str(segment.id),
+                'celery_task_id': segment.celery_task_id,
+                'document_id': segment.source_id,
+                'label': segment.context_label,
+                'status': segment.status,
+                'segment_index': metadata.get('segment_index'),
+                'segment_count': metadata.get('segment_count'),
+                'inference_state': metadata.get('inference_state'),
+                'created_at': segment.created_at,
+                'completed_at': segment.completed_at,
+                'error': segment.error_message,
+            }
+
+        vdr_runs = []
+        represented_deal_ids = set()
+        represented_root_task_ids = set()
+        for parent in active_parents:
+            metadata = parent.source_metadata or {}
+            deal_id = str(parent.source_id or '')
+            represented_deal_ids.add(deal_id)
+            if parent.celery_task_id:
+                represented_root_task_ids.add(str(parent.celery_task_id))
+            deal = deals_by_id.get(deal_id)
+            deal_documents = documents_by_deal.get(deal_id, [])
+            document_by_source = {
+                str(document.onedrive_id or ''): document for document in deal_documents
+            }
+            document_by_id = {str(document.id): document for document in deal_documents}
+            parent_segments = segments_by_parent.get(str(parent.id), [])
+            segment_groups = {}
+            for segment in parent_segments:
+                segment_groups.setdefault(str(segment.source_id or ''), []).append(segment)
+
+            document_rows = []
+            manifest = metadata.get('document_queue') or []
+            if not manifest:
+                manifest = [
+                    {
+                        'source_file_id': str(document.onedrive_id or ''),
+                        'document_id': str(document.id),
+                        'name': document.title,
+                        'status': 'processing' if segment_groups.get(str(document.id)) else 'queued',
+                    }
+                    for document in deal_documents
+                ]
+            for index, item in enumerate(manifest):
+                source_file_id = str(item.get('source_file_id') or '')
+                document = document_by_source.get(source_file_id) or document_by_id.get(
+                    str(item.get('document_id') or '')
+                )
+                document_id = str(document.id) if document else str(item.get('document_id') or '')
+                task_id = str(item.get('celery_task_id') or '')
+                broker_message = redis_message_by_id.get(task_id)
+                state = (
+                    worker_state_by_id.get(task_id)
+                    or ('queued' if broker_message else None)
+                    or item.get('status')
+                    or 'queued'
+                )
+                document_rows.append({
+                    'position': broker_message.get('position') if broker_message else index + 1,
+                    'source_file_id': source_file_id or None,
+                    'document_id': document_id or None,
+                    'name': item.get('name') or (document.title if document else 'Untitled document'),
+                    'status': state,
+                    'celery_task_id': task_id or None,
+                    'indexed': document.is_indexed if document else False,
+                    'transcription_status': document.transcription_status if document else None,
+                    'chunking_status': document.chunking_status if document else None,
+                    'error': item.get('error'),
+                    'segments': [
+                        segment_summary(segment)
+                        for segment in segment_groups.get(document_id, [])
+                    ],
+                })
+
+            root_message = redis_message_by_id.get(str(parent.celery_task_id or ''))
+            root_state = (
+                worker_state_by_id.get(str(parent.celery_task_id or ''))
+                or ('queued' if root_message else None)
+                or ('queued' if parent.status == 'PENDING' else 'processing')
+            )
+            vdr_runs.append({
+                'audit_log_id': str(parent.id),
+                'celery_task_id': parent.celery_task_id,
+                'deal_id': deal_id,
+                'deal_title': deal.title if deal else parent.context_label or 'Unknown deal',
+                'status': root_state,
+                'audit_status': parent.status,
+                'queue': metadata.get('queue_name') or 'low_priority',
+                'queue_position': root_message.get('position') if root_message else None,
+                'queued_at': metadata.get('queued_at') or parent.created_at,
+                'force_fresh': bool(metadata.get('force_fresh')),
+                'resume_cached': bool(metadata.get('resume_cached')),
+                'documents': document_rows,
+            })
+
+        for message in redis_state['messages']:
+            if message.get('task_name') != 'deals.tasks.process_deal_folder_background':
+                continue
+            task_id = str(message.get('task_id') or '')
+            if task_id in represented_root_task_ids:
+                continue
+            deal_id = str(message.get('deal_id') or '')
+            represented_deal_ids.add(deal_id)
+            deal = deals_by_id.get(deal_id) or Deal.objects.filter(id=deal_id).first()
+            vdr_runs.append({
+                'audit_log_id': message.get('audit_log_id'),
+                'celery_task_id': task_id or None,
+                'deal_id': deal_id or None,
+                'deal_title': deal.title if deal else 'Unknown deal',
+                'status': 'queued',
+                'audit_status': None,
+                'queue': message.get('queue'),
+                'queue_position': message.get('position'),
+                'queued_at': None,
+                'force_fresh': bool(message.get('force_fresh')),
+                'resume_cached': False,
+                'documents': [
+                    {
+                        'position': index + 1,
+                        'source_file_id': None,
+                        'document_id': None,
+                        'name': name,
+                        'status': 'waiting_for_parent',
+                        'celery_task_id': None,
+                        'indexed': False,
+                        'transcription_status': None,
+                        'chunking_status': None,
+                        'error': None,
+                        'segments': [],
+                    }
+                    for index, name in enumerate(message.get('document_names') or [])
+                ],
+            })
+
+        for deal_id, deal in deals_by_id.items():
+            if deal.processing_status != 'processing' or deal_id in represented_deal_ids:
+                continue
+            vdr_runs.append({
+                'audit_log_id': None,
+                'celery_task_id': None,
+                'deal_id': deal_id,
+                'deal_title': deal.title or 'Unknown deal',
+                'status': 'untracked',
+                'audit_status': None,
+                'queue': 'low_priority',
+                'queue_position': None,
+                'queued_at': None,
+                'force_fresh': False,
+                'resume_cached': False,
+                'documents': [],
+            })
+
+        deal_title_by_id = {
+            str(run.get('deal_id')): run.get('deal_title') for run in vdr_runs if run.get('deal_id')
+        }
+        for message in redis_state['messages']:
+            message['deal_title'] = deal_title_by_id.get(str(message.get('deal_id') or ''))
+
+        vdr_runs.sort(key=lambda run: (
+            run.get('queue_position') is None,
+            run.get('queue_position') or 0,
+            str(run.get('queued_at') or ''),
+        ))
+
         return Response({
+            'summary': {
+                'redis_ready': sum(queue['ready_count'] for queue in redis_state['queues']),
+                'worker_active': len(celery_state['active']),
+                'worker_reserved': len(celery_state['reserved']),
+                'vdr_deals': len(vdr_runs),
+                'vdr_documents': sum(len(run['documents']) for run in vdr_runs),
+                'inference_waiting': len(queued),
+                'inference_active': len(active),
+            },
+            'redis': redis_state,
+            'vdr_runs': vdr_runs,
             'inference': {
                 'slots': slots,
                 'lease_owner': lease_owner,
@@ -342,7 +587,11 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'queued_audits': queued,
             },
             'celery': celery_state,
-            'warnings': [warning for warning in [slot_warning, celery_state['warning']] if warning],
+            'warnings': [
+                warning for warning in [
+                    redis_state['warning'], slot_warning, celery_state['warning'],
+                ] if warning
+            ],
         })
 
 class AIConversationViewSet(viewsets.ModelViewSet):
