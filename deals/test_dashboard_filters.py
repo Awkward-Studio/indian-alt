@@ -127,3 +127,26 @@ class DealTableFilterTests(TestCase):
             queryset=DealViewSet.queryset.all(),
         ).qs
         self.assertEqual(list(filtered.values_list("title", flat=True)), ["Linked dataroom"])
+
+    def test_search_matches_raw_names_and_tolerates_small_typos(self):
+        deal = Deal.objects.create(
+            title="Acme Biotech",
+            bank_name="HDFC Bank",
+            primary_contact_name="Priya Shah",
+        )
+        Deal.objects.create(title="Unrelated company")
+
+        response = self.client.get(
+            "/api/deals/",
+            {"search": "Acm Biotech", "page_size": 100},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["id"] for row in response.data["results"]], [str(deal.id)])
+
+        banker_response = self.client.get(
+            "/api/deals/",
+            {"search": "HDFC", "page_size": 100},
+        )
+        self.assertEqual(banker_response.status_code, 200)
+        self.assertEqual([row["id"] for row in banker_response.data["results"]], [str(deal.id)])

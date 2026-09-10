@@ -1,12 +1,16 @@
 import logging
+import re
 import uuid
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+from functools import reduce
+from operator import and_, or_
 from urllib.parse import urlsplit
 
 import django_filters.rest_framework as django_filters
 import requests
 from django.conf import settings
+from django.contrib.postgres.search import TrigramSimilarity
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -16,7 +20,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.core.cache import cache
 from django.db.models import CharField, Count, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
-from django.db.models.functions import Cast, Coalesce, Trim
+from django.db.models.functions import Cast, Coalesce, Greatest, Trim
 from django.db.models.fields.json import KeyTextTransform
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -95,6 +99,8 @@ class DealOrderingFilter(filters.OrderingFilter):
             return queryset
 
         expressions = []
+        if request.query_params.get("search", "").strip():
+            expressions.append(F('search_relevance').desc(nulls_last=True))
         for field in ordering:
             if field.lstrip('-') == 'received_at':
                 expression = F('received_at')
@@ -106,6 +112,55 @@ class DealOrderingFilter(filters.OrderingFilter):
             else:
                 expressions.append(field)
         return queryset.order_by(*expressions)
+
+
+class DealSearchFilter(filters.BaseFilterBackend):
+    """Search deal identity fields with token-aware partial and fuzzy matching."""
+
+    MIN_FUZZY_TERM_LENGTH = 3
+
+    def filter_queryset(self, request, queryset, view):
+        raw_query = request.query_params.get("search", "").strip()
+        if not raw_query:
+            return queryset
+
+        terms = re.findall(r"[^\W_]+", raw_query, flags=re.UNICODE)
+        if not terms:
+            return queryset
+
+        search_fields = getattr(view, "search_fields", ())
+        term_queries = []
+        term_scores = []
+
+        for term in terms:
+            field_queries = [
+                Q(**{f"{field}__icontains": term})
+                for field in search_fields
+            ]
+            field_scores = [
+                TrigramSimilarity(field, term)
+                for field in search_fields
+            ]
+
+            if len(term) >= self.MIN_FUZZY_TERM_LENGTH:
+                field_queries.extend(
+                    Q(**{f"{field}__trigram_similar": term})
+                    for field in search_fields
+                )
+
+            term_queries.append(reduce(or_, field_queries, Q(pk__in=[])))
+            term_scores.append(Coalesce(Greatest(*field_scores), 0.0))
+
+        relevance = term_scores[0]
+        for score in term_scores[1:]:
+            relevance = relevance + score
+
+        return (
+            queryset
+            .filter(reduce(and_, term_queries))
+            .distinct()
+            .annotate(search_relevance=relevance)
+        )
 
 
 def serialize_vi_cin_candidates(resolution):
@@ -540,12 +595,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     )
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, DealOrderingFilter]
+    filter_backends = [DjangoFilterBackend, DealSearchFilter, DealOrderingFilter]
     filterset_class = DealFilterSet
     search_fields = [
         'title', 'industry', 'sector', 'city', 'state',
-        'country', 'bank__name', 'legacy_investment_bank',
-        'primary_contact__name'
+        'country', 'bank__name', 'bank_name', 'legacy_investment_bank',
+        'primary_contact__name', 'primary_contact_name',
     ]
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',

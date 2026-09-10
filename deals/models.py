@@ -278,7 +278,9 @@ class Deal(models.Model):
             GinIndex(fields=['city'], name='deal_city_trgm', opclasses=['gin_trgm_ops']),
             GinIndex(fields=['state'], name='deal_state_trgm', opclasses=['gin_trgm_ops']),
             GinIndex(fields=['country'], name='deal_country_trgm', opclasses=['gin_trgm_ops']),
+            GinIndex(fields=['bank_name'], name='deal_bank_name_trgm', opclasses=['gin_trgm_ops']),
             GinIndex(fields=['legacy_investment_bank'], name='deal_legacy_bank_trgm', opclasses=['gin_trgm_ops']),
+            GinIndex(fields=['primary_contact_name'], name='deal_contact_name_trgm', opclasses=['gin_trgm_ops']),
         ]
         constraints = [
             models.CheckConstraint(
