@@ -44,7 +44,7 @@ def _latest_active_section_audit(deal):
     if not parent_ids:
         return None
     return AIAuditLog.objects.filter(
-        source_type="email_report_section",
+        source_type__in=["email_report_section", "vdr_report_section"],
         source_id__in=[str(parent_id) for parent_id in parent_ids],
         status__in=REPORT_ACTIVE_STATUSES,
     ).order_by("-created_at").first()

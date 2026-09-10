@@ -6,6 +6,7 @@ from typing import Any, Iterator
 
 import requests
 from django.conf import settings
+from ai_orchestrator.services.token_budget import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -291,13 +292,16 @@ class VLLMProviderService:
             body["max_tokens"] = max_tokens
 
         if payload.get("_enforce_context_budget"):
-            # UTF-8 bytes are deliberately more conservative than chars/4 for
-            # multilingual text, CSV, numbers and JSON on our byte-fallback models.
-            # Count the complete message/tool payload, plus output and template reserve.
+            # Count the complete request using a conservative token estimate.
+            # The configured model window is tokens, not UTF-8 bytes.
             window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65536))
             reserve = 4096
-            input_bound = len(json.dumps({k: v for k, v in body.items() if k != "stream"}, ensure_ascii=False).encode("utf-8"))
-            if input_bound + int(max_tokens or 8192) + reserve > window:
+            serialized_input = json.dumps(
+                {k: v for k, v in body.items() if k != "stream"},
+                ensure_ascii=False,
+            )
+            input_tokens = estimate_tokens(serialized_input)
+            if input_tokens + int(max_tokens or 8192) + reserve > window:
                 raise ValueError(
                     "The complete chat request exceeds the safe model context budget. "
                     "Please shorten the question/history or remove extra context; no document text was silently discarded."

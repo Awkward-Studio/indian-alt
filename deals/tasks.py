@@ -1313,13 +1313,9 @@ def _compact_document_artifact(doc: DealDocument) -> dict:
 
 
 def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool = False) -> DealAnalysis:
-    """Map/reduce every ready DealDocument, then persist a new complete IC report version."""
+    """Retrieve section-specific indexed evidence and persist a complete IC report."""
     from ai_orchestrator.services.ai_processor import AIProcessorService
-    from ai_orchestrator.services.bulk_prompt_contracts import (
-        BULK3_DOCUMENT_SUMMARY_PROMPT,
-        BULK3_DOCUMENT_SUMMARY_SYSTEM_PROMPT,
-    )
-    from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
+    from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
     from ai_orchestrator.services.report_sections import ICReportSectionService
     from microsoft.services.email_ingestion_review import deal_email_evidence_gaps
     all_docs = list(deal.documents.all().order_by("title", "id"))
@@ -1338,54 +1334,10 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
 
     log_worker_event(
         audit_log,
-        f"Reducing complete evidence from {len(docs)} documents into a context-safe report pack...",
+        f"Preparing section-specific semantic retrieval across {len(docs)} indexed documents...",
         status="PROCESSING",
     )
-    context_documents = [
-        {
-            "id": str(doc.id),
-            "name": doc.title,
-            "text": doc.normalized_text or doc.extracted_text or "",
-            "truncated": doc.transcription_status != TranscriptionStatus.COMPLETE,
-            "quality_flags": (doc.evidence_json or {}).get("quality_flags", []),
-        }
-        for doc in docs
-    ]
-    # The provider's context preflight counts the complete serialized request
-    # in its conservative byte budget. Bound the reducer's final evidence pack
-    # to the same window, leaving room for each section completion and the
-    # provider/template reserve.
-    configured_context_bytes = int(getattr(settings, "VDR_REPORT_CONTEXT_BYTES", 135_000))
-    model_window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65_536))
-    section_tokens = int(getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8_192))
-    # Include both the provider's template reserve and the section prompt
-    # wrapper/system instructions, which are not part of the evidence string.
-    request_overhead = 8_192
-    safe_context_bytes = max(1_000, model_window - section_tokens - request_overhead)
-    effective_context_bytes = min(configured_context_bytes, safe_context_bytes)
-    evidence_context, covered_document_count = ChatDocumentChunkService(
-        progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
-        cache_scope=f"deal-report:{deal.id}",
-        chunk_bytes=int(getattr(settings, "VDR_REPORT_MAP_BYTES", 16_000)),
-        # Conservative 3 chars/token budgeting leaves room for the prompt,
-        # schema and a section response inside the configured model window.
-        final_bytes=effective_context_bytes,
-        cache_ttl=int(getattr(settings, "VDR_REPORT_CACHE_TTL", 30 * 24 * 60 * 60)),
-        evidence_system_prompt=BULK3_DOCUMENT_SUMMARY_SYSTEM_PROMPT,
-        # Dense spreadsheet sections can legitimately need more than a fixed
-        # output allowance. Zero omits max_tokens from these intermediate map
-        # and reduce calls while the provider still enforces the input window.
-        note_max_tokens=int(getattr(settings, "VDR_REPORT_NOTE_MAX_TOKENS", 0)),
-        request_timeout=int(getattr(settings, "VDR_REPORT_NOTE_TIMEOUT", 1800)),
-    ).build_context(
-        context_documents,
-        (
-            f"{BULK3_DOCUMENT_SUMMARY_PROMPT} Cover company, management, industry, transaction, "
-            "financials, multiples, risks, investment rationale, exits, next steps, conflicts, missing "
-            "information, and exact source references. Do not omit a document merely because it conflicts "
-            "with another source."
-        ),
-    )
+    section_evidence = ICReportSectionEvidenceService(deal=deal, documents=docs)
 
     document_evidence = [_compact_document_artifact(doc) for doc in docs]
     input_files = [
@@ -1444,12 +1396,12 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
     normalized.setdefault("metadata", {}).update({
         "evidence_coverage": {
             "documents_discovered": len(all_docs),
-            "documents_in_report": covered_document_count,
+            "documents_in_report": 0,
             "documents_with_gaps": [str(doc.id) for doc in missing_docs],
             "email_sources_with_gaps": source_gaps,
             "allow_gaps": allow_gaps,
-            "all_document_chunks_processed": covered_document_count == len(all_docs) and not source_gaps,
-            "context_strategy": "lossless extraction -> cached bulk-2 artifacts -> hierarchical map/reduce",
+            "all_document_chunks_processed": False,
+            "context_strategy": "section-specific hybrid pgvector and full-text retrieval",
         },
         "audit_log_id": str(audit_log.id),
     })
@@ -1457,11 +1409,26 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
     normalized["analyst_report"] = ICReportSectionService.complete(
         ai_service=ai_service,
         report="",
-        evidence=evidence_context,
+        evidence="",
         analysis=normalized,
         source_id=str(audit_log.id),
         progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
+        evidence_for_section=section_evidence.retrieve,
+        source_type="vdr_report_section",
+        context_label_prefix="VDR report section",
+        max_tokens=int(getattr(settings, "VDR_REPORT_SECTION_MAX_TOKENS", 16_384)),
+        max_input_tokens=int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
     )
+    retrieval_stats = normalized["metadata"]["evidence_coverage"]
+    retrieval_stats.update({
+        "documents_in_report": len(section_evidence.covered_document_ids),
+        "all_indexed_documents_retrieved": (
+            section_evidence.covered_document_ids == {str(doc.id) for doc in docs}
+        ),
+        "section_count": len(section_evidence.section_stats),
+        "section_chunk_selections": section_evidence.total_selected_chunks,
+        "sections": section_evidence.section_stats,
+    })
     normalized["canonical_snapshot"] = DealCreationService.build_canonical_snapshot(
         normalized,
         previous_snapshot=previous_snapshot,

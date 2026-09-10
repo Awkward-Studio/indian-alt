@@ -822,6 +822,7 @@ class EmbeddingService:
             limit=limit,
             deal_ids=deal_ids,
             source_ids=source_ids,
+            fetch_limit_override=limit if not rerank else None,
         )
         if not rerank:
             return candidates[:limit]
@@ -834,11 +835,16 @@ class EmbeddingService:
         limit: int,
         deal_ids: Optional[List[str]] = None,
         source_ids: Optional[List[str]] = None,
+        fetch_limit_override: int | None = None,
     ) -> List[DocumentChunk]:
         from pgvector.django import CosineDistance
 
-        fetch_limit = self._candidate_fetch_limit(limit)
-        queryset = self._retrievable_chunk_queryset()
+        fetch_limit = max(1, int(fetch_limit_override)) if fetch_limit_override else self._candidate_fetch_limit(limit)
+        # Ranking happens in PostgreSQL. Do not send 1024-dimensional source
+        # vectors or tsvectors back to the worker for every candidate.
+        queryset = self._retrievable_chunk_queryset().defer(
+            "embedding", "search_vector", "search_text",
+        )
         if deal_ids:
             queryset = queryset.filter(deal_id__in=deal_ids)
         if source_ids:

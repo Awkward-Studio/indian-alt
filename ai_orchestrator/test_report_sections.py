@@ -69,3 +69,35 @@ class ICReportSectionServiceTests(SimpleTestCase):
 
         self.assertIn("Cached complete section", section)
         service.process_content.assert_not_called()
+
+    @patch("ai_orchestrator.services.report_sections.cache")
+    def test_each_section_can_receive_distinct_retrieved_evidence(self, report_cache):
+        report_cache.get.return_value = None
+        service = Mock()
+        service.process_content.side_effect = lambda **kwargs: {
+            "response": f"## {kwargs['content'].split('Required heading: ## ', 1)[1].splitlines()[0]}\n\nGenerated section with complete evidence-backed detail."
+        }
+
+        result = ICReportSectionService.complete(
+            ai_service=service,
+            report="",
+            evidence="",
+            evidence_for_section=lambda title: {
+                "context": f"Only evidence ranked for {title}",
+                "metadata": {"selected_chunk_count": 25},
+            },
+            analysis={"deal_model_data": {"title": "Example"}},
+            source_id="report-1",
+            source_type="vdr_report_section",
+            context_label_prefix="VDR report section",
+            max_tokens=16_384,
+            max_input_tokens=40_960,
+        )
+
+        self.assertTrue(ICReportSectionService.is_complete(result))
+        self.assertEqual(service.process_content.call_count, len(IC_SECTION_TITLES))
+        for title, call in zip(IC_SECTION_TITLES, service.process_content.call_args_list):
+            self.assertIn(f"Only evidence ranked for {title}", call.kwargs["content"])
+            self.assertEqual(call.kwargs["source_type"], "vdr_report_section")
+            self.assertEqual(call.kwargs["metadata"]["max_tokens"], 16_384)
+            self.assertEqual(call.kwargs["metadata"]["max_input_tokens"], 40_960)

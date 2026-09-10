@@ -14,6 +14,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .inference_queue import InferenceQueueLease
 from .runtime import AIRuntimeService
+from .token_budget import estimate_tokens
 from .pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .search_provider import SearXNGProviderService
 from django.conf import settings
@@ -319,9 +320,7 @@ class AIProcessorService:
 
     @staticmethod
     def _estimated_tokens(value: str) -> int:
-        text = str(value or "")
-        lexical = len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
-        return max((len(text) + 2) // 3, int(lexical * 1.2))
+        return estimate_tokens(value)
 
     @classmethod
     def _truncate_prompt_to_token_budget(cls, prompt: str, system: str, max_input_tokens: int) -> str:

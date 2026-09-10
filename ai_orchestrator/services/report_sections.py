@@ -17,7 +17,7 @@ SECTION_GUIDANCE = BULK3_SECTION_INSTRUCTIONS
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v2"
+    CACHE_VERSION = "ic-report-sections-v3"
 
     @classmethod
     def headings(cls, report: str) -> list[str]:
@@ -76,7 +76,20 @@ class ICReportSectionService:
         return text.strip()
 
     @classmethod
-    def _generate_section(cls, *, ai_service, evidence: str, analysis: dict, title: str, source_id: str) -> str:
+    def _generate_section(
+        cls,
+        *,
+        ai_service,
+        evidence: str,
+        analysis: dict,
+        title: str,
+        source_id: str,
+        evidence_metadata: dict | None = None,
+        source_type: str = "email_report_section",
+        context_label_prefix: str = "Email report section",
+        max_tokens: int | None = None,
+        max_input_tokens: int | None = None,
+    ) -> str:
         model_data = analysis.get("deal_model_data") if isinstance(analysis.get("deal_model_data"), dict) else {}
         cache_key = cls._cache_key(evidence=evidence, model_data=model_data, title=title)
         try:
@@ -109,16 +122,21 @@ Internal evidence:
         result = ai_service.process_content(
             content=prompt,
             skill_name=None,
-            source_type="email_report_section",
+            source_type=source_type,
             source_id=str(source_id),
             metadata={
                 "personality_only_system": True,
                 "response_mode": "markdown",
                 "temperature": 0.0,
-                "max_tokens": int(getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192)),
+                "max_tokens": int(max_tokens or getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192)),
+                **({"max_input_tokens": int(max_input_tokens)} if max_input_tokens else {}),
                 "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
-                "context_label": f"Email report section: {title}",
+                "context_label": f"{context_label_prefix}: {title}",
+                "_source_metadata": {
+                    "report_section": title,
+                    "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
+                },
             },
         )
         section = cls._normalize_section(title, result.get("response") if isinstance(result, dict) else result)
@@ -142,6 +160,11 @@ Internal evidence:
         analysis: dict,
         source_id: str,
         progress: Callable[[str], None] | None = None,
+        evidence_for_section: Callable[[str], dict | str] | None = None,
+        source_type: str = "email_report_section",
+        context_label_prefix: str = "Email report section",
+        max_tokens: int | None = None,
+        max_input_tokens: int | None = None,
     ) -> str:
         if cls.is_complete(report):
             return str(report).strip()
@@ -154,12 +177,34 @@ Internal evidence:
                 continue
             if progress:
                 progress(f"Generating report section {index + 1} of {len(IC_SECTION_TITLES)}: {title}")
+            section_evidence = evidence
+            evidence_metadata = None
+            if evidence_for_section:
+                retrieved = evidence_for_section(title)
+                if isinstance(retrieved, dict):
+                    section_evidence = str(retrieved.get("context") or "")
+                    evidence_metadata = retrieved.get("metadata")
+                else:
+                    section_evidence = str(retrieved or "")
+                if not section_evidence.strip():
+                    raise ValueError(f"No evidence was retrieved for report section '{title}'.")
+                if progress:
+                    selected = (evidence_metadata or {}).get("selected_chunk_count")
+                    progress(
+                        f"Retrieved {selected or 'ranked'} indexed chunks for report section "
+                        f"{index + 1} of {len(IC_SECTION_TITLES)}: {title}"
+                    )
             sections.append(cls._generate_section(
                 ai_service=ai_service,
-                evidence=evidence,
+                evidence=section_evidence,
                 analysis=analysis,
                 title=title,
                 source_id=source_id,
+                evidence_metadata=evidence_metadata,
+                source_type=source_type,
+                context_label_prefix=context_label_prefix,
+                max_tokens=max_tokens,
+                max_input_tokens=max_input_tokens,
             ))
             if progress:
                 progress(f"Completed report section {index + 1} of {len(IC_SECTION_TITLES)}: {title}")

@@ -50,9 +50,9 @@ class ChatDocumentChunksTests(SimpleTestCase):
         self.assertLess(len(context.encode('utf-8')), 18500)
         self.assertGreater(provider.execute_standard.call_count, 17)
 
-    def test_complete_payload_budget_counts_system_output_and_unicode(self):
+    def test_complete_payload_budget_counts_estimated_input_and_output_tokens(self):
         provider = VLLMProviderService()
-        payload = {'model': 'local', 'prompt': 'x', 'system': 'अ' * 20000,
+        payload = {'model': 'local', 'prompt': 'x', 'system': 'अ' * 180000,
                    'options': {'max_tokens': 4096}, '_enforce_context_budget': True}
         with self.assertRaisesRegex(ValueError, 'safe model context budget'):
             provider._build_chat_body(payload, stream=False)
@@ -65,8 +65,22 @@ class ChatDocumentChunksTests(SimpleTestCase):
     def test_smaller_model_window_is_respected(self):
         with self.assertRaisesRegex(ValueError, 'safe model context budget'):
             VLLMProviderService()._build_chat_body({
-                'model': 'local', 'prompt': 'x' * 5000,
+                'model': 'local', 'prompt': 'x' * 12000,
                 'options': {'max_tokens': 1000}, '_enforce_context_budget': True,
+            }, stream=False)
+
+    @override_settings(CHAT_MODEL_CONTEXT_TOKENS=65536)
+    def test_report_split_allows_40k_input_and_reserves_16k_output(self):
+        provider = VLLMProviderService()
+        body = provider._build_chat_body({
+            'model': 'local', 'prompt': 'x' * 120000,
+            'options': {'max_tokens': 16384}, '_enforce_context_budget': True,
+        }, stream=False)
+        self.assertEqual(body['max_tokens'], 16384)
+        with self.assertRaisesRegex(ValueError, 'safe model context budget'):
+            provider._build_chat_body({
+                'model': 'local', 'prompt': 'x' * 150000,
+                'options': {'max_tokens': 16384}, '_enforce_context_budget': True,
             }, stream=False)
 
     def test_cache_reuses_only_identical_question_model_and_private_scope(self):

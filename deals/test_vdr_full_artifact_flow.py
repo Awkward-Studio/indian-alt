@@ -22,7 +22,7 @@ class FullVDRArtifactTests(SimpleTestCase):
     @patch("deals.tasks.DealCreationService.apply_analysis_to_deal")
     @patch("deals.tasks.DealAnalysis.objects.create")
     @patch("ai_orchestrator.services.report_sections.ICReportSectionService.complete")
-    @patch("ai_orchestrator.services.chat_document_chunks.ChatDocumentChunkService")
+    @patch("ai_orchestrator.services.report_section_evidence.ICReportSectionEvidenceService")
     @patch("microsoft.services.email_ingestion_review.deal_email_evidence_gaps", return_value=[])
     @patch("deals.tasks.DocumentArtifactService.artifact_from_document")
     @patch("deals.tasks.DocumentArtifactService.artifact_status", return_value="complete")
@@ -37,7 +37,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         _artifact_status,
         artifact_from_document,
         _email_gaps,
-        chunk_service_class,
+        section_evidence_class,
         complete_sections,
         create_analysis,
         _apply_analysis,
@@ -47,7 +47,9 @@ class FullVDRArtifactTests(SimpleTestCase):
 
         report = "\n\n".join(f"{header}\n\nSection content with sufficient detail." for header in IC_REPORT_HEADERS)
         complete_sections.return_value = report
-        chunk_service_class.return_value.build_context.return_value = ("Bounded evidence", 1)
+        section_evidence_class.return_value.covered_document_ids = {"document-1"}
+        section_evidence_class.return_value.section_stats = {}
+        section_evidence_class.return_value.total_selected_chunks = 0
         artifact_from_document.return_value = {"document_name": "Deck.pdf", "claims": []}
         created = MagicMock()
         create_analysis.return_value = created
@@ -82,6 +84,10 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertIs(result, created)
         ai_service_class.return_value.process_content.assert_not_called()
         self.assertEqual(complete_sections.call_args.kwargs["report"], "")
+        self.assertEqual(
+            complete_sections.call_args.kwargs["evidence_for_section"],
+            section_evidence_class.return_value.retrieve,
+        )
         self.assertEqual(create_analysis.call_args.kwargs["thinking"], "")
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)
