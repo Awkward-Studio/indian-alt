@@ -1359,7 +1359,13 @@ def _compact_document_artifact(doc: DealDocument) -> dict:
     return artifact
 
 
-def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool = False) -> DealAnalysis:
+def synthesize_complete_deal_analysis(
+    deal: Deal,
+    audit_log,
+    *,
+    allow_gaps: bool = False,
+    force_regenerate: bool = False,
+) -> DealAnalysis:
     """Retrieve section-specific indexed evidence and persist a complete IC report."""
     from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
@@ -1465,6 +1471,7 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
         context_label_prefix="VDR report section",
         max_tokens=int(getattr(settings, "VDR_REPORT_SECTION_MAX_TOKENS", 16_384)),
         max_input_tokens=int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
+        force_regenerate=force_regenerate,
     )
     retrieval_stats = normalized["metadata"]["evidence_coverage"]
     retrieval_stats.update({
@@ -1633,6 +1640,7 @@ def process_vdr_report_section(
             max_tokens=int(getattr(settings, "VDR_REPORT_SECTION_MAX_TOKENS", 16_384)),
             max_input_tokens=int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
             vdr_dispatch_generation=queue_generation,
+            force_regenerate=bool((audit.source_metadata or {}).get("force_regenerate")),
         )
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
     except Exception as exc:
@@ -2016,14 +2024,25 @@ def process_deal_folder_background(
 
 
 @shared_task(bind=True, max_retries=2, soft_time_limit=0, time_limit=0)
-def generate_vdr_analysis_async(self, deal_id: str, audit_log_id: str, allow_gaps: bool = False):
+def generate_vdr_analysis_async(
+    self,
+    deal_id: str,
+    audit_log_id: str,
+    allow_gaps: bool = False,
+    force_regenerate: bool = False,
+):
     """Generate a new report version after a user confirms the deal evidence set."""
     from ai_orchestrator.models import AIAuditLog
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
     try:
         deal = Deal.objects.get(id=deal_id)
-        analysis = synthesize_complete_deal_analysis(deal, audit_log, allow_gaps=allow_gaps)
+        analysis = synthesize_complete_deal_analysis(
+            deal,
+            audit_log,
+            allow_gaps=allow_gaps,
+            force_regenerate=force_regenerate,
+        )
         audit_log.status = "COMPLETED"
         audit_log.is_success = True
         audit_log.source_metadata = {

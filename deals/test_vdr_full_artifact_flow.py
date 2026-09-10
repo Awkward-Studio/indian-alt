@@ -79,7 +79,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         deal.analyses.order_by.return_value.first.return_value = None
         audit = MagicMock(id="audit-1")
 
-        result = synthesize_complete_deal_analysis(deal, audit)
+        result = synthesize_complete_deal_analysis(deal, audit, force_regenerate=True)
 
         self.assertIs(result, created)
         ai_service_class.return_value.process_content.assert_not_called()
@@ -88,6 +88,7 @@ class FullVDRArtifactTests(SimpleTestCase):
             complete_sections.call_args.kwargs["evidence_for_section"],
             section_evidence_class.return_value.retrieve,
         )
+        self.assertTrue(complete_sections.call_args.kwargs["force_regenerate"])
         self.assertEqual(create_analysis.call_args.kwargs["thinking"], "")
 
     @override_settings(VDR_ARTIFACT_SEGMENT_WORKERS=1)

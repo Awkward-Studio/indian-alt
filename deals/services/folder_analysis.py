@@ -1096,7 +1096,12 @@ class FolderAnalysisService:
         }
 
     @staticmethod
-    def trigger_vdr_analysis(deal: Deal, *, allow_gaps: bool = False) -> dict:
+    def trigger_vdr_analysis(
+        deal: Deal,
+        *,
+        allow_gaps: bool = False,
+        force_regenerate: bool = False,
+    ) -> dict:
         """Queue a report from all deal evidence after explicit user confirmation."""
         from ai_orchestrator.models import AIAuditLog, AIPersonality
         from deals.tasks import generate_vdr_analysis_async
@@ -1148,6 +1153,7 @@ class FolderAnalysisService:
                     user_prompt=f"Generate the complete analyst report for {deal.title} from all ready DealDocument artifacts.",
                     source_metadata=vdr_queue.initial_metadata(
                         kind="report", manifest=section_queue, allow_gaps=allow_gaps,
+                        force_regenerate=force_regenerate,
                         user_confirmation_received=True, readiness=readiness,
                         workflow_stage="analysis_queued",
                     ),
@@ -1158,7 +1164,11 @@ class FolderAnalysisService:
                 "queue_state": "queued", "queue_position": vdr_queue.queue_position(str(audit_log.id)),
                 "queued_at": (audit_log.source_metadata or {}).get("queued_at"),
                 "readiness": readiness,
-                "message": "Confirmed. The 11 report sections are queued from all deal evidence.",
+                "message": (
+                    "Confirmed. A fresh 11-section report is queued from the unchanged deal evidence."
+                    if force_regenerate
+                    else "Confirmed. The 11 report sections are queued from all deal evidence."
+                ),
             }
         audit_log = AIRuntimeService.create_audit_log(
             source_type="deal_full_synthesis",
@@ -1174,6 +1184,7 @@ class FolderAnalysisService:
             kwargs={
                 "deal_id": str(deal.id), "audit_log_id": str(audit_log.id),
                 "allow_gaps": allow_gaps,
+                "force_regenerate": force_regenerate,
             },
             queue="low_priority",
         )
@@ -1182,6 +1193,7 @@ class FolderAnalysisService:
             "workflow_stage": "analysis_queued",
             "user_confirmation_received": True,
             "allow_gaps": allow_gaps,
+            "force_regenerate": force_regenerate,
             "readiness": readiness,
         }
         audit_log.save(update_fields=["celery_task_id", "source_metadata"])
@@ -1190,5 +1202,9 @@ class FolderAnalysisService:
             "task_id": task.id,
             "audit_log_id": str(audit_log.id),
             "readiness": readiness,
-            "message": "Confirmed. The 11-section analyst report is queued from all deal evidence.",
+            "message": (
+                "Confirmed. A fresh 11-section report is queued from the unchanged deal evidence."
+                if force_regenerate
+                else "Confirmed. The 11-section analyst report is queued from all deal evidence."
+            ),
         }

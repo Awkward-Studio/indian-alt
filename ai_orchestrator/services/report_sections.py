@@ -165,13 +165,16 @@ class ICReportSectionService:
         max_tokens: int | None = None,
         max_input_tokens: int | None = None,
         vdr_dispatch_generation: int | None = None,
+        force_regenerate: bool = False,
     ) -> str:
         model_data = analysis.get("deal_model_data") if isinstance(analysis.get("deal_model_data"), dict) else {}
         cache_key = cls._cache_key(evidence=evidence, model_data=model_data, title=title)
-        try:
-            cached = cache.get(cache_key)
-        except Exception:
-            cached = None
+        cached = None
+        if not force_regenerate:
+            try:
+                cached = cache.get(cache_key)
+            except Exception:
+                cached = None
         if isinstance(cached, str) and cached:
             return cached
 
@@ -233,6 +236,7 @@ Internal evidence:
                 "context_label": f"{context_label_prefix}: {title}",
                 "_source_metadata": {
                     "report_section": title,
+                    "force_regenerate": bool(force_regenerate),
                     "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
                     **({
                         "vdr_parent_audit_id": str(source_id),
@@ -272,8 +276,11 @@ Internal evidence:
         context_label_prefix: str = "Email report section",
         max_tokens: int | None = None,
         max_input_tokens: int | None = None,
+        force_regenerate: bool = False,
     ) -> str:
-        if cls.is_complete(report):
+        if force_regenerate:
+            report = ""
+        elif cls.is_complete(report):
             return str(report).strip()
         existing = cls._split(report)
         stable_prefix = cls._stable_prefix_length(report)
@@ -315,6 +322,7 @@ Internal evidence:
                 context_label_prefix=context_label_prefix,
                 max_tokens=max_tokens,
                 max_input_tokens=max_input_tokens,
+                force_regenerate=force_regenerate,
             ))
             if progress:
                 progress(f"Completed report section {index + 1} of {len(IC_SECTION_TITLES)}: {title}")

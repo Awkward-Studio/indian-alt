@@ -24,6 +24,30 @@ class ICReportSectionServiceTests(SimpleTestCase):
         self.assertTrue(ICReportSectionService.is_complete(result))
         service.process_content.assert_not_called()
 
+    @patch("ai_orchestrator.services.report_sections.cache")
+    def test_force_regenerate_rebuilds_an_existing_complete_report(self, report_cache):
+        report_cache.get.return_value = "## Executive Summary\n\nOld cached section."
+        service = Mock()
+        service.process_content.side_effect = lambda **kwargs: {
+            "response": (
+                f"## {kwargs['content'].split('Required heading: ## ', 1)[1].splitlines()[0]}"
+                "\n\nFresh report section with enough evidence-backed detail."
+            )
+        }
+
+        result = ICReportSectionService.complete(
+            ai_service=service,
+            report=self.complete_report(),
+            evidence="Unchanged deal evidence",
+            analysis={"deal_model_data": {}},
+            source_id="report-1",
+            force_regenerate=True,
+        )
+
+        self.assertTrue(ICReportSectionService.is_complete(result))
+        self.assertEqual(service.process_content.call_count, len(IC_SECTION_TITLES))
+        report_cache.get.assert_not_called()
+
     @override_settings(
         EMAIL_REPORT_SECTION_MAX_TOKENS=3072,
         EMAIL_REPORT_SECTION_TIMEOUT=1800,
@@ -69,6 +93,30 @@ class ICReportSectionServiceTests(SimpleTestCase):
 
         self.assertIn("Cached complete section", section)
         service.process_content.assert_not_called()
+
+    @patch("ai_orchestrator.services.report_sections.cache")
+    def test_force_regenerate_bypasses_unchanged_section_cache(self, report_cache):
+        report_cache.get.return_value = "## Executive Summary\n\nPreviously cached report section."
+        service = Mock()
+        service.process_content.return_value = {
+            "response": "## Executive Summary\n\nFreshly generated report section with source-backed analysis."
+        }
+
+        section = ICReportSectionService._generate_section(
+            ai_service=service,
+            evidence="Unchanged evidence",
+            analysis={"deal_model_data": {}},
+            title="Executive Summary",
+            source_id="report-1",
+            force_regenerate=True,
+        )
+
+        self.assertIn("Freshly generated", section)
+        report_cache.get.assert_not_called()
+        service.process_content.assert_called_once()
+        self.assertTrue(
+            service.process_content.call_args.kwargs["metadata"]["_source_metadata"]["force_regenerate"]
+        )
 
     @override_settings(VDR_REPORT_SECTION_MIN_WORDS=0)
     @patch("ai_orchestrator.services.report_sections.cache")

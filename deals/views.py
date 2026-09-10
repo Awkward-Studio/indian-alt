@@ -2415,6 +2415,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = self.get_object()
         result = FolderAnalysisService.trigger_vdr_analysis(
             deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
+            force_regenerate=bool(request.data.get('force_regenerate', False)),
         )
         if "error" in result:
             return Response(result, status=400)
@@ -2429,6 +2430,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = self.get_object()
         result = FolderAnalysisService.trigger_vdr_analysis(
             deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
+            force_regenerate=bool(request.data.get('force_regenerate', False)),
         )
         if 'error' in result:
             return Response(result, status=status.HTTP_409_CONFLICT)
