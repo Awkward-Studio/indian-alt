@@ -128,11 +128,39 @@ def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
         snapshot = CeleryQueueSnapshotService.snapshot(celery_app, queues=("high_priority",))
         if sum(item["ready_count"] for item in snapshot["queues"]):
             return True
-        if any(
-            item.get("queue") == "high_priority" and is_other_task(item, "task_id")
+        unacked = [
+            item
             for item in snapshot.get("unacked", {}).get("messages", [])
-        ):
+            if item.get("queue") == "high_priority" and is_other_task(item, "task_id")
+        ]
+        stale_after = max(
+            60,
+            int(getattr(settings, "VDR_INTERACTIVE_UNACKED_STALE_SECONDS", 3600)),
+        )
+        fresh_unacked = [
+            item
+            for item in unacked
+            if item.get("age_seconds") is None
+            or int(item.get("age_seconds") or 0) <= stale_after
+        ]
+        if fresh_unacked:
             return True
+        stale_task_ids = {
+            str(item.get("task_id"))
+            for item in unacked
+            if item.get("task_id")
+        }
+        if stale_task_ids:
+            # Redis retains unacknowledged deliveries until its visibility
+            # timeout, even after an administrator has failed the audit. Only
+            # let an old delivery block VDR work while its audit is still live.
+            from ai_orchestrator.models import AIAuditLog
+
+            if AIAuditLog.objects.filter(
+                celery_task_id__in=stale_task_ids,
+                status__in=ACTIVE_STATUSES,
+            ).exists():
+                return True
         inspector = celery_app.control.inspect(timeout=0.5)
         for tasks in (inspector.active() or {}).values():
             if any(

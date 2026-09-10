@@ -70,6 +70,54 @@ class HighPriorityBusyTests(SimpleTestCase):
         self.assertTrue(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
         inspect.assert_not_called()
 
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_stale_terminal_unacked_delivery_does_not_block_vdr(
+        self,
+        snapshot,
+        inspect,
+        audit_filter,
+    ):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 0}],
+            "unacked": {"messages": [{
+                "queue": "high_priority",
+                "task_id": "failed-chat-task",
+                "age_seconds": 7200,
+            }]},
+        }
+        audit_filter.return_value.exists.return_value = False
+        inspect.return_value.active.return_value = {}
+
+        self.assertFalse(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+        audit_filter.assert_called_once_with(
+            celery_task_id__in={"failed-chat-task"},
+            status__in=vdr_queue.ACTIVE_STATUSES,
+        )
+
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_stale_unacked_delivery_with_live_audit_still_blocks_vdr(
+        self,
+        snapshot,
+        inspect,
+        audit_filter,
+    ):
+        snapshot.return_value = {
+            "queues": [{"name": "high_priority", "ready_count": 0}],
+            "unacked": {"messages": [{
+                "queue": "high_priority",
+                "task_id": "active-chat-task",
+                "age_seconds": 7200,
+            }]},
+        }
+        audit_filter.return_value.exists.return_value = True
+
+        self.assertTrue(vdr_queue._high_priority_busy(exclude_task_id="current-vdr-task"))
+        inspect.assert_not_called()
+
     def test_document_retry_keeps_non_interactive_queue(self):
         from deals.tasks import _document_retry_queue
 
