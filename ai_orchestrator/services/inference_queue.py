@@ -24,6 +24,7 @@ class InferenceQueueLease:
     SLOT_MONITORED_SOURCE_TYPES = frozenset({
         "document_evidence_segment",
         "email_report_section",
+        "internal_financial_profile",
         "vdr_report_section",
     })
 

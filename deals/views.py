@@ -3091,3 +3091,54 @@ class DealEnrichStatusView(APIView):
             }, status=500)
 
         return Response({"status": result.status, "audit_log_id": audit_log_id})
+
+
+class DealInternalFinancialFillView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            deal = Deal.objects.get(id=pk)
+        except Deal.DoesNotExist:
+            return Response({"error": "Deal not found"}, status=404)
+
+        indexed_count = DealDocument.objects.filter(deal=deal, is_indexed=True).count()
+        if not indexed_count:
+            return Response(
+                {"error": "No indexed internal documents are available for this deal."},
+                status=400,
+            )
+
+        from .tasks import fill_deal_financials_from_documents_task
+
+        audit_log = AIRuntimeService.create_audit_log(
+            source_type="internal_financial_profile_fill",
+            source_id=str(deal.id),
+            context_label=f"Internal financial fill: {deal.title}",
+            skill=None,
+            status="PENDING",
+            is_success=False,
+            system_prompt="Queued to fill missing target fields from indexed internal documents only.",
+            user_prompt=f"Fill supported missing company and financial fields for {deal.title}.",
+            source_metadata={
+                "deal_id": str(deal.id),
+                "deal_title": deal.title,
+                "indexed_document_count": indexed_count,
+                "data_policy": "indexed_internal_documents_only",
+                "write_policy": "fill_missing_only",
+                "web_search_enabled": False,
+                "result_route": f"/deals/{deal.id}?tab=key-financials#venture-intelligence-section",
+            },
+        )
+        task = fill_deal_financials_from_documents_task.apply_async(
+            kwargs={"deal_id": str(deal.id), "audit_log_id": str(audit_log.id)},
+            queue="high_priority",
+        )
+        audit_log.celery_task_id = task.id
+        audit_log.save(update_fields=["celery_task_id"])
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit_log.id),
+            "message": "Internal-document financial fill queued.",
+        })

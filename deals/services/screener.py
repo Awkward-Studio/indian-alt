@@ -1066,6 +1066,7 @@ class ScreenerCompanyService:
                 fy=str(row.get("fy") or row.get("year") or "N/A")[:20],
                 fin_type="Consolidated",
                 data=data,
+                data_source="screener",
             )
         for row in snapshot["balance_sheet"]:
             VentureIntelligenceFinancialStatement.objects.create(
@@ -1074,6 +1075,7 @@ class ScreenerCompanyService:
                 fy=str(row.get("fy") or row.get("year") or "N/A")[:20],
                 fin_type="Consolidated",
                 data={**row, "source": row.get("source") or "Screener"},
+                data_source="screener",
             )
         for row in snapshot["cash_flow"]:
             VentureIntelligenceFinancialStatement.objects.create(
@@ -1082,6 +1084,7 @@ class ScreenerCompanyService:
                 fy=str(row.get("fy") or row.get("year") or "N/A")[:20],
                 fin_type="Consolidated",
                 data={**row, "source": row.get("source") or "Screener"},
+                data_source="screener",
             )
         for row in snapshot["quarterly_financials"]:
             VentureIntelligenceFinancialStatement.objects.create(
@@ -1090,6 +1093,7 @@ class ScreenerCompanyService:
                 fy=str(row.get("fy") or row.get("quarter") or "N/A")[:20],
                 fin_type="Screener",
                 data=row,
+                data_source="screener",
             )
 
         VentureIntelligenceCompanyRelation.objects.update_or_create(

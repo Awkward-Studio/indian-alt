@@ -1222,6 +1222,8 @@ class VentureIntelligenceFinancialStatement(models.Model):
     fy = models.CharField(max_length=20, db_index=True)  # e.g., "FY23", "2023"
     fin_type = models.CharField(max_length=50, default="Standalone")  # Standalone or Consolidated
     data = models.JSONField(default=dict, help_text="Structured row key-value data")
+    data_source = models.CharField(max_length=40, default="venture_intelligence", db_index=True)
+    provenance = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

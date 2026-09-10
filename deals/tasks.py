@@ -3687,6 +3687,59 @@ def enrich_deal_vi_async_task(
 
 
 @shared_task(queue="high_priority")
+def fill_deal_financials_from_documents_task(
+    deal_id: str,
+    audit_log_id: str | None = None,
+) -> dict:
+    """Fill missing target profile and financial fields from indexed documents."""
+    from ai_orchestrator.models import AIAuditLog
+    from deals.services.internal_financial_profile import InternalFinancialProfileService
+
+    audit_log = AIAuditLog.objects.filter(id=audit_log_id).first() if audit_log_id else None
+    try:
+        if audit_log:
+            audit_log.status = "PROCESSING"
+            audit_log.save(update_fields=["status"])
+            broadcast_audit_log_update(audit_log)
+
+        deal = Deal.objects.get(id=deal_id)
+        summary = InternalFinancialProfileService().extract(
+            deal=deal,
+            parent_audit_log_id=str(audit_log.id) if audit_log else None,
+        )
+        if audit_log:
+            audit_log.status = "COMPLETED"
+            audit_log.is_success = True
+            audit_log.raw_response = (
+                f"Added {summary['profile_fields_added']} profile fields and "
+                f"{summary['financial_metrics_added']} financial metrics from indexed documents."
+            )
+            audit_log.parsed_json = {"status": "SUCCESS", "deal_id": deal_id, **summary}
+            audit_log.save(
+                update_fields=["status", "is_success", "raw_response", "parsed_json"]
+            )
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {
+            "status": "SUCCESS",
+            "audit_log_id": str(audit_log.id) if audit_log else None,
+            **summary,
+        }
+    except Exception as exc:
+        logger.error("Internal-document financial fill failed: %s", exc, exc_info=True)
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.error_message = str(exc)
+            audit_log.save(update_fields=["status", "is_success", "error_message"])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {
+            "status": "FAILURE",
+            "error": str(exc),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
+        }
+
+
+@shared_task(queue="high_priority")
 def discover_sector_reports_task(deal_id: str, run_id: str | None = None) -> dict:
     """Discover public research metadata for a deal without attaching files."""
     from ai_orchestrator.models import AIAuditLog
