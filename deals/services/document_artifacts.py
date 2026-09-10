@@ -213,7 +213,7 @@ class DocumentArtifactService:
                 "segment_metadata": {},
                 "segment_estimated_tokens": estimate_tokens(segment),
                 "segment_source_token_budget": int(
-                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)
                 ),
             }
             metadata = {
@@ -226,10 +226,10 @@ class DocumentArtifactService:
                     "segment_count": len(segments),
                     "segment_estimated_tokens": estimate_tokens(segment),
                     "segment_input_token_budget": int(
-                        getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
                     ),
                     "segment_output_token_budget": int(
-                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
                     ),
                     "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
                     "artifact_segment_cache_key": cache_key,
@@ -239,9 +239,9 @@ class DocumentArtifactService:
                 "segment_count": len(segments),
                 "chat_template_kwargs": {"enable_thinking": False},
                 "max_input_tokens": int(
-                    getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+                    getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
                 ),
-                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)),
+                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)),
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
                 "serialize_inference": True,
@@ -324,13 +324,13 @@ class DocumentArtifactService:
             "artifact_segments_completed": len(segments),
             "artifact_model": artifact_model,
             "artifact_segment_input_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 40_960)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 16_384)
             ),
             "artifact_segment_output_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 16_384)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
             ),
             "artifact_segment_source_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)
             ),
         }
         return artifact
@@ -339,7 +339,7 @@ class DocumentArtifactService:
     def _split_for_artifact(cls, text: str) -> list[str]:
         source_tokens = max(
             4_000,
-            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 36_000)),
+            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 12_000)),
         )
         overlap_tokens = max(
             0,

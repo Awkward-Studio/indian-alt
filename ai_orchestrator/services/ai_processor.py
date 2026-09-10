@@ -563,11 +563,17 @@ class AIProcessorService:
                 data = execute_request()
             
             raw_response = data.get("response") or data.get("thinking", "")
+            thinking = data.get("thinking", "")
+            self._record_token_usage(audit_log, data.get("usage"), raw_response, thinking)
             if audit_log.source_type == "document_evidence_segment":
                 finish = ((data.get("raw") or {}).get("choices") or [{}])[0].get("finish_reason")
                 if finish in {"length", "content_filter"}:
+                    audit_log.source_metadata = {
+                        **(audit_log.source_metadata or {}),
+                        "finish_reason": finish,
+                        "incomplete_response_chars": len(str(raw_response or "")),
+                    }
                     raise ValueError(f"Incomplete segment response: finish_reason={finish}.")
-            thinking = data.get("thinking", "")
             
             extraction_skills = {
                 "deal_extraction", 
@@ -652,8 +658,6 @@ class AIProcessorService:
                     audit_log.status = 'FAILED'
                     audit_log.error_message = parsed_json.get('error', 'AI response was truncated or malformed (JSON block not found).')
                     logger.error(f"AuditLog {audit_log.id} failed parsing: {audit_log.error_message}")
-                
-            self._record_token_usage(audit_log, data.get("usage"), clean_resp, clean_think)
                 
         except Exception as e:
             logger.error(f"Standard execution failed: {str(e)}")
