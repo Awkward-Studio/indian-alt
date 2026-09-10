@@ -64,6 +64,18 @@ class InferenceQueueLease:
             or (row["source_metadata"] or {}).get("cancel_requested") for row in rows
         ):
             raise InferenceCancelled("Inference workflow was cancelled or is already terminal.")
+        expected_generation = (self.audit_log.source_metadata or {}).get("vdr_dispatch_generation")
+        if parent and expected_generation is not None:
+            parent_row = next(
+                (row for row in rows if int((row["source_metadata"] or {}).get("queue_version") or 0) == 2),
+                None,
+            )
+            if (
+                parent_row is None
+                or int((parent_row["source_metadata"] or {}).get("dispatch_generation") or 0)
+                != int(expected_generation)
+            ):
+                raise InferenceCancelled("Inference workflow was superseded by a recovered VDR delivery.")
 
     def record_slot_progress(self, **updates):
         self.check_cancelled()

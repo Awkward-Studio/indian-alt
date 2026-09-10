@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
+from urllib.parse import urlsplit
 
 from django.conf import settings
 
@@ -64,7 +66,77 @@ class ICReportSectionEvidenceService:
         )
         self.source_ids = [str(document.id) for document in self.documents]
         self.document_titles = {str(document.id): document.title for document in self.documents}
+        self.document_urls = {
+            str(document.id): self._document_source_url(document)
+            for document in self.documents
+        }
         self.section_stats: dict[str, dict] = {}
+
+    @staticmethod
+    def _safe_http_url(value) -> str:
+        url = str(value or "").strip()
+        try:
+            return url if urlsplit(url).scheme.lower() in {"http", "https"} else ""
+        except ValueError:
+            return ""
+
+    @classmethod
+    def _document_source_url(cls, document) -> str:
+        direct = cls._safe_http_url(getattr(document, "file_url", None))
+        if direct:
+            return direct
+        evidence = getattr(document, "evidence_json", None)
+        source_metadata = evidence.get("source_metadata", {}) if isinstance(evidence, dict) else {}
+        return cls._safe_http_url(
+            source_metadata.get("source_url") or source_metadata.get("webUrl")
+        )
+
+    @staticmethod
+    def _location(metadata: dict) -> str:
+        candidates = (
+            ("source_location", ""),
+            ("section", "section "),
+            ("sheet_name", "sheet "),
+            ("page", "p. "),
+            ("slide", "slide "),
+        )
+        for key, prefix in candidates:
+            value = metadata.get(key)
+            if value in (None, ""):
+                continue
+            if isinstance(value, dict):
+                rendered = ", ".join(
+                    f"{item_key} {item_value}"
+                    for item_key, item_value in value.items()
+                    if item_value not in (None, "")
+                )
+                return rendered
+            return f"{prefix}{value}"
+        return ""
+
+    def _citation(self, chunk: DocumentChunk, *, rank: int) -> dict:
+        metadata = chunk.metadata or {}
+        source_id = str(chunk.source_id)
+        title = str(self.document_titles.get(source_id) or metadata.get("title") or source_id).strip()
+        location = self._location(metadata)
+        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", title)
+        year = year_match.group(1) if year_match else "n.d."
+        label_title = title.replace("[", "\\[").replace("]", "\\]")
+        detail = f"{label_title}. ({year}). Internal company document"
+        if location:
+            detail += f", {location}"
+        detail += "."
+        reference = f"{label_title}. ({year}). Internal company document."
+        url = self.document_urls.get(source_id) or ""
+        return {
+            "rank": rank,
+            "document_id": source_id,
+            "title": title,
+            "url": url,
+            "location": location,
+            "inline": f"[{detail}](<{url}>)" if url else detail,
+            "reference": f"[{reference}](<{url}>)" if url else reference,
+        }
 
     def _query(self, title: str) -> str:
         guidance = BULK3_SECTION_INSTRUCTIONS.get(title, "")
@@ -148,23 +220,15 @@ class ICReportSectionEvidenceService:
 
     def _format_chunk(self, chunk: DocumentChunk, *, rank: int) -> str:
         metadata = chunk.metadata or {}
-        title = self.document_titles.get(str(chunk.source_id)) or metadata.get("title") or chunk.source_id
-        location = next(
-            (
-                metadata.get(key)
-                for key in ("section", "sheet_name", "page", "slide", "chunk_index")
-                if metadata.get(key) not in (None, "")
-            ),
-            None,
-        )
+        citation = self._citation(chunk, rank=rank)
         header = [
-            f"[Evidence {rank}]",
-            f"Document: {title}",
-            f"Document ID: {chunk.source_id}",
+            f"Retrieval block R{rank:03d} (internal ordering only; never cite this label)",
+            f"Required citation: {citation['inline']}",
+            f"Document: {citation['title']}",
             f"Evidence type: {metadata.get('chunk_kind') or 'document text'}",
         ]
-        if location is not None:
-            header.append(f"Location: {location}")
+        if citation["location"]:
+            header.append(f"Location: {citation['location']}")
         return " | ".join(header) + "\n" + str(chunk.content or "").strip()
 
     def retrieve(self, title: str) -> dict:
@@ -213,6 +277,10 @@ class ICReportSectionEvidenceService:
             self._format_chunk(chunk, rank=index)
             for index, chunk in enumerate(selected, start=1)
         )
+        citations = {
+            str(index): self._citation(chunk, rank=index)
+            for index, chunk in enumerate(selected, start=1)
+        }
         source_counts = Counter(str(chunk.source_id) for chunk in selected)
         stats = {
             "strategy": strategy,
@@ -225,7 +293,7 @@ class ICReportSectionEvidenceService:
             "context_budget_tokens": self.max_tokens,
         }
         self.section_stats[title] = stats
-        return {"context": context, "metadata": stats}
+        return {"context": context, "metadata": stats, "citations": citations}
 
     @property
     def covered_document_ids(self) -> set[str]:

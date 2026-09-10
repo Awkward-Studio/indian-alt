@@ -886,7 +886,7 @@ class DealDocument(models.Model):
         default=DocumentType.OTHER
     )
     onedrive_id = models.TextField(blank=True, null=True)
-    file_url = models.URLField(blank=True, null=True)
+    file_url = models.URLField(max_length=2000, blank=True, null=True)
     extracted_text = models.TextField(blank=True, null=True)
     normalized_text = models.TextField(blank=True, null=True)
     evidence_json = models.JSONField(default=dict, blank=True)

@@ -2310,10 +2310,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """Return the live VDR segment, lease owner, and inference slot state."""
         deal = self.get_object()
         parent = AIAuditLog.objects.filter(
-            source_type='vdr_indexing',
+            source_type__in=['vdr_indexing', 'deal_full_synthesis'],
             source_id=str(deal.id),
             status__in=['PENDING', 'PROCESSING'],
         ).order_by('-created_at').first()
+        parent_metadata = (parent.source_metadata or {}) if parent else {}
 
         active_segment = None
         queued_segments = 0
@@ -2383,6 +2384,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 'celery_task_id': parent.celery_task_id if parent else None,
                 'status': parent.status if parent else None,
                 'created_at': parent.created_at if parent else None,
+                'job_kind': parent_metadata.get('queue_kind') if parent else None,
+                'queue_state': parent_metadata.get('queue_state') if parent else None,
+                'queue_position': (
+                    __import__('deals.services.vdr_queue', fromlist=['queue_position']).queue_position(str(parent.id))
+                    if parent and parent_metadata.get('queue_version') == 2 else None
+                ),
+                'current_unit_type': parent_metadata.get('current_unit_type') if parent else None,
+                'current_unit_key': parent_metadata.get('current_unit_key') if parent else None,
+                'heartbeat_at': parent_metadata.get('heartbeat_at') if parent else None,
+                'recovery_count': parent_metadata.get('recovery_count', 0) if parent else 0,
+                'max_recoveries': parent_metadata.get('max_recoveries', 3) if parent else 3,
+                'document_queue': parent_metadata.get('document_queue', []) if parent else [],
+                'report_section_queue': parent_metadata.get('report_section_queue', []) if parent else [],
             },
             'active_segment': active_segment,
             'queued_segment_count': queued_segments,

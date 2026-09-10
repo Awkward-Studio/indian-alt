@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any
 
 
 class CeleryQueueSnapshotService:
     """Read a safe, ordered snapshot directly from Celery's Redis queues."""
 
-    DEFAULT_QUEUES = ("high_priority", "default", "low_priority")
+    DEFAULT_QUEUES = ("high_priority", "vdr_control", "vdr_work", "default", "low_priority")
     MAX_MESSAGES_PER_QUEUE = 500
 
     @classmethod
@@ -56,16 +57,30 @@ class CeleryQueueSnapshotService:
                 "source_file_id": file_info.get("id"),
                 "name": file_info.get("name") or "Untitled document",
             }
+            context["queue_generation"] = kwargs.get("queue_generation")
+            context["queue_unit_key"] = kwargs.get("queue_unit_key")
         elif task_name == "deals.tasks.finalize_folder_background":
             context["deal_id"] = kwargs.get("deal_id") or (args[1] if len(args) > 1 else None)
             context["audit_log_id"] = kwargs.get("audit_log_id") or (args[2] if len(args) > 2 else None)
+        elif task_name in {
+            "deals.tasks.process_vdr_report_section", "deals.tasks.vdr_unit_completed",
+            "deals.tasks.coordinate_vdr_queue", "deals.tasks.reconcile_vdr_queue",
+        }:
+            context["deal_id"] = kwargs.get("deal_id")
+            context["audit_log_id"] = kwargs.get("audit_log_id")
+            context["document"] = ({"name": kwargs.get("section_title"), "source_file_id": None}
+                                   if kwargs.get("section_title") else None)
+            context["queue_generation"] = kwargs.get("queue_generation")
+            context["queue_unit_key"] = kwargs.get("section_title") or kwargs.get("unit_key")
         return context
 
     @classmethod
     def _decode_message(cls, raw: Any, *, queue: str, position: int) -> dict:
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
-        envelope = json.loads(raw)
+        envelope = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(envelope, dict):
+            raise ValueError("Celery message envelope is not an object.")
         headers = envelope.get("headers") if isinstance(envelope.get("headers"), dict) else {}
         properties = envelope.get("properties") if isinstance(envelope.get("properties"), dict) else {}
         task_name = str(headers.get("task") or "unknown")
@@ -84,7 +99,7 @@ class CeleryQueueSnapshotService:
     @classmethod
     def snapshot(cls, celery_app, queues: tuple[str, ...] | None = None) -> dict:
         queue_names = queues or cls.DEFAULT_QUEUES
-        result = {"queues": [], "messages": [], "warning": None}
+        result = {"queues": [], "messages": [], "unacked": {"count": 0, "oldest_age_seconds": None, "messages": []}, "warning": None}
         try:
             with celery_app.connection_for_read() as connection:
                 channel = connection.channel()
@@ -126,6 +141,36 @@ class CeleryQueueSnapshotService:
                         "truncated": total_depth > len(decoded),
                     })
                     result["messages"].extend(decoded)
+                unacked_index = client.zrange("unacked_index", 0, cls.MAX_MESSAGES_PER_QUEUE - 1, withscores=True)
+                unacked_rows = []
+                now = time.time()
+                for delivery_tag, delivered_at in unacked_index:
+                    raw = client.hget("unacked", delivery_tag)
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+                        envelope = payload[0] if isinstance(payload, list) and payload else payload
+                        exchange = payload[1] if isinstance(payload, list) and len(payload) > 1 else None
+                        queue = payload[2] if isinstance(payload, list) and len(payload) > 2 else "unacked"
+                        decoded = cls._decode_message(envelope, queue=str(queue or exchange or "unacked"), position=0)
+                        decoded.update({
+                            "delivery_tag": delivery_tag.decode() if isinstance(delivery_tag, bytes) else str(delivery_tag),
+                            "delivered_at": delivered_at,
+                            "age_seconds": max(0, int(now - float(delivered_at))),
+                            "classification": "vdr" if str(decoded.get("task_name") or "").startswith("deals.tasks.") and (
+                                "vdr" in str(decoded.get("task_name") or "")
+                                or decoded.get("audit_log_id") or decoded.get("deal_id")
+                            ) else "other",
+                        })
+                        unacked_rows.append(decoded)
+                    except Exception as exc:
+                        unacked_rows.append({"task_id": None, "task_name": "unreadable", "decode_error": str(exc)[:300]})
+                result["unacked"] = {
+                    "count": int(client.hlen("unacked") or 0),
+                    "oldest_age_seconds": max((row.get("age_seconds", 0) for row in unacked_rows), default=None),
+                    "messages": unacked_rows,
+                }
         except Exception as exc:
             result["warning"] = str(exc)[:500]
         return result

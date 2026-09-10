@@ -220,6 +220,11 @@ CELERY_IMPORTS = (
 )
 
 CELERY_BEAT_SCHEDULE = {
+    'reconcile-durable-vdr-queue': {
+        'task': 'deals.tasks.reconcile_vdr_queue',
+        'schedule': 30,
+        'options': {'queue': 'vdr_control'},
+    },
     'reconcile-email-evidence-every-minute': {
         'task': 'microsoft.tasks.reconcile_email_evidence',
         'schedule': 60,
@@ -256,9 +261,15 @@ CELERY_TASK_ROUTES = {
     'deals.tasks.process_deal_folder_background': {'queue': 'low_priority'},
     'deals.tasks.process_single_document_async': {'queue': 'low_priority'},
     'deals.tasks.finalize_folder_background': {'queue': 'low_priority'},
+    'deals.tasks.coordinate_vdr_queue': {'queue': 'vdr_control'},
+    'deals.tasks.reconcile_vdr_queue': {'queue': 'vdr_control'},
+    'deals.tasks.process_vdr_report_section': {'queue': 'vdr_work'},
+    'deals.tasks.vdr_unit_completed': {'queue': 'vdr_control'},
     'microsoft.tasks.analyze_email_async': {'queue': 'low_priority'},
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'
+CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT = config('CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT', default=60, cast=float)
+CELERY_WORKER_ENABLE_SOFT_SHUTDOWN_ON_IDLE = True
 
 # Total Local AI window, including prompt, template reserve, and completion.
 CHAT_MODEL_CONTEXT_TOKENS = config('CHAT_MODEL_CONTEXT_TOKENS', default=65536, cast=int)
@@ -284,6 +295,14 @@ VDR_REPORT_SECTION_MIN_CHUNKS_PER_DOCUMENT = config('VDR_REPORT_SECTION_MIN_CHUN
 VDR_REPORT_SECTION_EVIDENCE_TOKENS = config('VDR_REPORT_SECTION_EVIDENCE_TOKENS', default=36000, cast=int)
 VDR_REPORT_SECTION_INPUT_TOKENS = config('VDR_REPORT_SECTION_INPUT_TOKENS', default=40960, cast=int)
 VDR_REPORT_SECTION_MAX_TOKENS = config('VDR_REPORT_SECTION_MAX_TOKENS', default=16384, cast=int)
+VDR_REPORT_SECTION_MIN_WORDS = config('VDR_REPORT_SECTION_MIN_WORDS', default=900, cast=int)
+VDR_REPORT_SECTION_TARGET_WORDS = config('VDR_REPORT_SECTION_TARGET_WORDS', default=2500, cast=int)
+VDR_DURABLE_QUEUE_ENABLED = config('VDR_DURABLE_QUEUE_ENABLED', default=False, cast=bool)
+VDR_MAX_RECOVERIES = config('VDR_MAX_RECOVERIES', default=3, cast=int)
+VDR_STALE_SECONDS = config('VDR_STALE_SECONDS', default=300, cast=int)
+VDR_HARD_STALE_SECONDS = config('VDR_HARD_STALE_SECONDS', default=1800, cast=int)
+VDR_WORKER_HEARTBEAT_SECONDS = config('VDR_WORKER_HEARTBEAT_SECONDS', default=30, cast=int)
+VDR_WORKER_HEARTBEAT_TTL = config('VDR_WORKER_HEARTBEAT_TTL', default=90, cast=int)
 EMAIL_EVIDENCE_ROOT = Path(config('EMAIL_EVIDENCE_ROOT', default=str(BASE_DIR / 'private_email_evidence')))
 EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES = config('EMAIL_EVIDENCE_MAX_ATTACHMENT_BYTES', default=26214400, cast=int)
 

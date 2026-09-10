@@ -841,7 +841,8 @@ class FolderAnalysisService:
     ) -> dict:
         """Persist a VDR queue record before publishing its Redis message."""
         from ai_orchestrator.models import AIAuditLog
-        from deals.tasks import process_deal_folder_background
+        from deals.tasks import process_deal_folder_background, _is_supported_analysis_file
+        from deals.services import vdr_queue
         from microsoft.services.graph_service import DMS_USER_EMAIL
 
         task_id = str(uuid.uuid4())
@@ -851,11 +852,61 @@ class FolderAnalysisService:
                 "name": item.get("name") or "Untitled document",
                 "path": item.get("path") or "",
                 "size": item.get("size"),
-                "status": "queued",
+                "status": "queued" if _is_supported_analysis_file(item) else "skipped",
                 "celery_task_id": None,
+                "file_info": item,
             }
             for item in file_tree
         ]
+        if resume_cached:
+            prior_scopes = {
+                str(document.onedrive_id): str(
+                    (document.evidence_json.get("source_metadata", {}) or {}).get("artifact_run_id") or ""
+                )
+                for document in deal.documents.all()
+                if document.onedrive_id and isinstance(document.evidence_json, dict)
+            }
+            for item in document_queue:
+                scope = prior_scopes.get(item["source_file_id"])
+                if scope:
+                    item["resume_artifact_run_id"] = scope
+        if vdr_queue.enabled():
+            with transaction.atomic():
+                locked_deal = Deal.objects.select_for_update().get(pk=deal.pk)
+                active = AIAuditLog.objects.filter(
+                    source_type__in=["vdr_indexing", "deal_full_synthesis"],
+                    source_id=str(deal.id), status__in=["PENDING", "PROCESSING"],
+                ).order_by("created_at").first()
+                if active:
+                    return {
+                        "status": "already_running", "task_id": active.celery_task_id,
+                        "audit_log_id": str(active.id),
+                        "queue_state": (active.source_metadata or {}).get("queue_state"),
+                        "queue_position": vdr_queue.queue_position(str(active.id)),
+                        "queued_at": (active.source_metadata or {}).get("queued_at"),
+                    }
+                audit_log = AIRuntimeService.create_audit_log(
+                    source_type="vdr_indexing", source_id=str(deal.id),
+                    context_label=f"VDR indexing: {deal.title or deal.id}",
+                    status="PENDING", is_success=False,
+                    model_used=AIRuntimeService.get_embedding_model(),
+                    system_prompt=f"Queued {'fresh ' if force_fresh else ''}VDR indexing for {len(file_tree)} files.",
+                    user_prompt=f"Indexing dataroom for deal ID: {deal.id}",
+                    source_metadata=vdr_queue.initial_metadata(
+                        kind="indexing", manifest=document_queue, user_email=DMS_USER_EMAIL,
+                        requested_task_count=len(file_tree), coverage_policy=coverage_policy,
+                        resume_cached=resume_cached, force_fresh=force_fresh,
+                    ),
+                )
+                locked_deal.processing_status = "processing"
+                locked_deal.processing_error = None
+                locked_deal.save(update_fields=["processing_status", "processing_error"])
+                transaction.on_commit(vdr_queue.kick)
+            return {
+                "status": "queued", "task_id": None, "audit_log_id": str(audit_log.id),
+                "queue_state": "queued", "queue_position": vdr_queue.queue_position(str(audit_log.id)),
+                "queued_at": (audit_log.source_metadata or {}).get("queued_at"), "message": message,
+            }
         audit_log = AIRuntimeService.create_audit_log(
             source_type="vdr_indexing",
             source_id=str(deal.id),
@@ -1049,6 +1100,8 @@ class FolderAnalysisService:
         """Queue a report from all deal evidence after explicit user confirmation."""
         from ai_orchestrator.models import AIAuditLog, AIPersonality
         from deals.tasks import generate_vdr_analysis_async
+        from deals.services import vdr_queue
+        from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 
         readiness = FolderAnalysisService.deal_analysis_readiness(deal)
         if not readiness['ready'] and not (allow_gaps and readiness['can_build_with_gaps']):
@@ -1066,6 +1119,47 @@ class FolderAnalysisService:
             }
 
         personality = AIPersonality.objects.filter(is_default=True).first()
+        if vdr_queue.enabled():
+            section_queue = [
+                {"position": index, "title": title, "status": "queued", "celery_task_id": None}
+                for index, title in enumerate(IC_SECTION_TITLES, start=1)
+            ]
+            with transaction.atomic():
+                Deal.objects.select_for_update().get(pk=deal.pk)
+                # Recheck after acquiring the deal lock to prevent double-click races.
+                active = AIAuditLog.objects.filter(
+                    source_type__in=["vdr_indexing", "deal_full_synthesis"],
+                    source_id=str(deal.id), status__in=["PENDING", "PROCESSING"],
+                ).order_by("created_at").first()
+                if active:
+                    return {
+                        "status": "already_running", "audit_log_id": str(active.id),
+                        "task_id": active.celery_task_id, "readiness": readiness,
+                        "queue_state": (active.source_metadata or {}).get("queue_state"),
+                        "queue_position": vdr_queue.queue_position(str(active.id)),
+                        "queued_at": (active.source_metadata or {}).get("queued_at"),
+                    }
+                audit_log = AIRuntimeService.create_audit_log(
+                    source_type="deal_full_synthesis", source_id=str(deal.id),
+                    context_label=f"VDR report: {deal.title or deal.id}", personality=personality,
+                    status="PENDING", is_success=False,
+                    model_used=AIRuntimeService.get_text_model(personality),
+                    system_prompt="Waiting to generate the confirmed 11-section analyst report.",
+                    user_prompt=f"Generate the complete analyst report for {deal.title} from all ready DealDocument artifacts.",
+                    source_metadata=vdr_queue.initial_metadata(
+                        kind="report", manifest=section_queue, allow_gaps=allow_gaps,
+                        user_confirmation_received=True, readiness=readiness,
+                        workflow_stage="analysis_queued",
+                    ),
+                )
+                transaction.on_commit(vdr_queue.kick)
+            return {
+                "status": "queued", "task_id": None, "audit_log_id": str(audit_log.id),
+                "queue_state": "queued", "queue_position": vdr_queue.queue_position(str(audit_log.id)),
+                "queued_at": (audit_log.source_metadata or {}).get("queued_at"),
+                "readiness": readiness,
+                "message": "Confirmed. The 11 report sections are queued from all deal evidence.",
+            }
         audit_log = AIRuntimeService.create_audit_log(
             source_type="deal_full_synthesis",
             source_id=str(deal.id),

@@ -70,6 +70,7 @@ class ICReportSectionServiceTests(SimpleTestCase):
         self.assertIn("Cached complete section", section)
         service.process_content.assert_not_called()
 
+    @override_settings(VDR_REPORT_SECTION_MIN_WORDS=0)
     @patch("ai_orchestrator.services.report_sections.cache")
     def test_each_section_can_receive_distinct_retrieved_evidence(self, report_cache):
         report_cache.get.return_value = None
@@ -101,3 +102,41 @@ class ICReportSectionServiceTests(SimpleTestCase):
             self.assertEqual(call.kwargs["source_type"], "vdr_report_section")
             self.assertEqual(call.kwargs["metadata"]["max_tokens"], 16_384)
             self.assertEqual(call.kwargs["metadata"]["max_input_tokens"], 40_960)
+            self.assertIn("Cite every material factual statement", call.kwargs["content"])
+            self.assertIn("Never write `Evidence 20`", call.kwargs["content"])
+
+    def test_internal_evidence_reference_becomes_linked_apa_citation(self):
+        source_url = "https://contoso.sharepoint.com/document?id=123"
+        citation = {
+            "rank": 20,
+            "document_id": "doc-1",
+            "title": "Investment Memorandum 2025.pdf",
+            "url": source_url,
+            "inline": (
+                "[Investment Memorandum 2025.pdf. (2025). Internal company document, p. 7.]"
+                f"(<{source_url}>)"
+            ),
+            "reference": (
+                "[Investment Memorandum 2025.pdf. (2025). Internal company document.]"
+                f"(<{source_url}>)"
+            ),
+        }
+
+        section = ICReportSectionService._normalize_section(
+            "Executive Summary",
+            "## Executive Summary\n\nRevenue was INR 100 crore [Evidence 20].",
+            citations={"20": citation},
+        )
+
+        self.assertNotIn("Evidence 20", section)
+        self.assertIn(citation["inline"], section)
+        self.assertIn("### References", section)
+        self.assertIn(citation["reference"], section)
+
+    def test_unresolved_internal_reference_fails_validation(self):
+        with self.assertRaisesRegex(ValueError, "unresolved internal citation"):
+            ICReportSectionService._normalize_section(
+                "Executive Summary",
+                "## Executive Summary\n\nRevenue was INR 100 crore [Evidence 999].",
+                citations={},
+            )

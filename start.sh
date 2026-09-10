@@ -7,7 +7,9 @@ echo "Port: ${PORT:-8000}"
 echo "Python: $(python --version)"
 echo "Working directory: $(pwd)"
 RUN_AS_WORKER_NORMALIZED=$(printf '%s' "${RUN_AS_WORKER:-false}" | tr '[:upper:]' '[:lower:]')
+RUN_AS_COORDINATOR_NORMALIZED=$(printf '%s' "${RUN_AS_COORDINATOR:-false}" | tr '[:upper:]' '[:lower:]')
 echo "Run as worker: ${RUN_AS_WORKER_NORMALIZED}"
+echo "Run as coordinator: ${RUN_AS_COORDINATOR_NORMALIZED}"
 
 # Check database connection
 if [ -n "$DATABASE_URL" ]; then
@@ -33,10 +35,18 @@ echo ""
 echo "=== SEEDING AI SKILLS & PERSONALITIES ==="
 python manage.py seed_ai_prompts
 
-if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
+if [ "$RUN_AS_COORDINATOR_NORMALIZED" = "true" ]; then
+    echo ""
+    echo "=== STARTING COORDINATOR HEALTHCHECK SERVER ON PORT ${PORT:-8000} ==="
+    python -m deals.services.worker_health --role coordinator &
+    echo "=== STARTING VDR COORDINATOR WORKER AND BEAT ==="
+    exec celery -A config worker --loglevel="${CELERY_LOGLEVEL:-info}" --pool=solo \
+        -Q vdr_control --prefetch-multiplier=1 --concurrency=1 \
+        --hostname="vdr-coordinator@%h" --beat
+elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
-    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,low_priority,default}"
+    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,vdr_work,low_priority,default}"
     CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
 
     if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 32 ] 2>/dev/null; then
@@ -46,30 +56,7 @@ if [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
 
     echo ""
     echo "=== STARTING WORKER HEALTHCHECK SERVER ON PORT ${PORT:-8000} ==="
-    python - <<'PY' &
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
-
-PORT = int(os.environ.get("PORT", "8000"))
-
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/api/core/health/", "/api/core/health"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok","service":"worker"}')
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-
-HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-PY
+    python -m deals.services.worker_health --role worker &
 
     echo ""
     echo "=== STARTING CELERY WORKER ==="

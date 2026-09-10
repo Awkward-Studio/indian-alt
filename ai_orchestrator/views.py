@@ -104,6 +104,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         log = self.get_object()
         task_id = log.celery_task_id
         source_meta = log.source_metadata or {}
+        durable_vdr = source_meta.get("queue_version") == 2 and source_meta.get("queue_scope") == "vdr"
         revoke_errors = []
         task_ids_to_revoke = [
             tid for tid in [
@@ -134,11 +135,21 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             "cancel_requested_at": timezone.now().isoformat(),
             "cancel_reason": "manual",
             "cancelled_task_ids": task_ids_to_revoke,
+            "queue_state": "cancelled" if durable_vdr else source_meta.get("queue_state"),
+            "dispatch_generation": int(source_meta.get("dispatch_generation") or 0) + (1 if durable_vdr else 0),
+            "current_task_id": None if durable_vdr else source_meta.get("current_task_id"),
+            "current_unit_type": None if durable_vdr else source_meta.get("current_unit_type"),
+            "current_unit_key": None if durable_vdr else source_meta.get("current_unit_key"),
         }
         log.status = 'FAILED'
         log.error_message = "Task manually terminated by forensic user."
         log.is_success = False
-        log.save(update_fields=['source_metadata', 'status', 'error_message', 'is_success'])
+        if durable_vdr:
+            log.completed_at = timezone.now()
+        log.save(update_fields=[
+            'source_metadata', 'status', 'error_message', 'is_success',
+            *(['completed_at'] if durable_vdr else []),
+        ])
         try:
             broadcast_audit_log_update(log, event_type="terminal", done=True)
         except Exception as e:
@@ -156,6 +167,9 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             except Exception as e:
                 revoke_errors.append(f"Failed to update deal processing state: {e}")
                 logger.warning("Failed to update deal processing state for cancelled audit log %s: %s", log.id, e)
+        if durable_vdr:
+            from deals.services.vdr_queue import kick
+            transaction.on_commit(kick)
         
         response_payload = {
             "status": "cancelled",
@@ -374,10 +388,17 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
         active_parents = list(
             AIAuditLog.objects.filter(
-                source_type='vdr_indexing',
+                source_type__in=['vdr_indexing', 'deal_full_synthesis'],
                 status__in=['PENDING', 'PROCESSING'],
             ).order_by('created_at')
         )
+        durable_position_by_id = {
+            str(parent.id): position
+            for position, parent in enumerate([
+                item for item in active_parents
+                if (item.source_metadata or {}).get('queue_version') == 2
+            ], start=1)
+        }
         parent_ids = [str(parent.id) for parent in active_parents]
         parent_deal_ids = [parent.source_id for parent in active_parents if parent.source_id]
         deals_by_id = {
@@ -437,6 +458,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
             document_rows = []
             manifest = metadata.get('document_queue') or []
+            report_sections = metadata.get('report_section_queue') or []
             if not manifest:
                 manifest = [
                     {
@@ -482,6 +504,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             root_state = (
                 worker_state_by_id.get(str(parent.celery_task_id or ''))
                 or ('queued' if root_message else None)
+                or metadata.get('queue_state')
                 or ('queued' if parent.status == 'PENDING' else 'processing')
             )
             vdr_runs.append({
@@ -492,11 +515,39 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'status': root_state,
                 'audit_status': parent.status,
                 'queue': metadata.get('queue_name') or 'low_priority',
-                'queue_position': root_message.get('position') if root_message else None,
+                'queue_position': (
+                    durable_position_by_id.get(str(parent.id))
+                    if metadata.get('queue_state') == 'queued'
+                    else root_message.get('position') if root_message else None
+                ),
                 'queued_at': metadata.get('queued_at') or parent.created_at,
+                'job_kind': metadata.get('queue_kind') or ('report' if parent.source_type == 'deal_full_synthesis' else 'indexing'),
+                'queue_state': metadata.get('queue_state'),
+                'current_unit_type': metadata.get('current_unit_type'),
+                'current_unit_key': metadata.get('current_unit_key'),
+                'heartbeat_at': metadata.get('heartbeat_at'),
+                'recovery_count': metadata.get('recovery_count') or 0,
+                'max_recoveries': metadata.get('max_recoveries') or 3,
                 'force_fresh': bool(metadata.get('force_fresh')),
                 'resume_cached': bool(metadata.get('resume_cached')),
                 'documents': document_rows,
+                'report_sections': [{
+                    'position': item.get('position') or index + 1,
+                    'title': item.get('title'), 'status': item.get('status') or 'queued',
+                    'celery_task_id': item.get('celery_task_id'), 'error': item.get('error'),
+                    'completed_at': item.get('completed_at'),
+                } for index, item in enumerate(report_sections)],
+                'current_task_observed': bool(
+                    metadata.get('current_task_id')
+                    and (
+                        str(metadata.get('current_task_id')) in worker_state_by_id
+                        or str(metadata.get('current_task_id')) in redis_message_by_id
+                        or any(
+                            str(row.get('task_id') or '') == str(metadata.get('current_task_id'))
+                            for row in redis_state.get('unacked', {}).get('messages', [])
+                        )
+                    )
+                ),
             })
 
         for message in redis_state['messages']:
@@ -567,14 +618,32 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             run.get('queue_position') or 0,
             str(run.get('queued_at') or ''),
         ))
+        stale_warnings = []
+        now = timezone.now()
+        for run in vdr_runs:
+            heartbeat_at = run.get('heartbeat_at')
+            if not heartbeat_at or run.get('status') in {'queued', 'completed'}:
+                continue
+            try:
+                parsed_heartbeat = timezone.datetime.fromisoformat(str(heartbeat_at))
+                if timezone.is_naive(parsed_heartbeat):
+                    parsed_heartbeat = timezone.make_aware(parsed_heartbeat)
+                age_seconds = int((now - parsed_heartbeat).total_seconds())
+                run['heartbeat_age_seconds'] = max(0, age_seconds)
+                if age_seconds >= int(getattr(settings, 'VDR_STALE_SECONDS', 300)):
+                    stale_warnings.append(f"{run['deal_title']} has not renewed its VDR heartbeat for {age_seconds // 60} minutes.")
+            except (TypeError, ValueError):
+                stale_warnings.append(f"{run['deal_title']} has an unreadable VDR heartbeat.")
 
         return Response({
             'summary': {
                 'redis_ready': sum(queue['ready_count'] for queue in redis_state['queues']),
+                'redis_unacked': redis_state.get('unacked', {}).get('count', 0),
                 'worker_active': len(celery_state['active']),
                 'worker_reserved': len(celery_state['reserved']),
                 'vdr_deals': len(vdr_runs),
                 'vdr_documents': sum(len(run['documents']) for run in vdr_runs),
+                'vdr_report_sections': sum(len(run.get('report_sections') or []) for run in vdr_runs),
                 'inference_waiting': len(queued),
                 'inference_active': len(active),
             },
@@ -587,11 +656,16 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'queued_audits': queued,
             },
             'celery': celery_state,
+            'services': {
+                'durable_queue_enabled': bool(getattr(settings, 'VDR_DURABLE_QUEUE_ENABLED', False)),
+                'worker': cache.get('vdr:presence:worker:current'),
+                'coordinator': cache.get('vdr:presence:coordinator:current'),
+            },
             'warnings': [
                 warning for warning in [
                     redis_state['warning'], slot_warning, celery_state['warning'],
                 ] if warning
-            ],
+            ] + stale_warnings,
         })
 
 class AIConversationViewSet(viewsets.ModelViewSet):

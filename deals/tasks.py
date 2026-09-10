@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+import os
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery import shared_task, chord, current_task
@@ -177,6 +178,13 @@ def _update_vdr_document_queue(
         if not audit:
             return
         metadata = dict(audit.source_metadata or {})
+        running_task_id = str(getattr(getattr(current_task, "request", None), "id", "") or "")
+        if (
+            metadata.get("queue_version") == 2
+            and metadata.get("current_task_id")
+            and running_task_id != str(metadata.get("current_task_id"))
+        ):
+            return
         queue = [dict(item) for item in metadata.get("document_queue") or []]
         source_file_id = str(file_info.get("id") or "")
         entry = next(
@@ -1082,6 +1090,8 @@ def process_single_document_async(
     audit_log_id=None,
     resume_artifact_run_id=None,
     force_fresh=False,
+    queue_generation=None,
+    queue_unit_key=None,
 ):
     """
     Atomized task to process a single document from OneDrive.
@@ -1102,6 +1112,37 @@ def process_single_document_async(
     if not file_id or not file_name:
         return {"status": "skipped", "reason": "missing file info"}
 
+    if queue_generation is not None:
+        from deals.services.vdr_queue import delivery_is_current, heartbeat, start_heartbeat
+        if not delivery_is_current(
+            str(audit_log_id), task_id=str(self.request.id), generation=queue_generation,
+            unit_key=str(queue_unit_key or file_id),
+        ):
+            return {"status": "stale", "file": file_name, "reason": "Superseded VDR delivery."}
+        heartbeat(
+            str(audit_log_id), task_id=str(self.request.id), generation=queue_generation,
+            unit_key=str(queue_unit_key or file_id), worker_id=(
+                os.getenv("RAILWAY_DEPLOYMENT_ID") or str(getattr(self.request, "hostname", "") or "")
+            ),
+        )
+        start_heartbeat(
+            str(audit_log_id), task_id=str(self.request.id), generation=queue_generation,
+            unit_key=str(queue_unit_key or file_id), worker_id=(
+                os.getenv("RAILWAY_DEPLOYMENT_ID") or str(getattr(self.request, "hostname", "") or "")
+            ),
+        )
+
+    def delivery_cancelled() -> bool:
+        if _is_cancel_requested(audit_log_id):
+            return True
+        if queue_generation is None:
+            return False
+        from deals.services.vdr_queue import delivery_is_current
+        return not delivery_is_current(
+            str(audit_log_id), task_id=str(self.request.id), generation=queue_generation,
+            unit_key=str(queue_unit_key or file_id),
+        )
+
     try:
         _update_vdr_document_queue(
             audit_log_id,
@@ -1109,12 +1150,16 @@ def process_single_document_async(
             status="processing",
             celery_task_id=str(self.request.id),
         )
-        if _is_cancel_requested(audit_log_id):
+        if delivery_cancelled():
             _update_vdr_document_queue(audit_log_id, file_info, status="cancelled")
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
         deal = Deal.objects.get(id=deal_id)
         existing_doc = DealDocument.objects.filter(deal=deal, onedrive_id=file_id).first()
+        source_url = str(file_info.get("webUrl") or "").strip()
+        if existing_doc and source_url and existing_doc.file_url != source_url:
+            existing_doc.file_url = source_url
+            existing_doc.save(update_fields=["file_url"])
 
         if (
             force_fresh
@@ -1175,13 +1220,13 @@ def process_single_document_async(
         elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
             doc_type = DocumentType.PITCH_DECK
 
-        if _is_cancel_requested(audit_log_id):
+        if delivery_cancelled():
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
         # Download content
         content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
 
-        if _is_cancel_requested(audit_log_id):
+        if delivery_cancelled():
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
         # Full extraction is required. The downstream artifact stage splits and
@@ -1198,13 +1243,14 @@ def process_single_document_async(
             else TranscriptionStatus.FAILED
         )
 
-        if _is_cancel_requested(audit_log_id):
+        if delivery_cancelled():
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
         
         # Create or refresh the document checkpoint.
         initial_analysis_status, initial_analysis_reason = _resolve_initial_analysis_status(deal, file_id, file_name)
         doc = existing_doc or DealDocument(deal=deal, onedrive_id=file_id)
         doc.title = file_name
+        doc.file_url = source_url or doc.file_url
         doc.document_type = doc_type
         doc.extracted_text = extracted_text
         doc.normalized_text = normalized_text
@@ -1237,21 +1283,22 @@ def process_single_document_async(
                     "artifact_run_id": str(resume_artifact_run_id or audit_log_id or self.request.id),
                     "celery_task_id": str(self.request.id),
                     "vdr_parent_audit_id": str(audit_log_id or ""),
+                    **({"vdr_dispatch_generation": int(queue_generation)} if queue_generation is not None else {}),
                     "source_id": str(doc.id),
                     "source_file_id": file_id,
                     "source_drive_id": drive_id,
                     "source_path": file_info.get("path") or "",
-                    "source_url": file_info.get("webUrl") or "",
+                    "source_url": source_url,
                     "source_etag": source_etag,
                     "source_size": file_info.get("size"),
                     "source_last_modified": file_info.get("lastModifiedDateTime"),
                     "quality_flags": extraction.get("quality_flags") or [],
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
-                cancel_check=lambda: _is_cancel_requested(audit_log_id),
+                cancel_check=delivery_cancelled,
                 force_fresh=force_fresh,
             )
-            if _is_cancel_requested(audit_log_id) or not DealDocument.objects.filter(pk=doc.pk).exists():
+            if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():
                 return {
                     "status": "cancelled",
                     "file": file_name,
@@ -1269,7 +1316,7 @@ def process_single_document_async(
                 )
         
         # Vectorize for RAG
-        if normalized_text and len(normalized_text.strip()) > 50 and not _is_cancel_requested(audit_log_id):
+        if normalized_text and len(normalized_text.strip()) > 50 and not delivery_cancelled():
             chunk_count = _vectorize_document_and_capture(doc, embed_service)
             if chunk_count < 1:
                 raise ValueError(f"No retrieval chunks were persisted for {file_name}.")
@@ -1452,6 +1499,207 @@ def synthesize_complete_deal_analysis(deal: Deal, audit_log, *, allow_gaps: bool
     )
     deal.documents.filter(id__in=[doc.id for doc in docs]).update(is_ai_analyzed=True)
     return analysis
+
+
+def _durable_report_foundation(deal: Deal, audit_log, *, allow_gaps: bool) -> tuple[dict, list, object, object]:
+    """Build the shared report state without issuing any model request."""
+    from microsoft.services.email_ingestion_review import deal_email_evidence_gaps
+
+    all_docs = list(deal.documents.all().order_by("title", "id"))
+    ready_docs = [doc for doc in all_docs if DocumentArtifactService.artifact_complete(doc)]
+    missing_docs = [doc for doc in all_docs if not DocumentArtifactService.artifact_complete(doc)]
+    source_gaps = deal_email_evidence_gaps(deal)
+    if not ready_docs:
+        raise ValueError("The report cannot start because this deal has no complete DealDocument artifacts.")
+    if (missing_docs or source_gaps) and not allow_gaps:
+        raise ValueError(
+            "The report cannot start without gap acknowledgement "
+            f"({len(ready_docs)} ready documents, {len(missing_docs) + len(source_gaps)} evidence gaps)."
+        )
+    latest = deal.analyses.order_by("-version").first()
+    previous_snapshot = (
+        (latest.analysis_json or {}).get("canonical_snapshot")
+        if latest and isinstance(latest.analysis_json, dict) else None
+    )
+    model_fields = (
+        "title", "industry", "sector", "funding_ask", "funding_ask_for", "priority",
+        "city", "state", "country", "comments", "deal_details", "company_details",
+        "reasons_for_passing", "bank_name", "primary_contact_name", "priority_rationale",
+        "is_female_led", "management_meeting", "business_proposal_stage", "ic_stage",
+    )
+    analysis_kind = AnalysisKind.INITIAL if not latest else AnalysisKind.SUPPLEMENTAL
+    normalized = _normalize_synthesis_result(
+        {"deal_model_data": {
+            field: getattr(deal, field) for field in model_fields
+            if getattr(deal, field, None) not in (None, "")
+        }, "analyst_report": ""},
+        analysis_kind=analysis_kind,
+        document_evidence=[_compact_document_artifact(doc) for doc in ready_docs],
+        analysis_input_files=[{
+            "file_id": doc.onedrive_id or str(doc.id), "file_name": doc.title,
+            "document_id": str(doc.id), "transcription_status": doc.transcription_status,
+            "artifact_status": DocumentArtifactService.artifact_status(doc),
+        } for doc in ready_docs],
+        failed_files=[{
+            "file_id": doc.onedrive_id or str(doc.id), "file_name": doc.title,
+            "reason": f"Artifact status: {DocumentArtifactService.artifact_status(doc)}",
+        } for doc in missing_docs] + [{
+            "file_id": gap["source_id"], "file_name": gap["title"], "reason": gap["error"],
+            "source_kind": gap["source_kind"], "source_url": gap.get("source_url"),
+        } for gap in source_gaps],
+        documents_analyzed=[doc.title for doc in ready_docs],
+        previous_snapshot=previous_snapshot,
+    )
+    normalized.setdefault("metadata", {}).update({
+        "audit_log_id": str(audit_log.id),
+        "evidence_coverage": {
+            "documents_discovered": len(all_docs), "documents_in_report": 0,
+            "documents_with_gaps": [str(doc.id) for doc in missing_docs],
+            "email_sources_with_gaps": source_gaps, "allow_gaps": allow_gaps,
+            "all_document_chunks_processed": False,
+            "context_strategy": "section-specific hybrid pgvector and full-text retrieval",
+        },
+    })
+    return normalized, ready_docs, latest, previous_snapshot
+
+
+@shared_task
+def coordinate_vdr_queue():
+    from deals.services.vdr_queue import dispatch
+    return dispatch()
+
+
+@shared_task
+def reconcile_vdr_queue():
+    from deals.services.vdr_queue import reconcile
+    return reconcile()
+
+
+@shared_task
+def vdr_unit_completed(result, audit_log_id: str, task_id: str, generation: int, unit_key: str):
+    from deals.services.vdr_queue import unit_finished
+    safe_result = result if isinstance(result, dict) else {"status": "failed", "error": str(result)}
+    return {"accepted": unit_finished(
+        audit_log_id, task_id=task_id, generation=generation, unit_key=unit_key, result=safe_result,
+    )}
+
+
+@shared_task(
+    bind=True, max_retries=2, soft_time_limit=0, time_limit=0,
+    acks_late=True, reject_on_worker_lost=True,
+)
+def process_vdr_report_section(
+    self, deal_id: str, audit_log_id: str, section_title: str, queue_generation: int,
+):
+    """Generate exactly one canonical report section for a durable VDR job."""
+    from ai_orchestrator.models import AIAuditLog
+    from ai_orchestrator.services.ai_processor import AIProcessorService
+    from ai_orchestrator.services.report_sections import ICReportSectionService
+    from deals.services.vdr_queue import delivery_is_current, heartbeat, start_heartbeat
+
+    task_id = str(self.request.id)
+    if not delivery_is_current(
+        audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title,
+    ):
+        return {"status": "stale", "reason": "Superseded VDR report delivery."}
+    heartbeat(
+        audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title,
+        worker_id=(os.getenv("RAILWAY_DEPLOYMENT_ID") or str(getattr(self.request, "hostname", "") or "")),
+    )
+    start_heartbeat(
+        audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title,
+        worker_id=(os.getenv("RAILWAY_DEPLOYMENT_ID") or str(getattr(self.request, "hostname", "") or "")),
+    )
+    audit = AIAuditLog.objects.get(id=audit_log_id)
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        analysis, ready_docs, _, _ = _durable_report_foundation(
+            deal, audit, allow_gaps=bool((audit.source_metadata or {}).get("allow_gaps")),
+        )
+        evidence_service = __import__(
+            "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
+        ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs)
+        retrieved = evidence_service.retrieve(section_title)
+        context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
+        evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None
+        citations = retrieved.get("citations") if isinstance(retrieved, dict) else None
+        if not context.strip():
+            raise ValueError(f"No evidence was retrieved for report section '{section_title}'.")
+        section = ICReportSectionService._generate_section(
+            ai_service=AIProcessorService(), evidence=context, analysis=analysis, title=section_title,
+            source_id=audit_log_id, evidence_metadata=evidence_metadata,
+            citations=citations,
+            source_type="vdr_report_section", context_label_prefix="VDR report section",
+            max_tokens=int(getattr(settings, "VDR_REPORT_SECTION_MAX_TOKENS", 16_384)),
+            max_input_tokens=int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
+            vdr_dispatch_generation=queue_generation,
+        )
+        return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
+        return {"status": "failed", "error": str(exc)}
+
+
+def assemble_vdr_report(audit_log_id: str) -> DealAnalysis:
+    """Validate and persist a durable report once all section tasks have finished."""
+    from ai_orchestrator.models import AIAuditLog
+    from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
+    from ai_orchestrator.services.report_sections import ICReportSectionService
+
+    with transaction.atomic():
+        audit = AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+        metadata = dict(audit.source_metadata or {})
+        if metadata.get("queue_state") in {"completed", "failed", "cancelled"}:
+            existing_id = metadata.get("analysis_id")
+            return DealAnalysis.objects.get(id=existing_id) if existing_id else None
+        section_by_title = {
+            item.get("title"): item.get("content") for item in metadata.get("report_section_queue") or []
+        }
+        report = "\n\n".join(str(section_by_title.get(title) or "").strip() for title in IC_SECTION_TITLES)
+        if not ICReportSectionService.is_complete(report):
+            raise ValueError("The durable report did not produce the exact ordered 11-section contract.")
+        deal = Deal.objects.select_for_update().get(id=audit.source_id)
+        normalized, docs, latest, previous_snapshot = _durable_report_foundation(
+            deal, audit, allow_gaps=bool(metadata.get("allow_gaps")),
+        )
+        normalized["analyst_report"] = report
+        retrieval_sections = [
+            {"title": item.get("title"), **(item.get("evidence_metadata") or {})}
+            for item in metadata.get("report_section_queue") or []
+        ]
+        normalized["metadata"]["evidence_coverage"].update({
+            "documents_in_report": len(docs), "section_count": len(IC_SECTION_TITLES),
+            "all_indexed_documents_retrieved": True,
+            "section_chunk_selections": sum(
+                int(item.get("selected_chunk_count") or 0) for item in retrieval_sections
+            ),
+            "sections": retrieval_sections,
+        })
+        normalized["canonical_snapshot"] = DealCreationService.build_canonical_snapshot(
+            normalized, previous_snapshot=previous_snapshot,
+            analysis_kind=normalized.get("analysis_kind") or (AnalysisKind.INITIAL if not latest else AnalysisKind.SUPPLEMENTAL),
+        )
+        analysis = DealAnalysis.objects.create(
+            deal=deal, version=(latest.version + 1) if latest else 1,
+            analysis_kind=normalized.get("analysis_kind") or AnalysisKind.INITIAL,
+            thinking="", ambiguities=normalized.get("metadata", {}).get("ambiguous_points", []),
+            analysis_json=normalized,
+        )
+        DealCreationService.apply_analysis_to_deal(
+            deal, normalized, overwrite=False, source_id=f"analysis:{analysis.id}", overwrite_ai_owned=True,
+        )
+        deal.documents.filter(id__in=[doc.id for doc in docs]).update(is_ai_analyzed=True)
+        audit.status = "COMPLETED"
+        audit.is_success = True
+        audit.completed_at = timezone.now()
+        audit.source_metadata = {
+            **metadata, "queue_state": "completed", "workflow_stage": "analysis_complete",
+            "analysis_id": str(analysis.id), "current_task_id": None,
+            "current_unit_type": None, "current_unit_key": None,
+        }
+        audit.save(update_fields=["status", "is_success", "completed_at", "source_metadata"])
+        return analysis
 
 @shared_task(bind=True)
 def finalize_folder_background(self, results, deal_id, audit_log_id):
@@ -1822,6 +2070,12 @@ def prepare_linked_folder_vdr_async(
         file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
         if not file_tree:
             raise ValueError("The linked folder did not contain any discoverable files.")
+        from deals.services import vdr_queue
+        if vdr_queue.enabled():
+            return FolderAnalysisService._enqueue_vdr_processing(
+                deal, file_tree,
+                message=f"Queued complete artifact processing for {len(file_tree)} discovered files.",
+            )
         task = process_deal_folder_background.apply_async(
             kwargs={
                 "deal_id": str(deal.id),

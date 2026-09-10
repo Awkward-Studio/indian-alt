@@ -40,7 +40,9 @@ class ICReportSectionEvidenceServiceTests(SimpleTestCase):
         self.assertIn("historical projected P&L", search.args[0])
         self.assertFalse(search.kwargs["rerank"])
         self.assertEqual(search.kwargs["source_ids"], ["doc-1", "doc-2"])
-        self.assertGreaterEqual(result["metadata"]["selected_chunk_count"], 20)
+        # Full clickable source citations add context overhead, but retrieval
+        # should still use most of this deliberately small test budget.
+        self.assertGreaterEqual(result["metadata"]["selected_chunk_count"], 15)
         self.assertLessEqual(estimate_tokens(result["context"]), 4_000)
         self.assertEqual(result["metadata"]["selected_document_count"], 2)
 
@@ -109,3 +111,35 @@ class ICReportSectionEvidenceServiceTests(SimpleTestCase):
         self.assertEqual(set(result["metadata"]["selected_document_ids"]), {"doc-1", "doc-2"})
         self.assertEqual(result["metadata"]["supplemented_document_ids"], ["doc-2"])
         self.assertGreaterEqual(result["context"].count("IM evidence"), 4)
+
+    def test_context_exposes_clickable_apa_citation_from_artifact_source_url(self):
+        source_url = "https://contoso.sharepoint.com/sites/deals/Investment%20Memorandum.pdf"
+        deal = SimpleNamespace(id="deal-1", title="Example Foods")
+        document = SimpleNamespace(
+            id="doc-1",
+            title="Investment Memorandum 2025.pdf",
+            file_url=None,
+            evidence_json={"source_metadata": {"source_url": source_url}},
+        )
+        chunk = SimpleNamespace(
+            source_type="document",
+            source_id="doc-1",
+            content="FY25 revenue was INR 100 crore.",
+            metadata={"chunk_kind": "metric", "page": 7},
+        )
+        embedding_service = MagicMock()
+        embedding_service.search_global_chunks.return_value = [chunk]
+
+        result = ICReportSectionEvidenceService(
+            deal=deal,
+            documents=[document],
+            embedding_service=embedding_service,
+            max_tokens=4_000,
+        ).retrieve("Key Financials")
+
+        self.assertIn("Retrieval block R001", result["context"])
+        self.assertNotIn("[Evidence 1]", result["context"])
+        self.assertIn("Required citation:", result["context"])
+        self.assertIn("Investment Memorandum 2025.pdf. (2025).", result["context"])
+        self.assertIn(f"](<{source_url}>)", result["context"])
+        self.assertEqual(result["citations"]["1"]["location"], "p. 7")
