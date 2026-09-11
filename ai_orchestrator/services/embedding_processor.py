@@ -726,18 +726,14 @@ class EmbeddingService:
         created_count = len(created_chunks)
         if created_count:
             doc.is_indexed = True
-            doc.chunk_count = created_count
             doc.chunking_status = "chunked"
             doc.last_chunked_at = timezone.now()
-            doc.embedding_error = None
-            doc.save(update_fields=['is_indexed', 'chunk_count', 'chunking_status', 'last_chunked_at', 'embedding_error'])
+            doc.save(update_fields=['is_indexed', 'chunking_status', 'last_chunked_at'])
             self.refresh_deal_profile(doc.deal)
         else:
             doc.is_indexed = False
-            doc.chunk_count = 0
             doc.chunking_status = "failed"
-            doc.embedding_error = self._last_embedding_error or "No retrieval chunks were created."
-            doc.save(update_fields=['is_indexed', 'chunk_count', 'chunking_status', 'embedding_error'])
+            doc.save(update_fields=['is_indexed', 'chunking_status'])
         return bool(created_count)
 
     def vectorize_analysis_document(self, doc: FolderAnalysisDocument) -> bool:

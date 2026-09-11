@@ -2116,6 +2116,10 @@ class DealStatusSyncTests(TestCase):
         self.assertIn("normalized_text", chunk_kinds)
         self.assertIn("metric", chunk_kinds)
         self.assertIn("table_summary", chunk_kinds)
+        doc.refresh_from_db()
+        self.assertTrue(doc.is_indexed)
+        self.assertEqual(doc.chunking_status, "chunked")
+        self.assertIsNotNone(doc.last_chunked_at)
 
     def test_rerank_prefers_metric_chunks_for_numeric_queries(self):
         deal = Deal.objects.create(title="Ranking Deal")
