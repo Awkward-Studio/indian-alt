@@ -67,6 +67,44 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = AIAuditLog.objects.all().order_by('-created_at')
     serializer_class = AIAuditLogSerializer
     permission_classes = [IsAuthenticated]
+    search_fields = [
+        'source_type', 'source_id', 'context_label', 'model_provider',
+        'model_used', 'error_message', 'celery_task_id', 'skill__name',
+        'personality__name', 'requested_by__username', 'requested_by__email',
+    ]
+    ordering_fields = ['created_at', 'completed_at', 'status', 'request_duration_ms']
+
+    _category_queries = {
+        'chat': Q(source_type__icontains='chat'),
+        'deal': Q(source_type__in=[
+            'email', 'deal_full_synthesis', 'email_report_section',
+            'vdr_report_section', 'deal_extraction',
+        ]),
+        'documents': (
+            Q(source_type__icontains='document')
+            | Q(source_type__icontains='folder')
+            | Q(source_type__icontains='index')
+        ),
+        'workflow': Q(source_type__icontains='helper'),
+        'enrichment': (
+            Q(source_type__icontains='enrich')
+            | Q(source_type__icontains='competitor')
+            | Q(source_type__icontains='vendor_intelligence')
+        ),
+    }
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        category = (self.request.query_params.get('category') or 'all').strip().lower()
+        if category == 'failed':
+            return queryset.filter(status='FAILED')
+        if category == 'system':
+            categorized = Q()
+            for query in self._category_queries.values():
+                categorized |= query
+            return queryset.exclude(categorized)
+        category_query = self._category_queries.get(category)
+        return queryset.filter(category_query) if category_query else queryset
 
     def get_serializer_context(self):
         context = super().get_serializer_context()

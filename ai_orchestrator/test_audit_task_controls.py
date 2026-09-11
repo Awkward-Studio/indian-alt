@@ -53,6 +53,60 @@ class AuditTaskControlTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertNotIn('child_audits', response.data['results'][0])
 
+    def test_audit_list_searches_across_the_full_paginated_queryset(self):
+        for index in range(25):
+            AIAuditLog.objects.create(
+                source_type='system_health', context_label=f'Routine task {index}',
+                model_used='test', system_prompt='test', user_prompt='test',
+                status='COMPLETED',
+            )
+        match = AIAuditLog.objects.create(
+            source_type='universal_chat', context_label='Pebble market question',
+            model_used='special-model', system_prompt='test', user_prompt='test',
+            status='COMPLETED',
+        )
+
+        response = self.client.get('/api/ai/history/', {'search': 'Pebble'})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], str(match.id))
+
+    def test_audit_list_category_filter_is_applied_before_pagination(self):
+        for index in range(23):
+            AIAuditLog.objects.create(
+                source_type='system_health', context_label=f'System task {index}',
+                model_used='test', system_prompt='test', user_prompt='test',
+                status='COMPLETED',
+            )
+        for source_type in ('deal_chat', 'universal_chat'):
+            AIAuditLog.objects.create(
+                source_type=source_type, context_label='Chat task', model_used='test',
+                system_prompt='test', user_prompt='test', status='COMPLETED',
+            )
+
+        response = self.client.get('/api/ai/history/', {'category': 'chat'})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual({row['source_type'] for row in response.data['results']}, {'deal_chat', 'universal_chat'})
+
+    def test_audit_list_combines_category_and_search_filters(self):
+        AIAuditLog.objects.create(
+            source_type='vdr_indexing', context_label='Pebble VDR', model_used='test',
+            system_prompt='test', user_prompt='test', status='FAILED',
+        )
+        expected = AIAuditLog.objects.create(
+            source_type='deal_chat', context_label='Pebble chat', model_used='test',
+            system_prompt='test', user_prompt='test', status='FAILED',
+        )
+
+        response = self.client.get('/api/ai/history/', {'category': 'chat', 'search': 'Pebble'})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], str(expected.id))
+
     @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke', return_value=[])
     @patch('ai_orchestrator.views.requests.get')
     def test_clear_active_fails_durable_work_even_without_slots(self, get_slots, _revoke):

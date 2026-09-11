@@ -294,6 +294,18 @@ class SegmentPersistenceTests(TestCase):
         self.audit.refresh_from_db()
         self.assertEqual(self.audit.status, "FAILED")
 
+    def test_structured_quality_flag_does_not_crash_segment_validation(self):
+        self.service.current_provider.execute_standard.return_value["response"] = json.dumps({
+            "document_summary": "Complete evidence",
+            "quality_flags": [{"issue": "Ambiguous source label"}],
+        })
+
+        result = self.run_segment()
+
+        self.assertNotIn("error", result)
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "COMPLETED")
+
     def test_admin_cancellation_is_not_overwritten_by_late_success(self):
         from ai_orchestrator.models import AIAuditLog
         def response(*args, **kwargs):

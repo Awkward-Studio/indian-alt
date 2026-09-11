@@ -632,8 +632,14 @@ class AIProcessorService:
                 not isinstance(parsed_json, dict)
                 or not str(parsed_json.get("document_summary") or "").strip()
                 or parsed_json.get("_salvaged")
-                or {"fallback_artifact", "artifact_missing_text", "artifact_segment_processing_incomplete"}.intersection(
-                    parsed_json.get("quality_flags") or []
+                or any(
+                    isinstance(flag, str)
+                    and flag in {
+                        "fallback_artifact",
+                        "artifact_missing_text",
+                        "artifact_segment_processing_incomplete",
+                    }
+                    for flag in (parsed_json.get("quality_flags") or [])
                 )
             ):
                 success = False
