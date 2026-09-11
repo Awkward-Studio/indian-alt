@@ -1,6 +1,7 @@
 """Versioned email jobs with durable pending state and independent evidence indexing."""
 from datetime import timedelta
 import logging
+import os
 from pathlib import Path
 from pathlib import PurePath
 from urllib.parse import unquote, urlparse
@@ -8,6 +9,7 @@ import uuid
 
 from bs4 import BeautifulSoup
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -317,6 +319,10 @@ class EmailIngestionService:
             run.lease_until = now + timedelta(minutes=35)
             run.status = 'running'
             run.attempts += 1
+            run.source = {
+                **(run.source or {}),
+                '_worker_instance_id': os.getenv('RAILWAY_DEPLOYMENT_ID') or '',
+            }
             run.save()
             return run
 
@@ -536,6 +542,7 @@ class EmailIngestionService:
         if not getattr(settings, 'EMAIL_INGESTION_ENABLED', False):
             return 0
         now = timezone.now()
+        cls._recover_replaced_worker_runs(now=now)
         ids = list(EmailIngestionRun.objects.filter(status__in=['pending', 'running', 'failed', 'waiting_service'])
             .filter(Q(lease_until=None) | Q(lease_until__lte=now))
             .filter(Q(next_attempt_at=None) | Q(next_attempt_at__lte=now))
@@ -543,3 +550,77 @@ class EmailIngestionService:
         for run_id in ids:
             cls.dispatch(run_id)
         return len(ids)
+
+    @staticmethod
+    def _observed_task_ids() -> set[str]:
+        try:
+            from config.celery import app as celery_app
+
+            inspector = celery_app.control.inspect(timeout=1)
+            observed = set()
+            for payload in (inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}):
+                for tasks in payload.values():
+                    for task in tasks or []:
+                        task_data = task.get('request') or task
+                        if task_data.get('id'):
+                            observed.add(str(task_data['id']))
+            return observed
+        except Exception:
+            return set()
+
+    @classmethod
+    def _recover_replaced_worker_runs(cls, *, now=None) -> int:
+        """Fence leases left by a replaced Railway worker and requeue them."""
+        from ai_orchestrator.models import AIAuditLog
+
+        now = now or timezone.now()
+        current = cache.get('vdr:presence:worker:current')
+        if not isinstance(current, dict) or not current.get('instance_id'):
+            return 0
+        current_worker_id = str(current['instance_id'])
+        current_started_at = float(current.get('started_at') or 0)
+        observed_task_ids = cls._observed_task_ids()
+        recovered = 0
+        candidates = EmailIngestionRun.objects.filter(status='running', lease_until__gt=now)
+        for candidate in candidates:
+            source = candidate.source or {}
+            owner_worker_id = str(source.get('_worker_instance_id') or '')
+            audit = cls._audit_log_for_run(candidate)
+            task_id = str(audit.celery_task_id or '') if audit else ''
+            replaced_owner = bool(owner_worker_id and owner_worker_id != current_worker_id)
+            legacy_orphan = bool(
+                not owner_worker_id
+                and current_started_at > candidate.updated_at.timestamp()
+                and task_id
+                and task_id not in observed_task_ids
+            )
+            if not replaced_owner and not legacy_orphan:
+                continue
+            with transaction.atomic():
+                run = EmailIngestionRun.objects.select_for_update().get(pk=candidate.pk)
+                if run.status != 'running' or not run.lease_until or run.lease_until <= now:
+                    continue
+                previous_task_id = task_id
+                run.status = 'pending'
+                run.lease_until = None
+                run.lease_token = None
+                run.next_attempt_at = None
+                run.error = 'Recovered email ingestion after worker redeploy.'
+                run.source = {
+                    **(run.source or {}),
+                    '_worker_instance_id': '',
+                    '_deployment_recovery_count': int((run.source or {}).get('_deployment_recovery_count') or 0) + 1,
+                }
+                run.save()
+                if previous_task_id:
+                    AIAuditLog.objects.filter(
+                        source_type='document_evidence_segment',
+                        celery_task_id=previous_task_id,
+                        status__in=['PENDING', 'PROCESSING'],
+                    ).update(
+                        status='FAILED', is_success=False, completed_at=now,
+                        error_message='Inference workflow was superseded after worker redeploy.',
+                    )
+                cls._sync_audit_log(run)
+                recovered += 1
+        return recovered

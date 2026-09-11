@@ -8,6 +8,7 @@ from microsoft.models import Email, EmailAccount, EmailIngestionRun
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_ingestion import EmailIngestionService as Ingestion
 from microsoft.services.email_matching import EmailDecisionService as Decisions, EmailDecisionUnavailable
+from ai_orchestrator.models import AIAuditLog
 
 
 class EmailRecoveryTests(TestCase):
@@ -34,6 +35,37 @@ class EmailRecoveryTests(TestCase):
         run = Evidence.snapshot(self.email)
         self.assertIsNotNone(Ingestion.claim(run.id))
         self.assertIsNone(Ingestion.claim(run.id))
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, '_observed_task_ids', return_value=set())
+    @patch('microsoft.services.email_ingestion.cache.get')
+    @patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'old-deploy'})
+    def test_reconcile_recovers_live_lease_from_replaced_worker(self, cache_get, _observed):
+        run = Evidence.snapshot(self.email)
+        audit = Ingestion.ensure_audit_log(run)
+        claimed = Ingestion.claim(run.id)
+        audit.celery_task_id = 'old-task'
+        audit.status = 'PROCESSING'
+        audit.save(update_fields=['celery_task_id', 'status'])
+        segment = AIAuditLog.objects.create(
+            source_type='document_evidence_segment', source_id=str(self.email.id),
+            context_label='Document Evidence: attachment [1/2]', model_used='test',
+            system_prompt='test', user_prompt='test', status='PROCESSING',
+            celery_task_id='old-task',
+        )
+        cache_get.return_value = {'instance_id': 'new-deploy', 'started_at': timezone.now().timestamp()}
+
+        with patch.object(Ingestion, 'dispatch') as dispatch:
+            recovered = Ingestion.reconcile()
+
+        claimed.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(recovered, 1)
+        self.assertEqual(claimed.status, 'pending')
+        self.assertIsNone(claimed.lease_until)
+        self.assertEqual(claimed.source['_deployment_recovery_count'], 1)
+        self.assertEqual(segment.status, 'FAILED')
+        dispatch.assert_called_once_with(claimed.id)
 
     @patch.object(Ingestion, 'index_outputs', return_value=True)
     def test_expired_lease_resumes_and_new_version_still_processes(self, index):

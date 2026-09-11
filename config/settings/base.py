@@ -227,11 +227,14 @@ CELERY_BEAT_SCHEDULE = {
     'reconcile-durable-vdr-queue': {
         'task': 'deals.tasks.reconcile_vdr_queue',
         'schedule': 30,
-        'options': {'queue': 'vdr_control'},
+        # A solo worker may be inside a long model call. Never replay a stack
+        # of obsolete health checks after it becomes available again.
+        'options': {'queue': 'vdr_control', 'expires': 25},
     },
     'reconcile-email-evidence-every-minute': {
         'task': 'microsoft.tasks.reconcile_email_evidence',
         'schedule': 60,
+        'options': {'expires': 55},
     },
     'ingest-industry-news-every-six-hours': {
         'task': 'industry_knowledge.tasks.ingest_industry_news',

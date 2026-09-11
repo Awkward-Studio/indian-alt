@@ -95,11 +95,21 @@ def kick(*, countdown: int = 0) -> bool:
     """Best-effort wake-up. The periodic beat task is the durable fallback."""
     if not enabled():
         return False
+    pending_key = "vdr:coordinator:kick-pending"
+    try:
+        if not cache.add(pending_key, 1, timeout=max(60, int(countdown) + 30)):
+            return False
+    except Exception:
+        pass
     try:
         from deals.tasks import coordinate_vdr_queue
         coordinate_vdr_queue.apply_async(queue="vdr_control", countdown=countdown)
         return True
     except Exception:
+        try:
+            cache.delete(pending_key)
+        except Exception:
+            pass
         return False
 
 
@@ -226,6 +236,10 @@ def dispatch() -> dict:
     from ai_orchestrator.models import AIAuditLog
     from deals.tasks import process_single_document_async, process_vdr_report_section, vdr_unit_completed
 
+    try:
+        cache.delete("vdr:coordinator:kick-pending")
+    except Exception:
+        pass
     fallback_locked = False
     try:
         with transaction.atomic():

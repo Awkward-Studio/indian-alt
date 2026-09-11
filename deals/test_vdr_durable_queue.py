@@ -321,6 +321,16 @@ class DurableVdrQueueTests(TestCase):
         self.assertEqual(vdr_queue.queue_position(str(second.id)), 1)
         self.assertEqual(vdr_queue.queue_position(str(first.id)), 2)
 
+    @patch("deals.tasks.coordinate_vdr_queue.apply_async")
+    def test_kick_coalesces_duplicate_coordinator_wakeups(self, apply_async):
+        from django.core.cache import cache
+
+        cache.delete("vdr:coordinator:kick-pending")
+        self.assertTrue(vdr_queue.kick())
+        self.assertFalse(vdr_queue.kick())
+        apply_async.assert_called_once()
+        cache.delete("vdr:coordinator:kick-pending")
+
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
     @patch("deals.tasks.process_vdr_report_section.apply_async")
     def test_new_report_dispatches_before_waiting_indexing_job(self, apply_async, _busy):
