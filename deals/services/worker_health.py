@@ -17,6 +17,15 @@ from django.conf import settings
 from django.core.cache import cache
 
 
+def advertised_roles(role: str) -> tuple[str, ...]:
+    """An embedded beat is the coordinator and must advertise that role."""
+    embedded = (
+        role == "worker"
+        and str(os.getenv("RUN_VDR_COORDINATOR", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    return ("worker", "coordinator") if embedded else (role,)
+
+
 def record_presence(*, role: str, instance_id: str, started_at: float) -> dict:
     """Publish presence without allowing an older overlapping deploy to win."""
     presence = {
@@ -44,7 +53,8 @@ def main() -> None:
 
     def pulse():
         while True:
-            record_presence(role=args.role, instance_id=instance_id, started_at=started_at)
+            for advertised_role in advertised_roles(args.role):
+                record_presence(role=advertised_role, instance_id=instance_id, started_at=started_at)
             time.sleep(int(getattr(settings, "VDR_WORKER_HEARTBEAT_SECONDS", 30)))
 
     threading.Thread(target=pulse, daemon=True).start()

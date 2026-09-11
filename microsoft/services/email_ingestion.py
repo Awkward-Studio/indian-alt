@@ -2,6 +2,7 @@
 from datetime import timedelta
 import logging
 import os
+import time
 from pathlib import Path
 from pathlib import PurePath
 from urllib.parse import unquote, urlparse
@@ -22,7 +23,20 @@ from .email_matching import EmailDecisionService as Decisions, EmailDecisionUnav
 logger = logging.getLogger(__name__)
 
 
+class EmailIngestionCancelled(Exception):
+    pass
+
+
 class EmailIngestionService:
+    @classmethod
+    def _raise_if_cancelled(cls, run):
+        current_status = EmailIngestionRun.objects.filter(pk=run.pk).values_list('status', flat=True).first()
+        audit = cls._audit_log_for_run(run)
+        if current_status == 'cancelled' or (
+            audit and (audit.source_metadata or {}).get('cancel_requested')
+        ):
+            raise EmailIngestionCancelled('Email ingestion cancelled from the live queue.')
+
     @staticmethod
     def decision_source_metadata_context(run):
         """Return cheap source metadata for the routing/name decision.
@@ -145,8 +159,8 @@ class EmailIngestionService:
 
         from ai_orchestrator.services.realtime import broadcast_audit_log_update
 
-        terminal = run.status in ('completed', 'needs_review', 'failed')
-        if run.status == 'failed':
+        terminal = run.status in ('completed', 'needs_review', 'failed', 'cancelled')
+        if run.status in ('failed', 'cancelled'):
             status = 'FAILED'
         elif run.status in ('completed', 'needs_review'):
             status = 'COMPLETED'
@@ -304,7 +318,7 @@ class EmailIngestionService:
             run = EmailIngestionRun.objects.select_for_update().select_related('email__email_account').get(pk=run_id)
             # Serialize different versions of one email as well as duplicate jobs.
             Email.objects.select_for_update().get(pk=run.email_id)
-            if run.status in ('completed', 'needs_review', 'superseded'):
+            if run.status in ('completed', 'needs_review', 'superseded', 'cancelled'):
                 return None
             if EmailIngestionRun.objects.filter(email_id=run.email_id, lease_until__gt=now).exists():
                 return None
@@ -333,6 +347,7 @@ class EmailIngestionService:
             return {'status': 'not_claimed'}
         cls._sync_audit_log(run, task_id=task_id)
         try:
+            cls._raise_if_cancelled(run)
             available = cls.text_available() if use_ai is None else use_ai
             parts = Evidence.parts(run)
             if (
@@ -394,6 +409,7 @@ class EmailIngestionService:
                 run.status = 'waiting_service'
                 return cls.release(run)
             # Artifact processing starts only after the route has been confirmed.
+            cls._raise_if_cancelled(run)
             attachment_failures = Evidence.save_attachments(run)
             link_failures = Evidence.save_links(run)
             deal = Deal.objects.get(pk=run.match['deal_id'])
@@ -425,6 +441,10 @@ class EmailIngestionService:
             run.stages['index'] = 'completed' if indexing else 'waiting_service'
             run.status = 'completed' if indexing and not capture_failures else 'waiting_service'
             return cls.release(run)
+        except EmailIngestionCancelled as exc:
+            run.error = str(exc)
+            run.status = 'cancelled'
+            return cls.release(run)
         except EmailDecisionUnavailable as exc:
             run.error = str(exc)[:1500]
             run.status = 'waiting_service'
@@ -449,7 +469,7 @@ class EmailIngestionService:
         EmailIngestionService._sync_audit_log(run)
         Email.objects.filter(pk=run.email_id).update(
             is_indexed=run.stages.get('index') == 'completed',
-            processing_status='completed' if run.status == 'completed' else ('failed' if run.status == 'failed' else 'pending'),
+            processing_status='completed' if run.status == 'completed' else ('failed' if run.status in ('failed', 'cancelled') else 'pending'),
             processing_error=run.error or None)
         # Do not depend solely on a separately deployed Celery Beat service.
         # A transient VM outage schedules its own durable retry; the run lease
@@ -482,6 +502,7 @@ class EmailIngestionService:
             DocumentChunk.objects.filter(source_type='email', source_id=str(run.email_id)).delete()
         for link in links:
             try:
+                EmailIngestionService._raise_if_cancelled(run)
                 doc = link.document
                 if doc and link.blob_id and not (doc.normalized_text or '').strip():
                     content = link.blob.read_bytes()
@@ -579,6 +600,10 @@ class EmailIngestionService:
             return 0
         current_worker_id = str(current['instance_id'])
         current_started_at = float(current.get('started_at') or 0)
+        handoff_elapsed = (
+            time.time() - current_started_at
+            >= int(getattr(settings, 'VDR_DEPLOYMENT_HANDOFF_SECONDS', 90))
+        )
         observed_task_ids = cls._observed_task_ids()
         recovered = 0
         candidates = EmailIngestionRun.objects.filter(status='running', lease_until__gt=now)
@@ -587,7 +612,12 @@ class EmailIngestionService:
             owner_worker_id = str(source.get('_worker_instance_id') or '')
             audit = cls._audit_log_for_run(candidate)
             task_id = str(audit.celery_task_id or '') if audit else ''
-            replaced_owner = bool(owner_worker_id and owner_worker_id != current_worker_id)
+            replaced_owner = bool(
+                owner_worker_id
+                and owner_worker_id != current_worker_id
+                and handoff_elapsed
+                and task_id not in observed_task_ids
+            )
             legacy_orphan = bool(
                 not owner_worker_id
                 and current_started_at > candidate.updated_at.timestamp()

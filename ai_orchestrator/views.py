@@ -121,102 +121,188 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         return list(dict.fromkeys(str(value) for value in values if value))
 
     @staticmethod
-    def _revoke(task_ids):
+    def _revoke(task_ids, *, terminate=True):
         from config.celery import app as celery_app
         errors = []
         for task_id in task_ids:
             try:
-                celery_app.control.revoke(task_id, terminate=True, signal="SIGKILL")
+                celery_app.control.revoke(task_id, terminate=terminate, signal="SIGKILL" if terminate else None)
             except Exception as exc:
                 errors.append(f"{task_id}: {exc}")
         return errors
 
-    # Standard retrieve will now use the enhanced AIAuditLogSerializer
-    # which includes system_prompt, raw fields, and parsed_json automatically.
-
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        """
-        Attempts to cancel a running task using its stored Celery ID.
-        """
-        log = self.get_object()
-        task_id = log.celery_task_id
+    def _cancel_log(self, log):
+        """Cancel one audit-backed workflow and return an API-safe result."""
+        if log.status not in {'PENDING', 'PROCESSING'}:
+            raise DjangoValidationError('The selected workflow is already terminal.')
         source_meta = log.source_metadata or {}
         durable_vdr = source_meta.get("queue_version") == 2 and source_meta.get("queue_scope") == "vdr"
-        revoke_errors = []
-        task_ids_to_revoke = [
-            tid for tid in [
-                task_id,
-                source_meta.get("callback_task_id"),
-                *(source_meta.get("child_task_ids") or []),
-            ] if tid
-        ]
-        
-        # 1. Kill the Celery worker thread immediately
-        if task_ids_to_revoke:
-            try:
-                from config.celery import app as celery_app
-                for revoke_id in dict.fromkeys(task_ids_to_revoke):
-                    try:
-                        celery_app.control.revoke(revoke_id, terminate=True, signal='SIGKILL')
-                    except Exception as e:
-                        revoke_errors.append(f"Failed to revoke task {revoke_id}: {e}")
-                        logger.warning("Failed to revoke task %s for audit log %s: %s", revoke_id, log.id, e)
-            except Exception as e:
-                revoke_errors.append(f"Failed to connect to Celery broker: {e}")
-                logger.warning("Failed to connect to Celery broker while cancelling audit log %s: %s", log.id, e)
-            
-        # 2. Update the log status; workers will stop cooperatively at task boundaries.
+        email_ingestion = log.source_type == "email_ingestion"
+        task_ids = self._task_ids(log)
+        # Email ingestion cooperatively stops at artifact boundaries. Killing a
+        # solo-pool task would also kill the coordinator and unrelated queues.
+        # Never SIGKILL the shared solo worker for a single queue item. Revocation
+        # blocks redelivery; cooperative guards stop active inference safely.
+        warnings = self._revoke(task_ids, terminate=False)
+        now = timezone.now()
         log.source_metadata = {
             **source_meta,
             "cancel_requested": True,
-            "cancel_requested_at": timezone.now().isoformat(),
+            "cancel_requested_at": now.isoformat(),
             "cancel_reason": "manual",
-            "cancelled_task_ids": task_ids_to_revoke,
+            "cancelled_task_ids": task_ids,
             "queue_state": "cancelled" if durable_vdr else source_meta.get("queue_state"),
             "dispatch_generation": int(source_meta.get("dispatch_generation") or 0) + (1 if durable_vdr else 0),
             "current_task_id": None if durable_vdr else source_meta.get("current_task_id"),
             "current_unit_type": None if durable_vdr else source_meta.get("current_unit_type"),
             "current_unit_key": None if durable_vdr else source_meta.get("current_unit_key"),
         }
-        log.status = 'FAILED'
-        log.error_message = "Task manually terminated by forensic user."
+        log.status = "FAILED"
+        log.error_message = "Task cancelled from the live queue."
         log.is_success = False
-        if durable_vdr:
-            log.completed_at = timezone.now()
+        log.completed_at = now
         log.save(update_fields=[
-            'source_metadata', 'status', 'error_message', 'is_success',
-            *(['completed_at'] if durable_vdr else []),
+            "source_metadata", "status", "error_message", "is_success", "completed_at",
         ])
+        if email_ingestion:
+            from microsoft.models import Email, EmailIngestionRun
+            run_id = source_meta.get("run_id")
+            if run_id:
+                EmailIngestionRun.objects.filter(pk=run_id).update(
+                    status="cancelled", error=log.error_message, lease_token=None,
+                    lease_until=None, next_attempt_at=None,
+                )
+            Email.objects.filter(pk=log.source_id).update(
+                processing_status="failed", processing_error=log.error_message,
+            )
+        if log.source_type == "vdr_indexing" and log.source_id:
+            Deal.objects.filter(id=log.source_id).update(
+                processing_status="failed", processing_error=log.error_message,
+            )
         try:
             broadcast_audit_log_update(log, event_type="terminal", done=True)
-        except Exception as e:
-            revoke_errors.append(f"Failed to broadcast cancel update: {e}")
-            logger.warning("Failed to broadcast cancel update for audit log %s: %s", log.id, e)
-
-        if log.source_type == "vdr_indexing" and log.source_id:
-            try:
-                deal = Deal.objects.get(id=log.source_id)
-                deal.processing_status = 'failed'
-                deal.processing_error = "Task manually terminated by forensic user."
-                deal.save(update_fields=['processing_status', 'processing_error'])
-            except Deal.DoesNotExist:
-                logger.warning("VDR cancel requested for missing deal %s", log.source_id)
-            except Exception as e:
-                revoke_errors.append(f"Failed to update deal processing state: {e}")
-                logger.warning("Failed to update deal processing state for cancelled audit log %s: %s", log.id, e)
+        except Exception as exc:
+            warnings.append(f"Audit update: {exc}")
         if durable_vdr:
             from deals.services.vdr_queue import kick
             transaction.on_commit(kick)
-        
-        response_payload = {
-            "status": "cancelled",
-            "task_id": task_id,
-            "revoked_task_count": len(dict.fromkeys(task_ids_to_revoke)),
+        return {
+            "audit_log_id": str(log.id), "status": "cancelled",
+            "task_id": log.celery_task_id,
+            "revoked_task_count": len(task_ids), "warnings": warnings,
         }
-        if revoke_errors:
-            response_payload["warnings"] = revoke_errors
-        return Response(response_payload)
+
+    def _cancel_vdr_unit(self, log, *, task_id=None, unit_key=None):
+        """Cancel one durable document/report unit without cancelling its deal."""
+        with transaction.atomic():
+            log = AIAuditLog.objects.select_for_update().get(pk=log.pk)
+            metadata = dict(log.source_metadata or {})
+            if metadata.get('queue_version') != 2 or metadata.get('queue_scope') != 'vdr':
+                raise DjangoValidationError('Individual cancellation requires a durable VDR workflow.')
+            manifest_key = 'report_section_queue' if metadata.get('queue_kind') == 'report' else 'document_queue'
+            key_name = 'title' if manifest_key == 'report_section_queue' else 'source_file_id'
+            match = next((item for item in metadata.get(manifest_key) or [] if (
+                (task_id and str(item.get('celery_task_id') or '') == str(task_id))
+                or (unit_key and str(item.get(key_name) or '') == str(unit_key))
+            )), None)
+            if not match:
+                raise DjangoValidationError('The selected unit is not part of this workflow.')
+            if str(match.get('status') or '').lower() in {'completed', 'cached', 'failed', 'cancelled'}:
+                raise DjangoValidationError('The selected unit is already terminal.')
+            resolved_task_id = str(match.get('celery_task_id') or task_id or '')
+            resolved_key = str(match.get(key_name) or unit_key or '')
+            match['status'] = 'cancelled'
+            match['error'] = 'Cancelled from the live queue.'
+            match['completed_at'] = timezone.now().isoformat()
+            if str(metadata.get('current_unit_key') or '') == resolved_key:
+                metadata['dispatch_generation'] = int(metadata.get('dispatch_generation') or 0) + 1
+                metadata.update({
+                    'queue_state': 'waiting_next_unit', 'current_task_id': None,
+                    'current_unit_type': None, 'current_unit_key': None,
+                })
+            log.source_metadata = metadata
+            log.save(update_fields=['source_metadata'])
+            if resolved_task_id:
+                AIAuditLog.objects.filter(
+                    source_metadata__vdr_parent_audit_id=str(log.id),
+                    celery_task_id=resolved_task_id,
+                    status__in=['PENDING', 'PROCESSING'],
+                ).update(
+                    status='FAILED', is_success=False, completed_at=timezone.now(),
+                    error_message='Cancelled from the live queue.',
+                )
+        warnings = self._revoke([resolved_task_id], terminate=False) if resolved_task_id else []
+        from deals.services.vdr_queue import kick
+        transaction.on_commit(kick)
+        return {
+            'audit_log_id': str(log.id), 'status': 'cancelled',
+            'task_id': resolved_task_id or None, 'unit_key': resolved_key,
+            'revoked_task_count': 1 if resolved_task_id else 0, 'warnings': warnings,
+        }
+
+    # Standard retrieve will now use the enhanced AIAuditLogSerializer
+    # which includes system_prompt, raw fields, and parsed_json automatically.
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        try:
+            return Response(self._cancel_log(self.get_object()))
+        except DjangoValidationError as exc:
+            return Response({'error': '; '.join(exc.messages)}, status=400)
+
+    @action(detail=False, methods=['post'], url_path='cancel-many')
+    def cancel_many(self, request):
+        if not _is_ai_admin(request.user):
+            return Response({'error': 'Administrator access is required.'}, status=403)
+        raw_targets = request.data.get('targets')
+        if isinstance(raw_targets, list):
+            targets = [item for item in raw_targets if isinstance(item, dict) and item.get('audit_log_id')]
+        else:
+            targets = [{'audit_log_id': value} for value in request.data.get('audit_log_ids', []) if value]
+        whole_workflow_ids = {
+            str(item['audit_log_id']) for item in targets
+            if not item.get('task_id') and not item.get('unit_key')
+        }
+        targets = [
+            item for item in targets
+            if str(item['audit_log_id']) not in whole_workflow_ids
+            or (not item.get('task_id') and not item.get('unit_key'))
+        ]
+        if not targets or len(targets) > 100:
+            return Response({'error': 'Select between 1 and 100 tasks.'}, status=400)
+        ids = list(dict.fromkeys(str(item['audit_log_id']) for item in targets))
+        logs = {str(log.id): log for log in AIAuditLog.objects.filter(id__in=ids)}
+        results = []
+        errors = []
+        for target in targets:
+            audit_id = str(target['audit_log_id'])
+            log = logs.get(audit_id)
+            if not log:
+                errors.append({'audit_log_id': audit_id, 'error': 'Task not found.'})
+                continue
+            try:
+                if target.get('unit_key') or target.get('task_id'):
+                    results.append(self._cancel_vdr_unit(
+                        log, task_id=target.get('task_id'), unit_key=target.get('unit_key'),
+                    ))
+                else:
+                    results.append(self._cancel_log(log))
+            except DjangoValidationError as exc:
+                errors.append({'audit_log_id': audit_id, 'error': '; '.join(exc.messages)})
+        return Response({
+            'status': 'cancelled' if not errors else 'partial',
+            'cancelled_count': len(results), 'results': results, 'errors': errors,
+        })
+
+    @action(detail=True, methods=['post'], url_path='cancel-unit')
+    def cancel_unit(self, request, pk=None):
+        try:
+            return Response(self._cancel_vdr_unit(
+                self.get_object(), task_id=request.data.get('task_id'),
+                unit_key=request.data.get('unit_key'),
+            ))
+        except DjangoValidationError as exc:
+            return Response({'error': '; '.join(exc.messages)}, status=400)
 
     @action(detail=True, methods=['post'], url_path='cancel-child')
     def cancel_child(self, request, pk=None):
@@ -335,9 +421,9 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
 
         redis_state = CeleryQueueSnapshotService.snapshot(celery_app)
-        processing_logs = AIAuditLog.objects.filter(
+        processing_logs = list(AIAuditLog.objects.filter(
             status__in=['PENDING', 'PROCESSING'],
-        ).order_by('created_at')
+        ).order_by('created_at'))
 
         def audit_summary(log):
             metadata = log.source_metadata or {}
@@ -347,6 +433,8 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'source_type': log.source_type,
                 'source_id': log.source_id,
                 'context_label': log.context_label,
+                'status': log.status,
+                'error': log.error_message,
                 'created_at': log.created_at,
                 'inference_state': metadata.get('inference_state'),
                 'inference_started_at': metadata.get('inference_started_at'),
@@ -448,6 +536,102 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         documents_by_deal = {}
         for document in DealDocument.objects.filter(deal_id__in=deals_by_id).order_by('created_at'):
             documents_by_deal.setdefault(str(document.deal_id), []).append(document)
+        all_document_ids = [
+            log.source_id for log in processing_logs
+            if log.source_type == 'document_evidence_segment' and log.source_id
+        ]
+        queue_documents_by_id = {
+            str(document.id): document
+            for document in DealDocument.objects.filter(id__in=all_document_ids).select_related('deal')
+        }
+
+        # Non-VDR work is grouped into user-facing workflow umbrellas. Email
+        # ingestion owns every active artifact segment for its matched deal,
+        # including a superseded delivery that may have survived a deploy.
+        task_groups = []
+        grouped_audit_ids = set()
+        email_parents = [log for log in processing_logs if log.source_type == 'email_ingestion']
+        non_vdr_segments = [
+            log for log in processing_logs
+            if log.source_type == 'document_evidence_segment'
+            and not (log.source_metadata or {}).get('vdr_parent_audit_id')
+        ]
+        for parent in email_parents:
+            metadata = parent.source_metadata or {}
+            deal_id = str((metadata.get('match') or {}).get('deal_id') or '')
+            children = []
+            delivery_ids = set()
+            for child in non_vdr_segments:
+                document = queue_documents_by_id.get(str(child.source_id or ''))
+                same_deal = bool(deal_id and document and str(document.deal_id) == deal_id)
+                same_delivery = bool(parent.celery_task_id and child.celery_task_id == parent.celery_task_id)
+                if not same_deal and not same_delivery:
+                    continue
+                grouped_audit_ids.add(str(child.id))
+                if child.celery_task_id:
+                    delivery_ids.add(str(child.celery_task_id))
+                summary = audit_summary(child)
+                summary.update({
+                    'title': child.context_label or (document.title if document else 'Document segment'),
+                    'deal_id': str(document.deal_id) if document else deal_id or None,
+                    'deal_title': document.deal.title if document else None,
+                    # A segment on the parent's current delivery is one step of
+                    # that task. An older delivery is independently revocable.
+                    'can_cancel': bool(
+                        child.celery_task_id
+                        and str(child.celery_task_id) != str(parent.celery_task_id or '')
+                    ),
+                    'is_superseded_delivery': bool(
+                        child.celery_task_id
+                        and parent.celery_task_id
+                        and str(child.celery_task_id) != str(parent.celery_task_id)
+                    ),
+                })
+                children.append(summary)
+            grouped_audit_ids.add(str(parent.id))
+            deal = deals_by_id.get(deal_id)
+            child_deal_title = next((item.get('deal_title') for item in children if item.get('deal_title')), None)
+            task_groups.append({
+                'id': str(parent.id), 'audit_log_id': str(parent.id),
+                'celery_task_id': parent.celery_task_id,
+                'kind': 'email_ingestion',
+                'title': parent.context_label or 'Email document analysis',
+                'deal_id': deal_id or None,
+                'deal_title': deal.title if deal else child_deal_title,
+                'status': parent.status, 'created_at': parent.created_at,
+                'can_cancel': True, 'children': children,
+                'has_delivery_conflict': len(delivery_ids) > 1,
+                'delivery_count': len(delivery_ids),
+                'stages': metadata.get('stages') or {},
+            })
+
+        vdr_parent_id_set = {str(parent.id) for parent in active_parents}
+        for log in processing_logs:
+            metadata = log.source_metadata or {}
+            if str(log.id) in grouped_audit_ids or str(log.id) in vdr_parent_id_set:
+                continue
+            if metadata.get('vdr_parent_audit_id'):
+                continue
+            document = queue_documents_by_id.get(str(log.source_id or ''))
+            deal_id = str(document.deal_id) if document else (
+                str(log.source_id) if log.source_type in {
+                    'deal_chat', 'deal_full_synthesis', 'vdr_indexing',
+                    'competitor_research', 'company_news', 'public_news_research',
+                } else ''
+            )
+            deal = deals_by_id.get(deal_id) or (document.deal if document else None)
+            task_groups.append({
+                'id': str(log.id), 'audit_log_id': str(log.id),
+                'celery_task_id': log.celery_task_id,
+                'kind': log.source_type,
+                'title': log.context_label or log.source_type.replace('_', ' ').title(),
+                'deal_id': deal_id or None,
+                'deal_title': deal.title if deal else None,
+                'status': log.status, 'created_at': log.created_at,
+                'can_cancel': True, 'children': [],
+                'has_delivery_conflict': False, 'delivery_count': 1 if log.celery_task_id else 0,
+                'stages': {},
+            })
         segments_by_parent = {}
         if parent_ids:
             segment_logs = AIAuditLog.objects.filter(
@@ -687,6 +871,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             },
             'redis': redis_state,
             'vdr_runs': vdr_runs,
+            'task_groups': task_groups,
             'inference': {
                 'slots': slots,
                 'lease_owner': lease_owner,

@@ -541,6 +541,9 @@ def reconcile() -> dict:
         metadata = candidate.source_metadata or {}
         current_worker = cache.get("vdr:presence:worker:current")
         current_worker_id = current_worker.get("instance_id") if isinstance(current_worker, dict) else None
+        current_worker_started_at = (
+            float(current_worker.get("started_at") or 0) if isinstance(current_worker, dict) else 0
+        )
         owner_worker_id = metadata.get("worker_instance_id")
         heartbeat_at = metadata.get("heartbeat_at")
         try:
@@ -556,6 +559,11 @@ def reconcile() -> dict:
             and owner_worker_id
             and current_worker_id
             and owner_worker_id != current_worker_id
+            and current_worker_started_at
+            and time.time() - current_worker_started_at
+            >= int(getattr(settings, "VDR_DEPLOYMENT_HANDOFF_SECONDS", 90))
+            and inspection_available
+            and str(metadata.get("current_task_id") or "") not in observed_task_ids
         )
         missing_after_grace = (
             inspection_available

@@ -273,7 +273,7 @@ class DurableVdrQueueTests(TestCase):
     @patch("config.celery.app.control.inspect")
     @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
     @patch("deals.services.vdr_queue.cache.get")
-    def test_reconcile_immediately_recovers_a_delivery_owned_by_replaced_deploy(
+    def test_reconcile_recovers_replaced_delivery_after_handoff_window(
         self, cache_get, snapshot, inspect, kick,
     ):
         _, audit = self.make_job(files=("a",))
@@ -288,7 +288,10 @@ class DurableVdrQueueTests(TestCase):
         audit.status = "PROCESSING"
         audit.source_metadata = metadata
         audit.save()
-        cache_get.return_value = {"instance_id": "new-deploy"}
+        cache_get.return_value = {
+            "instance_id": "new-deploy",
+            "started_at": timezone.now().timestamp() - 91,
+        }
         snapshot.return_value = {"messages": [], "unacked": {"messages": []}}
         inspect.return_value.active.return_value = {}
         inspect.return_value.reserved.return_value = {}
@@ -301,6 +304,36 @@ class DurableVdrQueueTests(TestCase):
         self.assertEqual(audit.source_metadata["recovery_count"], 2)
         self.assertEqual(audit.source_metadata["deployment_recovery_count"], 1)
         self.assertIsNone(audit.source_metadata["worker_instance_id"])
+
+    @patch("deals.services.vdr_queue.kick")
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    @patch("deals.services.vdr_queue.cache.get")
+    def test_reconcile_does_not_overlap_a_draining_worker(
+        self, cache_get, snapshot, inspect, kick,
+    ):
+        _, audit = self.make_job(files=("a",))
+        metadata = dict(audit.source_metadata)
+        metadata.update({
+            "queue_state": "active", "current_task_id": "old-task",
+            "current_unit_type": "document", "current_unit_key": "a",
+            "worker_instance_id": "old-deploy", "heartbeat_at": timezone.now().isoformat(),
+        })
+        audit.status = "PROCESSING"
+        audit.source_metadata = metadata
+        audit.save()
+        cache_get.return_value = {
+            "instance_id": "new-deploy", "started_at": timezone.now().timestamp(),
+        }
+        snapshot.return_value = {"messages": [], "unacked": {"messages": []}}
+        inspect.return_value.active.return_value = {}
+        inspect.return_value.reserved.return_value = {}
+
+        result = vdr_queue.reconcile()
+
+        audit.refresh_from_db()
+        self.assertEqual(result["recovered"], 0)
+        self.assertEqual(audit.source_metadata["queue_state"], "active")
 
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
     @patch("deals.tasks.process_single_document_async.apply_async")

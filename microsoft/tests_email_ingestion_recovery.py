@@ -53,7 +53,10 @@ class EmailRecoveryTests(TestCase):
             system_prompt='test', user_prompt='test', status='PROCESSING',
             celery_task_id='old-task',
         )
-        cache_get.return_value = {'instance_id': 'new-deploy', 'started_at': timezone.now().timestamp()}
+        cache_get.return_value = {
+            'instance_id': 'new-deploy',
+            'started_at': timezone.now().timestamp() - 91,
+        }
 
         with patch.object(Ingestion, 'dispatch') as dispatch:
             recovered = Ingestion.reconcile()
@@ -66,6 +69,28 @@ class EmailRecoveryTests(TestCase):
         self.assertEqual(claimed.source['_deployment_recovery_count'], 1)
         self.assertEqual(segment.status, 'FAILED')
         dispatch.assert_called_once_with(claimed.id)
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, '_observed_task_ids', return_value=set())
+    @patch('microsoft.services.email_ingestion.cache.get')
+    @patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'old-deploy'})
+    def test_reconcile_waits_for_deployment_handoff_before_recovery(self, cache_get, _observed):
+        run = Evidence.snapshot(self.email)
+        Ingestion.ensure_audit_log(run)
+        claimed = Ingestion.claim(run.id)
+        cache_get.return_value = {
+            'instance_id': 'new-deploy',
+            'started_at': timezone.now().timestamp(),
+        }
+
+        with patch.object(Ingestion, 'dispatch') as dispatch:
+            recovered = Ingestion.reconcile()
+
+        claimed.refresh_from_db()
+        self.assertEqual(recovered, 0)
+        self.assertEqual(claimed.status, 'running')
+        self.assertIsNotNone(claimed.lease_until)
+        dispatch.assert_not_called()
 
     @patch.object(Ingestion, 'index_outputs', return_value=True)
     def test_expired_lease_resumes_and_new_version_still_processes(self, index):
