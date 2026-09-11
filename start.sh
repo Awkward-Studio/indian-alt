@@ -8,8 +8,10 @@ echo "Python: $(python --version)"
 echo "Working directory: $(pwd)"
 RUN_AS_WORKER_NORMALIZED=$(printf '%s' "${RUN_AS_WORKER:-false}" | tr '[:upper:]' '[:lower:]')
 RUN_AS_COORDINATOR_NORMALIZED=$(printf '%s' "${RUN_AS_COORDINATOR:-false}" | tr '[:upper:]' '[:lower:]')
+RUN_VDR_COORDINATOR_NORMALIZED=$(printf '%s' "${RUN_VDR_COORDINATOR:-false}" | tr '[:upper:]' '[:lower:]')
 echo "Run as worker: ${RUN_AS_WORKER_NORMALIZED}"
 echo "Run as coordinator: ${RUN_AS_COORDINATOR_NORMALIZED}"
+echo "Run embedded VDR coordinator: ${RUN_VDR_COORDINATOR_NORMALIZED}"
 
 # Check database connection
 if [ -n "$DATABASE_URL" ]; then
@@ -46,8 +48,12 @@ if [ "$RUN_AS_COORDINATOR_NORMALIZED" = "true" ]; then
 elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
-    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,vdr_work,low_priority,default}"
+    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,vdr_control,vdr_work,low_priority,default}"
     CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
+    CELERY_BEAT_ARGS=()
+    if [ "$RUN_VDR_COORDINATOR_NORMALIZED" = "true" ]; then
+        CELERY_BEAT_ARGS+=(--beat)
+    fi
 
     if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 32 ] 2>/dev/null; then
         echo "Capping thread-pool concurrency from ${CELERY_CONCURRENCY_VALUE} to 32 for memory safety."
@@ -64,12 +70,14 @@ elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     echo "Concurrency: ${CELERY_CONCURRENCY_VALUE}"
     echo "Queues: ${CELERY_QUEUES_VALUE}"
     echo "Prefetch multiplier: ${CELERY_PREFETCH_MULTIPLIER_VALUE}"
+    echo "Embedded beat: ${RUN_VDR_COORDINATOR_NORMALIZED}"
     exec celery -A config worker \
         --loglevel="${CELERY_LOGLEVEL:-info}" \
         --pool="${CELERY_POOL_VALUE}" \
         -Q "${CELERY_QUEUES_VALUE}" \
         --prefetch-multiplier="${CELERY_PREFETCH_MULTIPLIER_VALUE}" \
-        --concurrency="${CELERY_CONCURRENCY_VALUE}"
+        --concurrency="${CELERY_CONCURRENCY_VALUE}" \
+        "${CELERY_BEAT_ARGS[@]}"
 else
     echo ""
     echo "=== CREATING/UPDATING SUPERUSER ==="
