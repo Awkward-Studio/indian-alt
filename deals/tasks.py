@@ -1273,6 +1273,16 @@ def process_single_document_async(
             exclude_audit_log_id=str(audit_log_id or ""),
         )
 
+    def durable_delivery_superseded() -> bool:
+        if queue_generation is None:
+            return False
+        from deals.services.vdr_queue import delivery_ownership_matches
+
+        return not delivery_ownership_matches(
+            str(audit_log_id), task_id=str(self.request.id), generation=queue_generation,
+            unit_key=str(queue_unit_key or file_id),
+        )
+
     try:
         _update_vdr_document_queue(
             audit_log_id,
@@ -1504,6 +1514,8 @@ def process_single_document_async(
         
     except DocumentArtifactCancelled as e:
         logger.info("Cancelled artifact processing for %s: %s", file_name, e)
+        if durable_delivery_superseded():
+            return {"status": "stale", "file": file_name, "reason": "Superseded VDR delivery."}
         _update_vdr_document_queue(audit_log_id, file_info, status="cancelled", error=str(e))
         return {"status": "cancelled", "file": file_name, "reason": str(e)}
     except DocumentArtifactYielded as e:
@@ -1522,6 +1534,8 @@ def process_single_document_async(
         )
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
+        if durable_delivery_superseded():
+            return {"status": "stale", "file": file_name, "reason": "Superseded VDR delivery."}
         if failure_retries < 3:
             _update_vdr_document_queue(audit_log_id, file_info, status="retrying", error=str(e))
             retry_kwargs = {

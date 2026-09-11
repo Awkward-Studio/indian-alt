@@ -334,7 +334,7 @@ def dispatch() -> dict:
             _unlock_fallback()
 
 
-def delivery_is_current(audit_log_id: str, *, task_id: str, generation: int, unit_key: str) -> bool:
+def delivery_ownership_matches(audit_log_id: str, *, task_id: str, generation: int, unit_key: str) -> bool:
     from ai_orchestrator.models import AIAuditLog
     row = AIAuditLog.objects.filter(id=audit_log_id, status="PROCESSING").values("source_metadata").first()
     metadata = (row or {}).get("source_metadata") or {}
@@ -343,8 +343,18 @@ def delivery_is_current(audit_log_id: str, *, task_id: str, generation: int, uni
         and str(metadata.get("current_task_id") or "") == str(task_id)
         and int(metadata.get("dispatch_generation") or 0) == int(generation)
         and str(metadata.get("current_unit_key") or "") == str(unit_key)
-        and not metadata.get("cancel_requested")
     )
+
+
+def delivery_is_current(audit_log_id: str, *, task_id: str, generation: int, unit_key: str) -> bool:
+    from ai_orchestrator.models import AIAuditLog
+
+    if not delivery_ownership_matches(
+        audit_log_id, task_id=task_id, generation=generation, unit_key=unit_key,
+    ):
+        return False
+    metadata = AIAuditLog.objects.filter(id=audit_log_id).values_list("source_metadata", flat=True).first() or {}
+    return not metadata.get("cancel_requested")
 
 
 def heartbeat(audit_log_id: str, *, task_id: str, generation: int, unit_key: str, worker_id: str | None = None) -> bool:

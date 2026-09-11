@@ -321,6 +321,25 @@ class DurableVdrQueueTests(TestCase):
         self.assertEqual(vdr_queue.queue_position(str(second.id)), 1)
         self.assertEqual(vdr_queue.queue_position(str(first.id)), 2)
 
+    def test_superseded_delivery_does_not_match_recovered_ownership(self):
+        _, audit = self.make_job(files=("a",))
+        audit.status = "PROCESSING"
+        audit.source_metadata = {
+            **audit.source_metadata,
+            "queue_state": "active",
+            "dispatch_generation": 4,
+            "current_task_id": "replacement-task",
+            "current_unit_key": "a",
+        }
+        audit.save()
+
+        self.assertFalse(vdr_queue.delivery_ownership_matches(
+            str(audit.id), task_id="old-task", generation=3, unit_key="a",
+        ))
+        self.assertTrue(vdr_queue.delivery_ownership_matches(
+            str(audit.id), task_id="replacement-task", generation=4, unit_key="a",
+        ))
+
     @patch("deals.tasks.coordinate_vdr_queue.apply_async")
     def test_kick_coalesces_duplicate_coordinator_wakeups(self, apply_async):
         from django.core.cache import cache
