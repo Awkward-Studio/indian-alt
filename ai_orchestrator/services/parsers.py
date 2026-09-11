@@ -22,6 +22,7 @@ class ResponseParserService:
 
         # 1. Basic cleanup
         json_str = json_str.strip()
+        json_str = ResponseParserService.escape_invalid_backslashes(json_str)
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
         json_str = json_str.replace('\t', '    ')
 
@@ -61,6 +62,49 @@ class ResponseParserService:
             json_str += stack.pop()
             
         return json_str
+
+    @staticmethod
+    def escape_invalid_backslashes(json_str: str) -> str:
+        """Normalize illegal string characters without masking truncation."""
+        if not json_str:
+            return ""
+        valid_escapes = set('"\\/bfnrtu')
+        control_escapes = {
+            8: "\\b",
+            9: "\\t",
+            10: "\\n",
+            12: "\\f",
+            13: "\\r",
+        }
+        output: list[str] = []
+        in_string = False
+        index = 0
+        while index < len(json_str):
+            char = json_str[index]
+            if in_string and ord(char) < 0x20:
+                output.append(control_escapes.get(ord(char), f"\\u{ord(char):04x}"))
+                index += 1
+                continue
+            if char == '"':
+                slash_count = 0
+                cursor = len(output) - 1
+                while cursor >= 0 and output[cursor] == "\\":
+                    slash_count += 1
+                    cursor -= 1
+                if slash_count % 2 == 0:
+                    in_string = not in_string
+                output.append(char)
+                index += 1
+                continue
+            if char == "\\" and in_string:
+                next_char = json_str[index + 1] if index + 1 < len(json_str) else ""
+                if next_char not in valid_escapes:
+                    output.extend(["\\", "\\"])
+                    index += 1
+                    continue
+            output.append(char)
+            index += 1
+        return "".join(output)
 
     @staticmethod
     def extract_json(text: str) -> str:

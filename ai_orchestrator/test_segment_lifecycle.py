@@ -294,6 +294,28 @@ class SegmentPersistenceTests(TestCase):
         self.audit.refresh_from_db()
         self.assertEqual(self.audit.status, "FAILED")
 
+    def test_literal_backslash_in_complete_json_is_accepted(self):
+        self.service.current_provider.execute_standard.return_value["response"] = (
+            '{"document_summary":"Path C:\\Plans\\FY26"}'
+        )
+
+        result = self.run_segment()
+
+        self.assertNotIn("error", result)
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "COMPLETED")
+
+    def test_raw_control_character_in_complete_json_is_escaped(self):
+        self.service.current_provider.execute_standard.return_value["response"] = (
+            '{"document_summary":"Line one' + chr(10) + 'Line two"}'
+        )
+
+        result = self.run_segment()
+
+        self.assertNotIn("error", result)
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "COMPLETED")
+
     def test_structured_quality_flag_does_not_crash_segment_validation(self):
         self.service.current_provider.execute_standard.return_value["response"] = json.dumps({
             "document_summary": "Complete evidence",

@@ -601,7 +601,10 @@ class AIProcessorService:
                 start = candidate.find("{")
                 if start < 0:
                     raise ValueError("Segment response contains no JSON object.")
-                parsed_json, _ = json.JSONDecoder().raw_decode(candidate[start:])
+                # Normalize illegal string characters while keeping raw_decode
+                # strict for truncation and missing braces.
+                candidate_json = ResponseParserService.escape_invalid_backslashes(candidate[start:])
+                parsed_json, _ = json.JSONDecoder().raw_decode(candidate_json)
                 success = isinstance(parsed_json, dict)
             elif response_mode == "json" and not is_extraction:
                 _, _, clean_resp, clean_think = ResponseParserService.parse_standard_response(
