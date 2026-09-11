@@ -280,6 +280,9 @@ def dispatch() -> dict:
                 "current_unit_type": unit_type,
                 "current_unit_key": unit_key,
                 "heartbeat_at": now,
+                # The delivery does not belong to a worker instance until the
+                # task starts and sends its first heartbeat.
+                "worker_instance_id": None,
             })
             audit.status = "PROCESSING"
             audit.celery_task_id = task_id
@@ -524,7 +527,12 @@ def reconcile() -> dict:
             heartbeat_time = timezone.make_aware(heartbeat_time)
         age = now - heartbeat_time
         hard_stale = age >= timedelta(seconds=int(getattr(settings, "VDR_HARD_STALE_SECONDS", 1800)))
-        worker_replaced = bool(owner_worker_id and owner_worker_id != current_worker_id)
+        worker_replaced = bool(
+            metadata.get("queue_state") == "active"
+            and owner_worker_id
+            and current_worker_id
+            and owner_worker_id != current_worker_id
+        )
         missing_after_grace = (
             inspection_available
             and age >= timedelta(seconds=int(getattr(settings, "VDR_STALE_SECONDS", 300)))
@@ -535,7 +543,7 @@ def reconcile() -> dict:
         with transaction.atomic():
             audit = AIAuditLog.objects.select_for_update().get(id=candidate.id)
             metadata = dict(audit.source_metadata or {})
-            recoveries = int(metadata.get("recovery_count") or 0) + 1
+            recoveries = int(metadata.get("recovery_count") or 0) + (0 if worker_replaced else 1)
             if recoveries > int(metadata.get("max_recoveries") or 3):
                 audit.status = "FAILED"
                 audit.is_success = False
@@ -554,9 +562,10 @@ def reconcile() -> dict:
                         break
                 metadata.update({
                     "queue_state": "recovering", "recovery_count": recoveries,
+                    "deployment_recovery_count": int(metadata.get("deployment_recovery_count") or 0) + (1 if worker_replaced else 0),
                     "dispatch_generation": int(metadata.get("dispatch_generation") or 0) + 1,
                     "current_task_id": None, "current_unit_type": None, "current_unit_key": None,
-                    "heartbeat_at": now.isoformat(),
+                    "heartbeat_at": now.isoformat(), "worker_instance_id": None,
                 })
                 recovered += 1
             audit.source_metadata = metadata
