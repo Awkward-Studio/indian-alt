@@ -227,7 +227,7 @@ class DocumentArtifactService:
             # blocking interactive work or repeating model inference.
             if yield_check and yield_check():
                 raise DocumentArtifactYielded(
-                    "Interactive AI work is waiting; yielding before the next VDR segment."
+                    "Higher-priority AI work is waiting; yielding before the next VDR segment."
                 )
 
             segment_context = {

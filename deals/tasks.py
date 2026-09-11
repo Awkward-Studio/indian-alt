@@ -1265,10 +1265,13 @@ def process_single_document_async(
             unit_key=str(queue_unit_key or file_id),
         )
 
-    def interactive_work_is_waiting() -> bool:
-        from deals.services.vdr_queue import interactive_work_waiting
+    def higher_priority_work_is_waiting() -> bool:
+        from deals.services.vdr_queue import higher_priority_work_waiting
 
-        return interactive_work_waiting(exclude_task_id=str(self.request.id))
+        return higher_priority_work_waiting(
+            exclude_task_id=str(self.request.id),
+            exclude_audit_log_id=str(audit_log_id or ""),
+        )
 
     try:
         _update_vdr_document_queue(
@@ -1372,9 +1375,9 @@ def process_single_document_async(
 
         if delivery_cancelled():
             return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
-        if interactive_work_is_waiting():
+        if higher_priority_work_is_waiting():
             raise DocumentArtifactYielded(
-                "Interactive AI work is waiting; yielding before VDR extraction."
+                "Higher-priority AI work is waiting; yielding before VDR extraction."
             )
 
         # Download content
@@ -1450,7 +1453,7 @@ def process_single_document_async(
                     "render_metadata": extraction.get("render_metadata") or {},
                 },
                 cancel_check=delivery_cancelled,
-                yield_check=interactive_work_is_waiting,
+                yield_check=higher_priority_work_is_waiting,
                 force_fresh=force_fresh,
             )
             if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():
@@ -1504,8 +1507,10 @@ def process_single_document_async(
         _update_vdr_document_queue(audit_log_id, file_info, status="cancelled", error=str(e))
         return {"status": "cancelled", "file": file_name, "reason": str(e)}
     except DocumentArtifactYielded as e:
-        logger.info("Yielding VDR document %s for interactive AI work", file_name)
+        logger.info("Yielding VDR document %s for higher-priority AI work", file_name)
         _update_vdr_document_queue(audit_log_id, file_info, status="queued")
+        if queue_generation is not None:
+            return {"status": "yielded", "file": file_name, "reason": str(e)}
         retry_queue = _document_retry_queue(
             self.request,
             durable_delivery=queue_generation is not None,

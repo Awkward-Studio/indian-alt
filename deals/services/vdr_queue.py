@@ -1,4 +1,4 @@
-"""Database-authoritative FIFO coordination for VDR indexing and reports."""
+"""Database-authoritative priority coordination for VDR indexing and reports."""
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +16,7 @@ from django.utils import timezone
 QUEUE_VERSION = 2
 ACTIVE_STATUSES = ("PENDING", "PROCESSING")
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
+RUNNABLE_STATES = ("queued", "waiting_next_unit", "recovering")
 _sqlite_lock = threading.Lock()
 
 
@@ -71,13 +72,23 @@ def queue_position(audit_log_id: str) -> int | None:
     metadata = target["source_metadata"] or {}
     if metadata.get("queue_version") != QUEUE_VERSION or metadata.get("queue_state") != "queued":
         return None
-    return 1 + AIAuditLog.objects.filter(
+    active = AIAuditLog.objects.filter(
         status__in=ACTIVE_STATUSES,
-        created_at__lt=target["created_at"],
         source_metadata__queue_version=QUEUE_VERSION,
         source_metadata__queue_scope="vdr",
-        source_metadata__queue_state="queued",
-    ).count()
+    )
+    if metadata.get("queue_kind") == "report":
+        ahead = active.filter(
+            created_at__lt=target["created_at"],
+            source_metadata__queue_kind="report",
+        ).count()
+    else:
+        ahead = active.filter(source_metadata__queue_kind="report").count()
+        ahead += active.filter(
+            created_at__lt=target["created_at"],
+            source_metadata__queue_kind="indexing",
+        ).count()
+    return 1 + ahead
 
 
 def kick(*, countdown: int = 0) -> bool:
@@ -179,8 +190,39 @@ def interactive_work_waiting(*, exclude_task_id: str | None = None) -> bool:
     return _high_priority_busy(exclude_task_id=exclude_task_id)
 
 
+def report_work_waiting(*, exclude_audit_log_id: str | None = None) -> bool:
+    """Return whether a durable report should run before another document segment."""
+    from ai_orchestrator.models import AIAuditLog
+
+    reports = AIAuditLog.objects.filter(
+        status__in=ACTIVE_STATUSES,
+        source_metadata__queue_version=QUEUE_VERSION,
+        source_metadata__queue_scope="vdr",
+        source_metadata__queue_kind="report",
+        source_metadata__queue_state__in=(
+            *RUNNABLE_STATES,
+            "dispatching",
+            "active",
+        ),
+    )
+    if exclude_audit_log_id:
+        reports = reports.exclude(id=exclude_audit_log_id)
+    return reports.exists()
+
+
+def higher_priority_work_waiting(
+    *,
+    exclude_task_id: str | None = None,
+    exclude_audit_log_id: str | None = None,
+) -> bool:
+    """Check work that should run before the next VDR document segment."""
+    return _high_priority_busy(exclude_task_id=exclude_task_id) or report_work_waiting(
+        exclude_audit_log_id=exclude_audit_log_id,
+    )
+
+
 def dispatch() -> dict:
-    """Dispatch at most one unit from the oldest eligible durable VDR job."""
+    """Dispatch one unit, preferring reports over document indexing."""
     from ai_orchestrator.models import AIAuditLog
     from deals.tasks import process_single_document_async, process_vdr_report_section, vdr_unit_completed
 
@@ -190,23 +232,33 @@ def dispatch() -> dict:
             if not _lock_coordinator():
                 return {"status": "locked"}
             fallback_locked = connection.vendor != "postgresql"
-            active = AIAuditLog.objects.select_for_update().filter(
+            in_flight = AIAuditLog.objects.select_for_update().filter(
                 status="PROCESSING",
                 source_metadata__queue_version=QUEUE_VERSION,
                 source_metadata__queue_scope="vdr",
-                source_metadata__queue_state__in=["dispatching", "active", "waiting_next_unit", "recovering"],
+                source_metadata__queue_state__in=["dispatching", "active"],
             ).order_by("created_at").first()
-            audit = active or AIAuditLog.objects.select_for_update().filter(
-                status="PENDING",
+            if in_flight:
+                metadata = dict(in_flight.source_metadata or {})
+                if metadata.get("current_task_id"):
+                    return {"status": "active", "audit_log_id": str(in_flight.id)}
+
+            runnable = AIAuditLog.objects.select_for_update().filter(
+                status__in=ACTIVE_STATUSES,
                 source_metadata__queue_version=QUEUE_VERSION,
                 source_metadata__queue_scope="vdr",
-                source_metadata__queue_state="queued",
+                source_metadata__queue_state__in=RUNNABLE_STATES,
+            )
+            audit = runnable.filter(
+                source_metadata__queue_kind="report",
             ).order_by("created_at").first()
+            if not audit:
+                audit = runnable.filter(
+                    source_metadata__queue_kind="indexing",
+                ).order_by("created_at").first()
             if not audit:
                 return {"status": "idle"}
             metadata = dict(audit.source_metadata or {})
-            if metadata.get("queue_state") in {"dispatching", "active"} and metadata.get("current_task_id"):
-                return {"status": "active", "audit_log_id": str(audit.id)}
             if _high_priority_busy():
                 transaction.on_commit(lambda: kick(countdown=5))
                 return {"status": "deferred_for_interactive_work"}
@@ -336,11 +388,19 @@ def unit_finished(audit_log_id: str, *, task_id: str, generation: int, unit_key:
             terminal = "completed"
         for item in metadata.get(manifest_key) or []:
             if str(item.get(key_name) or "") == str(unit_key):
-                item.update({
-                    "status": terminal,
-                    "completed_at": timezone.now().isoformat(),
-                    "error": result.get("error") or result.get("reason"),
-                })
+                if terminal == "yielded":
+                    item.update({
+                        "status": "queued",
+                        "celery_task_id": None,
+                        "yielded_at": timezone.now().isoformat(),
+                        "error": result.get("error") or result.get("reason"),
+                    })
+                else:
+                    item.update({
+                        "status": terminal,
+                        "completed_at": timezone.now().isoformat(),
+                        "error": result.get("error") or result.get("reason"),
+                    })
                 if result.get("document_id"):
                     item["document_id"] = result["document_id"]
                 if result.get("section"):

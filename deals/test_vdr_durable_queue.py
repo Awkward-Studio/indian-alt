@@ -152,6 +152,22 @@ class DurableVdrQueueTests(TestCase):
         )
         return deal, audit
 
+    def make_report_job(self, title="Report", sections=("Executive Summary",)):
+        deal = Deal.objects.create(title=title)
+        audit = AIAuditLog.objects.create(
+            source_type="deal_full_synthesis", source_id=str(deal.id), context_label=title,
+            model_used="model", system_prompt="queued", user_prompt="queued",
+            status="PENDING", is_success=False,
+            source_metadata=vdr_queue.initial_metadata(
+                kind="report",
+                manifest=[
+                    {"position": position, "title": section, "status": "queued"}
+                    for position, section in enumerate(sections, start=1)
+                ],
+            ),
+        )
+        return deal, audit
+
     @patch("deals.tasks.coordinate_vdr_queue.apply_async")
     def test_kick_publishes_coordinator_task(self, apply_async):
         self.assertTrue(vdr_queue.kick(countdown=3))
@@ -198,6 +214,36 @@ class DurableVdrQueueTests(TestCase):
         kick.assert_called_once()
 
     @patch("deals.services.vdr_queue.kick")
+    def test_yielded_document_releases_ownership_and_remains_queued(self, kick):
+        _, audit = self.make_job(files=("a",))
+        metadata = dict(audit.source_metadata)
+        metadata.update({
+            "queue_state": "active", "dispatch_generation": 2,
+            "current_task_id": "document-task", "current_unit_type": "document",
+            "current_unit_key": "a",
+        })
+        metadata["document_queue"][0].update({
+            "status": "processing", "celery_task_id": "document-task",
+        })
+        audit.status = "PROCESSING"
+        audit.source_metadata = metadata
+        audit.save()
+
+        self.assertTrue(vdr_queue.unit_finished(
+            str(audit.id), task_id="document-task", generation=2, unit_key="a",
+            result={"status": "yielded", "reason": "Report work is waiting."},
+        ))
+
+        audit.refresh_from_db()
+        item = audit.source_metadata["document_queue"][0]
+        self.assertEqual(item["status"], "queued")
+        self.assertIsNone(item["celery_task_id"])
+        self.assertNotIn("completed_at", item)
+        self.assertEqual(audit.source_metadata["queue_state"], "waiting_next_unit")
+        self.assertIsNone(audit.source_metadata["current_task_id"])
+        kick.assert_called_once()
+
+    @patch("deals.services.vdr_queue.kick")
     @patch("config.celery.app.control.inspect")
     @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
     def test_reconcile_supersedes_missing_stale_delivery(self, snapshot, inspect, kick):
@@ -223,33 +269,69 @@ class DurableVdrQueueTests(TestCase):
         self.assertEqual(audit.source_metadata["document_queue"][0]["status"], "recovering")
         self.assertIsNone(audit.source_metadata["current_task_id"])
 
-    def test_queue_position_is_fifo_across_indexing_and_report_jobs(self):
+    def test_queue_position_puts_reports_before_indexing_jobs(self):
         _, first = self.make_job("Indexing", files=("a",))
-        report_deal = Deal.objects.create(title="Report")
-        second = AIAuditLog.objects.create(
-            source_type="deal_full_synthesis", source_id=str(report_deal.id), context_label="Report",
-            model_used="model", system_prompt="queued", user_prompt="queued",
-            status="PENDING", is_success=False,
-            source_metadata=vdr_queue.initial_metadata(
-                kind="report", manifest=[{"title": "Executive Summary", "status": "queued"}],
-            ),
-        )
-        self.assertEqual(vdr_queue.queue_position(str(first.id)), 1)
-        self.assertEqual(vdr_queue.queue_position(str(second.id)), 2)
+        _, second = self.make_report_job()
+        self.assertEqual(vdr_queue.queue_position(str(second.id)), 1)
+        self.assertEqual(vdr_queue.queue_position(str(first.id)), 2)
+
+    @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
+    @patch("deals.tasks.process_vdr_report_section.apply_async")
+    def test_new_report_dispatches_before_waiting_indexing_job(self, apply_async, _busy):
+        _, indexing = self.make_job("Indexing", files=("a",))
+        indexing.status = "PROCESSING"
+        indexing.source_metadata = {
+            **indexing.source_metadata,
+            "queue_state": "waiting_next_unit",
+        }
+        indexing.save()
+        _, report = self.make_report_job()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = vdr_queue.dispatch()
+
+        report.refresh_from_db()
+        indexing.refresh_from_db()
+        self.assertEqual(result["audit_log_id"], str(report.id))
+        self.assertEqual(result["unit"], "Executive Summary")
+        self.assertEqual(report.source_metadata["queue_state"], "dispatching")
+        self.assertEqual(indexing.source_metadata["queue_state"], "waiting_next_unit")
+        apply_async.assert_called_once()
+
+    @patch("deals.tasks.process_vdr_report_section.apply_async")
+    def test_report_waits_for_current_document_segment_boundary(self, apply_async):
+        _, indexing = self.make_job("Indexing", files=("a",))
+        indexing.status = "PROCESSING"
+        indexing.source_metadata = {
+            **indexing.source_metadata,
+            "queue_state": "active",
+            "current_task_id": "document-task",
+            "current_unit_type": "document",
+            "current_unit_key": "a",
+        }
+        indexing.source_metadata["document_queue"][0].update({
+            "status": "processing", "celery_task_id": "document-task",
+        })
+        indexing.save()
+        self.make_report_job()
+
+        result = vdr_queue.dispatch()
+
+        self.assertEqual(result, {
+            "status": "active",
+            "audit_log_id": str(indexing.id),
+        })
+        apply_async.assert_not_called()
+
+    def test_document_boundary_detects_waiting_report(self):
+        _, report = self.make_report_job()
+        self.assertTrue(vdr_queue.report_work_waiting())
+        self.assertFalse(vdr_queue.report_work_waiting(exclude_audit_log_id=str(report.id)))
 
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
     @patch("deals.tasks.process_vdr_report_section.apply_async")
     def test_report_dispatches_one_section_on_the_same_lane(self, apply_async, _busy):
-        deal = Deal.objects.create(title="Report")
-        audit = AIAuditLog.objects.create(
-            source_type="deal_full_synthesis", source_id=str(deal.id), context_label="Report",
-            model_used="model", system_prompt="queued", user_prompt="queued",
-            status="PENDING", is_success=False,
-            source_metadata=vdr_queue.initial_metadata(kind="report", manifest=[
-                {"position": 1, "title": "First section", "status": "queued"},
-                {"position": 2, "title": "Second section", "status": "queued"},
-            ]),
-        )
+        _, audit = self.make_report_job(sections=("First section", "Second section"))
         with self.captureOnCommitCallbacks(execute=True):
             result = vdr_queue.dispatch()
         audit.refresh_from_db()
