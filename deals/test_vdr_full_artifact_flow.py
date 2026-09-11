@@ -199,14 +199,14 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertIn("INTERNAL-DOCUMENT-EVIDENCE-EXTRACTION", first_prompt)
         self.assertIn("Build a complete structured evidence artifact", first_prompt)
         self.assertEqual(first_metadata["max_input_tokens"], 14336)
-        self.assertEqual(first_metadata["max_tokens"], 45056)
+        self.assertEqual(first_metadata["max_tokens"], 32768)
         self.assertEqual(first_metadata["request_timeout"], 1800)
 
     def test_default_artifact_budget_leaves_room_for_complete_chat_envelope(self):
         from django.conf import settings
 
         provider_reserve = 4096
-        envelope_margin = 2048
+        envelope_margin = 12288
         self.assertLessEqual(
             settings.VDR_ARTIFACT_SEGMENT_INPUT_TOKENS
             + settings.VDR_ARTIFACT_SEGMENT_MAX_TOKENS

@@ -83,6 +83,23 @@ class ChatDocumentChunksTests(SimpleTestCase):
                 'options': {'max_tokens': 16384}, '_enforce_context_budget': True,
             }, stream=False)
 
+    @override_settings(CHAT_MODEL_CONTEXT_TOKENS=65536)
+    def test_spreadsheet_escaping_fits_with_document_output_budget(self):
+        provider = VLLMProviderService()
+        prompt = "\t\n" * 5000
+
+        with self.assertRaisesRegex(ValueError, 'safe model context budget'):
+            provider._build_chat_body({
+                'model': 'local', 'prompt': prompt,
+                'options': {'max_tokens': 45056}, '_enforce_context_budget': True,
+            }, stream=False)
+
+        body = provider._build_chat_body({
+            'model': 'local', 'prompt': prompt,
+            'options': {'max_tokens': 32768}, '_enforce_context_budget': True,
+        }, stream=False)
+        self.assertEqual(body['max_tokens'], 32768)
+
     def test_cache_reuses_only_identical_question_model_and_private_scope(self):
         from unittest.mock import patch
         values = {}

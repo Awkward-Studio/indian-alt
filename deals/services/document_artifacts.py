@@ -258,7 +258,7 @@ class DocumentArtifactService:
                         getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                     ),
                     "segment_output_token_budget": int(
-                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
+                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)
                     ),
                     "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
                     "artifact_segment_cache_key": cache_key,
@@ -270,7 +270,7 @@ class DocumentArtifactService:
                 "max_input_tokens": int(
                     getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                 ),
-                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)),
+                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)),
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
                 "serialize_inference": True,
@@ -368,7 +368,7 @@ class DocumentArtifactService:
                 getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
             ),
             "artifact_segment_output_token_budget": int(
-                getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 45_056)
+                getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)
             ),
             "artifact_segment_source_token_budget": int(
                 getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
