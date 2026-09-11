@@ -95,13 +95,7 @@ def process_manual_document(document_id):
         raise
 
 VDR_DOCUMENT_LIMIT = 50
-SUPPORTED_ANALYSIS_EXTENSIONS = {
-    ".pdf", ".png", ".jpg", ".jpeg",
-    ".docx", ".doc", ".docm", ".odt", ".rtf",
-    ".pptx", ".ppt", ".pptm", ".odp",
-    ".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".ods",
-    ".txt", ".msg",
-}
+SUPPORTED_ANALYSIS_EXTENSIONS = set(DocumentProcessorService.SUPPORTED_EXTENSIONS)
 
 
 def _is_supported_analysis_file(file_info: dict) -> bool:
@@ -301,6 +295,7 @@ def _extract_selected_files(drive_id: str | None, user_email: str, selected_file
             file_record["normalized_text"] = normalized_text
             file_record["quality_flags"] = extraction.get("quality_flags") or []
             file_record["render_metadata"] = extraction.get("render_metadata") or {}
+            file_record["extraction_manifest"] = extraction.get("structured_data") or {}
             passed_files.append(file_record)
             combined_text_parts.append(f"\n--- FILE: {name} ---\n{normalized_text}")
         except Exception as e:
@@ -480,6 +475,7 @@ def _prepare_document_update_from_extraction(extraction: dict, *, full: bool) ->
             TranscriptionStatus.COMPLETE if full and normalized_text else TranscriptionStatus.PARTIAL if normalized_text else TranscriptionStatus.FAILED
         ),
         "last_transcribed_at": timezone.now() if normalized_text else None,
+        "extraction_manifest": extraction.get("structured_data") or {},
     }
 
 
@@ -634,6 +630,7 @@ def _build_folder_doc_result(file_info: dict, extraction: dict) -> dict:
         "normalized_text": normalized_text,
         "quality_flags": extraction.get("quality_flags") or [],
         "render_metadata": extraction.get("render_metadata") or {},
+        "extraction_manifest": extraction.get("structured_data") or {},
     }
 
 
@@ -656,6 +653,7 @@ def _analysis_document_to_result(doc: FolderAnalysisDocument) -> dict:
         "normalized_text": (doc.normalized_text or "").strip(),
         "quality_flags": doc.quality_flags or [],
         "render_metadata": doc.render_metadata or {},
+        "extraction_manifest": doc.extraction_manifest or {},
         "document_artifact": artifact,
         "document_reasoning": doc.reasoning or artifact.get("reasoning") or "",
         "chunk_count": doc.chunk_count or 0,
@@ -690,6 +688,7 @@ def _persist_folder_analysis_document(
         "chunking_status": ChunkingStatus.NOT_CHUNKED,
         "quality_flags": extraction.get("quality_flags") or [],
         "render_metadata": extraction.get("render_metadata") or {},
+        "extraction_manifest": extraction.get("structured_data") or {},
         "error_message": extraction.get("error") if not normalized_text else None,
         "last_transcribed_at": timezone.now() if normalized_text else None,
     }
@@ -1421,6 +1420,7 @@ def process_single_document_async(
         doc.document_type = doc_type
         doc.extracted_text = extracted_text
         doc.normalized_text = normalized_text
+        doc.extraction_manifest = extraction.get("structured_data") or {}
         doc.is_indexed = False
         doc.is_ai_analyzed = False
         doc.initial_analysis_status = initial_analysis_status
@@ -3012,6 +3012,7 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
                             "table_json": artifact.get("tables_summary", []) if isinstance(artifact, dict) else [],
                             "key_metrics_json": artifact.get("metrics", []) if isinstance(artifact, dict) else [],
                             "reasoning": item.get("document_reasoning") or "",
+                            "extraction_manifest": item.get("extraction_manifest") or {},
                             "is_ai_analyzed": True,
                             "transcription_status": TranscriptionStatus.COMPLETE,
                         },

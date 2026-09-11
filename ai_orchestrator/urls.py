@@ -5,7 +5,8 @@ from .views import (
     UniversalChatDocumentView,
     AISkillsView, DealIndustrySkillsView, DealIndustrySkillAssignmentView,
     DealIndustrySkillRunView, AIConversationViewSet, VMControlView,
-    AIAuditLogViewSet, DealHelperView
+    AIAuditLogViewSet, DealHelperView, WebSocketTicketView,
+    DocumentCapabilitiesView,
 )
 
 router = DefaultRouter()
@@ -22,6 +23,8 @@ urlpatterns = [
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/', DealIndustrySkillAssignmentView.as_view(), name='deal-industry-skill-assignment'),
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/run/', DealIndustrySkillRunView.as_view(), name='deal-industry-skill-run'),
     path('vm/control/', VMControlView.as_view(), name='ai-vm-control'),
+    path('websocket-ticket/', WebSocketTicketView.as_view(), name='ai-websocket-ticket'),
+    path('document-capabilities/', DocumentCapabilitiesView.as_view(), name='ai-document-capabilities'),
     path('deal-chat/', DealChatView.as_view(), name='ai-deal-chat'),
     path('deal-helper/<str:action>/', DealHelperView.as_view(), name='ai-deal-helper'),
     path('universal-chat/', UniversalChatView.as_view(), name='ai-universal-chat'),

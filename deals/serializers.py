@@ -283,7 +283,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'in_latest_supplemental_analysis', 'latest_supplemental_version',
             'artifact_status', 'artifact_complete',
             'normalized_text', 'evidence_json', 'source_map_json', 'table_json',
-            'key_metrics_json', 'reasoning',
+            'key_metrics_json', 'reasoning', 'extraction_manifest',
             'extraction_mode', 'transcription_status', 'chunking_status', 'chunk_count',
             'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'

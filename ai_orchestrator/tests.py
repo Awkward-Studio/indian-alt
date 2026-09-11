@@ -1877,8 +1877,10 @@ class DocumentProcessorServiceTests(SimpleTestCase):
         _, kwargs = mock_post.call_args
         self.assertEqual(kwargs["timeout"], 123)
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
-        self.assertEqual(kwargs["json"]["filename"], "example.pdf")
-        self.assertEqual(kwargs["json"]["page_limit"], 5)
+        self.assertEqual(kwargs["data"]["filename"], "example.pdf")
+        self.assertEqual(kwargs["data"]["page_limit"], "5")
+        self.assertEqual(kwargs["files"]["file"][0], "example.pdf")
+        self.assertEqual(kwargs["files"]["file"][1], b"file-bytes")
 
     @override_settings(DOC_PROCESSOR_URL="http://docproc.internal")
     @patch.object(DocumentProcessorService, "_local_extract")

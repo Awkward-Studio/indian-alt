@@ -686,9 +686,7 @@ class FolderAnalysisService:
             
             # Extract structured intel (Same as bulk_sync_artifacts.py)
             clean_text = file.get('normalized_text') or file.get('extracted_text') or ""
-            doc_summary = normalized_json.get("document_summary", "No summary extracted.")
             metrics = normalized_json.get("metrics", [])
-            risks = normalized_json.get("risks", [])
             doc_type = normalized_json.get("document_type") or DocumentType.OTHER
 
             # Create the permanent DealDocument record
@@ -698,6 +696,7 @@ class FolderAnalysisService:
                 document_type=doc_type,
                 extracted_text=clean_text,
                 normalized_text=clean_text,
+                extraction_manifest=file.get('extraction_manifest') or {},
                 evidence_json=normalized_json,
                 source_map_json=normalized_json.get('source_map', {}),
                 table_json=normalized_json.get('tables_summary', []),
@@ -714,29 +713,10 @@ class FolderAnalysisService:
                 doc.onedrive_id = file.get('file_id')
                 doc.save(update_fields=['onedrive_id'])
 
-            # 5. PERFORM DEEP CHUNKING & EMBEDDING (Matches bulk_sync_artifacts sync_worker)
+            # Build retrieval units from the artifact and extraction manifest.
+            # Spreadsheet ranges stay intact and are not indexed twice.
             if clean_text:
-                chunk_count = embed_service.chunk_and_embed(
-                    text=clean_text,
-                    deal=deal,
-                    source_type='extracted_source', # Matches bulk loader for chat consistency
-                    source_id=f"{file_name}.json",
-                    metadata={
-                        'filename': file_name,
-                        'is_artifact': True,
-                        'metrics': metrics,
-                        'summary': doc_summary,
-                        'doc_type': doc_type,
-                        'risks': risks,
-                        'chunk_kind': 'normalized_text',
-                    },
-                    replace_existing=True,
-                )
-                if chunk_count > 0:
-                    doc.is_indexed = True
-                    doc.chunk_count = chunk_count
-                    doc.chunking_status = ChunkingStatus.CHUNKED
-                    doc.save(update_fields=['is_indexed', 'chunk_count', 'chunking_status'])
+                embed_service.vectorize_document(doc)
             
             created_docs.append(doc)
 

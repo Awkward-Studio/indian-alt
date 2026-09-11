@@ -518,7 +518,8 @@ class EmailIngestionService:
                     ) or 'complete'
                     if extraction:
                         doc.extraction_mode = extraction.get('mode') or doc.extraction_mode
-                    doc.save(update_fields=['extracted_text', 'normalized_text', 'transcription_status', 'extraction_mode'])
+                        doc.extraction_manifest = extraction.get('structured_data') or {}
+                    doc.save(update_fields=['extracted_text', 'normalized_text', 'transcription_status', 'extraction_mode', 'extraction_manifest'])
                 if doc:
                     link.index_status = 'creating_artifact'
                     link.error = ''

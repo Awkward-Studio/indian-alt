@@ -277,16 +277,29 @@ class DocumentArtifactService:
                 "celery_task_id": source_metadata.get("celery_task_id"),
                 "vdr_parent_audit_id": source_metadata.get("vdr_parent_audit_id"),
             }
-            result = cls._process_segment(service,
-                content=(
-                    f"{BULK2_INTEL_SYSTEM_PROMPT}\n\n"
-                    f"{build_bulk2_segment_prompt(segment=segment, context=segment_context)}"
-                ),
-                skill_name="document_evidence_extraction",
-                source_type="document_evidence_segment",
-                source_id=str(source_metadata.get("source_id") or file_name),
-                metadata=metadata,
-            )
+            def run_model(*, compact: bool = False):
+                attempt_metadata = deepcopy(metadata)
+                if compact:
+                    attempt_metadata["_source_metadata"]["compact_retry"] = True
+                    attempt_metadata["context_label"] += " [compact retry]"
+                return cls._process_segment(
+                    service,
+                    content=(
+                        f"{BULK2_INTEL_SYSTEM_PROMPT}\n\n"
+                        f"{build_bulk2_segment_prompt(segment=segment, context=segment_context, compact=compact)}"
+                    ),
+                    skill_name="document_evidence_extraction",
+                    source_type="document_evidence_segment",
+                    source_id=str(source_metadata.get("source_id") or file_name),
+                    metadata=attempt_metadata,
+                )
+
+            try:
+                result = run_model()
+            except Exception as exc:
+                if "finish_reason=length" not in str(exc):
+                    raise
+                result = run_model(compact=True)
             parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
             if not isinstance(parsed, dict) or parsed.get("error"):
                 raise RuntimeError(
@@ -684,7 +697,28 @@ class DocumentArtifactService:
         }
 
         chunks: list[dict[str, Any]] = []
+        manifest = getattr(artifact_or_document, "extraction_manifest", None)
+        if isinstance(manifest, dict):
+            for manifest_index, item in enumerate(manifest.get("chunks") or []):
+                if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+                    continue
+                chunks.append({
+                    "text": str(item["text"]),
+                    "metadata": {
+                        **base_metadata,
+                        **(item.get("metadata") or {}),
+                        "chunk_kind": (item.get("metadata") or {}).get("chunk_kind", "structured_range"),
+                        "manifest_chunk_index": manifest_index,
+                        "extraction_schema_version": manifest.get("schema_version", "1"),
+                    },
+                })
         normalized_text = (artifact.get("normalized_text") or "").strip()
+        manifest_kind = manifest.get("kind") if isinstance(manifest, dict) else None
+        has_structured_chunks = bool(manifest.get("chunks")) if isinstance(manifest, dict) else False
+        # Spreadsheet ranges are already purpose-built retrieval units. Splitting the
+        # rendered workbook text again duplicates the same cells in the vector index.
+        if manifest_kind == "spreadsheet" and has_structured_chunks:
+            normalized_text = ""
         if normalized_text:
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=text_excerpt_chars,

@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import uuid
 from collections import defaultdict
@@ -43,6 +44,7 @@ from .serializers import (
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
+from ai_orchestrator.services.document_processor import DocumentProcessorService
 from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
 from .services.receipt_date_evidence import ReceiptDateEvidenceService
@@ -2564,12 +2566,13 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if file_obj.size > 25 * 1024 * 1024:
             return Response({"error": "Document must be 25 MB or smaller."}, status=400)
 
+        extension = os.path.splitext(os.path.basename(file_obj.name or ""))[1].lower()
+        if extension not in DocumentProcessorService.SUPPORTED_EXTENSIONS:
+            return Response({"error": f"Unsupported file type: {extension or 'unknown'}"}, status=400)
+
         try:
-            from ai_orchestrator.services.document_processor import DocumentProcessorService
             from django.utils import timezone
             from .tasks import process_manual_document
-            import os
-
             doc_processor = DocumentProcessorService()
             file_content = file_obj.read()
             file_name = os.path.basename(file_obj.name)
@@ -2587,7 +2590,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 doc_type = DocumentType.MEMO
                 
             try:
-                extraction = doc_processor.get_native_extraction_result(file_content, file_name)
+                extraction = doc_processor.get_evidence_extraction_result(file_content, file_name)
             except Exception as exc:
                 return Response({"error": f"Could not read this document: {exc}"}, status=422)
             extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
@@ -2601,6 +2604,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 document_type=doc_type,
                 extracted_text=extracted_text,
                 normalized_text=normalized_text,
+                extraction_manifest=extraction.get("structured_data") or {},
                 is_indexed=False,
                 is_ai_analyzed=False,
                 extraction_mode=extraction.get("mode"),
@@ -2608,7 +2612,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 evidence_json={
                     "upload_processing_status": "queued",
                     "quality_flags": extraction.get("quality_flags", []),
-                    "source_metadata": {"filename": file_name, "size": file_obj.size, "extraction": "native_text_only"},
+                    "source_metadata": {
+                        "filename": file_name,
+                        "size": file_obj.size,
+                        "extraction": extraction.get("mode") or "unknown",
+                    },
                 },
                 chunking_status="not_chunked",
                 last_transcribed_at=timezone.now() if normalized_text else None,

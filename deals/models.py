@@ -861,6 +861,7 @@ class FolderAnalysisDocument(models.Model):
     )
     quality_flags = models.JSONField(default=list, blank=True)
     render_metadata = models.JSONField(default=dict, blank=True)
+    extraction_manifest = models.JSONField(default=dict, blank=True)
     is_indexed = models.BooleanField(default=False)
     chunk_count = models.PositiveIntegerField(default=0)
     error_message = models.TextField(blank=True, null=True)
@@ -904,6 +905,7 @@ class DealDocument(models.Model):
     table_json = models.JSONField(default=list, blank=True)
     key_metrics_json = models.JSONField(default=list, blank=True)
     reasoning = models.TextField(blank=True, null=True)
+    extraction_manifest = models.JSONField(default=dict, blank=True)
     is_indexed = models.BooleanField(default=False)
     is_ai_analyzed = models.BooleanField(
         default=False,

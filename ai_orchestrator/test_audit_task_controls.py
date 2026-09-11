@@ -1,10 +1,12 @@
 from unittest.mock import patch
+from asgiref.sync import async_to_sync
 
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.consumers import _user_from_ticket
 from deals.models import Deal
 from microsoft.models import Email, EmailAccount, EmailIngestionRun
 
@@ -15,6 +17,31 @@ class AuditTaskControlTests(TestCase):
         self.user = User.objects.create_user('audit-admin', password='test-only', is_staff=True)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
+
+    def test_websocket_ticket_is_scoped_and_single_use(self):
+        response = self.client.post('/api/ai/websocket-ticket/', {'scope': 'ledger'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        user = async_to_sync(_user_from_ticket)(response.data['ticket'], required_scope='ledger')
+        self.assertEqual(user.pk, self.user.pk)
+        reused = async_to_sync(_user_from_ticket)(response.data['ticket'], required_scope='ledger')
+        self.assertIsNone(reused)
+
+    def test_audit_websocket_ticket_cannot_open_another_audit(self):
+        first = AIAuditLog.objects.create(
+            source_type='test', model_used='test', system_prompt='', user_prompt='', status='PROCESSING',
+        )
+        second = AIAuditLog.objects.create(
+            source_type='test', model_used='test', system_prompt='', user_prompt='', status='PROCESSING',
+        )
+        response = self.client.post('/api/ai/websocket-ticket/', {
+            'scope': 'audit', 'audit_log_id': str(first.id),
+        }, format='json')
+
+        user = async_to_sync(_user_from_ticket)(
+            response.data['ticket'], required_scope='audit', audit_log_id=str(second.id),
+        )
+        self.assertIsNone(user)
 
     def test_audit_detail_includes_worker_progress_and_related_child_logs(self):
         parent = AIAuditLog.objects.create(

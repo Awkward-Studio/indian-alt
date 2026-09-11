@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import secrets
 import uuid
 from urllib.parse import urlsplit
 import requests
@@ -11,6 +12,7 @@ from django.db import transaction
 from django.forms.models import model_to_dict
 from django.utils import timezone
 from django.core.cache import cache
+from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -58,6 +60,42 @@ def _is_ai_admin(user):
             or getattr(getattr(user, "profile", None), "is_admin", False)
         )
     )
+
+
+class WebSocketTicketView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        scope = str(request.data.get("scope") or "").strip()
+        audit_log_id = str(request.data.get("audit_log_id") or "").strip()
+        if scope not in {"ledger", "audit"}:
+            return Response({"error": "scope must be ledger or audit"}, status=400)
+        if scope == "ledger" and not _is_ai_admin(request.user):
+            return Response({"error": "Administrator access is required."}, status=403)
+        if scope == "audit":
+            if not audit_log_id or not AIAuditLog.objects.filter(id=audit_log_id).exists():
+                return Response({"error": "Audit log not found."}, status=404)
+        nonce = secrets.token_urlsafe(24)
+        payload = {
+            "user_id": request.user.pk,
+            "scope": scope,
+            "audit_log_id": audit_log_id or None,
+            "nonce": nonce,
+        }
+        ticket = signing.dumps(payload, salt="ai-websocket-ticket", compress=True)
+        cache.set(f"ai-ws-ticket:{nonce}", payload, timeout=60)
+        return Response({"ticket": ticket, "expires_in": 60})
+
+
+class DocumentCapabilitiesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({
+            "schema_version": "2",
+            "supported_extensions": sorted(DocumentProcessorService.SUPPORTED_EXTENSIONS),
+            "max_file_bytes": 25 * 1024 * 1024,
+        })
 
 
 class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1313,7 +1351,7 @@ class UniversalChatView(APIView):
 
 class UniversalChatDocumentView(APIView):
     permission_classes = [IsAuthenticated]
-    allowed_extensions = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
+    allowed_extensions = set(DocumentProcessorService.SUPPORTED_EXTENSIONS)
     max_file_size = 25 * 1024 * 1024
     max_documents = 5
     max_text_chars = 120_000
@@ -1341,7 +1379,7 @@ class UniversalChatDocumentView(APIView):
             return Response({"error": "Conversation not found."}, status=404)
 
         document_id = str(uuid.uuid4())
-        result = DocumentProcessorService().get_chat_extraction_result(uploaded_file.read(), filename)
+        result = DocumentProcessorService().get_evidence_extraction_result(uploaded_file.read(), filename)
         extracted_text = str(result.get("normalized_text") or result.get("text") or "").strip()
         if not extracted_text:
             return Response({"error": result.get("error") or "No readable text was found in the document."}, status=422)

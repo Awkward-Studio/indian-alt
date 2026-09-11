@@ -1,7 +1,11 @@
 import base64
 import io
+import hashlib
 import logging
 import os
+import tempfile
+from email import policy
+from email.parser import BytesParser
 
 import fitz  # PyMuPDF
 import requests
@@ -28,6 +32,14 @@ class DocumentProcessorService:
     - keep the existing local rendering/text extraction behavior so the
       backend can still function if docproc is unavailable.
     """
+
+    SUPPORTED_EXTENSIONS = {
+        ".pdf",
+        ".docx", ".docm", ".dotx", ".dotm", ".doc", ".odt", ".rtf",
+        ".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm", ".ppt", ".odp",
+        ".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".xlsb", ".xla", ".xlam", ".ods",
+        ".csv", ".tsv", ".txt", ".md", ".json", ".xml", ".html", ".htm", ".msg", ".eml",
+    }
 
     def __init__(self):
         self.provider = VLLMProviderService()
@@ -117,9 +129,9 @@ class DocumentProcessorService:
             elif ext in {".png", ".jpg", ".jpeg"}:
                 mime = "image/png" if ext == ".png" else "image/jpeg"
                 sections.append(read_image(f"data:{mime};base64,{base64.b64encode(file_content).decode('ascii')}", 1))
-            elif ext in {".txt", ".csv"}:
+            elif ext in {".txt", ".csv", ".tsv", ".md", ".json", ".xml", ".html", ".htm"}:
                 sections.append(file_content.decode("utf-8-sig", errors="replace"))
-            elif ext in {".docx", ".xlsx", ".pptx"}:
+            elif ext in self.SUPPORTED_EXTENSIONS:
                 native = self.get_native_extraction_result(file_content, filename)
                 sections.append(native["normalized_text"])
                 native_warnings.extend(native.get("quality_flags") or [])
@@ -169,6 +181,7 @@ class DocumentProcessorService:
 
         ext = os.path.splitext(filename)[1].lower()
         sections, warnings = [], []
+        structured_data = {}
         if ext == ".pdf":
             with fitz.open(stream=file_content, filetype="pdf") as document:
                 for index, page in enumerate(document):
@@ -194,12 +207,15 @@ class DocumentProcessorService:
                     sections.extend(f"[{label} {index + 1}]\n{p.text}" for p in container.paragraphs if p.text)
             if document.inline_shapes:
                 warnings.append("Embedded images were not interpreted.")
-        elif ext == ".xlsx":
-            formulas = load_workbook(io.BytesIO(file_content), data_only=False, read_only=True)
+        elif ext in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+            formulas = load_workbook(io.BytesIO(file_content), data_only=False, read_only=True, keep_vba=ext in {".xlsm", ".xltm"})
             values = load_workbook(io.BytesIO(file_content), data_only=True, read_only=True)
+            sheets = []
+            chunks = []
             try:
                 for sheet in formulas:
                     sections.append(f"[Sheet: {sheet.title}]")
+                    sheet_lines = []
                     for row, cached_row in zip(sheet.iter_rows(), values[sheet.title].iter_rows()):
                         cells = []
                         for cell, cached in zip(row, cached_row):
@@ -210,10 +226,64 @@ class DocumentProcessorService:
                                 value += f" [cached value: {cached.value if cached.value is not None else 'unavailable'}]"
                             cells.append(f"{cell.coordinate}={value}")
                         if cells:
-                            sections.append("\t".join(cells))
+                            line = "\t".join(cells)
+                            sections.append(line)
+                            sheet_lines.append(line)
+                    sheets.append({"name": sheet.title, "row_count": sheet.max_row, "column_count": sheet.max_column})
+                    for start in range(0, len(sheet_lines), 200):
+                        chunks.append({
+                            "text": "\n".join(sheet_lines[start:start + 200]),
+                            "metadata": {"chunk_kind": "spreadsheet_range", "sheet_name": sheet.title, "row_start": start + 1, "row_end": min(start + 200, len(sheet_lines))},
+                        })
             finally:
                 formulas.close()
                 values.close()
+            structured_data = {"schema_version": "2", "kind": "spreadsheet", "format": ext.lstrip("."), "filename": filename, "content_sha256": hashlib.sha256(file_content).hexdigest(), "sheets": sheets, "chunks": chunks, "fallback_fidelity": "cell_values_and_formulas"}
+            warnings.append("backend_fallback_extraction")
+        elif ext in {".xls", ".xlsb", ".xla", ".xlam", ".ods"}:
+            from python_calamine import CalamineWorkbook
+            workbook = CalamineWorkbook.from_filelike(io.BytesIO(file_content))
+            sheets = []
+            chunks = []
+            for sheet_name in workbook.sheet_names:
+                rows = workbook.get_sheet_by_name(sheet_name).to_python(skip_empty_area=False)
+                lines = [f"{index + 1}\t" + "\t".join("" if value is None else str(value) for value in row) for index, row in enumerate(rows)]
+                sections.extend([f"[Sheet: {sheet_name}]", *lines])
+                sheets.append({"name": sheet_name, "row_count": len(rows), "column_count": max((len(row) for row in rows), default=0)})
+                for start in range(0, len(lines), 200):
+                    chunks.append({"text": "\n".join(lines[start:start + 200]), "metadata": {"chunk_kind": "spreadsheet_range", "sheet_name": sheet_name, "row_start": start + 1, "row_end": min(start + 200, len(lines))}})
+            structured_data = {"schema_version": "2", "kind": "spreadsheet", "format": ext.lstrip("."), "filename": filename, "content_sha256": hashlib.sha256(file_content).hexdigest(), "sheets": sheets, "chunks": chunks, "fallback_fidelity": "cell_values"}
+            warnings.extend(["backend_fallback_extraction", "calamine"])
+        elif ext == ".msg":
+            import extract_msg
+            with tempfile.NamedTemporaryFile(suffix=".msg") as handle:
+                handle.write(file_content)
+                handle.flush()
+                message = extract_msg.Message(handle.name)
+                try:
+                    fields = {key: str(value or "").strip() for key, value in {
+                        "subject": getattr(message, "subject", None), "sender": getattr(message, "sender", None),
+                        "to": getattr(message, "to", None), "cc": getattr(message, "cc", None),
+                        "bcc": getattr(message, "bcc", None), "date": getattr(message, "date", None),
+                        "message_id": getattr(message, "messageId", None),
+                    }.items()}
+                    body = str(getattr(message, "body", None) or "").strip()
+                    attachments = [{"filename": str(getattr(item, "longFilename", None) or getattr(item, "shortFilename", None) or "attachment"), "size_bytes": len(item.data) if isinstance(getattr(item, "data", None), bytes) else None} for item in (getattr(message, "attachments", None) or [])]
+                    sections.extend([f"{key.replace('_', ' ').title()}: {value}" for key, value in fields.items() if value])
+                    if body:
+                        sections.extend(["[Body]", body])
+                    structured_data = {"schema_version": "2", "kind": "email_message", "format": "msg", "filename": filename, **fields, "attachments": attachments, "fallback_fidelity": "body_headers_attachment_inventory"}
+                    warnings.append("backend_fallback_extraction")
+                finally:
+                    message.close()
+        elif ext == ".eml":
+            message = BytesParser(policy=policy.default).parsebytes(file_content)
+            body = message.get_body(preferencelist=("plain", "html"))
+            body_text = str(body.get_content()) if body else ""
+            fields = {"subject": str(message.get("subject") or ""), "sender": str(message.get("from") or ""), "to": str(message.get("to") or ""), "cc": str(message.get("cc") or ""), "date": str(message.get("date") or ""), "message_id": str(message.get("message-id") or "")}
+            sections.extend([f"{key.replace('_', ' ').title()}: {value}" for key, value in fields.items() if value] + ["[Body]", body_text])
+            structured_data = {"schema_version": "2", "kind": "email_message", "format": "eml", "filename": filename, **fields}
+            warnings.append("backend_fallback_extraction")
         elif ext == ".pptx":
             presentation = Presentation(io.BytesIO(file_content))
             for index, slide in enumerate(presentation.slides):
@@ -231,8 +301,8 @@ class DocumentProcessorService:
                 extract_shapes(slide.shapes)
                 if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
                     sections.append(f"[Speaker notes]\n{slide.notes_slide.notes_text_frame.text}")
-        elif ext in {".txt", ".csv"}:
-            sections.append(file_content.decode("utf-8-sig"))
+        elif ext in {".txt", ".csv", ".tsv", ".md", ".json", ".xml", ".html", ".htm"}:
+            sections.append(file_content.decode("utf-8-sig", errors="replace"))
         else:
             raise ValueError("Use a text PDF, DOCX, XLSX, PPTX, TXT, or CSV file. Scans and images require OCR first.")
         text = "\n\n".join(sections).strip()
@@ -244,29 +314,43 @@ class DocumentProcessorService:
             "text": text, "raw_extracted_text": text, "normalized_text": text,
             "mode": "fallback_text", "quality_flags": warnings,
             "transcription_status": "partial" if warnings else "complete",
+            "structured_data": structured_data,
+            "render_metadata": {"route": "backend_native_fallback", "content_sha256": hashlib.sha256(file_content).hexdigest()},
         }
 
     def _remote_extract(self, file_content: bytes, filename: str, page_limit: int = None, hint: str | None = None, prompt: str = "") -> dict | None:
         try:
-            payload = {
-                "filename": filename,
-                "page_limit": page_limit,
-                "content_base64": base64.b64encode(file_content).decode("utf-8"),
-                "hint": hint,
-                "prompt": prompt,
-            }
-            headers = {"Content-Type": "application/json"}
+            headers = {}
             if self.docproc_api_key:
                 headers["Authorization"] = f"Bearer {self.docproc_api_key}"
             timeout_val = self.docproc_timeout
             if timeout_val != 123:
                 timeout_val = (1.0, self.docproc_timeout)
             response = requests.post(
-                f"{self.docproc_url}/extract/document",
+                f"{self.docproc_url}/v2/extract/document",
                 headers=headers,
-                json=payload,
+                files={"file": (os.path.basename(filename), file_content, "application/octet-stream")},
+                data={
+                    "filename": os.path.basename(filename),
+                    **({"page_limit": str(page_limit)} if page_limit else {}),
+                    **({"hint": hint} if hint else {}),
+                    **({"prompt": prompt} if prompt else {}),
+                },
                 timeout=timeout_val,
             )
+            if response.status_code == 404:
+                response = requests.post(
+                    f"{self.docproc_url}/extract/document",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={
+                        "filename": filename,
+                        "page_limit": page_limit,
+                        "content_base64": base64.b64encode(file_content).decode("utf-8"),
+                        "hint": hint,
+                        "prompt": prompt,
+                    },
+                    timeout=timeout_val,
+                )
             response.raise_for_status()
             data = response.json()
             return self._normalize_remote_result(data, filename)
@@ -519,7 +603,7 @@ class DocumentProcessorService:
                     for table in doc.tables
                 ])
 
-            if ext in [".xlsx", ".xls"]:
+            if ext in [".xlsx", ".xlsm", ".xltx", ".xltm"]:
                 wb = load_workbook(io.BytesIO(file_content), data_only=True, read_only=True)
                 text = ""
                 sheets = wb.sheetnames
