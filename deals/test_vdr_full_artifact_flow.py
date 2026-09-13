@@ -279,6 +279,18 @@ class FullVDRArtifactTests(SimpleTestCase):
             artifact_run_id="audit-1",
             force_fresh=False,
         ))
+        self.assertTrue(_has_reusable_document_extraction(
+            document,
+            source_etag="etag-1",
+            artifact_run_id="audit-1",
+            force_fresh=True,
+        ))
+        self.assertFalse(_has_reusable_document_extraction(
+            document,
+            source_etag="etag-1",
+            artifact_run_id="new-fresh-run",
+            force_fresh=True,
+        ))
         self.assertFalse(_has_reusable_document_extraction(
             document,
             source_etag="etag-2",
@@ -337,6 +349,7 @@ class FullVDRArtifactTests(SimpleTestCase):
             extracted_text="Stable spreadsheet source",
             ai_service=service,
             source_metadata={"artifact_run_id": "audit-1"},
+            force_fresh=True,
         )
 
         service.process_content.assert_not_called()
@@ -357,6 +370,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         service = MagicMock()
         source_text = "\n".join(f"row {index}: financial evidence" for index in range(12_000))
         expected_segments = DocumentArtifactService._split_for_artifact(source_text)
+        failed_index = len(expected_segments) - 3
         completed_response = {
             "parsed_json": {
                 "document_name": "Model.xlsx",
@@ -366,22 +380,23 @@ class FullVDRArtifactTests(SimpleTestCase):
         }
         first_attempt = 0
 
-        def fail_last_segment(**kwargs):
+        def fail_segment_before_end(**kwargs):
             nonlocal first_attempt
             first_attempt += 1
-            if first_attempt == len(expected_segments):
+            if first_attempt == failed_index + 1:
                 raise RuntimeError("invalid model JSON")
             return completed_response
 
-        service.process_content.side_effect = fail_last_segment
+        service.process_content.side_effect = fail_segment_before_end
         incomplete = DocumentArtifactService.build_document_artifact(
             file_name="Model.xlsx",
             extracted_text=source_text,
             ai_service=service,
             source_metadata={"artifact_run_id": "audit-1"},
+            force_fresh=True,
         )
         self.assertIn("artifact_segment_processing_incomplete", incomplete["quality_flags"])
-        self.assertEqual(len(stored), len(expected_segments) - 1, incomplete["quality_flags"])
+        self.assertEqual(len(stored), failed_index, incomplete["quality_flags"])
 
         service.process_content.reset_mock()
         service.process_content.side_effect = None
@@ -395,9 +410,13 @@ class FullVDRArtifactTests(SimpleTestCase):
                 extracted_text=source_text,
                 ai_service=service,
                 source_metadata=incomplete["source_metadata"],
+                force_fresh=True,
             )
 
-        self.assertEqual(service.process_content.call_count, 1)
+        self.assertEqual(
+            [call.kwargs["metadata"]["segment_index"] for call in service.process_content.call_args_list],
+            list(range(failed_index, len(expected_segments))),
+        )
         self.assertEqual(
             service.process_content.call_args.kwargs["model_override"],
             incomplete["source_metadata"]["artifact_model"],

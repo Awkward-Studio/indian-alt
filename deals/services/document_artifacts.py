@@ -229,6 +229,9 @@ class DocumentArtifactService:
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
         source_metadata = cls.prepare_artifact_run_metadata(raw_text, source_metadata)
+        # Run-scoped keys already isolate a fresh run from earlier results.
+        # Retrying that run must still recover its own completed segments.
+        force_fresh = force_fresh and not bool(source_metadata.get("artifact_run_id"))
         artifact_model = source_metadata["artifact_model"]
         source_token_budget = source_metadata["artifact_segment_source_token_budget"]
         overlap_token_budget = source_metadata["artifact_segment_overlap_token_budget"]

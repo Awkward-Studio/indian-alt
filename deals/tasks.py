@@ -605,7 +605,8 @@ def _has_reusable_document_extraction(
     force_fresh: bool,
 ) -> bool:
     """Return whether a failed document attempt can resume its exact source text."""
-    if not document or force_fresh or not artifact_run_id:
+    # A fresh run excludes older runs, but must resume its own checkpoint.
+    if not document or not artifact_run_id:
         return False
     source = document.evidence_json.get("source_metadata", {}) if isinstance(document.evidence_json, dict) else {}
     source_unchanged = not source_etag or source_etag == str(source.get("source_etag") or "")
@@ -1351,10 +1352,16 @@ def process_single_document_async(
             if existing_doc and isinstance(existing_doc.evidence_json, dict)
             else {}
         )
+        resume_extraction = _has_reusable_document_extraction(
+            existing_doc,
+            source_etag=source_etag,
+            artifact_run_id=artifact_run_id,
+            force_fresh=force_fresh,
+        )
         if _has_reusable_document_artifact(
             existing_doc,
             source_etag=source_etag,
-            force_fresh=force_fresh,
+            force_fresh=force_fresh and not resume_extraction,
         ):
             if existing_doc.is_indexed:
                 _update_vdr_document_queue(
@@ -1397,12 +1404,6 @@ def process_single_document_async(
                 "artifact_reused": True,
             }
 
-        resume_extraction = _has_reusable_document_extraction(
-            existing_doc,
-            source_etag=source_etag,
-            artifact_run_id=artifact_run_id,
-            force_fresh=force_fresh,
-        )
             
         # Determine document type
         doc_type = DocumentType.OTHER
