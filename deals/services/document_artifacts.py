@@ -138,6 +138,82 @@ class DocumentArtifactService:
             raise
 
     @classmethod
+    def prepare_artifact_run_metadata(
+        cls,
+        extracted_text: str,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Freeze every input that determines segment identity for one artifact run."""
+        raw_text = (extracted_text or "").strip()
+        prepared = json.loads(json.dumps(source_metadata or {}, default=str))
+        try:
+            from ai_orchestrator.services.runtime import AIRuntimeService
+
+            artifact_model = str(
+                prepared.get("artifact_model")
+                or AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
+            )
+        except Exception:
+            artifact_model = str(
+                prepared.get("artifact_model")
+                or getattr(settings, "VLLM_MODEL", "default")
+            )
+
+        source_token_budget = max(4_000, int(
+            prepared.get("artifact_segment_source_token_budget")
+            or getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
+        ))
+        stored_overlap_token_budget = prepared.get("artifact_segment_overlap_token_budget")
+        overlap_token_budget = max(0, min(
+            int(
+                stored_overlap_token_budget
+                if stored_overlap_token_budget is not None
+                else getattr(settings, "VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS", 768)
+            ),
+            source_token_budget // 4,
+        ))
+        prepared.update({
+            "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
+            "artifact_model": artifact_model,
+            "artifact_source_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            "artifact_segment_source_token_budget": source_token_budget,
+            "artifact_segment_overlap_token_budget": overlap_token_budget,
+        })
+        return prepared
+
+    @classmethod
+    def begin_document_artifact_run(
+        cls,
+        document: Any,
+        source_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the exact extraction and splitter contract before inference starts."""
+        text = (document.normalized_text or document.extracted_text or "").strip()
+        prepared = cls.prepare_artifact_run_metadata(text, source_metadata)
+        segments = cls._split_for_artifact(
+            text,
+            source_tokens=prepared["artifact_segment_source_token_budget"],
+            overlap_tokens=prepared["artifact_segment_overlap_token_budget"],
+        )
+        checkpoint = cls._fallback_artifact(
+            file_name=document.title,
+            extracted_text=text,
+            document_type=document.document_type,
+            extraction_mode=document.extraction_mode,
+        )
+        checkpoint["quality_flags"] = [
+            "fallback_artifact",
+            "artifact_segment_processing_incomplete",
+        ]
+        checkpoint["source_metadata"] = {
+            **prepared,
+            "artifact_segment_count": len(segments),
+            "artifact_segments_completed": 0,
+        }
+        cls.persist_artifact(document, checkpoint)
+        return prepared
+
+    @classmethod
     def build_document_artifact(
         cls,
         *,
@@ -152,7 +228,10 @@ class DocumentArtifactService:
         force_fresh: bool = False,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
-        source_metadata = json.loads(json.dumps(source_metadata or {}, default=str))
+        source_metadata = cls.prepare_artifact_run_metadata(raw_text, source_metadata)
+        artifact_model = source_metadata["artifact_model"]
+        source_token_budget = source_metadata["artifact_segment_source_token_budget"]
+        overlap_token_budget = source_metadata["artifact_segment_overlap_token_budget"]
         fallback = cls._fallback_artifact(
             file_name=file_name,
             extracted_text=raw_text,
@@ -169,17 +248,15 @@ class DocumentArtifactService:
             service = AIProcessorService()
         else:
             service = ai_service
-        try:
-            from ai_orchestrator.services.runtime import AIRuntimeService
-
-            artifact_model = AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
-        except Exception:
-            artifact_model = str(getattr(settings, "VLLM_MODEL", "default"))
 
         # Match bulk_2's lossless map/merge contract: every bounded segment is
         # analyzed, cached by content, and merged. The full extracted source is
         # retained separately and is never replaced by an LLM-cleaned excerpt.
-        segments = cls._split_for_artifact(raw_text)
+        segments = cls._split_for_artifact(
+            raw_text,
+            source_tokens=source_token_budget,
+            overlap_tokens=overlap_token_budget,
+        )
         segment_artifacts: list[dict[str, Any] | None] = [None] * len(segments)
         failures: list[str] = []
 
@@ -292,6 +369,7 @@ class DocumentArtifactService:
                     source_type="document_evidence_segment",
                     source_id=str(source_metadata.get("source_id") or file_name),
                     metadata=attempt_metadata,
+                    model_override=artifact_model,
                 )
 
             try:
@@ -377,18 +455,26 @@ class DocumentArtifactService:
         return artifact
 
     @classmethod
-    def _split_for_artifact(cls, text: str) -> list[str]:
-        source_tokens = max(
-            4_000,
-            int(getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)),
-        )
-        overlap_tokens = max(
-            0,
-            min(
-                int(getattr(settings, "VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS", 768)),
-                source_tokens // 4,
+    def _split_for_artifact(
+        cls,
+        text: str,
+        *,
+        source_tokens: int | None = None,
+        overlap_tokens: int | None = None,
+    ) -> list[str]:
+        source_tokens = max(4_000, int(
+            source_tokens
+            if source_tokens is not None
+            else getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
+        ))
+        overlap_tokens = max(0, min(
+            int(
+                overlap_tokens
+                if overlap_tokens is not None
+                else getattr(settings, "VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS", 768)
             ),
-        )
+            source_tokens // 4,
+        ))
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=source_tokens,
             chunk_overlap=overlap_tokens,
@@ -838,10 +924,13 @@ class DocumentArtifactService:
         chunking_status = getattr(artifact_or_document, "chunking_status", None)
         if transcription_status == "failed":
             return cls.STATUS_FAILED
-        if transcription_status == "partial":
-            return cls.STATUS_PARTIAL
 
         artifact = cls._coerce_artifact(artifact_or_document)
+        if transcription_status == "partial" and not cls._legacy_native_extraction_complete(
+            artifact_or_document,
+            artifact,
+        ):
+            return cls.STATUS_PARTIAL
         normalized_text = (artifact.get("normalized_text") or "").strip()
         if not normalized_text:
             return cls.STATUS_MISSING
@@ -871,6 +960,32 @@ class DocumentArtifactService:
             return cls.STATUS_DEGRADED
 
         return cls.STATUS_COMPLETE
+
+    @classmethod
+    def _legacy_native_extraction_complete(cls, document: Any, artifact: dict[str, Any]) -> bool:
+        """Accept old native extractions whose partial state came from provenance flags only."""
+        if not getattr(document, "is_indexed", False):
+            return False
+        if getattr(document, "extraction_mode", None) != "chat_native_text":
+            return False
+        if not (artifact.get("normalized_text") or "").strip():
+            return False
+
+        source_metadata = artifact.get("source_metadata") or {}
+        render_metadata = source_metadata.get("render_metadata") or {}
+        if render_metadata.get("failed_pages"):
+            return False
+
+        quality_flags = set(cls._normalize_string_list(
+            source_metadata.get("quality_flags") or artifact.get("quality_flags") or []
+        ))
+        informational_flags = {
+            "chat_direct_extraction",
+            "backend_fallback_extraction",
+            "calamine",
+            "partial_extraction",
+        }
+        return "backend_fallback_extraction" in quality_flags and quality_flags <= informational_flags
 
     @classmethod
     def artifact_complete(cls, artifact_or_document: Any) -> bool:

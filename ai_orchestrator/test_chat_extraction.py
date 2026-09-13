@@ -69,6 +69,9 @@ class ChatExtractionTests(SimpleTestCase):
         workbook.close()
         result = self.service.get_chat_extraction_result(output.getvalue(), "data.xlsx")
         self.assertIn("A1=Revenue\tB1=0\tC1=False", result["text"])
+        self.assertEqual(result["transcription_status"], "complete")
+        self.assertIn("backend_fallback_extraction", result["quality_flags"])
+        self.assertNotIn("partial_extraction", result["quality_flags"])
 
     @override_settings(ALLOW_SHARED_MODEL_DOCUMENT_VISION=False)
     @patch("ai_orchestrator.services.document_processor.PipelineRegistryService.render_prompt_stage", return_value=(None, "OCR", None))

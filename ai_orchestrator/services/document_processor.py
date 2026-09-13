@@ -33,6 +33,11 @@ class DocumentProcessorService:
       backend can still function if docproc is unavailable.
     """
 
+    INFORMATIONAL_EXTRACTION_FLAGS = {
+        "backend_fallback_extraction",
+        "calamine",
+    }
+
     SUPPORTED_EXTENSIONS = {
         ".pdf",
         ".docx", ".docm", ".dotx", ".dotm", ".doc", ".odt", ".rtf",
@@ -142,13 +147,17 @@ class DocumentProcessorService:
             failed_pages.append("document")
 
         text = "\n\n".join(section for section in sections if section.strip()).strip()
+        partial_warnings = [
+            warning for warning in native_warnings
+            if warning not in self.INFORMATIONAL_EXTRACTION_FLAGS
+        ]
         flags = ["chat_direct_extraction", *native_warnings]
-        if failed_pages or native_warnings:
+        if failed_pages or partial_warnings:
             flags.append("partial_extraction")
         return {
             "text": text, "raw_extracted_text": text, "normalized_text": text,
             "mode": "chat_local_vision" if vision_pages else "chat_native_text",
-            "transcription_status": "partial" if text and (failed_pages or native_warnings) else "complete" if text else "failed",
+            "transcription_status": "partial" if text and (failed_pages or partial_warnings) else "complete" if text else "failed",
             "quality_flags": flags,
             "render_metadata": {"failed_pages": failed_pages, "vision_pages": vision_pages},
             "error": "No readable content was extracted. Scanned pages and images require dedicated OCR, or an explicitly enabled vision model." if not text else "",
@@ -313,7 +322,10 @@ class DocumentProcessorService:
         return {
             "text": text, "raw_extracted_text": text, "normalized_text": text,
             "mode": "fallback_text", "quality_flags": warnings,
-            "transcription_status": "partial" if warnings else "complete",
+            "transcription_status": "partial" if any(
+                warning not in self.INFORMATIONAL_EXTRACTION_FLAGS
+                for warning in warnings
+            ) else "complete",
             "structured_data": structured_data,
             "render_metadata": {"route": "backend_native_fallback", "content_sha256": hashlib.sha256(file_content).hexdigest()},
         }

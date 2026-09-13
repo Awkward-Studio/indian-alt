@@ -1,5 +1,6 @@
 import logging
 import json
+import hashlib
 import time
 import os
 from difflib import SequenceMatcher
@@ -593,6 +594,29 @@ def _has_reusable_document_artifact(
         and (document.normalized_text or document.extracted_text or "").strip()
         and DocumentArtifactService.artifact_status(document.evidence_json)
         == DocumentArtifactService.STATUS_COMPLETE
+    )
+
+
+def _has_reusable_document_extraction(
+    document: DealDocument | None,
+    *,
+    source_etag: str,
+    artifact_run_id: str,
+    force_fresh: bool,
+) -> bool:
+    """Return whether a failed document attempt can resume its exact source text."""
+    if not document or force_fresh or not artifact_run_id:
+        return False
+    source = document.evidence_json.get("source_metadata", {}) if isinstance(document.evidence_json, dict) else {}
+    source_unchanged = not source_etag or source_etag == str(source.get("source_etag") or "")
+    text = (document.normalized_text or document.extracted_text or "").strip()
+    return bool(
+        source_unchanged
+        and str(source.get("artifact_run_id") or "") == artifact_run_id
+        and source.get("artifact_pipeline_version") == DocumentArtifactService.ARTIFACT_PIPELINE_VERSION
+        and source.get("artifact_source_sha256") == hashlib.sha256(text.encode("utf-8")).hexdigest()
+        and source.get("artifact_segment_count")
+        and text
     )
 
 
@@ -1321,6 +1345,7 @@ def process_single_document_async(
             }
 
         source_etag = str(file_info.get("eTag") or file_info.get("cTag") or "")
+        artifact_run_id = str(resume_artifact_run_id or audit_log_id or self.request.id)
         existing_source = (
             existing_doc.evidence_json.get("source_metadata", {})
             if existing_doc and isinstance(existing_doc.evidence_json, dict)
@@ -1371,6 +1396,13 @@ def process_single_document_async(
                 "artifact_segments": existing_source.get("artifact_segment_count", 0),
                 "artifact_reused": True,
             }
+
+        resume_extraction = _has_reusable_document_extraction(
+            existing_doc,
+            source_etag=source_etag,
+            artifact_run_id=artifact_run_id,
+            force_fresh=force_fresh,
+        )
             
         # Determine document type
         doc_type = DocumentType.OTHER
@@ -1382,54 +1414,69 @@ def process_single_document_async(
         elif any(k in name_lower for k in ['teaser', 'deck', 'pitch', 'im']): 
             doc_type = DocumentType.PITCH_DECK
 
-        if delivery_cancelled():
-            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
-        if higher_priority_work_is_waiting():
-            raise DocumentArtifactYielded(
-                "Higher-priority AI work is waiting; yielding before VDR extraction."
+        if resume_extraction:
+            doc = existing_doc
+            extracted_text = (doc.extracted_text or doc.normalized_text or "").strip()
+            normalized_text = (doc.normalized_text or doc.extracted_text or "").strip()
+            transcription_status = doc.transcription_status
+            extraction = {
+                "mode": doc.extraction_mode,
+                "transcription_status": transcription_status,
+                "quality_flags": existing_source.get("quality_flags") or [],
+                "render_metadata": existing_source.get("render_metadata") or {},
+                "structured_data": doc.extraction_manifest or {},
+            }
+            doc_type = doc.document_type
+            logger.info(
+                "Resuming exact extraction checkpoint for %s in artifact run %s.",
+                file_name,
+                artifact_run_id,
+            )
+        else:
+            if delivery_cancelled():
+                return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+            if higher_priority_work_is_waiting():
+                raise DocumentArtifactYielded(
+                    "Higher-priority AI work is waiting; yielding before VDR extraction."
+                )
+
+            content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+
+            if delivery_cancelled():
+                return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
+
+            extraction = doc_processor.get_evidence_extraction_result(content, file_name)
+            extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
+            normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
+            reported_transcription_status = extraction.get("transcription_status")
+            transcription_status = (
+                TranscriptionStatus.COMPLETE
+                if normalized_text and reported_transcription_status not in {TranscriptionStatus.PARTIAL, TranscriptionStatus.FAILED}
+                else TranscriptionStatus.PARTIAL
+                if normalized_text
+                else TranscriptionStatus.FAILED
             )
 
-        # Download content
-        content = graph_service.get_drive_item_content(user_email, file_id, drive_id=drive_id)
+            if delivery_cancelled():
+                return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
 
-        if delivery_cancelled():
-            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
-
-        # Full extraction is required. The downstream artifact stage splits and
-        # caches the complete text in bounded segments, matching bulk_2.
-        extraction = doc_processor.get_evidence_extraction_result(content, file_name)
-        extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
-        normalized_text = (extraction.get("normalized_text") or extraction.get("text") or extracted_text).strip()
-        reported_transcription_status = extraction.get("transcription_status")
-        transcription_status = (
-            TranscriptionStatus.COMPLETE
-            if normalized_text and reported_transcription_status not in {TranscriptionStatus.PARTIAL, TranscriptionStatus.FAILED}
-            else TranscriptionStatus.PARTIAL
-            if normalized_text
-            else TranscriptionStatus.FAILED
-        )
-
-        if delivery_cancelled():
-            return {"status": "cancelled", "file": file_name, "reason": "manual termination requested"}
-        
-        # Create or refresh the document checkpoint.
-        initial_analysis_status, initial_analysis_reason = _resolve_initial_analysis_status(deal, file_id, file_name)
-        doc = existing_doc or DealDocument(deal=deal, onedrive_id=file_id)
-        doc.title = file_name
-        doc.file_url = source_url or doc.file_url
-        doc.document_type = doc_type
-        doc.extracted_text = extracted_text
-        doc.normalized_text = normalized_text
-        doc.extraction_manifest = extraction.get("structured_data") or {}
-        doc.is_indexed = False
-        doc.is_ai_analyzed = False
-        doc.initial_analysis_status = initial_analysis_status
-        doc.initial_analysis_reason = initial_analysis_reason
-        doc.extraction_mode = extraction.get("mode")
-        doc.transcription_status = transcription_status
-        doc.chunking_status = ChunkingStatus.NOT_CHUNKED
-        doc.last_transcribed_at = timezone.now() if normalized_text else None
-        doc.save()
+            initial_analysis_status, initial_analysis_reason = _resolve_initial_analysis_status(deal, file_id, file_name)
+            doc = existing_doc or DealDocument(deal=deal, onedrive_id=file_id)
+            doc.title = file_name
+            doc.file_url = source_url or doc.file_url
+            doc.document_type = doc_type
+            doc.extracted_text = extracted_text
+            doc.normalized_text = normalized_text
+            doc.extraction_manifest = extraction.get("structured_data") or {}
+            doc.is_indexed = False
+            doc.is_ai_analyzed = False
+            doc.initial_analysis_status = initial_analysis_status
+            doc.initial_analysis_reason = initial_analysis_reason
+            doc.extraction_mode = extraction.get("mode")
+            doc.transcription_status = transcription_status
+            doc.chunking_status = ChunkingStatus.NOT_CHUNKED
+            doc.last_transcribed_at = timezone.now() if normalized_text else None
+            doc.save()
 
         if transcription_status == TranscriptionStatus.FAILED or not normalized_text:
             raise ValueError(
@@ -1437,31 +1484,35 @@ def process_single_document_async(
             )
 
         if normalized_text:
+            artifact_source_metadata = {
+                **(existing_source if resume_extraction else {}),
+                "artifact_run_id": artifact_run_id,
+                "celery_task_id": str(self.request.id),
+                "vdr_parent_audit_id": str(audit_log_id or ""),
+                **({"vdr_dispatch_generation": int(queue_generation)} if queue_generation is not None else {}),
+                "source_id": str(doc.id),
+                "source_file_id": file_id,
+                "source_drive_id": drive_id,
+                "source_path": file_info.get("path") or "",
+                "source_url": source_url,
+                "source_etag": source_etag,
+                "source_size": file_info.get("size"),
+                "source_last_modified": file_info.get("lastModifiedDateTime"),
+                "quality_flags": extraction.get("quality_flags") or [],
+                "render_metadata": extraction.get("render_metadata") or {},
+            }
+            if not resume_extraction:
+                artifact_source_metadata = DocumentArtifactService.begin_document_artifact_run(
+                    doc,
+                    artifact_source_metadata,
+                )
             artifact = DocumentArtifactService.build_document_artifact(
                 file_name=doc.title,
                 extracted_text=normalized_text,
                 document_type=doc.document_type,
                 extraction_mode=doc.extraction_mode,
                 ai_service=ai_service,
-                source_metadata={
-                    # Normal runs use their parent audit id as the cache scope.
-                    # Resume runs pass the prior artifact scope so completed
-                    # segments survive a failed parent run.
-                    "artifact_run_id": str(resume_artifact_run_id or audit_log_id or self.request.id),
-                    "celery_task_id": str(self.request.id),
-                    "vdr_parent_audit_id": str(audit_log_id or ""),
-                    **({"vdr_dispatch_generation": int(queue_generation)} if queue_generation is not None else {}),
-                    "source_id": str(doc.id),
-                    "source_file_id": file_id,
-                    "source_drive_id": drive_id,
-                    "source_path": file_info.get("path") or "",
-                    "source_url": source_url,
-                    "source_etag": source_etag,
-                    "source_size": file_info.get("size"),
-                    "source_last_modified": file_info.get("lastModifiedDateTime"),
-                    "quality_flags": extraction.get("quality_flags") or [],
-                    "render_metadata": extraction.get("render_metadata") or {},
-                },
+                source_metadata=artifact_source_metadata,
                 cancel_check=delivery_cancelled,
                 yield_check=higher_priority_work_is_waiting,
                 force_fresh=force_fresh,

@@ -1,3 +1,4 @@
+import hashlib
 from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, override_settings
@@ -251,6 +252,159 @@ class FullVDRArtifactTests(SimpleTestCase):
                 source_etag="etag-1",
                 force_fresh=True,
             )
+        )
+
+    def test_incomplete_run_reuses_its_exact_extraction_checkpoint(self):
+        from deals.tasks import _has_reusable_document_extraction
+
+        text = "Stable extracted spreadsheet evidence"
+        document = MagicMock(
+            normalized_text=text,
+            extracted_text=text,
+            evidence_json={
+                "source_metadata": {
+                    "artifact_run_id": "audit-1",
+                    "artifact_pipeline_version": DocumentArtifactService.ARTIFACT_PIPELINE_VERSION,
+                    "artifact_source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "artifact_segment_count": 76,
+                    "artifact_segments_completed": 74,
+                    "source_etag": "etag-1",
+                },
+            },
+        )
+
+        self.assertTrue(_has_reusable_document_extraction(
+            document,
+            source_etag="etag-1",
+            artifact_run_id="audit-1",
+            force_fresh=False,
+        ))
+        self.assertFalse(_has_reusable_document_extraction(
+            document,
+            source_etag="etag-2",
+            artifact_run_id="audit-1",
+            force_fresh=False,
+        ))
+        self.assertFalse(_has_reusable_document_extraction(
+            document,
+            source_etag="etag-1",
+            artifact_run_id="audit-2",
+            force_fresh=False,
+        ))
+
+    @patch.object(DocumentArtifactService, "persist_artifact")
+    def test_source_checkpoint_is_persisted_before_segment_inference(self, persist_artifact):
+        document = MagicMock(
+            title="Model.xlsx",
+            document_type="financials",
+            extraction_mode="chat_native_text",
+            normalized_text="Stable spreadsheet source",
+            extracted_text="Stable spreadsheet source",
+        )
+
+        prepared = DocumentArtifactService.begin_document_artifact_run(
+            document,
+            {"artifact_run_id": "audit-1", "source_etag": "etag-1"},
+        )
+
+        checkpoint = persist_artifact.call_args.args[1]
+        self.assertEqual(checkpoint["source_metadata"]["artifact_run_id"], "audit-1")
+        self.assertEqual(checkpoint["source_metadata"]["artifact_segment_count"], 1)
+        self.assertEqual(checkpoint["source_metadata"]["artifact_segments_completed"], 0)
+        self.assertEqual(
+            checkpoint["source_metadata"]["artifact_source_sha256"],
+            prepared["artifact_source_sha256"],
+        )
+
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("deals.services.document_artifacts.cache")
+    def test_completed_segment_is_recovered_from_audit_when_redis_is_empty(
+        self,
+        mock_cache,
+        audit_filter,
+    ):
+        mock_cache.get.return_value = None
+        recovered = {
+            "document_name": "Model.xlsx",
+            "document_summary": "Durably completed segment",
+            "quality_flags": [],
+        }
+        audit_filter.return_value.order_by.return_value.values_list.return_value.first.return_value = recovered
+        service = MagicMock()
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Model.xlsx",
+            extracted_text="Stable spreadsheet source",
+            ai_service=service,
+            source_metadata={"artifact_run_id": "audit-1"},
+        )
+
+        service.process_content.assert_not_called()
+        self.assertEqual(artifact["document_summary"], "Durably completed segment")
+        self.assertEqual(DocumentArtifactService.artifact_status(artifact), "complete")
+
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=4_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("deals.services.document_artifacts.cache")
+    def test_retry_only_calls_inference_for_failed_segments(self, mock_cache, _audit_filter):
+        stored = {}
+        mock_cache.get.side_effect = stored.get
+        mock_cache.set.side_effect = lambda key, value, timeout: stored.__setitem__(key, value)
+
+        service = MagicMock()
+        source_text = "\n".join(f"row {index}: financial evidence" for index in range(12_000))
+        expected_segments = DocumentArtifactService._split_for_artifact(source_text)
+        completed_response = {
+            "parsed_json": {
+                "document_name": "Model.xlsx",
+                "document_summary": "Segment evidence",
+                "quality_flags": [],
+            },
+        }
+        first_attempt = 0
+
+        def fail_last_segment(**kwargs):
+            nonlocal first_attempt
+            first_attempt += 1
+            if first_attempt == len(expected_segments):
+                raise RuntimeError("invalid model JSON")
+            return completed_response
+
+        service.process_content.side_effect = fail_last_segment
+        incomplete = DocumentArtifactService.build_document_artifact(
+            file_name="Model.xlsx",
+            extracted_text=source_text,
+            ai_service=service,
+            source_metadata={"artifact_run_id": "audit-1"},
+        )
+        self.assertIn("artifact_segment_processing_incomplete", incomplete["quality_flags"])
+        self.assertEqual(len(stored), len(expected_segments) - 1, incomplete["quality_flags"])
+
+        service.process_content.reset_mock()
+        service.process_content.side_effect = None
+        service.process_content.return_value = completed_response
+        with override_settings(
+            VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=8_000,
+            VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=500,
+        ):
+            completed = DocumentArtifactService.build_document_artifact(
+                file_name="Model.xlsx",
+                extracted_text=source_text,
+                ai_service=service,
+                source_metadata=incomplete["source_metadata"],
+            )
+
+        self.assertEqual(service.process_content.call_count, 1)
+        self.assertEqual(
+            service.process_content.call_args.kwargs["model_override"],
+            incomplete["source_metadata"]["artifact_model"],
+        )
+        self.assertEqual(
+            completed["source_metadata"]["artifact_segments_completed"],
+            len(expected_segments),
         )
 
     def test_segment_artifact_does_not_require_duplicated_normalized_text(self):

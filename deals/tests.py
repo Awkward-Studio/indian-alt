@@ -1927,6 +1927,55 @@ class DealStatusSyncTests(TestCase):
         self.assertFalse(DocumentArtifactService.artifact_complete(partial_doc))
         self.assertFalse(DocumentArtifactService.artifact_complete(failed_doc))
 
+    def test_legacy_indexed_native_spreadsheet_is_complete_for_reports(self):
+        deal = Deal.objects.create(title="Legacy Spreadsheet Deal")
+        document = DealDocument.objects.create(
+            deal=deal,
+            title="Dashboard.xlsx",
+            is_indexed=True,
+            extraction_mode="chat_native_text",
+            transcription_status="partial",
+            chunking_status="chunked",
+            normalized_text="Revenue\t100",
+            evidence_json={
+                "document_name": "Dashboard.xlsx",
+                "document_type": "Other",
+                "document_summary": "Revenue dashboard",
+                "claims": [],
+                "metrics": [],
+                "tables_summary": [],
+                "contacts_found": [],
+                "risks": [],
+                "open_questions": [],
+                "citations": ["Dashboard.xlsx"],
+                "reasoning": "",
+                "quality_flags": [
+                    "chat_direct_extraction",
+                    "backend_fallback_extraction",
+                    "partial_extraction",
+                ],
+                "normalized_text": "Revenue\t100",
+                "source_map": {"document_name": "Dashboard.xlsx"},
+                "source_metadata": {
+                    "quality_flags": [
+                        "chat_direct_extraction",
+                        "backend_fallback_extraction",
+                        "partial_extraction",
+                    ],
+                    "render_metadata": {"failed_pages": [], "vision_pages": []},
+                },
+            },
+        )
+
+        self.assertEqual(
+            DocumentArtifactService.artifact_status(document),
+            DocumentArtifactService.STATUS_COMPLETE,
+        )
+        self.assertTrue(DocumentArtifactService.artifact_complete(document))
+        readiness = FolderAnalysisService.deal_analysis_readiness(deal)
+        self.assertEqual(readiness["ready_count"], 1)
+        self.assertEqual(readiness["gap_count"], 0)
+
     def test_document_artifact_service_normalizes_grounded_industry_evidence(self):
         artifact = DocumentArtifactService.artifact_from_file_record({
             "file_name": "Annual Report.pdf",
