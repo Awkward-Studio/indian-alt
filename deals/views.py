@@ -20,7 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.core.cache import cache
-from django.db.models import CharField, Count, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
+from django.db.models import CharField, Count, DateTimeField, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
 from django.db.models.functions import Cast, Coalesce, Greatest, Trim
 from django.db.models.fields.json import KeyTextTransform
 from django.utils import timezone
@@ -104,8 +104,8 @@ class DealOrderingFilter(filters.OrderingFilter):
         if request.query_params.get("search", "").strip():
             expressions.append(F('search_relevance').desc(nulls_last=True))
         for field in ordering:
-            if field.lstrip('-') == 'received_at':
-                expression = F('received_at')
+            if field.lstrip('-') in {'received_at', 'last_analysis_at'}:
+                expression = F(field.lstrip('-'))
                 expressions.append(
                     expression.desc(nulls_last=True)
                     if field.startswith('-')
@@ -265,6 +265,18 @@ class DealFilterSet(django_filters.FilterSet):
         field_name='folder_document_count',
         lookup_expr='lte',
     )
+    last_analysis_after = django_filters.DateFilter(
+        field_name='last_analysis_at',
+        lookup_expr='date__gte',
+    )
+    last_analysis_before = django_filters.DateFilter(
+        field_name='last_analysis_at',
+        lookup_expr='date__lte',
+    )
+    indexing_coverage = django_filters.ChoiceFilter(
+        choices=[('complete', 'Complete'), ('partial', 'Partial'), ('none', 'None')],
+        method='filter_indexing_coverage',
+    )
 
     def filter_deal_group(self, queryset, name, value):
         terminal_statuses = ['Passed', 'Invested', 'Portfolio']
@@ -306,6 +318,21 @@ class DealFilterSet(django_filters.FilterSet):
         queryset = queryset.annotate(_pass_reason_filter=normalized)
         return queryset.exclude(_pass_reason_filter='') if value == 'has_reason' else queryset.filter(_pass_reason_filter='')
 
+    def filter_indexing_coverage(self, queryset, name, value):
+        if value == 'complete':
+            return queryset.filter(
+                coverage_document_count__gt=0,
+                indexed_document_count__gte=F('coverage_document_count'),
+            )
+        if value == 'partial':
+            return queryset.filter(
+                indexed_document_count__gt=0,
+                indexed_document_count__lt=F('coverage_document_count'),
+            )
+        if value == 'none':
+            return queryset.filter(indexed_document_count=0)
+        return queryset
+
     class Meta:
         model = Deal
         fields = [
@@ -319,6 +346,7 @@ class DealFilterSet(django_filters.FilterSet):
             'pass_reason', 'pass_reason_state', 'folder_linked',
             'deal_document_count_min', 'deal_document_count_max',
             'folder_document_count_min', 'folder_document_count_max',
+            'last_analysis_after', 'last_analysis_before', 'indexing_coverage',
         ]
 
 
@@ -535,6 +563,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             .values('ambiguities')[:1],
             output_field=JSONField(),
         ),
+        last_analysis_at=Subquery(
+            DealAnalysis.objects.filter(deal_id=OuterRef('pk'))
+            .order_by('-version', '-created_at')
+            .values('created_at')[:1],
+            output_field=DateTimeField(),
+        ),
         pending_task_count=Count(
             'tasks',
             filter=~Q(tasks__status='done'),
@@ -578,6 +612,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'documents',
             distinct=True,
         ),
+        indexed_document_count=Count(
+            'documents',
+            filter=Q(documents__is_indexed=True),
+            distinct=True,
+        ),
         folder_document_count=Subquery(
             AIAuditLog.objects.filter(
                 source_type='onedrive_folder',
@@ -594,6 +633,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             ).order_by('-created_at').values('audit_total_files')[:1],
             output_field=IntegerField(),
         ),
+    ).annotate(
+        coverage_document_count=Coalesce('folder_document_count', 'deal_document_count'),
     )
     permission_classes = [IsAuthenticated]
     pagination_class = DealPagination
@@ -609,6 +650,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
         'is_female_led', 'has_analysis', 'has_complete_analysis', 'has_vi_data', 'bank__name',
         'primary_contact__name', 'deal_document_count', 'folder_document_count',
+        'indexed_document_count', 'last_analysis_at',
     ]
     ordering = ['-received_at', '-created_at']
     @staticmethod

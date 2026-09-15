@@ -774,6 +774,8 @@ class DealListSerializer(serializers.ModelSerializer):
     folder_linked = serializers.SerializerMethodField()
     deal_document_count = serializers.IntegerField(read_only=True)
     folder_document_count = serializers.IntegerField(read_only=True, allow_null=True)
+    indexed_document_count = serializers.IntegerField(read_only=True)
+    last_analysis_at = serializers.DateTimeField(read_only=True, allow_null=True)
     bank_name = serializers.CharField(source='bank.name', read_only=True)
     primary_contact_name = serializers.CharField(
         source='primary_contact.name',
@@ -901,6 +903,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
             'folder_linked', 'deal_document_count', 'folder_document_count',
+            'indexed_document_count', 'last_analysis_at',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',

@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from ai_orchestrator.models import AIAuditLog
@@ -7,6 +10,7 @@ from deals.models import Deal
 from deals.serializers import DealListSerializer
 from deals.views import DealFilterSet, DealViewSet
 from deals.models import DealDocument
+from deals.models import DealAnalysis
 
 
 class DealTableFilterTests(TestCase):
@@ -90,7 +94,8 @@ class DealTableFilterTests(TestCase):
         )
         unlinked = Deal.objects.create(title="Unlinked dataroom")
         DealDocument.objects.create(deal=linked, title="Memo")
-        DealDocument.objects.create(deal=linked, title="Model")
+        DealDocument.objects.create(deal=linked, title="Model", is_indexed=True)
+        analysis = DealAnalysis.objects.create(deal=linked)
         AIAuditLog.objects.create(
             source_type="onedrive_folder",
             source_id="folder-1",
@@ -114,6 +119,11 @@ class DealTableFilterTests(TestCase):
         self.assertEqual(payload["Linked dataroom"]["folder_linked"], True)
         self.assertEqual(payload["Linked dataroom"]["deal_document_count"], 2)
         self.assertEqual(payload["Linked dataroom"]["folder_document_count"], 7)
+        self.assertEqual(payload["Linked dataroom"]["indexed_document_count"], 1)
+        self.assertEqual(
+            payload["Linked dataroom"]["last_analysis_at"],
+            analysis.created_at.isoformat().replace('+00:00', 'Z'),
+        )
         self.assertEqual(payload["Unlinked dataroom"]["folder_linked"], False)
         self.assertEqual(payload["Unlinked dataroom"]["deal_document_count"], 0)
         self.assertIsNone(payload["Unlinked dataroom"]["folder_document_count"])
@@ -127,6 +137,12 @@ class DealTableFilterTests(TestCase):
             queryset=DealViewSet.queryset.all(),
         ).qs
         self.assertEqual(list(filtered.values_list("title", flat=True)), ["Linked dataroom"])
+
+        partially_indexed = DealFilterSet(
+            data={"indexing_coverage": "partial"},
+            queryset=DealViewSet.queryset.all(),
+        ).qs
+        self.assertEqual(list(partially_indexed.values_list("title", flat=True)), ["Linked dataroom"])
 
     def test_search_matches_raw_names_and_tolerates_small_typos(self):
         deal = Deal.objects.create(
@@ -150,3 +166,35 @@ class DealTableFilterTests(TestCase):
         )
         self.assertEqual(banker_response.status_code, 200)
         self.assertEqual([row["id"] for row in banker_response.data["results"]], [str(deal.id)])
+
+    def test_last_analysis_date_can_be_filtered_and_sorted(self):
+        older = Deal.objects.create(title="Older analysis")
+        newer = Deal.objects.create(title="Newer analysis")
+        missing = Deal.objects.create(title="No analysis")
+        older_analysis = DealAnalysis.objects.create(deal=older)
+        newer_analysis = DealAnalysis.objects.create(deal=newer)
+        DealAnalysis.objects.filter(pk=older_analysis.pk).update(
+            created_at=timezone.now() - timedelta(days=30),
+        )
+
+        response = self.client.get(
+            "/api/deals/",
+            {
+                "last_analysis_after": (timezone.localdate() - timedelta(days=7)).isoformat(),
+                "ordering": "-last_analysis_at",
+                "page_size": 100,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["id"] for row in response.data["results"]], [str(newer.id)])
+        self.assertIsNotNone(newer_analysis.created_at)
+        self.assertNotIn(str(missing.id), [row["id"] for row in response.data["results"]])
+
+        sorted_response = self.client.get(
+            "/api/deals/",
+            {"ordering": "-last_analysis_at", "page_size": 100},
+        )
+        sorted_ids = [row["id"] for row in sorted_response.data["results"]]
+        self.assertLess(sorted_ids.index(str(newer.id)), sorted_ids.index(str(older.id)))
+        self.assertEqual(sorted_ids[-1], str(missing.id))
