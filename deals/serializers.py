@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 from .models import (
-    Deal, DealContradiction, DealDocument, DealFieldProvenance, DealGeneratedDocument, DealPhaseLog,
+    Deal, DealContradiction, DealDocument, DealFieldProvenance, DealGeneratedDocument,
     InitialAnalysisStatus,
     SectorResearchAcquisition, SectorResearchDiscoveryRun, SectorResearchRecommendation,
     SectorResearchSourceRule,
@@ -21,13 +21,6 @@ from api_requests.serializers import RequestSerializer
 from .services.contact_linking import sync_deal_contact_links
 from .services.document_artifacts import DocumentArtifactService
 from .services.report_status import is_complete_analyst_report, report_status_for_deal
-class DealPhaseLogSerializer(serializers.ModelSerializer):
-    changed_by_name = serializers.CharField(source='changed_by.name', read_only=True)
-    
-    class Meta:
-        model = DealPhaseLog
-        fields = '__all__'
-        read_only_fields = ('id', 'changed_at')
 
 
 class DealContradictionSerializer(serializers.ModelSerializer):
@@ -357,15 +350,12 @@ class DealSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'responsibility': 'You do not have permission to manage the IA team for this deal.'
                 })
-        status_supplied = self.instance is None or 'deal_status' in attrs or 'current_phase' in attrs
+        status_supplied = self.instance is None or 'deal_status' in attrs
         if not status_supplied:
             return attrs
 
-        current_status = (
-            getattr(self.instance, 'current_phase', None)
-            or getattr(self.instance, 'deal_status', None)
-        )
-        target_status = attrs.get('current_phase') or attrs.get('deal_status') or current_status
+        current_status = getattr(self.instance, 'deal_status', None)
+        target_status = attrs.get('deal_status') or current_status
         transitioning_to_passed = target_status == 'Passed' and current_status != 'Passed'
         if not transitioning_to_passed:
             return attrs
@@ -431,11 +421,7 @@ class DealSerializer(serializers.ModelSerializer):
                 model_data['fund_classification_reviewed_at'] = timezone.now()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
-        deal_status = model_data.get('deal_status')
-        current_phase = model_data.get('current_phase')
-        synced_status = current_phase or deal_status or '1: Deal Sourced'
-        model_data['deal_status'] = synced_status
-        model_data['current_phase'] = synced_status
+        model_data.setdefault('deal_status', 'New')
         model_data.pop('source_email_id', None)
         model_data.pop('contact_discovery', None)
         model_data.pop('analysis_json', None)
@@ -506,10 +492,6 @@ class DealSerializer(serializers.ModelSerializer):
                 model_data['fund_classification_reviewed_at'] = timezone.now()
         additional_contacts = model_data.pop('additional_contacts', None)
         legacy_other_contacts = model_data.pop('other_contacts', None)
-        if 'deal_status' in model_data or 'current_phase' in model_data:
-            synced_status = model_data.get('current_phase') or model_data.get('deal_status') or instance.current_phase or instance.deal_status or '1: Deal Sourced'
-            model_data['deal_status'] = synced_status
-            model_data['current_phase'] = synced_status
         deal = super().update(instance, model_data)
 
         from .services.field_provenance import record_deal_field_changes
@@ -678,7 +660,6 @@ class VentureIntelligenceCompanyRelationSerializer(serializers.ModelSerializer):
 class DealDetailSerializer(DealSerializer):
     documents = DealDocumentSerializer(many=True, read_only=True)
     generated_documents = DealGeneratedDocumentSerializer(many=True, read_only=True)
-    phase_logs = DealPhaseLogSerializer(many=True, read_only=True)
     file_tree = serializers.SerializerMethodField()
     vi_relations = VentureIntelligenceCompanyRelationSerializer(many=True, read_only=True)
     competitor_candidates = serializers.SerializerMethodField()
@@ -703,13 +684,13 @@ class DealDetailSerializer(DealSerializer):
         fields = (
             'id', 'title', 'bank', 'bank_name', 'primary_contact',
             'primary_contact_name', 'primary_contact_details', 'priority', 'deal_status', 'fund', 'themes', 'responsibility',
-            'funding_ask', 'funding_ask_for', 'current_phase', 'industry',
+            'funding_ask', 'funding_ask_for', 'industry',
             'sector', 'is_female_led', 'management_meeting', 'business_proposal_stage',
             'ic_stage', 'city', 'country', 'received_at', 'days_since_sourcing', 'created_at', 'deal_summary',
             'deal_details', 'company_details', 'comments', 'reasons_for_passing',
             'legacy_investment_bank', 'other_contacts', 'other_contact_details', 'additional_contacts', 'priority_rationale', 'state', 'request_data', 'documents',
             'generated_documents', 'analysis_prompt',
-            'phase_logs', 'source_onedrive_id',
+            'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree', 'vi_relations', 'competitor_candidates',
             'report_status',
@@ -898,7 +879,7 @@ class DealListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = (
-            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status', 'current_phase',
+            'id', 'title', 'bank', 'bank_name', 'priority', 'deal_status',
             'received_at', 'days_since_sourcing', 'receipt_date_state',
             'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
@@ -908,7 +889,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',
             'is_female_led', 'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'rejection_stage_id', 'rejection_reason', 'reasons_for_passing',
+            'rejection_reason', 'reasons_for_passing',
             'fund_classification_state', 'fund_classification_source_type',
             'fund_classification_source_id', 'fund_classification_reviewed_by',
             'fund_classification_reviewed_at',

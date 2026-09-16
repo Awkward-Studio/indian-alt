@@ -328,7 +328,7 @@ class Command(BaseCommand):
     def _format_candidate(self, index: int, candidate: Candidate) -> str:
         deal = candidate.deal
         prefix = "  source" if index == 0 else f"  {index}."
-        phase = deal.current_phase or "N/A"
+        phase = deal.deal_status or "N/A"
         status = deal.deal_status or "N/A"
         fund = deal.fund or "N/A"
         funding_ask = deal.funding_ask or "N/A"

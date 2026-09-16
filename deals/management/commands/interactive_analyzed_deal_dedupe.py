@@ -79,9 +79,9 @@ def deal_score(deal: Deal) -> tuple[int, list[str]]:
     if deal.primary_contact_id:
         score += 2
         reasons.append("has primary contact")
-    if deal.current_phase and deal.current_phase != "1: Deal Sourced":
+    if deal.deal_status and deal.deal_status != "New":
         score += 1
-        reasons.append(f"phase={deal.current_phase}")
+        reasons.append(f"status={deal.deal_status}")
     return score, reasons or ["no strong retention signal"]
 
 
@@ -98,7 +98,7 @@ def recommendations_for_group(deals: list[Deal]) -> dict[str, DealRecommendation
             reasons.append("same OneDrive source folder as group")
         if distinct_source_group and deal.source_onedrive_id:
             warnings.append("multiple source folders in group")
-        if deal.current_phase == "Portfolio":
+        if deal.deal_status == "Portfolio":
             warnings.append("portfolio row")
         raw.append((deal, score, reasons, warnings))
 
@@ -218,7 +218,7 @@ class Command(BaseCommand):
                 marker = "  [recommended canonical]" if rec.score == best_score else ""
                 self.stdout.write(
                     f"  {index}. {deal.title or '(blank)'} | id={deal.id} | "
-                    f"phase={deal.current_phase or '-'} | bank={deal.bank.name if deal.bank else '-'} | "
+                    f"status={deal.deal_status or '-'} | bank={deal.bank.name if deal.bank else '-'} | "
                     f"source={'yes' if deal.source_onedrive_id else 'no'} | "
                     f"analyses={deal.analyses.count()} docs={deal.documents.count()} chunks={deal.chunks.count()}{marker}"
                 )

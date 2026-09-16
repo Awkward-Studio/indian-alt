@@ -22,29 +22,25 @@ class DealTableFilterTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
-    def test_portfolio_filter_combines_invested_and_portfolio_rows_for_one_fund(self):
+    def test_portfolio_filter_returns_portfolio_rows_for_one_fund(self):
         current_portfolio = Deal.objects.create(
             title="Fund I portfolio",
             fund="Fund I",
-            current_phase="Portfolio",
-            deal_status="1: Deal Sourced",
+            deal_status="Portfolio",
         )
         invested = Deal.objects.create(
             title="Fund I invested",
             fund="FUND1",
-            current_phase="Invested",
-            deal_status="Invested",
+            deal_status="Portfolio",
         )
         Deal.objects.create(
             title="Fund I passed",
             fund="FUND1",
-            current_phase="Passed",
             deal_status="Passed",
         )
         Deal.objects.create(
             title="Fund II portfolio",
             fund="FUND2",
-            current_phase="Portfolio",
             deal_status="Portfolio",
         )
 
@@ -60,17 +56,15 @@ class DealTableFilterTests(TestCase):
             {str(current_portfolio.id), str(invested.id)},
         )
 
-    def test_active_filter_uses_the_canonical_current_phase(self):
+    def test_active_filter_uses_canonical_deal_status(self):
         active = Deal.objects.create(
             title="Active deal",
             fund="FUND3",
-            current_phase="4: Initial Materials Review",
-            deal_status="4: Initial Materials Review",
+            deal_status="Interesting",
         )
-        stale_secondary_status = Deal.objects.create(
-            title="Stale portfolio phase",
+        portfolio = Deal.objects.create(
+            title="Portfolio deal",
             fund="FUND3",
-            current_phase="4: Initial Materials Review",
             deal_status="Portfolio",
         )
 
@@ -80,11 +74,12 @@ class DealTableFilterTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["count"], 2)
+        self.assertEqual(response.data["count"], 1)
         self.assertEqual(
             {row["id"] for row in response.data["results"]},
-            {str(active.id), str(stale_secondary_status.id)},
+            {str(active.id)},
         )
+        self.assertNotIn(str(portfolio.id), {row["id"] for row in response.data["results"]})
 
     def test_dashboard_exposes_folder_and_deal_document_counts(self):
         linked = Deal.objects.create(

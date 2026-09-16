@@ -4,7 +4,8 @@ from datetime import datetime
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
-from deals.models import Deal, DealStatus, DealPhase
+from deals.models import Deal, DealStatus
+from deals.statuses import normalize_deal_status
 from contacts.models import Contact
 from accounts.models import Profile
 from django.contrib.auth.models import User
@@ -68,18 +69,7 @@ class Command(BaseCommand):
 
                         # 4. Deal Status
                         status_str = (row.get('Deal Status') or '').strip()
-                        deal_status = DealStatus.STAGE_1
-                        current_phase = DealPhase.STAGE_1
-                        
-                        if status_str.lower() == 'passed':
-                            deal_status = DealStatus.PASSED
-                            current_phase = DealPhase.PASSED
-                        elif status_str.lower() == 'invested':
-                            deal_status = DealStatus.INVESTED
-                            current_phase = DealPhase.INVESTED
-                        elif status_str.lower() == 'portfolio':
-                            deal_status = DealStatus.PORTFOLIO
-                            current_phase = DealPhase.PORTFOLIO
+                        deal_status = normalize_deal_status(status_str, default=DealStatus.NEW)
 
                         # 5. Create Deal (Dry run check)
                         if dry_run:
@@ -88,7 +78,6 @@ class Command(BaseCommand):
                             deal = Deal.objects.create(
                                 title=title,
                                 deal_status=deal_status,
-                                current_phase=current_phase,
                                 funding_ask=(row.get('Ask (INR Million)') or '').strip(),
                                 industry=industry.strip(),
                                 sector=sector.strip(),

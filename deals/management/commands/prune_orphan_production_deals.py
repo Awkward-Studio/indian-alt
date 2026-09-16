@@ -141,7 +141,6 @@ def build_prune_candidates(local_deals: Iterable[Deal]) -> list[dict]:
             "bank_id",
             "fund",
             "deal_status",
-            "current_phase",
             "created_at",
         )
         .iterator(chunk_size=2000)

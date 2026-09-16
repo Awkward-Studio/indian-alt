@@ -27,8 +27,8 @@ def canonical_workbook_status(value):
     if "portfolio" in status:
         return "Portfolio"
     if "invested" in status:
-        return "Invested"
-    return "1: Deal Sourced"
+        return "Portfolio"
+    return "New"
 
 
 class Command(BaseCommand):
@@ -72,7 +72,7 @@ class Command(BaseCommand):
                     "sector": clean(row[positions["Sector"]]),
                     "city": clean(row[positions["City"]]),
                     "is_female_led": parse_bool(row[positions["Is Female Led"]]),
-                    "current_phase": canonical_workbook_status(row[positions["Deal Status"]]),
+                    "deal_status": canonical_workbook_status(row[positions["Deal Status"]]),
                     "deal_status": canonical_workbook_status(row[positions["Deal Status"]]),
                     "reasons_for_passing": reason_for_passing,
                     "rejection_reason": reason_for_passing,

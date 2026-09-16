@@ -8,18 +8,16 @@ from deals.models import (
     Deal,
     DealAnalysis,
     DealPassReasonRemediationAudit,
-    DealPhaseLog,
 )
 from deals.serializers import DealSerializer
-from deals.services.deal_flow import DealFlowService, DealFlowValidationError
 
 
 class PassReasonContractTests(TestCase):
     def test_serializer_requires_reason_for_new_pass_transition(self):
-        deal = Deal.objects.create(title="Scoped", current_phase="1: Deal Sourced")
+        deal = Deal.objects.create(title="Scoped", deal_status="New")
         serializer = DealSerializer(
             deal,
-            data={"current_phase": "Passed", "reasons_for_passing": "   "},
+            data={"deal_status": "Passed", "reasons_for_passing": "   "},
             partial=True,
         )
 
@@ -29,48 +27,20 @@ class PassReasonContractTests(TestCase):
     def test_serializer_preserves_existing_reason_on_pass_transition(self):
         deal = Deal.objects.create(
             title="Scoped",
-            current_phase="1: Deal Sourced",
+            deal_status="New",
             reasons_for_passing="Existing investment-team rationale",
         )
-        serializer = DealSerializer(deal, data={"current_phase": "Passed"}, partial=True)
+        serializer = DealSerializer(deal, data={"deal_status": "Passed"}, partial=True)
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         updated = serializer.save()
         self.assertEqual(updated.reasons_for_passing, "Existing investment-team rationale")
 
     def test_unrelated_edit_of_legacy_passed_deal_is_not_blocked(self):
-        deal = Deal.objects.create(title="Legacy", current_phase="Passed", reasons_for_passing=None)
+        deal = Deal.objects.create(title="Legacy", deal_status="Passed", reasons_for_passing=None)
         serializer = DealSerializer(deal, data={"city": "Mumbai"}, partial=True)
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
-
-    def test_flow_service_rejects_blank_pass_reason_without_mutation(self):
-        deal = Deal.objects.create(title="Rejected", current_phase="5: Financial Model Call")
-
-        with self.assertRaises(DealFlowValidationError):
-            DealFlowService.update_flow_state(deal, active_stage="Passed", reason=" ")
-
-        deal.refresh_from_db()
-        self.assertEqual(deal.current_phase, "5: Financial Model Call")
-        self.assertFalse(DealPhaseLog.objects.filter(deal=deal).exists())
-
-    def test_flow_service_persists_canonical_reason_and_log(self):
-        deal = Deal.objects.create(title="Rejected", current_phase="5: Financial Model Call")
-
-        DealFlowService.update_flow_state(
-            deal,
-            active_stage="Passed",
-            decisions_update={"5": "no"},
-            reason="  Unit economics do not meet threshold  ",
-            rejection_stage_id=5,
-        )
-
-        deal.refresh_from_db()
-        log = DealPhaseLog.objects.get(deal=deal)
-        self.assertEqual(deal.reasons_for_passing, "Unit economics do not meet threshold")
-        self.assertEqual(deal.rejection_reason, "Unit economics do not meet threshold")
-        self.assertEqual(log.rationale, "Unit economics do not meet threshold")
-
 
 class PassReasonApiTests(TestCase):
     def setUp(self):
@@ -86,7 +56,6 @@ class PassReasonApiTests(TestCase):
     def test_remediation_list_is_bounded_to_missing_passed_fund_one_and_two_deals(self):
         eligible = Deal.objects.create(
             title="Eligible",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND1",
             reasons_for_passing="   ",
@@ -94,7 +63,6 @@ class PassReasonApiTests(TestCase):
         eligible.responsibility.add(self.profile)
         populated = Deal.objects.create(
             title="Already complete",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND2",
             reasons_for_passing="Documented rationale",
@@ -102,13 +70,12 @@ class PassReasonApiTests(TestCase):
         populated.responsibility.add(self.profile)
         wrong_phase = Deal.objects.create(
             title="Active",
-            current_phase="4: Initial Materials Review",
+            deal_status="Interesting",
             fund="FUND1",
         )
         wrong_phase.responsibility.add(self.profile)
         fund_three = Deal.objects.create(
             title="Fund III",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND3",
         )
@@ -123,7 +90,6 @@ class PassReasonApiTests(TestCase):
     def test_remediation_update_records_actor_and_removes_deal_from_queue(self):
         deal = Deal.objects.create(
             title="Legacy passed deal",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND2",
             reasons_for_passing=None,
@@ -152,7 +118,6 @@ class PassReasonApiTests(TestCase):
     def test_remediation_rejects_stale_update_without_audit(self):
         deal = Deal.objects.create(
             title="Concurrent edit",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND1",
         )
@@ -178,7 +143,6 @@ class PassReasonApiTests(TestCase):
     def test_remediation_rejects_unassigned_analyst(self):
         deal = Deal.objects.create(
             title="Another analyst's deal",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND1",
         )
@@ -195,39 +159,37 @@ class PassReasonApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(DealPassReasonRemediationAudit.objects.filter(deal=deal).exists())
 
-    def test_update_flow_endpoint_returns_400_for_blank_reason(self):
-        deal = Deal.objects.create(title="API Deal", current_phase="4: Initial Materials Review")
+    def test_deal_update_returns_400_for_blank_pass_reason(self):
+        deal = Deal.objects.create(title="API Deal", deal_status="Interesting")
 
-        response = self.client.post(
-            f"/api/deals/{deal.id}/update_flow_state/",
-            {"active_stage": "Passed", "reason": "   ", "rejection_stage_id": 4},
+        response = self.client.patch(
+            f"/api/deals/{deal.id}/",
+            {"deal_status": "Passed", "reasons_for_passing": "   "},
             format="json",
         )
 
         self.assertEqual(response.status_code, 400)
         deal.refresh_from_db()
-        self.assertEqual(deal.current_phase, "4: Initial Materials Review")
+        self.assertEqual(deal.deal_status, "Interesting")
 
-    def test_non_passed_status_clears_rejection_tracking(self):
+    def test_non_passed_status_preserves_historic_rejection_reason(self):
         deal = Deal.objects.create(
             title="Reactivated",
-            current_phase="Passed",
             deal_status="Passed",
-            rejection_stage_id=4,
             rejection_reason="Weak financials",
             reasons_for_passing="Weak financials",
         )
 
-        response = self.client.post(
-            f"/api/deals/{deal.id}/update_flow_state/",
-            {"active_stage": "4: Initial Materials Review"},
+        response = self.client.patch(
+            f"/api/deals/{deal.id}/",
+            {"deal_status": "Interesting"},
             format="json",
         )
 
         self.assertEqual(response.status_code, 200)
         deal.refresh_from_db()
-        self.assertIsNone(deal.rejection_stage_id)
-        self.assertIsNone(deal.rejection_reason)
+        self.assertEqual(deal.deal_status, "Interesting")
+        self.assertEqual(deal.rejection_reason, "Weak financials")
 
     def test_receipt_date_descending_keeps_undated_deals_last(self):
         Deal.objects.create(title="Undated", received_at=None)

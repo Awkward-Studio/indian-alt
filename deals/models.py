@@ -15,50 +15,11 @@ class DealPriority(models.TextChoices):
 
 
 class DealStatus(models.TextChoices):
-    STAGE_1 = '1: Deal Sourced', '1: Deal Sourced'
-    STAGE_2 = '2: Initial Banker Call', '2: Initial Banker Call'
-    STAGE_3 = '3: NDA Execution', '3: NDA Execution'
-    STAGE_4 = '4: Initial Materials Review', '4: Initial Materials Review'
-    STAGE_5 = '5: Financial Model Call', '5: Financial Model Call'
-    STAGE_6 = '6: Additional Data Request', '6: Additional Data Request'
-    STAGE_7 = '7: Industry Research', '7: Industry Research'
-    STAGE_8 = '8: Reference Calls', '8: Reference Calls'
-    STAGE_9 = '9: IA Model Build', '9: IA Model Build'
-    STAGE_10 = '10: Field Visit', '10: Field Visit'
-    STAGE_11 = '11: Business Proposal', '11: Business Proposal'
-    STAGE_12 = '12: Term Sheet', '12: Term Sheet'
-    STAGE_13 = '13: Full Due Diligence', '13: Full Due Diligence'
-    STAGE_14 = '14: IC Note I', '14: IC Note I'
-    STAGE_15 = '15: IC Feedback', '15: IC Feedback'
-    STAGE_16 = '16: IC Note II', '16: IC Note II'
-    STAGE_17 = '17: Definitive Documentation', '17: Definitive Documentation'
-    STAGE_18 = '18: Closure', '18: Closure'
+    NEW = 'New', 'New'
+    INTERESTING = 'Interesting', 'Interesting'
+    SEMI_INTERESTING = 'Semi Interesting', 'Semi Interesting'
+    TO_PASS = 'To Pass', 'To Pass'
     PASSED = 'Passed', 'Passed'
-    INVESTED = 'Invested', 'Invested'
-    PORTFOLIO = 'Portfolio', 'Portfolio'
-
-
-class DealPhase(models.TextChoices):
-    STAGE_1 = '1: Deal Sourced', '1: Deal Sourced'
-    STAGE_2 = '2: Initial Banker Call', '2: Initial Banker Call'
-    STAGE_3 = '3: NDA Execution', '3: NDA Execution'
-    STAGE_4 = '4: Initial Materials Review', '4: Initial Materials Review'
-    STAGE_5 = '5: Financial Model Call', '5: Financial Model Call'
-    STAGE_6 = '6: Additional Data Request', '6: Additional Data Request'
-    STAGE_7 = '7: Industry Research', '7: Industry Research'
-    STAGE_8 = '8: Reference Calls', '8: Reference Calls'
-    STAGE_9 = '9: IA Model Build', '9: IA Model Build'
-    STAGE_10 = '10: Field Visit', '10: Field Visit'
-    STAGE_11 = '11: Business Proposal', '11: Business Proposal'
-    STAGE_12 = '12: Term Sheet', '12: Term Sheet'
-    STAGE_13 = '13: Full Due Diligence', '13: Full Due Diligence'
-    STAGE_14 = '14: IC Note I', '14: IC Note I'
-    STAGE_15 = '15: IC Feedback', '15: IC Feedback'
-    STAGE_16 = '16: IC Note II', '16: IC Note II'
-    STAGE_17 = '17: Definitive Documentation', '17: Definitive Documentation'
-    STAGE_18 = '18: Closure', '18: Closure'
-    PASSED = 'Passed', 'Passed'
-    INVESTED = 'Invested', 'Invested'
     PORTFOLIO = 'Portfolio', 'Portfolio'
 
 
@@ -96,24 +57,11 @@ class Deal(models.Model):
         db_column='priority'
     )
     deal_status = models.CharField(
-        max_length=50,
+        max_length=20,
         choices=DealStatus.choices,
-        default=DealStatus.STAGE_1,
-        blank=True,
-        null=True,
+        default=DealStatus.NEW,
         db_column='deal_status'
     )
-    current_phase = models.CharField(
-        max_length=50,
-        choices=DealPhase.choices,
-        default=DealPhase.STAGE_1
-    )
-    deal_flow_decisions = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text='Dictionary mapping stage IDs to decisions (e.g., {"1": "yes"})'
-    )
-    rejection_stage_id = models.IntegerField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True, null=True)
     received_at = models.DateField(
         null=True,
@@ -283,6 +231,10 @@ class Deal(models.Model):
             GinIndex(fields=['primary_contact_name'], name='deal_contact_name_trgm', opclasses=['gin_trgm_ops']),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(deal_status__in=DealStatus.values),
+                name='deal_status_is_canonical',
+            ),
             models.CheckConstraint(
                 condition=models.Q(
                     fund_classification_state__in=[
@@ -757,32 +709,6 @@ class DealGeneratedDocument(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.deal.title})"
-
-
-class DealPhaseLog(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    deal = models.ForeignKey(
-        Deal,
-        on_delete=models.CASCADE,
-        related_name='phase_logs'
-    )
-    from_phase = models.CharField(max_length=50, choices=DealPhase.choices, null=True)
-    to_phase = models.CharField(max_length=50, choices=DealPhase.choices)
-    rationale = models.TextField(blank=True, null=True)
-    changed_at = models.DateTimeField(auto_now_add=True)
-    changed_by = models.ForeignKey(
-        'accounts.Profile',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True
-    )
-
-    class Meta:
-        db_table = 'deal_phase_log'
-        ordering = ['-changed_at']
-
-    def __str__(self):
-        return f"{self.deal.title}: {self.from_phase} -> {self.to_phase}"
 
 
 class DocumentType(models.TextChoices):

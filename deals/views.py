@@ -28,7 +28,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
-    Deal, DealAnalysis, DealContradiction, DealDocument, DealPhase, DealPhaseLog,
+    Deal, DealAnalysis, DealContradiction, DealDocument,
     DealPassReasonRemediationAudit,
     DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
@@ -38,14 +38,13 @@ from .models import (
 )
 from .serializers import (
     DealSerializer, DealListSerializer, DealDetailSerializer,
-    DealContradictionSerializer, DealDocumentSerializer, DealPhaseLogSerializer,
+    DealContradictionSerializer, DealDocumentSerializer,
     DealHeavyFieldsSerializer, SectorResearchAcquisitionSerializer, SectorResearchDiscoveryRunSerializer,
     SectorResearchRecommendationSerializer, SectorResearchSourceRuleSerializer,
 )
 from .services.deal_creation import DealCreationService
 from .services.document_artifacts import DocumentArtifactService
 from ai_orchestrator.services.document_processor import DocumentProcessorService
-from .services.deal_flow import DealFlowService, DealFlowValidationError
 from .services.folder_analysis import FolderAnalysisService
 from .services.receipt_date_evidence import ReceiptDateEvidenceService
 from .services.report_status import is_complete_analyst_report
@@ -279,13 +278,12 @@ class DealFilterSet(django_filters.FilterSet):
     )
 
     def filter_deal_group(self, queryset, name, value):
-        terminal_statuses = ['Passed', 'Invested', 'Portfolio']
         if value == 'portfolio':
-            return queryset.filter(current_phase__in=['Invested', 'Portfolio'])
+            return queryset.filter(deal_status='Portfolio')
         if value == 'passed':
-            return queryset.filter(current_phase='Passed')
+            return queryset.filter(deal_status='Passed')
         if value == 'active':
-            return queryset.exclude(current_phase__in=terminal_statuses)
+            return queryset.filter(deal_status__in=['New', 'Interesting', 'Semi Interesting', 'To Pass'])
         return queryset
 
     def filter_fund(self, queryset, name, value):
@@ -338,7 +336,7 @@ class DealFilterSet(django_filters.FilterSet):
         fields = [
             'bank', 'priority', 'deal_status', 'deal_group', 'fund', 'is_female_led',
             'management_meeting', 'business_proposal_stage', 'ic_stage',
-            'current_phase', 'sector', 'city', 'primary_contact',
+            'sector', 'city', 'primary_contact',
             'industry',
             'bank_name', 'banker_name',
             'fund_classification_state',
@@ -647,7 +645,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ]
     ordering_fields = [
         'received_at', 'created_at', 'title', 'priority', 'deal_status',
-        'sector', 'industry', 'fund', 'current_phase', 'city', 'funding_ask',
+        'sector', 'industry', 'fund', 'city', 'funding_ask',
         'is_female_led', 'has_analysis', 'has_complete_analysis', 'has_vi_data', 'bank__name',
         'primary_contact__name', 'deal_document_count', 'folder_document_count',
         'indexed_document_count', 'last_analysis_at',
@@ -795,7 +793,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             })
 
         deal_node_id = f"deal:{deal.id}"
-        add_node(deal_node_id, "deal", deal.title, deal.current_phase, {
+        add_node(deal_node_id, "deal", deal.title, deal.deal_status, {
             "priority": deal.priority,
             "deal_status": deal.deal_status,
             "sector": deal.sector,
@@ -971,14 +969,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         """
         queryset = Deal.objects.all()
 
-        stage_counts = [
+        status_counts = [
             {
-                'stage': row['current_phase'] or 'Unassigned',
+                'status': row['deal_status'],
                 'count': row['count'],
             }
-            for row in queryset.values('current_phase')
+            for row in queryset.values('deal_status')
             .annotate(count=Count('id'))
-            .order_by('current_phase')
+            .order_by('deal_status')
         ]
         fund_counts = [
             {
@@ -1022,20 +1020,20 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         )
 
         total_value = 0.0
-        invested_ytd = 0.0
-        for current_phase, funding_ask in queryset.values_list('current_phase', 'funding_ask').iterator(chunk_size=1000):
+        portfolio_value = 0.0
+        for deal_status, funding_ask in queryset.values_list('deal_status', 'funding_ask').iterator(chunk_size=1000):
             parsed_amount = self._parse_funding_ask(funding_ask)
             total_value += parsed_amount
-            if current_phase in ['Invested', 'Portfolio']:
-                invested_ytd += parsed_amount
+            if deal_status == 'Portfolio':
+                portfolio_value += parsed_amount
 
         return Response({
             'totalDeals': queryset.count(),
-            'activeDeals': queryset.exclude(current_phase__in=['Passed', 'Invested', 'Portfolio']).count(),
-            'closedDeals': queryset.filter(current_phase__in=['Invested', 'Portfolio']).count(),
+            'activeDeals': queryset.filter(deal_status__in=['New', 'Interesting', 'Semi Interesting', 'To Pass']).count(),
+            'portfolioDeals': queryset.filter(deal_status='Portfolio').count(),
             'totalValue': total_value,
-            'investedYTD': invested_ytd,
-            'stageCounts': stage_counts,
+            'portfolioValue': portfolio_value,
+            'statusCounts': status_counts,
             'fundCounts': fund_counts,
             'priorityCounts': priority_counts,
             'femaleLedCounts': female_led_counts,
@@ -1062,7 +1060,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     'id': str(deal.id),
                     'title': deal.title or 'Untitled deal',
                     'source_onedrive_id': deal.source_onedrive_id,
-                    'current_phase': deal.current_phase,
+                    'deal_status': deal.deal_status,
                     'priority': deal.priority,
                 }
                 for deal in items
@@ -1363,7 +1361,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
     @staticmethod
     def _pass_reason_remediation_queryset(user):
-        queryset = Deal.objects.filter(current_phase=DealPhase.PASSED).annotate(
+        queryset = Deal.objects.filter(deal_status='Passed').annotate(
             normalized_pass_reason=Trim(
                 Coalesce('reasons_for_passing', Value(''), output_field=CharField())
             )
@@ -1397,7 +1395,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'id': str(deal.id),
             'title': deal.title,
             'fund': deal.fund,
-            'current_phase': deal.current_phase,
+            'deal_status': deal.deal_status,
             'reasons_for_passing': deal.reasons_for_passing,
             'updated_at': deal.updated_at.isoformat(),
             'last_remediation': ({
@@ -2170,43 +2168,6 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-    @action(detail=True, methods=['post'])
-    def transition_phase(self, request, pk=None):
-        """
-        Transitions a deal to a new phase and logs the rationale.
-        """
-        deal = self.get_object()
-        try:
-            result = DealFlowService.transition_phase(
-                deal=deal,
-                to_phase=request.data.get('to_phase'),
-                rationale=request.data.get('rationale'),
-                request_user=request.user
-            )
-        except DealFlowValidationError as exc:
-            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result)
-
-    @action(detail=True, methods=['post'])
-    def update_flow_state(self, request, pk=None):
-        """
-        Unified endpoint for the 18-stage interactive deal flow.
-        Accepts `active_stage`, `decisions_update` (dict), and optional `reason`.
-        """
-        deal = self.get_object()
-        try:
-            result = DealFlowService.update_flow_state(
-                deal=deal,
-                active_stage=request.data.get('active_stage'),
-                decisions_update=request.data.get('decisions_update'),
-                reason=request.data.get('reason'),
-                rejection_stage_id=request.data.get('rejection_stage_id'),
-                request_user=request.user
-            )
-        except DealFlowValidationError as exc:
-            return Response({"reason": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result)
 
     @action(detail=True, methods=['get'])
     def get_paginated_extracted_text(self, request, pk=None):

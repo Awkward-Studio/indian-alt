@@ -150,7 +150,7 @@ def _deal_comparison_context(deal, selected_deal_ids: list | None = None) -> str
             "title": item.title,
             "industry": item.industry,
             "sector": item.sector,
-            "current_phase": item.current_phase,
+            "deal_status": item.deal_status,
             "priority": item.priority,
             "funding_ask": item.funding_ask,
             "funding_ask_for": item.funding_ask_for,

@@ -75,7 +75,7 @@ QUERY_PLANNER_RESPONSE_FORMAT = {
                         "sector": {"type": ["string", "null"]},
                         "city": {"type": ["string", "null"]},
                         "priority": {"type": ["string", "null"]},
-                        "current_phase": {"type": ["string", "null"]},
+                        "deal_status": {"type": ["string", "null"]},
                         "is_female_led": {"type": ["boolean", "null"]},
                         "management_meeting": {"type": ["boolean", "null"]},
                     },
@@ -85,7 +85,7 @@ QUERY_PLANNER_RESPONSE_FORMAT = {
                         "sector",
                         "city",
                         "priority",
-                        "current_phase",
+                        "deal_status",
                         "is_female_led",
                         "management_meeting",
                     ],
@@ -743,7 +743,7 @@ class UniversalChatService:
                         "title": candidate.title,
                         "industry": candidate.industry,
                         "sector": candidate.sector,
-                        "current_phase": candidate.current_phase,
+                        "deal_status": candidate.deal_status,
                         "priority": candidate.priority,
                         "funding_ask": candidate.funding_ask,
                         "funding_ask_for": candidate.funding_ask_for,
@@ -1096,7 +1096,7 @@ class UniversalChatService:
         if current_deal_id and current_deal_id not in target_ids:
             target_ids.append(current_deal_id)
 
-        deals = list(Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs"))
+        deals = list(Deal.objects.filter(id__in=target_ids))
         chunks, diagnostics = self._search_ranked_chunks(plan, deals)
         serialized = [self._serialize_chunk(item) for item in chunks]
         
@@ -1115,7 +1115,7 @@ class UniversalChatService:
         if current_deal_id and str(current_deal_id) not in target_ids:
             target_ids.append(str(current_deal_id))
 
-        deals = list(Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs"))
+        deals = list(Deal.objects.filter(id__in=target_ids))
         self._trace_chunks("documents_for_selected_deals_query_ranked_chunks_start")
         chunks, diagnostics = self._search_ranked_chunks(plan, deals)
         self._trace_chunks("documents_for_selected_deals_query_ranked_chunks_done", chunks=len(chunks))
@@ -1744,7 +1744,7 @@ class UniversalChatService:
         target_ids = [str(item) for item in deal_ids if item]
         if current_deal_id and str(current_deal_id) not in target_ids:
             target_ids.append(str(current_deal_id))
-        deals_qs = Deal.objects.filter(id__in=target_ids).prefetch_related("phase_logs")
+        deals_qs = Deal.objects.filter(id__in=target_ids)
         deals = []
         for deal in deals_qs:
             sd = self._serialize_deal(deal)
@@ -1993,7 +1993,7 @@ class UniversalChatService:
             "user_query": user_message,
         }
 
-        for field in ["title", "industry", "sector", "city", "priority", "current_phase", "is_female_led", "management_meeting"]:
+        for field in ["title", "industry", "sector", "city", "priority", "deal_status", "is_female_led", "management_meeting"]:
             value = hard_filters.get(field)
             if value not in [None, "", "null", "None"]:
                 normalized["hard_filters"][field] = value
@@ -2307,29 +2307,29 @@ class UniversalChatService:
         return [title for _, title in sorted(matches, key=lambda item: (item[0], -len(item[1])))[:10]]
 
     def _pipeline_stats_context(self) -> Dict[str, Any]:
-        phase_rows = list(
-            Deal.objects.values("current_phase").annotate(count=Count("id")).order_by("-count", "current_phase")
+        status_rows = list(
+            Deal.objects.values("deal_status").annotate(count=Count("id")).order_by("-count", "deal_status")
         )
-        by_current_phase = [
-            {"current_phase": row["current_phase"] or "Unspecified", "count": row["count"]}
-            for row in phase_rows
+        by_deal_status = [
+            {"deal_status": row["deal_status"], "count": row["count"]}
+            for row in status_rows
         ]
-        total_deals = sum(row["count"] for row in phase_rows)
+        total_deals = sum(row["count"] for row in status_rows)
         passed_deals = sum(
-            row["count"] for row in phase_rows
-            if str(row["current_phase"] or "").strip().lower() == "passed"
+            row["count"] for row in status_rows
+            if row["deal_status"] == "Passed"
         )
-        sourced_deals = sum(
-            row["count"] for row in phase_rows
-            if str(row["current_phase"] or "").strip().lower().startswith("1: deal sourced")
+        new_deals = sum(
+            row["count"] for row in status_rows
+            if row["deal_status"] == "New"
         )
         return {
             "total_deals": total_deals,
             "non_passed_deals": total_deals - passed_deals,
             "passed_deals": passed_deals,
-            "deal_sourced_phase_count": sourced_deals,
+            "new_deals": new_deals,
             "female_led_count": Deal.objects.filter(is_female_led=True).count(),
-            "by_current_phase": by_current_phase,
+            "by_deal_status": by_deal_status,
             "by_industry": list(
                 Deal.objects.values("industry").annotate(count=Count("id")).order_by("-count")[:10]
             ),
@@ -2433,7 +2433,7 @@ class UniversalChatService:
         filter_settings = self._stage_settings("deal_filtering")
         rerank_settings = self._stage_settings("chunk_rerank")
         result_limit = max(int(plan.get("deal_limit") or filter_settings.get("result_limit") or 8), 1)
-        base_queryset = Deal.objects.all().select_related("retrieval_profile").prefetch_related("phase_logs")
+        base_queryset = Deal.objects.all().select_related("retrieval_profile")
         queryset = base_queryset
         filters = self._align_hard_filters_to_known_values(base_queryset, plan.get("hard_filters", {}))
         plan["hard_filters"] = filters
@@ -2443,7 +2443,7 @@ class UniversalChatService:
             queryset = queryset.filter(is_female_led=filters["is_female_led"])
         if "management_meeting" in filters:
             queryset = queryset.filter(management_meeting=filters["management_meeting"])
-        for field in ["title", "industry", "sector", "city", "priority", "current_phase"]:
+        for field in ["title", "industry", "sector", "city", "priority", "deal_status"]:
             value = filters.get(field)
             if value:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})
@@ -2838,7 +2838,7 @@ class UniversalChatService:
 
         aligned: Dict[str, Any] = {}
         passthrough_fields = {"is_female_led", "management_meeting"}
-        string_fields = ["title", "industry", "sector", "city", "priority", "current_phase"]
+        string_fields = ["title", "industry", "sector", "city", "priority", "deal_status"]
 
         for field, value in filters.items():
             if value in [None, "", "null", "None"]:
@@ -3852,16 +3852,6 @@ class UniversalChatService:
     def _serialize_deal(self, deal: Deal) -> Dict[str, Any]:
         current_analysis = deal.current_analysis or {}
         canonical_snapshot = current_analysis.get("canonical_snapshot") if isinstance(current_analysis, dict) else {}
-        recent_timeline = [
-            {
-                "date": log.changed_at.isoformat(),
-                "from_phase": log.from_phase,
-                "to_phase": log.to_phase,
-                "rationale": log.rationale,
-            }
-            for log in deal.phase_logs.all().order_by("-changed_at")[:3]
-        ]
-        
         # Omit the massive analysis_json/current_analysis blob to avoid OOM in large retrieval turns.
         # Everything needed for the context or UI is already extracted into top-level fields.
         compact_analysis = {
@@ -3878,7 +3868,7 @@ class UniversalChatService:
             "sector": deal.sector,
             "city": deal.city,
             "priority": deal.priority,
-            "current_phase": deal.current_phase,
+            "deal_status": deal.deal_status,
             "is_female_led": deal.is_female_led,
             "management_meeting": deal.management_meeting,
             "funding_ask": deal.funding_ask,
@@ -3890,7 +3880,6 @@ class UniversalChatService:
             "summary_excerpt": ((canonical_snapshot or {}).get("analyst_report") or deal.deal_summary or "")[: int(self._stage_settings("context_assembly").get("deal_summary_excerpt_chars", 900) or 900)],
             "current_analysis": compact_analysis,
             "vi_context": self._serialize_vi_context(deal),
-            "recent_timeline": recent_timeline,
             "retrieval_score": getattr(deal, "_retrieval_score", None),
             "retrieval_components": getattr(deal, "_retrieval_components", None),
         }
@@ -4013,7 +4002,7 @@ class UniversalChatService:
                 sections.append(
                     f"- {deal['title']}{is_primary_str} | Has Extracted Docs: {has_docs_str} | Industry: {deal.get('industry') or 'N/A'} | "
                     f"Sector: {deal.get('sector') or 'N/A'} | Priority: {deal.get('priority') or 'N/A'} | "
-                    f"Phase: {deal.get('current_phase') or 'N/A'} | Themes: {', '.join(deal.get('themes') or []) or 'N/A'}"
+                    f"Status: {deal.get('deal_status') or 'N/A'} | Themes: {', '.join(deal.get('themes') or []) or 'N/A'}"
                 )
                 if deal.get("summary_excerpt"):
                     sections.append(f"  Summary: {deal['summary_excerpt']}")

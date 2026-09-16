@@ -263,7 +263,7 @@ class Command(BaseCommand):
             "title": deal.title,
             "industry": deal.industry,
             "sector": deal.sector,
-            "current_phase": deal.current_phase,
+            "deal_status": deal.deal_status,
             "priority": deal.priority,
             "funding_ask": deal.funding_ask,
             "funding_ask_for": deal.funding_ask_for,
@@ -339,7 +339,7 @@ class Command(BaseCommand):
         for competitor in competitors:
             self.stdout.write(
                 f"- {competitor['title']} | {competitor.get('industry') or 'N/A'} / "
-                f"{competitor.get('sector') or 'N/A'} | phase={competitor.get('current_phase') or 'N/A'} | "
+                f"{competitor.get('sector') or 'N/A'} | status={competitor.get('deal_status') or 'N/A'} | "
                 f"funding_ask={competitor.get('funding_ask') or 'N/A'} | model_keys={competitor.get('deal_model_data_keys') or []}"
             )
 

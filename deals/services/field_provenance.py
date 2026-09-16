@@ -8,7 +8,7 @@ from deals.models import DealFieldProvenance
 TRACKED_DEAL_FIELDS = {
     'title', 'received_at', 'bank', 'bank_name', 'legacy_investment_bank',
     'primary_contact', 'primary_contact_name', 'deal_status',
-    'current_phase', 'priority', 'fund', 'responsibility', 'sector',
+    'priority', 'fund', 'responsibility', 'sector',
     'industry', 'city', 'funding_ask', 'funding_ask_for', 'is_female_led',
     'deal_summary', 'company_details', 'priority_rationale', 'comments',
     'reasons_for_passing', 'rejection_reason', 'state', 'country', 'themes',

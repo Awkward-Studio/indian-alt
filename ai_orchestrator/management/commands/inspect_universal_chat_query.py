@@ -486,7 +486,7 @@ class Command(BaseCommand):
                     "title": str(deal.title or ""),
                     "industry": str(deal.industry or ""),
                     "sector": str(deal.sector or ""),
-                    "current_phase": str(deal.current_phase or ""),
+                    "deal_status": str(deal.deal_status or ""),
                     "retrieval_score": getattr(deal, "_retrieval_score", None),
                     "retrieval_components": getattr(deal, "_retrieval_components", None),
                 }
@@ -640,7 +640,7 @@ class Command(BaseCommand):
                 title = deal.get("title") or "Untitled"
                 industry = deal.get("industry") or "N/A"
                 sector = deal.get("sector") or "N/A"
-                phase = deal.get("current_phase") or "N/A"
+                phase = deal.get("deal_status") or "N/A"
                 score = deal.get("retrieval_score")
                 components = deal.get("retrieval_components") or {}
                 self.stdout.write(

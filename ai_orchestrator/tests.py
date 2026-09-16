@@ -1205,18 +1205,18 @@ class UniversalChatServiceTests(TestCase):
         self.assertEqual(plan["deal_limit"], 2)
         self.assertEqual(plan["exact_terms"], ["Arman Financial Services", "Light MFI"])
 
-    def test_pipeline_stats_context_includes_current_phase_breakdown(self):
-        Deal.objects.create(title="Sourced", current_phase="1: Deal Sourced")
-        Deal.objects.create(title="Passed", current_phase="Passed")
-        Deal.objects.create(title="Review", current_phase="3: IC Review")
+    def test_pipeline_stats_context_includes_deal_status_breakdown(self):
+        Deal.objects.create(title="Sourced", deal_status="New")
+        Deal.objects.create(title="Passed", deal_status="Passed")
+        Deal.objects.create(title="Review", deal_status="Interesting")
 
         stats = self.service._pipeline_stats_context()
 
         self.assertEqual(stats["total_deals"], 3)
         self.assertEqual(stats["passed_deals"], 1)
         self.assertEqual(stats["non_passed_deals"], 2)
-        self.assertEqual(stats["deal_sourced_phase_count"], 1)
-        self.assertIn({"current_phase": "Passed", "count": 1}, stats["by_current_phase"])
+        self.assertEqual(stats["new_deals"], 1)
+        self.assertIn({"deal_status": "Passed", "count": 1}, stats["by_deal_status"])
 
     def test_tokenize_keywords_strips_generic_query_words(self):
         keywords = self.service._tokenize_keywords(

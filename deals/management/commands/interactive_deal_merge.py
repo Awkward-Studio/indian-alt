@@ -43,7 +43,7 @@ class Command(BaseCommand):
         changed_fields = []
 
         # Handle Scalar Fields
-        comparison_fields = ["title"] + SCALAR_FIELDS + ["themes", "other_contacts", "deal_flow_decisions"]
+        comparison_fields = ["title"] + SCALAR_FIELDS + ["themes", "other_contacts"]
         for field in comparison_fields:
             val1 = getattr(canonical, field)
             val2 = getattr(duplicate, field)

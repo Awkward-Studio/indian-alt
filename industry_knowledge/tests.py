@@ -115,9 +115,9 @@ class NewsIngestionTests(TestCase):
 class IndustryViewSetTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="analyst2", password="password")
-        self.deal1 = Deal.objects.create(title="Fintech App", industry="Fintech", current_phase="Initial Review")
-        self.deal2 = Deal.objects.create(title="PayTech Solutions", industry="Fintech", current_phase="Due Diligence")
-        self.deal3 = Deal.objects.create(title="Cold Storage Logistics", industry="Cold Chain", current_phase="Passed")
+        self.deal1 = Deal.objects.create(title="Fintech App", industry="Fintech", deal_status="New")
+        self.deal2 = Deal.objects.create(title="PayTech Solutions", industry="Fintech", deal_status="Interesting")
+        self.deal3 = Deal.objects.create(title="Cold Storage Logistics", industry="Cold Chain", deal_status="Passed")
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
@@ -180,4 +180,3 @@ class IndustryViewSetTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["title"], "Fintech growth in India accelerates")
-

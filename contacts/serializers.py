@@ -25,7 +25,6 @@ class ContactSerializer(serializers.ModelSerializer):
                 "deal_id": str(deal.id),
                 "title": deal.title,
                 "deal_status": deal.deal_status,
-                "current_phase": deal.current_phase,
                 "bank": str(deal.bank_id) if deal.bank_id else None,
                 "bank_name": deal.bank.name if deal.bank else None,
                 "is_primary": deal.primary_contact_id == obj.id,
@@ -83,7 +82,6 @@ class BankerDealActivitySerializer(serializers.Serializer):
     deal_id = serializers.UUIDField(source='id')
     title = serializers.CharField(allow_null=True)
     deal_status = serializers.CharField(allow_null=True)
-    current_phase = serializers.CharField()
     activity_date = serializers.DateField()
     received_at = serializers.DateField(allow_null=True)
     bank_id = serializers.UUIDField(source='bank.id', allow_null=True)

@@ -7,8 +7,8 @@ from deals.models import Deal
 
 # Mapping legacy status to the 18-step Deal Flow tracker enumValues
 DEAL_FLOW_MAPPING = {
-    'deal sourced': '1: Deal Sourced',
-    'sourced': '1: Deal Sourced',
+    'deal sourced': 'New',
+    'sourced': 'New',
     'initial banker call': '2: Initial Banker Call',
     'banker call': '2: Initial Banker Call',
     'nda execution': '3: NDA Execution',
@@ -109,7 +109,7 @@ class Command(BaseCommand):
                             title=deal_title,
                             primary_contact=contact,
                             defaults={
-                                'current_phase': mapped_phase,
+                                'deal_status': mapped_phase,
                                 'bank': bank,
                                 'deal_summary': f"Imported from legacy banker database. Original Status: {legacy_pipeline}",
                             }

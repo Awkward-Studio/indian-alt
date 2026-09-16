@@ -17,30 +17,26 @@ class DashboardMetricsApiTests(TestCase):
     def test_metrics_return_full_pipeline_fund_and_analysis_counts(self):
         available = Deal.objects.create(
             title="Analysis available",
-            current_phase="4: Initial Materials Review",
-            deal_status="4: Initial Materials Review",
+            deal_status="Interesting",
             fund="FUND1",
             processing_status="completed",
         )
         DealAnalysis.objects.create(deal=available)
         Deal.objects.create(
             title="Analysis running",
-            current_phase="7: Industry Research",
-            deal_status="7: Industry Research",
+            deal_status="Semi Interesting",
             fund="FUND2",
             processing_status="processing",
         )
         Deal.objects.create(
             title="Analysis failed",
-            current_phase="Passed",
             deal_status="Passed",
             fund="FUND3",
             processing_status="failed",
         )
         Deal.objects.create(
             title="Analysis not started",
-            current_phase="1: Deal Sourced",
-            deal_status="1: Deal Sourced",
+            deal_status="New",
             fund="",
             processing_status="idle",
         )
@@ -63,11 +59,11 @@ class DashboardMetricsApiTests(TestCase):
             {"FUND1": 1, "FUND2": 1, "FUND3": 1, "UNASSIGNED": 1},
         )
         self.assertEqual(
-            {row["stage"]: row["count"] for row in response.data["stageCounts"]},
+            {row["status"]: row["count"] for row in response.data["statusCounts"]},
             {
-                "1: Deal Sourced": 1,
-                "4: Initial Materials Review": 1,
-                "7: Industry Research": 1,
+                "New": 1,
+                "Interesting": 1,
+                "Semi Interesting": 1,
                 "Passed": 1,
             },
         )

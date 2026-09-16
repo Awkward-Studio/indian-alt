@@ -295,7 +295,7 @@ class EmbeddingService:
             f"Sector: {deal.sector or ''}",
             f"Geography: {', '.join(part for part in [deal.city, deal.state, deal.country] if part)}",
             f"Priority: {deal.priority or ''}",
-            f"Current Phase: {deal.current_phase or ''}",
+            f"Deal Status: {deal.deal_status or ''}",
             f"Themes: {', '.join(deal.themes or []) if isinstance(deal.themes, list) else ''}",
             f"Female Led: {'yes' if deal.is_female_led else 'no'}",
             f"Management Meeting Complete: {'yes' if deal.management_meeting else 'no'}",
@@ -909,7 +909,7 @@ class EmbeddingService:
             queryset = queryset.filter(is_female_led=filters["is_female_led"])
         if "management_meeting" in filters:
             queryset = queryset.filter(management_meeting=filters["management_meeting"])
-        for field in ["title", "industry", "sector", "city", "priority", "current_phase"]:
+        for field in ["title", "industry", "sector", "city", "priority", "deal_status"]:
             value = filters.get(field)
             if value:
                 queryset = queryset.filter(**{f"{field}__icontains": str(value)})

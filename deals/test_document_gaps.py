@@ -29,7 +29,7 @@ class DocumentGapQueueTests(TestCase):
 
     def test_returns_every_missing_folder_with_dialog_metadata(self):
         Deal.objects.bulk_create([
-            Deal(title=f"Missing folder {index}", current_phase="Evaluation", priority="high")
+            Deal(title=f"Missing folder {index}", deal_status="Interesting", priority="High")
             for index in range(55)
         ])
 
@@ -39,5 +39,5 @@ class DocumentGapQueueTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["counts"]["missing_folders"], 55)
         self.assertEqual(len(payload["missing_folders"]), 55)
-        self.assertEqual(payload["missing_folders"][0]["current_phase"], "Evaluation")
-        self.assertEqual(payload["missing_folders"][0]["priority"], "high")
+        self.assertEqual(payload["missing_folders"][0]["deal_status"], "Interesting")
+        self.assertEqual(payload["missing_folders"][0]["priority"], "High")

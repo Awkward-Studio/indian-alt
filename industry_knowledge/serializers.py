@@ -125,7 +125,7 @@ class DealSummaryForIndustrySerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         fields = [
-            "id", "title", "deal_status", "current_phase", "fund",
+            "id", "title", "deal_status", "fund",
             "funding_ask", "funding_ask_for", "received_at", "deal_summary",
             "city", "is_female_led", "created_at",
         ]
@@ -163,4 +163,3 @@ class IndustryDetailSerializer(serializers.ModelSerializer):
     def get_deals(self, obj):
         deals = Deal.objects.filter(industry=obj.name).order_by("-received_at", "-created_at")[:100]
         return DealSummaryForIndustrySerializer(deals, many=True).data
-

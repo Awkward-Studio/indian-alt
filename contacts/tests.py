@@ -43,12 +43,12 @@ class BankerAnalyticsAPITests(TestCase):
 
         self.active_deal = self._deal(
             "Active mandate",
-            DealStatus.STAGE_8,
+            DealStatus.NEW,
             date(2026, 7, 20),
         )
-        self._deal("IC mandate", DealStatus.STAGE_15, date(2026, 7, 10))
+        self._deal("Interesting mandate", DealStatus.INTERESTING, date(2026, 7, 10))
         self._deal("Passed mandate", DealStatus.PASSED, date(2026, 6, 2))
-        self._deal("Invested mandate", DealStatus.INVESTED, date(2026, 5, 1))
+        self._deal("Portfolio mandate two", DealStatus.PORTFOLIO, date(2026, 5, 1))
         self._deal("Portfolio mandate", DealStatus.PORTFOLIO, date(2026, 4, 1))
         meeting = Meeting.objects.create(notes="Quarterly relationship review")
         meeting.contacts.add(self.banker)
@@ -56,8 +56,7 @@ class BankerAnalyticsAPITests(TestCase):
         self.additional_only_deal = Deal.objects.create(
             title="Participant-only relationship",
             bank=self.bank,
-            deal_status=DealStatus.STAGE_3,
-            current_phase=DealStatus.STAGE_3,
+            deal_status=DealStatus.INTERESTING,
             received_at=date(2026, 7, 25),
         )
         self.additional_only_deal.additional_contacts.add(self.banker)
@@ -68,7 +67,6 @@ class BankerAnalyticsAPITests(TestCase):
             bank=self.bank,
             primary_contact=self.banker,
             deal_status=deal_status,
-            current_phase=deal_status,
             received_at=received_at,
         )
 
@@ -87,8 +85,8 @@ class BankerAnalyticsAPITests(TestCase):
         self.assertEqual(banker["entity_type"], "banker")
         self.assertEqual(banker["total_deals_introduced"], 5)
         self.assertEqual(banker["active_mandates"], 2)
-        self.assertEqual(banker["sourced_mandates"], 1)
-        self.assertEqual(banker["ic_mandates"], 1)
+        self.assertEqual(banker["sourced_mandates"], 2)
+        self.assertEqual(banker["ic_mandates"], 0)
         self.assertEqual(banker["converted_deals"], 2)
         self.assertEqual(banker["passed_deals"], 1)
         self.assertEqual(banker["conversion_rate"], 40.0)
@@ -128,8 +126,8 @@ class BankerAnalyticsAPITests(TestCase):
         self.assertEqual(response.data["banker_count"], 2)
         self.assertEqual(response.data["total_deals_introduced"], 6)
         self.assertEqual(response.data["active_mandates"], 3)
-        self.assertEqual(response.data["sourced_mandates"], 2)
-        self.assertEqual(response.data["ic_mandates"], 1)
+        self.assertEqual(response.data["sourced_mandates"], 3)
+        self.assertEqual(response.data["ic_mandates"], 0)
         self.assertEqual(response.data["converted_deals"], 2)
         self.assertEqual(response.data["passed_deals"], 1)
         self.assertEqual(response.data["conversion_rate"], 33.3)

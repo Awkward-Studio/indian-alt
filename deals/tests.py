@@ -30,7 +30,6 @@ from contacts.models import Contact
 from banks.models import Bank
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
-from deals.services.deal_flow import DealFlowService
 from deals.services.contact_linking import sync_contact_deal_links
 from deals.services.folder_analysis import FolderAnalysisService
 from deals.services.bulk_sync_resolution import folder_aliases, resolve_existing_deal, synthesis_canonical_title
@@ -1474,32 +1473,33 @@ class DealAnalysisMappingTests(TestCase):
         self.assertEqual(serialized["file_tree"][0]["path"], "Investment/Deck.pdf")
 
 
-class DealStatusSyncTests(TestCase):
-    def test_serializer_create_syncs_deal_status_and_current_phase(self):
+class DealStatusSerializerTests(TestCase):
+    def test_serializer_create_persists_canonical_deal_status(self):
         serializer = DealSerializer(data={
-            "title": "Synced Create",
-            "deal_status": "12: Term Sheet",
+            "title": "Canonical Create",
+            "deal_status": "Semi Interesting",
         })
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         deal = serializer.save()
 
-        self.assertEqual(deal.deal_status, "12: Term Sheet")
-        self.assertEqual(deal.current_phase, "12: Term Sheet")
+        self.assertEqual(deal.deal_status, "Semi Interesting")
 
-    def test_serializer_update_syncs_from_current_phase(self):
+    def test_serializer_update_changes_deal_status(self):
         deal = Deal.objects.create(
-            title="Synced Update",
-            deal_status="3: NDA Execution",
-            current_phase="3: NDA Execution",
+            title="Canonical Update",
+            deal_status="New",
         )
-        serializer = DealSerializer(instance=deal, data={"current_phase": "16: IC Note II"}, partial=True)
+        serializer = DealSerializer(
+            instance=deal,
+            data={"deal_status": "Interesting"},
+            partial=True,
+        )
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         updated = serializer.save()
 
-        self.assertEqual(updated.deal_status, "16: IC Note II")
-        self.assertEqual(updated.current_phase, "16: IC Note II")
+        self.assertEqual(updated.deal_status, "Interesting")
 
     def test_deal_serializer_sets_primary_contact_bank_and_additional_contacts(self):
         bank = Bank.objects.create(name="Axis Capital")
@@ -1553,26 +1553,6 @@ class DealStatusSyncTests(TestCase):
 
         deal.refresh_from_db()
         self.assertIsNone(deal.primary_contact)
-
-    def test_update_flow_state_sets_passed_on_rejection(self):
-        deal = Deal.objects.create(
-            title="Rejected Deal",
-            deal_status="5: Financial Model Call",
-            current_phase="5: Financial Model Call",
-        )
-
-        DealFlowService.update_flow_state(
-            deal=deal,
-            active_stage="Passed",
-            decisions_update={"5": "no"},
-            reason="Model assumptions broke",
-            rejection_stage_id=5,
-        )
-
-        deal.refresh_from_db()
-        self.assertEqual(deal.deal_status, "Passed")
-        self.assertEqual(deal.current_phase, "Passed")
-        self.assertEqual(deal.rejection_stage_id, 5)
 
     @patch("ai_orchestrator.services.embedding_processor.EmbeddingService.vectorize_document")
     @patch("deals.tasks.process_deal_folder_background.apply_async")
@@ -2392,8 +2372,7 @@ class RebuildDerivedDealStateCommandTests(TestCase):
     def test_rebuild_command_repairs_title_and_rebuilds_derived_state(self, mock_refresh_embeddings):
         deal = Deal.objects.create(
             title="Investment Report: Acme Finance",
-            current_phase="5: Financial Model Call",
-            deal_status="5: Financial Model Call",
+            deal_status="Interesting",
             deal_summary="Old summary",
             funding_ask="999",
             industry="Old Industry",
@@ -2508,8 +2487,7 @@ class RebuildDerivedDealStateCommandTests(TestCase):
 
         deal.refresh_from_db()
         self.assertEqual(deal.title, "Acme Finance")
-        self.assertEqual(deal.current_phase, "5: Financial Model Call")
-        self.assertEqual(deal.deal_status, "5: Financial Model Call")
+        self.assertEqual(deal.deal_status, "Interesting")
         self.assertEqual(deal.funding_ask, "125")
         self.assertEqual(deal.industry, "NBFC")
         self.assertEqual(deal.sector, "Fintech")
@@ -2541,8 +2519,7 @@ class RebuildDerivedDealStateCommandTests(TestCase):
             title="Investment Report: Dry Run Finance",
             deal_summary="Old summary",
             funding_ask="999",
-            current_phase="1: Deal Sourced",
-            deal_status="1: Deal Sourced",
+            deal_status="New",
         )
         DealAnalysis.objects.create(
             deal=deal,

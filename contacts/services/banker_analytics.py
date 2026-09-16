@@ -8,13 +8,9 @@ from contacts.models import Contact
 from deals.models import Deal, DealStatus
 
 
-CONVERTED_STATUSES = (DealStatus.INVESTED, DealStatus.PORTFOLIO)
+CONVERTED_STATUSES = (DealStatus.PORTFOLIO,)
 INACTIVE_STATUSES = (DealStatus.PASSED, *CONVERTED_STATUSES)
-IC_STATUSES = (
-    DealStatus.STAGE_14,
-    DealStatus.STAGE_15,
-    DealStatus.STAGE_16,
-)
+IC_STATUSES = ()
 
 
 def _effective_deal_date(prefix: str):

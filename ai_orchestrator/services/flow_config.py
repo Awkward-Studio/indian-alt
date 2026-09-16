@@ -78,7 +78,7 @@ Return only JSON with this shape:
     "sector": null,
     "city": null,
     "priority": null,
-    "current_phase": null,
+    "deal_status": null,
     "is_female_led": null,
     "management_meeting": null
   },

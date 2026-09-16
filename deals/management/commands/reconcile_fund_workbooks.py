@@ -214,7 +214,7 @@ class Command(BaseCommand):
         database_deals = defaultdict(list)
         for deal in Deal.objects.filter(fund__in=selected_funds).only(
             "id", "title", "fund", "received_at", "reasons_for_passing",
-            "rejection_reason", "deal_status", "current_phase", "funding_ask",
+            "rejection_reason", "deal_status", "funding_ask",
             "legacy_investment_bank", "industry", "sector", "city",
             "deal_summary", "deal_details", "company_details", "comments",
             "is_female_led", "management_meeting", "business_proposal_stage",
@@ -294,7 +294,7 @@ class Command(BaseCommand):
             elif not source_date:
                 stats["missing_workbook_dates"] += 1
 
-            is_passed = "Passed" in {deal.deal_status, deal.current_phase}
+            is_passed = deal.deal_status == "Passed"
             existing_reason = clean(deal.reasons_for_passing) or clean(deal.rejection_reason)
             if is_passed and source["reason"] and not existing_reason:
                 changes["reasons_for_passing"] = source["reason"]
@@ -385,12 +385,10 @@ class Command(BaseCommand):
             source_status = source["status"].casefold()
             expected_status = (
                 "Passed" if source_status == "passed"
-                else "1: Deal Sourced" if source_status == "new"
+                else "New" if source_status == "new"
                 else ""
             )
-            if expected_status and expected_status not in {
-                deal.deal_status, deal.current_phase
-            }:
+            if expected_status and expected_status != deal.deal_status:
                 stats["status_conflicts_preserved"] += 1
             elif not expected_status and source["status"]:
                 stats["unmapped_workbook_statuses"] += 1

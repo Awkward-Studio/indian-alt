@@ -5,7 +5,7 @@ import json
 from django.db import transaction
 
 from ai_orchestrator.models import DealRetrievalProfile, DocumentChunk
-from deals.models import Deal, DealAnalysis, DealDocument, DealFieldProvenance, DealPhaseLog
+from deals.models import Deal, DealAnalysis, DealDocument, DealFieldProvenance
 from microsoft.models import Email
 
 
@@ -13,8 +13,6 @@ SCALAR_FIELDS = [
     "bank",
     "priority",
     "deal_status",
-    "current_phase",
-    "rejection_stage_id",
     "rejection_reason",
     "deal_summary",
     "funding_ask",
@@ -159,7 +157,6 @@ def move_related_objects(canonical: Deal, duplicate: Deal) -> None:
 
     dedupe_documents(canonical, duplicate)
     dedupe_chunks(canonical, duplicate)
-    DealPhaseLog.objects.filter(deal=duplicate).update(deal=canonical)
     DealFieldProvenance.objects.filter(deal=duplicate).update(deal=canonical)
     Email.objects.filter(deal=duplicate).update(deal=canonical)
 
@@ -187,7 +184,7 @@ def move_related_objects(canonical: Deal, duplicate: Deal) -> None:
     # Preserve newer reverse relations added after the original merge service.
     # Relations with bespoke deduplication above are skipped here.
     handled_accessors = {
-        "documents", "chunks", "phase_logs", "field_provenance", "emails",
+        "documents", "chunks", "field_provenance", "emails",
         "retrieval_profile", "analyses", "additional_contacts", "responsibility",
     }
     for relation in Deal._meta.related_objects:

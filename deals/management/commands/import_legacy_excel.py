@@ -5,7 +5,8 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth.models import User
-from deals.models import Deal, DealFieldProvenance, DealStatus, DealPhase
+from deals.models import Deal, DealFieldProvenance, DealStatus
+from deals.statuses import normalize_deal_status
 from deals.services.field_provenance import record_deal_field_changes
 from contacts.models import Contact
 from banks.models import Bank
@@ -148,18 +149,7 @@ class Command(BaseCommand):
 
                     # 2. Status Mapping
                     status_str = str(row.get('Deal Status', '')).lower().strip()
-                    deal_status = DealStatus.STAGE_1
-                    current_phase = DealPhase.STAGE_1
-                    
-                    if 'passed' in status_str:
-                        deal_status = DealStatus.PASSED
-                        current_phase = DealPhase.PASSED
-                    elif 'invested' in status_str:
-                        deal_status = DealStatus.INVESTED
-                        current_phase = DealPhase.INVESTED
-                    elif 'portfolio' in status_str:
-                        deal_status = DealStatus.PORTFOLIO
-                        current_phase = DealPhase.PORTFOLIO
+                    deal_status = normalize_deal_status(status_str, default=DealStatus.NEW)
 
                     # 3. Combine Summary and Details
                     summary = str(row.get('Summary', '')).replace('nan', '').strip()
@@ -183,7 +173,6 @@ class Command(BaseCommand):
                     else:
                         deal_fields = {
                             'deal_status': deal_status,
-                            'current_phase': current_phase,
                             'funding_ask': str(row.get('Funding Ask (INR MILLION)', '')).replace('nan', '').strip(),
                             'industry': str(row.get('Industry', '')).replace('nan', '').strip(),
                             'sector': str(row.get('Sector', '')).replace('nan', '').strip(),
