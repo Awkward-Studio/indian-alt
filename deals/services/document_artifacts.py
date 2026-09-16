@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import math
+import re
 from copy import deepcopy
 from datetime import date, datetime
 from typing import Any, Callable, Optional, TYPE_CHECKING
@@ -91,6 +92,122 @@ class DocumentArtifactService:
     STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
     ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v2"
+    SPREADSHEET_EMBEDDING_ROWS_PER_CHUNK = 8
+    SPREADSHEET_EMBEDDING_CHARS_PER_CHUNK = 900
+
+    @staticmethod
+    def _spreadsheet_coordinate(value: Any) -> tuple[str, int] | None:
+        match = re.fullmatch(r"([A-Za-z]{1,4})([1-9]\d*)", str(value or "").strip())
+        if not match:
+            return None
+        return match.group(1).upper(), int(match.group(2))
+
+    @staticmethod
+    def _spreadsheet_column_number(label: str) -> int:
+        number = 0
+        for character in str(label or "").upper():
+            if not "A" <= character <= "Z":
+                return 0
+            number = number * 26 + ord(character) - ord("A") + 1
+        return number
+
+    @classmethod
+    def _spreadsheet_manifest_chunks(
+        cls,
+        manifest: dict[str, Any],
+        *,
+        base_metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Build bounded retrieval units from the exact workbook cell manifest."""
+        chunks: list[dict[str, Any]] = []
+        for sheet in manifest.get("sheets") or []:
+            if not isinstance(sheet, dict):
+                continue
+            sheet_name = str(sheet.get("name") or "").strip()
+            cells_by_row: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+            for cell in sheet.get("cells") or []:
+                if not isinstance(cell, dict):
+                    continue
+                parsed = cls._spreadsheet_coordinate(cell.get("coordinate"))
+                if not parsed:
+                    continue
+                column, row_number = parsed
+                cells_by_row.setdefault(row_number, []).append((column, cell))
+            if not cells_by_row:
+                continue
+
+            window: list[tuple[int, str, str, str]] = []
+            window_chars = 0
+
+            def flush() -> None:
+                nonlocal window, window_chars
+                if not window:
+                    return
+                row_start = window[0][0]
+                row_end = window[-1][0]
+                columns = [
+                    column
+                    for _, column_start, column_end, _ in window
+                    for column in (column_start, column_end)
+                ]
+                column_start = min(columns, key=cls._spreadsheet_column_number)
+                column_end = max(columns, key=cls._spreadsheet_column_number)
+                chunks.append({
+                    "text": "\n".join(item[3] for item in window),
+                    "metadata": {
+                        **base_metadata,
+                        "chunk_kind": "spreadsheet_cells",
+                        "sheet_name": sheet_name,
+                        "row_start": row_start,
+                        "row_end": row_end,
+                        "column_start": column_start,
+                        "column_end": column_end,
+                        "cell_range": f"{column_start}{row_start}:{column_end}{row_end}",
+                        "extraction_schema_version": manifest.get("schema_version", "1"),
+                    },
+                })
+                window = []
+                window_chars = 0
+
+            for row_number in sorted(cells_by_row):
+                row_cells = sorted(
+                    cells_by_row[row_number],
+                    key=lambda item: cls._spreadsheet_column_number(item[0]),
+                )
+                rendered_cells = []
+                for column, cell in row_cells:
+                    coordinate = f"{column}{row_number}"
+                    raw_value = cell.get("value")
+                    cached_value = cell.get("cached_value")
+                    rendered = f"{coordinate}={raw_value}"
+                    if (
+                        cached_value not in (None, "")
+                        and str(cached_value) != str(raw_value)
+                    ):
+                        rendered += f" [calculated: {cached_value}]"
+                    if cell.get("number_format") not in (None, "", "General"):
+                        rendered += f" [format: {cell['number_format']}]"
+                    if cell.get("hyperlink"):
+                        rendered += f" [link: {cell['hyperlink']}]"
+                    if cell.get("comment"):
+                        rendered += f" [comment: {cell['comment']}]"
+                    rendered_cells.append(rendered)
+                row_text = " | ".join(rendered_cells)
+                row_start_column = row_cells[0][0]
+                row_end_column = row_cells[-1][0]
+                would_exceed = (
+                    window
+                    and (
+                        len(window) >= cls.SPREADSHEET_EMBEDDING_ROWS_PER_CHUNK
+                        or window_chars + len(row_text) + 1 > cls.SPREADSHEET_EMBEDDING_CHARS_PER_CHUNK
+                    )
+                )
+                if would_exceed:
+                    flush()
+                window.append((row_number, row_start_column, row_end_column, row_text))
+                window_chars += len(row_text) + 1
+            flush()
+        return chunks
 
     @staticmethod
     def _segment_artifact_usable(artifact: Any) -> bool:
@@ -787,7 +904,14 @@ class DocumentArtifactService:
 
         chunks: list[dict[str, Any]] = []
         manifest = getattr(artifact_or_document, "extraction_manifest", None)
-        if isinstance(manifest, dict):
+        spreadsheet_chunks = []
+        if isinstance(manifest, dict) and manifest.get("kind") == "spreadsheet":
+            spreadsheet_chunks = cls._spreadsheet_manifest_chunks(
+                manifest,
+                base_metadata=base_metadata,
+            )
+            chunks.extend(spreadsheet_chunks)
+        if isinstance(manifest, dict) and not spreadsheet_chunks:
             for manifest_index, item in enumerate(manifest.get("chunks") or []):
                 if not isinstance(item, dict) or not str(item.get("text") or "").strip():
                     continue

@@ -112,7 +112,7 @@ class ICReportSectionEvidenceServiceTests(SimpleTestCase):
         self.assertEqual(result["metadata"]["supplemented_document_ids"], ["doc-2"])
         self.assertGreaterEqual(result["context"].count("IM evidence"), 4)
 
-    def test_context_exposes_clickable_apa_citation_from_artifact_source_url(self):
+    def test_context_exposes_precise_citation_marker_from_artifact_source_url(self):
         source_url = "https://contoso.sharepoint.com/sites/deals/Investment%20Memorandum.pdf"
         deal = SimpleNamespace(id="deal-1", title="Example Foods")
         document = SimpleNamespace(
@@ -139,7 +139,44 @@ class ICReportSectionEvidenceServiceTests(SimpleTestCase):
 
         self.assertIn("Retrieval block R001", result["context"])
         self.assertNotIn("[Evidence 1]", result["context"])
-        self.assertIn("Required citation:", result["context"])
-        self.assertIn("Investment Memorandum 2025.pdf. (2025).", result["context"])
-        self.assertIn(f"](<{source_url}>)", result["context"])
+        self.assertIn("Citation marker: [R001]", result["context"])
+        self.assertIn("Document: Investment Memorandum 2025.pdf", result["context"])
         self.assertEqual(result["citations"]["1"]["location"], "p. 7")
+        self.assertEqual(result["citations"]["1"]["url"], source_url)
+
+    def test_spreadsheet_citation_retains_verified_bounds(self):
+        deal = SimpleNamespace(id="deal-1", title="Example Foods")
+        document = SimpleNamespace(
+            id="doc-1",
+            title="Financial Model.xlsx",
+            file_url="https://contoso.sharepoint.com/model.xlsx",
+            evidence_json={},
+        )
+        chunk = SimpleNamespace(
+            source_type="document",
+            source_id="doc-1",
+            content="F42=100 | G42=125 | H42=150",
+            metadata={
+                "chunk_kind": "spreadsheet_cells",
+                "sheet_name": "Revenue Build",
+                "row_start": 42,
+                "row_end": 49,
+                "column_start": "A",
+                "column_end": "H",
+                "cell_range": "A42:H49",
+            },
+        )
+        embedding_service = MagicMock()
+        embedding_service.search_global_chunks.return_value = [chunk]
+
+        result = ICReportSectionEvidenceService(
+            deal=deal,
+            documents=[document],
+            embedding_service=embedding_service,
+            max_tokens=4_000,
+        ).retrieve("Key Financials")
+
+        citation = result["citations"]["1"]
+        self.assertEqual(citation["location"], "Revenue Build!A42:H49")
+        self.assertEqual(citation["locator"]["row_start"], 42)
+        self.assertIn("[R001@'Revenue Build'!A1:B2]", result["context"])

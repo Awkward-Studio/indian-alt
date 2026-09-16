@@ -76,7 +76,12 @@ class ICReportSectionEvidenceService:
     def _safe_http_url(value) -> str:
         url = str(value or "").strip()
         try:
-            return url if urlsplit(url).scheme.lower() in {"http", "https"} else ""
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in {"http", "https"}:
+                return ""
+            if (parsed.hostname or "").lower() in {"example.com", "example.org", "example.net"}:
+                return ""
+            return url
         except ValueError:
             return ""
 
@@ -92,41 +97,59 @@ class ICReportSectionEvidenceService:
         )
 
     @staticmethod
-    def _location(metadata: dict) -> str:
-        candidates = (
-            ("source_location", ""),
-            ("section", "section "),
-            ("sheet_name", "sheet "),
-            ("page", "p. "),
-            ("slide", "slide "),
-        )
-        for key, prefix in candidates:
-            value = metadata.get(key)
-            if value in (None, ""):
-                continue
-            if isinstance(value, dict):
-                rendered = ", ".join(
-                    f"{item_key} {item_value}"
-                    for item_key, item_value in value.items()
-                    if item_value not in (None, "")
-                )
-                return rendered
-            return f"{prefix}{value}"
-        return ""
+    def _location_details(metadata: dict) -> dict:
+        details = {
+            "kind": str(metadata.get("chunk_kind") or "document_text"),
+            "source_location": metadata.get("source_location"),
+            "section": metadata.get("section"),
+            "sheet_name": metadata.get("sheet_name"),
+            "page": metadata.get("page"),
+            "slide": metadata.get("slide"),
+            "row_start": metadata.get("row_start"),
+            "row_end": metadata.get("row_end"),
+            "column_start": metadata.get("column_start"),
+            "column_end": metadata.get("column_end"),
+            "cell_range": metadata.get("cell_range"),
+        }
+        return {key: value for key, value in details.items() if value not in (None, "")}
+
+    @classmethod
+    def _location(cls, metadata: dict) -> str:
+        details = cls._location_details(metadata)
+        sheet_name = str(details.get("sheet_name") or "").strip()
+        cell_range = str(details.get("cell_range") or "").strip()
+        if not cell_range and details.get("row_start") not in (None, ""):
+            row_start = details["row_start"]
+            row_end = details.get("row_end") or row_start
+            column_start = str(details.get("column_start") or "A")
+            column_end = str(details.get("column_end") or column_start)
+            cell_range = f"{column_start}{row_start}:{column_end}{row_end}"
+        if sheet_name and cell_range:
+            return f"{sheet_name}!{cell_range}"
+        if sheet_name:
+            return f"sheet {sheet_name}"
+        if details.get("page") not in (None, ""):
+            return f"p. {details['page']}"
+        if details.get("slide") not in (None, ""):
+            return f"slide {details['slide']}"
+        if details.get("section") not in (None, ""):
+            return f"section {details['section']}"
+        source_location = details.get("source_location")
+        if isinstance(source_location, dict):
+            return ", ".join(
+                f"{item_key} {item_value}"
+                for item_key, item_value in source_location.items()
+                if item_value not in (None, "")
+            )
+        return str(source_location or "").strip()
 
     def _citation(self, chunk: DocumentChunk, *, rank: int) -> dict:
         metadata = chunk.metadata or {}
         source_id = str(chunk.source_id)
         title = str(self.document_titles.get(source_id) or metadata.get("title") or source_id).strip()
         location = self._location(metadata)
-        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", title)
-        year = year_match.group(1) if year_match else "n.d."
         label_title = title.replace("[", "\\[").replace("]", "\\]")
-        detail = f"{label_title}. ({year}). Internal company document"
-        if location:
-            detail += f", {location}"
-        detail += "."
-        reference = f"{label_title}. ({year}). Internal company document."
+        label = f"{label_title}, {location}" if location else label_title
         url = self.document_urls.get(source_id) or ""
         return {
             "rank": rank,
@@ -134,8 +157,9 @@ class ICReportSectionEvidenceService:
             "title": title,
             "url": url,
             "location": location,
-            "inline": f"[{detail}](<{url}>)" if url else detail,
-            "reference": f"[{reference}](<{url}>)" if url else reference,
+            "locator": self._location_details(metadata),
+            "inline": f"[{label}](<{url}>)" if url else label,
+            "reference": f"[{label_title}](<{url}>)" if url else label_title,
         }
 
     def _query(self, title: str) -> str:
@@ -223,12 +247,17 @@ class ICReportSectionEvidenceService:
         citation = self._citation(chunk, rank=rank)
         header = [
             f"Retrieval block R{rank:03d} (internal ordering only; never cite this label)",
-            f"Required citation: {citation['inline']}",
+            f"Citation marker: [R{rank:03d}]",
             f"Document: {citation['title']}",
             f"Evidence type: {metadata.get('chunk_kind') or 'document text'}",
         ]
         if citation["location"]:
             header.append(f"Location: {citation['location']}")
+        if citation["locator"].get("sheet_name") and citation["locator"].get("cell_range"):
+            header.append(
+                "For a narrower spreadsheet citation, cite only cells visible in this block as "
+                f"[R{rank:03d}@'{citation['locator']['sheet_name']}'!A1:B2]"
+            )
         return " | ".join(header) + "\n" + str(chunk.content or "").strip()
 
     def retrieve(self, title: str) -> dict:

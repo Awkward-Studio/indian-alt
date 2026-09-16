@@ -884,7 +884,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'receipt_date_has_evidence', 'created_at', 'updated_at',
             'has_analysis', 'has_complete_analysis', 'has_vi_data', 'has_competitors',
             'folder_linked', 'deal_document_count', 'folder_document_count',
-            'indexed_document_count', 'last_analysis_at',
+            'indexed_document_count', 'last_analysis_at', 'processing_status', 'processing_error',
             'deal_summary', 'industry', 'sector', 'city', 'primary_contact',
             'primary_contact_name', 'banker_names', 'fund', 'themes', 'responsibility',
             'funding_ask', 'funding_ask_for', 'legacy_investment_bank',

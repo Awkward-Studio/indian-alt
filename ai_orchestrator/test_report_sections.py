@@ -151,23 +151,18 @@ class ICReportSectionServiceTests(SimpleTestCase):
             self.assertEqual(call.kwargs["metadata"]["max_tokens"], 16_384)
             self.assertEqual(call.kwargs["metadata"]["max_input_tokens"], 40_960)
             self.assertIn("Cite every material factual statement", call.kwargs["content"])
-            self.assertIn("Never write `Evidence 20`", call.kwargs["content"])
+            self.assertIn("Do not write a References section", call.kwargs["content"])
 
-    def test_internal_evidence_reference_becomes_linked_apa_citation(self):
+    def test_internal_evidence_reference_becomes_linked_precise_citation(self):
         source_url = "https://contoso.sharepoint.com/document?id=123"
         citation = {
             "rank": 20,
             "document_id": "doc-1",
             "title": "Investment Memorandum 2025.pdf",
             "url": source_url,
-            "inline": (
-                "[Investment Memorandum 2025.pdf. (2025). Internal company document, p. 7.]"
-                f"(<{source_url}>)"
-            ),
-            "reference": (
-                "[Investment Memorandum 2025.pdf. (2025). Internal company document.]"
-                f"(<{source_url}>)"
-            ),
+            "location": "p. 7",
+            "locator": {"page": 7},
+            "reference": f"[Investment Memorandum 2025.pdf](<{source_url}>)",
         }
 
         section = ICReportSectionService._normalize_section(
@@ -177,9 +172,101 @@ class ICReportSectionServiceTests(SimpleTestCase):
         )
 
         self.assertNotIn("Evidence 20", section)
-        self.assertIn(citation["inline"], section)
+        self.assertIn(
+            f"[Investment Memorandum 2025.pdf, p. 7](<{source_url}>)",
+            section,
+        )
         self.assertIn("### References", section)
         self.assertIn(citation["reference"], section)
+        self.assertIn("cited at p. 7", section)
+
+    def test_model_references_are_removed_before_marker_expansion(self):
+        source_url = "https://contoso.sharepoint.com/model.xlsx"
+        citation = {
+            "rank": 1,
+            "document_id": "doc-1",
+            "title": "Model.xlsx",
+            "url": source_url,
+            "location": "Revenue!A1:H8",
+            "locator": {
+                "sheet_name": "Revenue",
+                "row_start": 1,
+                "row_end": 8,
+                "column_start": "A",
+                "column_end": "H",
+            },
+            "reference": f"[Model.xlsx](<{source_url}>)",
+        }
+        raw = (
+            "## Executive Summary\n\nRevenue increased [R001].\n\n"
+            "### References\n\n"
+            "- [Model.xlsx](https://example.com) (Used for: R001, R001, R001)"
+        )
+
+        section = ICReportSectionService._normalize_section(
+            "Executive Summary",
+            raw,
+            citations={"1": citation},
+        )
+
+        self.assertNotIn("example.com", section)
+        self.assertNotIn("Used for", section)
+        self.assertEqual(section.count("### References"), 1)
+        self.assertEqual(section.count("cited at Revenue!A1:H8"), 1)
+
+    def test_spreadsheet_subrange_is_validated_and_rendered(self):
+        source_url = "https://contoso.sharepoint.com/model.xlsx"
+        citation = {
+            "rank": 42,
+            "document_id": "doc-1",
+            "title": "Project Fit - FM.xlsx",
+            "url": source_url,
+            "location": "Revenue Build!A42:H49",
+            "locator": {
+                "sheet_name": "Revenue Build",
+                "row_start": 42,
+                "row_end": 49,
+                "column_start": "A",
+                "column_end": "H",
+            },
+            "reference": f"[Project Fit - FM.xlsx](<{source_url}>)",
+        }
+
+        section = ICReportSectionService._normalize_section(
+            "Key Financials",
+            "## Key Financials\n\nRevenue increased [R042@'Revenue Build'!F42:H42].",
+            citations={"42": citation},
+        )
+
+        self.assertIn("Project Fit - FM.xlsx, Revenue Build!F42:H42", section)
+        self.assertIn("cited at Revenue Build!F42:H42", section)
+        self.assertIn("activeCell=%27Revenue+Build%27%21F42", section)
+
+    def test_out_of_bounds_spreadsheet_subrange_falls_back_to_verified_chunk(self):
+        citation = {
+            "rank": 1,
+            "document_id": "doc-1",
+            "title": "Model.xlsx",
+            "url": "",
+            "location": "Revenue!A1:H8",
+            "locator": {
+                "sheet_name": "Revenue",
+                "row_start": 1,
+                "row_end": 8,
+                "column_start": "A",
+                "column_end": "H",
+            },
+            "reference": "Model.xlsx",
+        }
+
+        section = ICReportSectionService._normalize_section(
+            "Executive Summary",
+            "## Executive Summary\n\nRevenue increased [R001@'Revenue'!Z99:Z99].",
+            citations={"1": citation},
+        )
+
+        self.assertIn("Model.xlsx, Revenue!A1:H8", section)
+        self.assertNotIn("Z99", section)
 
     def test_unresolved_internal_reference_fails_validation(self):
         with self.assertRaisesRegex(ValueError, "unresolved internal citation"):
@@ -187,4 +274,37 @@ class ICReportSectionServiceTests(SimpleTestCase):
                 "Executive Summary",
                 "## Executive Summary\n\nRevenue was INR 100 crore [Evidence 999].",
                 citations={},
+            )
+
+    def test_section_with_ranked_evidence_requires_a_verifiable_marker(self):
+        with self.assertRaisesRegex(ValueError, "no verifiable evidence citations"):
+            ICReportSectionService._normalize_section(
+                "Executive Summary",
+                "## Executive Summary\n\nRevenue was INR 100 crore without a source marker.",
+                citations={
+                    "1": {
+                        "document_id": "doc-1",
+                        "title": "Model.xlsx",
+                        "url": "https://contoso.sharepoint.com/model.xlsx",
+                    }
+                },
+            )
+
+    def test_unverified_model_link_fails_validation(self):
+        with self.assertRaisesRegex(ValueError, "unverified source link"):
+            ICReportSectionService._normalize_section(
+                "Executive Summary",
+                (
+                    "## Executive Summary\n\nRevenue was INR 100 crore [R001]. "
+                    "[Unsupported](https://example.com/source)."
+                ),
+                citations={
+                    "1": {
+                        "document_id": "doc-1",
+                        "title": "Model.xlsx",
+                        "url": "https://contoso.sharepoint.com/model.xlsx",
+                        "location": "Revenue!A1:H8",
+                        "reference": "[Model.xlsx](<https://contoso.sharepoint.com/model.xlsx>)",
+                    }
+                },
             )

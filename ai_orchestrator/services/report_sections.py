@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from django.conf import settings
 from django.core.cache import cache
@@ -17,10 +18,16 @@ SECTION_GUIDANCE = BULK3_SECTION_INSTRUCTIONS
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v4"
+    CACHE_VERSION = "ic-report-sections-v5"
     INTERNAL_CITATION_PATTERN = re.compile(
-        r"\[?\bEvidence\s+(\d+)\b\]?|\[?\bR0*(\d+)\b\]?",
+        r"\[(?:Evidence\s+(?P<evidence>\d+)|R0*(?P<rank>\d+))"
+        r"(?:@(?P<locator>[^\]\n]+))?\]"
+        r"|\b(?:Evidence\s+(?P<bare_evidence>\d+)|R0*(?P<bare_rank>\d+))\b",
         flags=re.IGNORECASE,
+    )
+    SPREADSHEET_LOCATOR_PATTERN = re.compile(
+        r"^(?:(?:'(?P<quoted_sheet>(?:[^']|'')+)'|(?P<sheet>[^!]+))!)?"
+        r"(?P<start>[A-Za-z]{1,4}[1-9]\d*)(?::(?P<end>[A-Za-z]{1,4}[1-9]\d*))?$"
     )
 
     @classmethod
@@ -61,54 +68,173 @@ class ICReportSectionService:
         )
         return "ic-report-section:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _column_number(label: str) -> int:
+        value = 0
+        for character in str(label or "").upper():
+            if not "A" <= character <= "Z":
+                return 0
+            value = value * 26 + ord(character) - ord("A") + 1
+        return value
+
+    @staticmethod
+    def _cell_parts(value: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"([A-Za-z]{1,4})([1-9]\d*)", str(value or "").strip())
+        if not match:
+            return None
+        return ICReportSectionService._column_number(match.group(1)), int(match.group(2))
+
+    @classmethod
+    def _validated_spreadsheet_location(cls, locator: str, citation: dict) -> str:
+        match = cls.SPREADSHEET_LOCATOR_PATTERN.fullmatch(str(locator or "").strip())
+        source = citation.get("locator") if isinstance(citation.get("locator"), dict) else {}
+        if not match or not source.get("sheet_name"):
+            return ""
+        requested_sheet = (match.group("quoted_sheet") or match.group("sheet") or "").replace("''", "'").strip()
+        source_sheet = str(source.get("sheet_name") or "").strip()
+        if requested_sheet and requested_sheet.casefold() != source_sheet.casefold():
+            return ""
+        start = cls._cell_parts(match.group("start"))
+        end = cls._cell_parts(match.group("end") or match.group("start"))
+        source_start = cls._cell_parts(
+            f"{source.get('column_start') or 'A'}{source.get('row_start') or ''}"
+        )
+        source_end = cls._cell_parts(
+            f"{source.get('column_end') or source.get('column_start') or 'A'}"
+            f"{source.get('row_end') or source.get('row_start') or ''}"
+        )
+        if not all((start, end, source_start, source_end)):
+            return ""
+        if start[0] > end[0] or start[1] > end[1]:
+            return ""
+        if (
+            start[0] < source_start[0]
+            or end[0] > source_end[0]
+            or start[1] < source_start[1]
+            or end[1] > source_end[1]
+        ):
+            return ""
+        start_label = match.group("start").upper()
+        end_label = (match.group("end") or match.group("start")).upper()
+        cell_range = start_label if start_label == end_label else f"{start_label}:{end_label}"
+        return f"{source_sheet}!{cell_range}"
+
+    @classmethod
+    def _location_url(cls, citation: dict, location: str) -> str:
+        url = str(citation.get("url") or "").strip()
+        title = str(citation.get("title") or "").lower()
+        if not url or not title.endswith((".xlsx", ".xlsm", ".xlsb", ".xls")):
+            return url
+        match = re.fullmatch(r"(?P<sheet>.+)!(?P<cell>[A-Za-z]{1,4}[1-9]\d*)(?::[A-Za-z]{1,4}[1-9]\d*)?", location)
+        if not match:
+            return url
+        try:
+            parsed = urlsplit(url)
+            query = [
+                (key, value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key.casefold() != "activecell"
+            ]
+            sheet = match.group("sheet").replace("'", "''")
+            query.append(("activeCell", f"'{sheet}'!{match.group('cell').upper()}"))
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+        except ValueError:
+            return url
+
+    @classmethod
+    def _render_inline_citation(cls, citation: dict, *, location: str = "") -> str:
+        title = str(citation.get("title") or citation.get("document_id") or "Source")
+        title = title.replace("[", "\\[").replace("]", "\\]")
+        rendered_location = str(location or citation.get("location") or "").strip()
+        label = f"{title}, {rendered_location}" if rendered_location else title
+        url = cls._location_url(citation, rendered_location)
+        return f"[{label}](<{url}>)" if url else label
+
+    @staticmethod
+    def _strip_model_references(text: str) -> str:
+        heading = re.search(r"^###\s+References\s*$", text, flags=re.MULTILINE | re.IGNORECASE)
+        return text[:heading.start()].rstrip() if heading else text.rstrip()
+
+    @staticmethod
+    def _unverified_links(text: str, citations: dict | None) -> list[str]:
+        allowed_locations = set()
+        for citation in (citations or {}).values():
+            if not isinstance(citation, dict) or not citation.get("url"):
+                continue
+            try:
+                parsed = urlsplit(str(citation["url"]))
+            except ValueError:
+                continue
+            allowed_locations.add((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path))
+        links = re.findall(r"\]\(<(https?://[^>]+)>\)", text, flags=re.IGNORECASE)
+        links.extend(
+            re.findall(r"\]\((https?://[^)\s]+)\)", text, flags=re.IGNORECASE)
+        )
+        invalid = []
+        for link in links:
+            try:
+                parsed = urlsplit(link)
+            except ValueError:
+                invalid.append(link)
+                continue
+            if (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path) not in allowed_locations:
+                invalid.append(link)
+        return invalid
+
     @classmethod
     def _replace_internal_citations(cls, text: str, citations: dict | None) -> tuple[str, list[dict]]:
         citation_map = citations or {}
         used: list[dict] = []
 
         def replace(match: re.Match) -> str:
-            rank = match.group(1) or match.group(2)
+            rank = (
+                match.group("evidence")
+                or match.group("rank")
+                or match.group("bare_evidence")
+                or match.group("bare_rank")
+            )
             citation = citation_map.get(str(int(rank))) if rank else None
             if not isinstance(citation, dict):
                 return match.group(0)
-            used.append(citation)
-            return str(citation.get("inline") or match.group(0))
+            requested_locator = str(match.group("locator") or "").strip()
+            resolved_location = (
+                cls._validated_spreadsheet_location(requested_locator, citation)
+                if requested_locator else ""
+            )
+            used_citation = dict(citation)
+            used_citation["used_location"] = resolved_location or str(citation.get("location") or "")
+            used.append(used_citation)
+            return cls._render_inline_citation(
+                citation,
+                location=used_citation["used_location"],
+            )
 
         return cls.INTERNAL_CITATION_PATTERN.sub(replace, text), used
 
     @staticmethod
     def _append_references(text: str, citations: dict | None, used: list[dict]) -> str:
-        references_heading = re.search(
-            r"^###\s+References\s*$", text, flags=re.MULTILINE | re.IGNORECASE
-        )
-        has_references_heading = bool(references_heading)
-        references_body = text[references_heading.end():] if references_heading else ""
-        available = [item for item in (citations or {}).values() if isinstance(item, dict)]
-        referenced_urls = {
-            str(item.get("url") or "")
-            for item in available
-            if item.get("url") and str(item.get("url")) in text
-        }
-        candidates = used or [item for item in available if str(item.get("url") or "") in referenced_urls]
-        if not candidates:
-            candidates = available
-        references = []
-        seen_documents = set()
+        candidates = used
+        documents: dict[str, dict] = {}
         for item in candidates:
             document_key = str(item.get("document_id") or item.get("title") or "")
-            if not document_key or document_key in seen_documents:
+            if not document_key:
                 continue
-            seen_documents.add(document_key)
-            reference = str(item.get("reference") or "").strip()
-            url = str(item.get("url") or "").strip()
-            if reference and (not has_references_heading or not url or url not in references_body):
-                references.append(f"- {reference}")
-            if len(references) >= 12:
-                break
+            entry = documents.setdefault(document_key, {"citation": item, "locations": []})
+            location = str(item.get("used_location") or item.get("location") or "").strip()
+            if location and location not in entry["locations"]:
+                entry["locations"].append(location)
+        references = []
+        for entry in documents.values():
+            item = entry["citation"]
+            reference = str(item.get("reference") or item.get("title") or "").strip()
+            if not reference:
+                continue
+            locations = entry["locations"]
+            location_note = f"; cited at {'; '.join(locations)}" if locations else ""
+            references.append(f"- {reference}{location_note}")
         if not references:
             return text
-        heading = "" if has_references_heading else "### References\n\n"
-        return text.rstrip() + "\n\n" + heading + "\n".join(references)
+        return text.rstrip() + "\n\n### References\n\n" + "\n".join(references)
 
     @classmethod
     def _normalize_section(
@@ -130,7 +256,12 @@ class ICReportSectionService:
                 text = text[:len(target) + next_heading.start()]
         else:
             text = f"{target}\n\n{text}"
+        text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
+        if citations and not used_citations:
+            raise ValueError(
+                f"Report section '{title}' returned no verifiable evidence citations."
+            )
         text = cls._append_references(text, citations, used_citations)
         body = text[len(target):].strip()
         if len(body) < 40:
@@ -140,6 +271,11 @@ class ICReportSectionService:
             raise ValueError(
                 f"Report section '{title}' returned unresolved internal citation "
                 f"'{unresolved.group(0)}'."
+            )
+        unverified_links = cls._unverified_links(body, citations)
+        if unverified_links:
+            raise ValueError(
+                f"Report section '{title}' returned an unverified source link."
             )
         word_count = len(re.findall(r"\b\w+\b", body))
         if minimum_words and word_count < minimum_words:
@@ -203,10 +339,10 @@ Depth and analytical standard:
 
 Citation rules:
 - Cite every material factual statement, number, date, management claim and table row inline.
-- Each retrieval block supplies a `Required citation` in linked APA form. Copy that citation, including its hyperlink, beside the claim it supports.
-- End with `### References` and list the linked APA citations actually used in the section.
-- Never write `Evidence 20`, `[Evidence 20]`, `R020`, a retrieval rank, chunk ID, document ID, or any other internal storage label in the report.
-- If a source has no URL, retain its APA text citation and state that the source link is unavailable. Never invent a URL.
+- Cite a retrieval block with its supplied marker, for example `[R020]`. The server replaces markers with readable linked citations after generation.
+- For spreadsheet evidence, use the narrowest visible supporting cells when possible, for example `[R020@'Revenue Build'!F42:H42]`. The sheet and cells must appear inside that retrieval block's verified bounds.
+- Reuse a marker for every claim it supports. Never invent a retrieval rank, filename, sheet, cell, page, URL, chunk ID or document ID.
+- Do not write a References section. The server builds a complete deduplicated bibliography from the markers actually used.
 
 Output rules:
 - Return only this Markdown section, beginning with the exact required heading.
