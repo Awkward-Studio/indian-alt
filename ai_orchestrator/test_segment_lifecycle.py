@@ -67,6 +67,8 @@ class SlotTransportTests(IsolatedAsyncioTestCase):
             body = await request.json()
             self.assertEqual(body["id_slot"], 0)
             self.posts += 1
+            if self.mode == "submitted_hang":
+                await asyncio.sleep(10)
             self.task_id += 1
             self.active = True
             try:
@@ -120,6 +122,20 @@ class SlotTransportTests(IsolatedAsyncioTestCase):
         self.mode = "active_hang"
         with self.assertRaises(SlotProcessingTimeout):
             await _execute(self.provider, {}, 0.15, self.progress)
+
+    @override_settings(AI_SLOT_RESPONSE_GRACE_SECONDS=5)
+    async def test_submitted_request_has_absolute_wall_timeout(self):
+        self.mode = "submitted_hang"
+        started = asyncio.get_running_loop().time()
+        with self.assertRaisesRegex(
+            SlotProcessingTimeout, "wall seconds after slot submission",
+        ):
+            await _execute(self.provider, {}, 0.15, self.progress)
+        self.assertLess(asyncio.get_running_loop().time() - started, 1)
+        self.assertTrue(any(
+            event.get("inference_failure_kind") == "submission_wall_timeout"
+            for event in self.events
+        ))
 
     async def test_idle_without_response_is_delivery_failure(self):
         self.mode = "idle_hang"

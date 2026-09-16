@@ -204,59 +204,79 @@ async def _execute(provider, body, active_timeout, progress):
             inactive_since = time.monotonic()
             unavailable_since = None
             try:
-                while True:
-                    done, _ = await asyncio.wait({request}, timeout=poll)
-                    if done:
-                        data = request.result()
-                        if data is None:
-                            # Loading/rejected requests did not execute and
-                            # must not consume a processing retry or timeout.
-                            await notify(inference_state="waiting_for_service")
-                            await asyncio.sleep(poll)
-                            break
-                        timings = data.get("timings") or {}
-                        measured_ms = int(clock.active_seconds * 1000)
-                        if all(isinstance(timings.get(key), (int, float)) for key in ("prompt_ms", "predicted_ms")):
-                            measured_ms = max(0, int(timings["prompt_ms"] + timings["predicted_ms"]))
-                        await notify(
-                            inference_state="response_received",
-                            inference_active_ms=measured_ms,
-                            inference_vm_task_id=clock.task_id,
-                            inference_slot_processing=False,
+                try:
+                    # Once a request is submitted it needs an absolute wall
+                    # deadline as well as the slot-activity clock below. The
+                    # activity clock deliberately ignores queue/service time,
+                    # but cannot protect a request that stalls before the VM
+                    # publishes its task id (or inside a progress callback).
+                    async with asyncio.timeout(active_timeout):
+                        while True:
+                            done, _ = await asyncio.wait({request}, timeout=poll)
+                            if done:
+                                data = request.result()
+                                if data is None:
+                                    # Loading/rejected requests did not execute and
+                                    # must not consume a processing retry or timeout.
+                                    await notify(inference_state="waiting_for_service")
+                                    await asyncio.sleep(poll)
+                                    break
+                                timings = data.get("timings") or {}
+                                measured_ms = int(clock.active_seconds * 1000)
+                                if all(isinstance(timings.get(key), (int, float)) for key in ("prompt_ms", "predicted_ms")):
+                                    measured_ms = max(0, int(timings["prompt_ms"] + timings["predicted_ms"]))
+                                await notify(
+                                    inference_state="response_received",
+                                    inference_active_ms=measured_ms,
+                                    inference_vm_task_id=clock.task_id,
+                                    inference_slot_processing=False,
+                                )
+                                return data
+                            now = time.monotonic()
+                            try:
+                                snapshot = await slots()
+                                slot = next((s for s in snapshot if s.get("id") == slot_id), None)
+                                if slot is None:
+                                    raise InferenceDeliveryError("Assigned VM slot is unavailable.")
+                                unavailable_since = None
+                            except (aiohttp.ClientError, asyncio.TimeoutError, InferenceDeliveryError):
+                                clock.observe(None, now)
+                                unavailable_since = unavailable_since if unavailable_since is not None else now
+                                await notify(inference_state="slot_status_unavailable")
+                                if now - unavailable_since >= delivery_grace:
+                                    raise InferenceDeliveryError("Lost VM slot status while awaiting the response.")
+                                continue
+                            active = clock.observe(slot, now)
+                            await notify(
+                                inference_state="processing" if active else "awaiting_response" if clock.seen_active else "submitted",
+                                inference_slot_id=slot_id,
+                                inference_vm_task_id=clock.task_id,
+                                inference_active_ms=int(clock.active_seconds * 1000),
+                                inference_slot_processing=active,
+                            )
+                            if active:
+                                inactive_since = None
+                                if clock.active_seconds >= active_timeout:
+                                    await notify(inference_failure_kind="slot_processing_timeout")
+                                    raise SlotProcessingTimeout(f"VM processing exceeded {active_timeout:g} active seconds.")
+                            else:
+                                inactive_since = inactive_since if inactive_since is not None else now
+                                if now - inactive_since >= delivery_grace:
+                                    await notify(inference_failure_kind="response_delivery")
+                                    raise InferenceDeliveryError("VM slot is idle but no completed HTTP response arrived.")
+                except SlotProcessingTimeout:
+                    raise
+                except TimeoutError as exc:
+                    # Keep failure persistence from becoming another
+                    # unbounded wait when the database/cache is unhealthy.
+                    with suppress(Exception):
+                        await asyncio.wait_for(
+                            notify(inference_failure_kind="submission_wall_timeout"),
+                            timeout=max(0.1, min(5.0, delivery_grace)),
                         )
-                        return data
-                    now = time.monotonic()
-                    try:
-                        snapshot = await slots()
-                        slot = next((s for s in snapshot if s.get("id") == slot_id), None)
-                        if slot is None:
-                            raise InferenceDeliveryError("Assigned VM slot is unavailable.")
-                        unavailable_since = None
-                    except (aiohttp.ClientError, asyncio.TimeoutError, InferenceDeliveryError):
-                        clock.observe(None, now)
-                        unavailable_since = unavailable_since if unavailable_since is not None else now
-                        await notify(inference_state="slot_status_unavailable")
-                        if now - unavailable_since >= delivery_grace:
-                            raise InferenceDeliveryError("Lost VM slot status while awaiting the response.")
-                        continue
-                    active = clock.observe(slot, now)
-                    await notify(
-                        inference_state="processing" if active else "awaiting_response" if clock.seen_active else "submitted",
-                        inference_slot_id=slot_id,
-                        inference_vm_task_id=clock.task_id,
-                        inference_active_ms=int(clock.active_seconds * 1000),
-                        inference_slot_processing=active,
-                    )
-                    if active:
-                        inactive_since = None
-                        if clock.active_seconds >= active_timeout:
-                            await notify(inference_failure_kind="slot_processing_timeout")
-                            raise SlotProcessingTimeout(f"VM processing exceeded {active_timeout:g} active seconds.")
-                    else:
-                        inactive_since = inactive_since if inactive_since is not None else now
-                        if now - inactive_since >= delivery_grace:
-                            await notify(inference_failure_kind="response_delivery")
-                            raise InferenceDeliveryError("VM slot is idle but no completed HTTP response arrived.")
+                    raise SlotProcessingTimeout(
+                        f"VM request exceeded {active_timeout:g} wall seconds after slot submission."
+                    ) from exc
             finally:
                 # Cancelling the async request closes its HTTP connection
                 # before the caller releases the inference lease.
