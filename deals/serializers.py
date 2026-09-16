@@ -278,6 +278,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             'normalized_text', 'evidence_json', 'source_map_json', 'table_json',
             'key_metrics_json', 'reasoning', 'extraction_manifest',
             'extraction_mode', 'transcription_status', 'chunking_status', 'chunk_count',
+            'error_message',
             'last_transcribed_at', 'last_chunked_at',
             'created_at', 'uploaded_by', 'uploaded_by_name'
         )

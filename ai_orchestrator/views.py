@@ -753,7 +753,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                     'indexed': document.is_indexed if document else False,
                     'transcription_status': document.transcription_status if document else None,
                     'chunking_status': document.chunking_status if document else None,
-                    'error': item.get('error'),
+                    'error': item.get('error') or (document.error_message if document else None),
                     'segments': [
                         segment_summary(segment)
                         for segment in segment_groups.get(document_id, [])

@@ -860,6 +860,7 @@ class DealDocument(models.Model):
         choices=ChunkingStatus.choices,
         default=ChunkingStatus.NOT_CHUNKED,
     )
+    error_message = models.TextField(blank=True, null=True)
     last_transcribed_at = models.DateTimeField(blank=True, null=True)
     last_chunked_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -85,6 +85,7 @@ class QueueStatusEndpointTests(TestCase):
             deal=deal,
             title="Deck.pdf",
             onedrive_id="file-1",
+            error_message="Stored document failure",
         )
         parent = AIAuditLog.objects.create(
             source_type="vdr_indexing",
@@ -149,6 +150,10 @@ class QueueStatusEndpointTests(TestCase):
         self.assertEqual(response.data["vdr_runs"][0]["deal_title"], "Queue Deal")
         self.assertEqual(response.data["vdr_runs"][0]["queue_position"], 1)
         self.assertEqual(response.data["vdr_runs"][0]["documents"][0]["name"], "Deck.pdf")
+        self.assertEqual(
+            response.data["vdr_runs"][0]["documents"][0]["error"],
+            "Stored document failure",
+        )
         self.assertEqual(
             response.data["vdr_runs"][0]["documents"][0]["segments"][0]["audit_log_id"],
             str(segment.id),

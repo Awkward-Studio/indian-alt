@@ -39,6 +39,50 @@ from ai_orchestrator.services.runtime import AIRuntimeService
 logger = logging.getLogger(__name__)
 
 
+def _record_document_extraction_audit(doc, extraction: dict, *, parent_audit_id: str, celery_task_id: str) -> None:
+    """Persist one extraction result per Celery delivery without storing document text."""
+    from ai_orchestrator.models import AIAuditLog
+
+    transcription_status = str(extraction.get("transcription_status") or "failed")
+    succeeded = bool((extraction.get("normalized_text") or extraction.get("text") or "").strip())
+    mode = str(extraction.get("mode") or "document_extraction")
+    error = str(extraction.get("error") or "").strip() or (
+        None if succeeded else "Document extraction produced no readable content."
+    )
+    defaults = {
+        "context_label": f"Document Extraction: {doc.title}",
+        "model_provider": "docproc" if mode == "docproc_remote" else "backend",
+        "model_used": mode,
+        "system_prompt": "Extract readable text and structured source data from the document.",
+        "user_prompt": doc.title,
+        "raw_response": "",
+        "parsed_json": {
+            "transcription_status": transcription_status,
+            "extraction_mode": mode,
+            "quality_flags": extraction.get("quality_flags") or [],
+            "render_metadata": extraction.get("render_metadata") or {},
+        },
+        "source_metadata": {
+            "vdr_parent_audit_id": str(parent_audit_id or ""),
+            "workflow_stage": "document_extraction",
+            "document_id": str(doc.id),
+            "document_title": doc.title,
+            "deal_id": str(doc.deal_id),
+        },
+        "status": "COMPLETED" if succeeded else "FAILED",
+        "is_success": succeeded,
+        "error_message": error,
+        "completed_at": timezone.now(),
+    }
+    audit, _ = AIAuditLog.objects.update_or_create(
+        source_type="document_extraction",
+        source_id=str(doc.id),
+        celery_task_id=celery_task_id,
+        defaults=defaults,
+    )
+    broadcast_audit_log_update(audit, event_type="terminal", done=True)
+
+
 def _document_retry_queue(request, *, durable_delivery: bool) -> str:
     """Keep document retries on their original non-interactive queue."""
     delivery_info = getattr(request, "delivery_info", None)
@@ -1331,6 +1375,9 @@ def process_single_document_async(
             and existing_doc.is_indexed
             and DocumentArtifactService.artifact_complete(existing_doc)
         ):
+            if existing_doc.error_message:
+                existing_doc.error_message = None
+                existing_doc.save(update_fields=["error_message"])
             _update_vdr_document_queue(
                 audit_log_id,
                 file_info,
@@ -1364,6 +1411,9 @@ def process_single_document_async(
             force_fresh=force_fresh and not resume_extraction,
         ):
             if existing_doc.is_indexed:
+                if existing_doc.error_message:
+                    existing_doc.error_message = None
+                    existing_doc.save(update_fields=["error_message"])
                 _update_vdr_document_queue(
                     audit_log_id,
                     file_info,
@@ -1476,8 +1526,20 @@ def process_single_document_async(
             doc.extraction_mode = extraction.get("mode")
             doc.transcription_status = transcription_status
             doc.chunking_status = ChunkingStatus.NOT_CHUNKED
+            doc.error_message = (
+                str(extraction.get("error") or transcription_status)
+                if transcription_status == TranscriptionStatus.FAILED or not normalized_text
+                else None
+            )
             doc.last_transcribed_at = timezone.now() if normalized_text else None
             doc.save()
+
+            _record_document_extraction_audit(
+                doc,
+                extraction,
+                parent_audit_id=str(audit_log_id or ""),
+                celery_task_id=str(self.request.id),
+            )
 
         if transcription_status == TranscriptionStatus.FAILED or not normalized_text:
             raise ValueError(
@@ -1557,6 +1619,9 @@ def process_single_document_async(
             status="completed",
             document_id=str(doc.id),
         )
+        if doc.error_message:
+            doc.error_message = None
+            doc.save(update_fields=["error_message"])
         return {
             "status": "success",
             "file": file_name,
@@ -1586,6 +1651,9 @@ def process_single_document_async(
         )
     except Exception as e:
         logger.error(f"Error processing {file_name}: {str(e)}")
+        DealDocument.objects.filter(deal_id=deal_id, onedrive_id=file_id).update(
+            error_message=str(e)[:4000],
+        )
         if durable_delivery_superseded():
             return {"status": "stale", "file": file_name, "reason": "Superseded VDR delivery."}
         if failure_retries < 3:
@@ -2005,8 +2073,8 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
 
         deal.processing_status = 'completed' if not errors and not remaining_documents else 'failed'
         if errors:
-            error_msgs = [f"{e['file']}: {e['error']}" for e in errors]
-            deal.processing_error = "; ".join(error_msgs)
+            from deals.services.vdr_failures import vdr_failure_message
+            deal.processing_error = vdr_failure_message(errors)
         elif remaining_documents:
             deal.processing_error = (
                 f"Selected VDR rerun completed, but {len(remaining_documents)} other "
@@ -2045,7 +2113,7 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             "analysis_confirmation_required": not errors and not remaining_documents,
         }
         if errors:
-            audit_log.error_message = f"Errors encountered in {len(errors)} files."
+            audit_log.error_message = deal.processing_error
             
         audit_log.save()
         log_worker_event(
