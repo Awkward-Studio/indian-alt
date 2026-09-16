@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import hashlib
 import logging
@@ -110,6 +111,125 @@ class DocumentArtifactService:
                 return 0
             number = number * 26 + ord(character) - ord("A") + 1
         return number
+
+    @staticmethod
+    def _spreadsheet_column_label(number: int) -> str:
+        label = ""
+        while number > 0:
+            number, remainder = divmod(number - 1, 26)
+            label = chr(ord("A") + remainder) + label
+        return label
+
+    @classmethod
+    def spreadsheet_manifest_from_text(
+        cls,
+        *,
+        file_name: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """Rebuild exact cell coordinates from legacy rendered spreadsheet text.
+
+        Native XLSX text uses ``A1=value`` tokens. Calamine-backed legacy
+        formats use ``row_number<TAB>value...``. CSV/TSV sources are parsed
+        directly when no sheet markers are present.
+        """
+        source = str(text or "").strip()
+        if not source:
+            return {}
+
+        sheet_marker = re.compile(r"^(?:\[Sheet:\s*(.+?)\]|##\s*SHEET:\s*(.+?))$", re.I)
+        coordinate_token = re.compile(r"^([A-Za-z]{1,4}[1-9]\d*)=(.*)$", re.S)
+        cached_suffix = re.compile(r"^(.*?)\s*\[cached value:\s*(.*?)\]\s*$", re.S | re.I)
+        sheets: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+
+        def ensure_sheet(name: str = "Sheet1") -> dict[str, Any]:
+            nonlocal current
+            if current is None:
+                current = {"name": name, "cells": []}
+                sheets.append(current)
+            return current
+
+        for raw_line in source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            marker = sheet_marker.match(line)
+            if marker:
+                current = {"name": (marker.group(1) or marker.group(2)).strip(), "cells": []}
+                sheets.append(current)
+                continue
+
+            fields = raw_line.split("\t")
+            coordinate_cells = []
+            for field in fields:
+                match = coordinate_token.match(field.strip())
+                if not match:
+                    coordinate_cells = []
+                    break
+                value = match.group(2)
+                cached = cached_suffix.match(value)
+                cell = {"coordinate": match.group(1).upper(), "value": value}
+                if cached:
+                    cell["value"] = cached.group(1)
+                    if cached.group(2).lower() != "unavailable":
+                        cell["cached_value"] = cached.group(2)
+                coordinate_cells.append(cell)
+            if coordinate_cells:
+                ensure_sheet()["cells"].extend(coordinate_cells)
+                continue
+
+            if len(fields) > 1 and fields[0].strip().isdigit():
+                row_number = int(fields[0].strip())
+                target = ensure_sheet()
+                for column_number, value in enumerate(fields[1:], start=1):
+                    if value == "":
+                        continue
+                    target["cells"].append({
+                        "coordinate": f"{cls._spreadsheet_column_label(column_number)}{row_number}",
+                        "value": value,
+                    })
+
+        extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        if not any(sheet.get("cells") for sheet in sheets) and extension in {"csv", "tsv"}:
+            delimiter = "\t" if extension == "tsv" else ","
+            current = {"name": "Sheet1", "cells": []}
+            sheets = [current]
+            for row_number, row in enumerate(csv.reader(source.splitlines(), delimiter=delimiter), start=1):
+                for column_number, value in enumerate(row, start=1):
+                    if value == "":
+                        continue
+                    current["cells"].append({
+                        "coordinate": f"{cls._spreadsheet_column_label(column_number)}{row_number}",
+                        "value": value,
+                    })
+
+        populated_sheets = []
+        for sheet in sheets:
+            coordinates = [
+                cls._spreadsheet_coordinate(cell.get("coordinate"))
+                for cell in sheet.get("cells") or []
+            ]
+            coordinates = [coordinate for coordinate in coordinates if coordinate]
+            if not coordinates:
+                continue
+            sheet["row_count"] = max(row for _, row in coordinates)
+            sheet["column_count"] = max(cls._spreadsheet_column_number(column) for column, _ in coordinates)
+            populated_sheets.append(sheet)
+        if not populated_sheets:
+            return {}
+
+        manifest = {
+            "schema_version": "2",
+            "kind": "spreadsheet",
+            "format": extension,
+            "filename": file_name,
+            "sheets": populated_sheets,
+            "fallback_fidelity": "reconstructed_from_stored_text",
+            "content_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        }
+        manifest["chunks"] = cls._spreadsheet_manifest_chunks(manifest, base_metadata={})
+        return manifest
 
     @classmethod
     def _spreadsheet_manifest_chunks(
@@ -342,6 +462,7 @@ class DocumentArtifactService:
         source_metadata: dict[str, Any] | None = None,
         cancel_check: Callable[[], bool] | None = None,
         yield_check: Callable[[], bool] | None = None,
+        segment_progress: Callable[[int, int], None] | None = None,
         force_fresh: bool = False,
     ) -> dict[str, Any]:
         raw_text = (extracted_text or "").strip()
@@ -474,16 +595,45 @@ class DocumentArtifactService:
                 "celery_task_id": source_metadata.get("celery_task_id"),
                 "vdr_parent_audit_id": source_metadata.get("vdr_parent_audit_id"),
             }
-            def run_model(*, compact: bool = False):
+            def run_model(
+                source_segment: str,
+                *,
+                subdivision_index: int | None = None,
+                subdivision_count: int | None = None,
+            ):
                 attempt_metadata = deepcopy(metadata)
-                if compact:
-                    attempt_metadata["_source_metadata"]["compact_retry"] = True
-                    attempt_metadata["context_label"] += " [compact retry]"
+                attempt_context = deepcopy(segment_context)
+                if subdivision_index is not None and subdivision_count is not None:
+                    subdivision_cache_key = "vdr-document-artifact-subsegment:" + hashlib.sha256(
+                        f"{cache_key}:{subdivision_index}:{subdivision_count}:{source_segment}".encode("utf-8")
+                    ).hexdigest()
+                    attempt_metadata["_source_metadata"].update({
+                        "artifact_parent_segment_cache_key": cache_key,
+                        "artifact_segment_cache_key": subdivision_cache_key,
+                        "segment_subdivision_index": subdivision_index,
+                        "segment_subdivision_count": subdivision_count,
+                        "segment_estimated_tokens": estimate_tokens(source_segment),
+                    })
+                    attempt_metadata["context_label"] += (
+                        f" [full subdivision {subdivision_index + 1}/{subdivision_count}]"
+                    )
+                    attempt_context.update({
+                        "source_location": (
+                            f"{file_name} | segment {index + 1}/{len(segments)} | "
+                            f"subsegment {subdivision_index + 1}/{subdivision_count}"
+                        ),
+                        "segment_metadata": {
+                            "parent_segment_index": index + 1,
+                            "subsegment_index": subdivision_index + 1,
+                            "subsegment_count": subdivision_count,
+                        },
+                        "segment_estimated_tokens": estimate_tokens(source_segment),
+                    })
                 return cls._process_segment(
                     service,
                     content=(
                         f"{BULK2_INTEL_SYSTEM_PROMPT}\n\n"
-                        f"{build_bulk2_segment_prompt(segment=segment, context=segment_context, compact=compact)}"
+                        f"{build_bulk2_segment_prompt(segment=source_segment, context=attempt_context)}"
                     ),
                     skill_name="document_evidence_extraction",
                     source_type="document_evidence_segment",
@@ -492,21 +642,47 @@ class DocumentArtifactService:
                     model_override=artifact_model,
                 )
 
+            def normalize_result(result: Any) -> dict[str, Any]:
+                parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
+                if not isinstance(parsed, dict) or parsed.get("error"):
+                    raise RuntimeError(
+                        str(parsed.get("error") if isinstance(parsed, dict) else "AI segment response was invalid.")
+                    )
+                normalized = cls._normalize_segment_artifact(parsed, fallback=fallback)
+                normalized["reasoning"] = (
+                    result.get("thinking") or normalized.get("reasoning") or ""
+                    if isinstance(result, dict)
+                    else ""
+                )
+                if not cls._segment_artifact_usable(normalized):
+                    raise RuntimeError("AI segment response did not produce a complete evidence artifact.")
+                return normalized
+
             try:
-                result = run_model()
+                artifact = normalize_result(run_model(segment))
             except Exception as exc:
                 if "finish_reason=length" not in str(exc):
                     raise
-                result = run_model(compact=True)
-            parsed = result.get("parsed_json") if isinstance(result, dict) and "parsed_json" in result else result
-            if not isinstance(parsed, dict) or parsed.get("error"):
-                raise RuntimeError(
-                    str(parsed.get("error") if isinstance(parsed, dict) else "AI segment response was invalid.")
+                subdivision_source_tokens = max(4_000, source_token_budget // 2)
+                subdivisions = cls._split_for_artifact(
+                    segment,
+                    source_tokens=subdivision_source_tokens,
+                    overlap_tokens=min(overlap_token_budget, subdivision_source_tokens // 8),
                 )
-            artifact = cls._normalize_segment_artifact(parsed, fallback=fallback)
-            artifact["reasoning"] = result.get("thinking") or artifact.get("reasoning") or "" if isinstance(result, dict) else ""
-            if not cls._segment_artifact_usable(artifact):
-                raise RuntimeError("AI segment response did not produce a complete evidence artifact.")
+                if len(subdivisions) < 2:
+                    raise
+                subdivision_artifacts = [
+                    normalize_result(run_model(
+                        subdivision,
+                        subdivision_index=subdivision_index,
+                        subdivision_count=len(subdivisions),
+                    ))
+                    for subdivision_index, subdivision in enumerate(subdivisions)
+                ]
+                artifact = cls._normalize_segment_artifact(
+                    cls._merge_segment_artifacts(subdivision_artifacts, fallback=fallback),
+                    fallback=fallback,
+                )
             try:
                 cache.set(
                     cache_key,
@@ -524,6 +700,17 @@ class DocumentArtifactService:
             try:
                 result_index, segment_artifact, _cache_hit = analyze_segment(index, segment)
                 segment_artifacts[result_index] = segment_artifact
+                if segment_progress:
+                    try:
+                        segment_progress(
+                            len([item for item in segment_artifacts if item]),
+                            len(segments),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not persist artifact segment progress for %s",
+                            file_name,
+                        )
             except (DocumentArtifactCancelled, DocumentArtifactYielded):
                 raise
             except Exception as exc:

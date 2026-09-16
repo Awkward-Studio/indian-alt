@@ -1,5 +1,5 @@
 import hashlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.test import SimpleTestCase, override_settings
 
@@ -180,6 +180,7 @@ class FullVDRArtifactTests(SimpleTestCase):
             }
 
         service.process_content.side_effect = response
+        progress = MagicMock()
         source_text = "A" * 15_500
         expected_segments = DocumentArtifactService._split_for_artifact(source_text)
 
@@ -189,11 +190,16 @@ class FullVDRArtifactTests(SimpleTestCase):
             document_type="Financial Model",
             ai_service=service,
             source_metadata={"source_file_id": "file-1"},
+            segment_progress=progress,
         )
 
         self.assertEqual(service.process_content.call_count, len(expected_segments))
         self.assertEqual(artifact["normalized_text"], source_text)
         self.assertEqual(artifact["source_metadata"]["artifact_segments_completed"], len(expected_segments))
+        self.assertEqual(
+            progress.call_args_list,
+            [call(index, len(expected_segments)) for index in range(1, len(expected_segments) + 1)],
+        )
         self.assertEqual(DocumentArtifactService.artifact_status(artifact), DocumentArtifactService.STATUS_COMPLETE)
         first_prompt = service.process_content.call_args_list[0].kwargs["content"]
         first_metadata = service.process_content.call_args_list[0].kwargs["metadata"]
@@ -585,6 +591,46 @@ class FullVDRArtifactTests(SimpleTestCase):
 
         mock_cache.set.assert_not_called()
         self.assertIn("artifact_segment_processing_incomplete", artifact["quality_flags"])
+
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=8_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("deals.services.document_artifacts.cache")
+    def test_length_limit_retries_smaller_subsegments_with_full_prompt(self, mock_cache):
+        mock_cache.get.return_value = None
+        service = MagicMock()
+        complete = {
+            "parsed_json": {
+                "document_name": "Dense Model.xlsx",
+                "document_summary": "Complete evidence from one full subsegment.",
+                "quality_flags": [],
+            },
+        }
+        service.process_content.side_effect = [
+            RuntimeError("finish_reason=length"),
+            complete,
+            complete,
+            complete,
+        ]
+        source_text = "financial evidence with exact values 100 200 300 " * 350
+        self.assertEqual(len(DocumentArtifactService._split_for_artifact(source_text)), 1)
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Dense Model.xlsx",
+            extracted_text=source_text,
+            ai_service=service,
+        )
+
+        self.assertEqual(DocumentArtifactService.artifact_status(artifact), "complete")
+        self.assertGreater(service.process_content.call_count, 1)
+        retry_calls = service.process_content.call_args_list[1:]
+        self.assertTrue(retry_calls)
+        self.assertTrue(all("COMPACT MODE" not in item.kwargs["content"] for item in retry_calls))
+        self.assertTrue(all(
+            "full subdivision" in item.kwargs["metadata"]["context_label"]
+            for item in retry_calls
+        ))
 
     def test_complete_artifact_remains_usable_with_partial_source_coverage(self):
         artifact = DocumentArtifactService._fallback_artifact(

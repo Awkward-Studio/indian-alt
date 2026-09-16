@@ -72,6 +72,32 @@ class ChatExtractionTests(SimpleTestCase):
         self.assertEqual(result["transcription_status"], "complete")
         self.assertIn("backend_fallback_extraction", result["quality_flags"])
         self.assertNotIn("partial_extraction", result["quality_flags"])
+        self.assertEqual(result["structured_data"]["kind"], "spreadsheet")
+        self.assertEqual(
+            [cell["coordinate"] for cell in result["structured_data"]["sheets"][0]["cells"]],
+            ["A1", "B1", "C1"],
+        )
+
+    def test_complete_native_spreadsheet_still_prefers_docproc_manifest(self):
+        self.service.docproc_url = "http://docproc.invalid"
+        native = {"text": "A1=Revenue", "transcription_status": "complete"}
+        remote = {
+            "text": "A1=Revenue",
+            "transcription_status": "complete",
+            "mode": "docproc_remote",
+            "structured_data": {
+                "kind": "spreadsheet",
+                "sheets": [{"name": "Model", "cells": [{"coordinate": "A1", "value": "Revenue"}]}],
+            },
+        }
+        with patch.object(self.service, "get_chat_extraction_result", return_value=native) as local, patch.object(
+            self.service, "get_extraction_result", return_value=remote,
+        ) as docproc:
+            result = self.service.get_evidence_extraction_result(b"xlsx", "model.xlsx")
+
+        self.assertEqual(result, remote)
+        docproc.assert_called_once_with(b"xlsx", "model.xlsx", page_limit=None, allow_local_fallback=False)
+        local.assert_not_called()
 
     @override_settings(ALLOW_SHARED_MODEL_DOCUMENT_VISION=False)
     @patch("ai_orchestrator.services.document_processor.PipelineRegistryService.render_prompt_stage", return_value=(None, "OCR", None))

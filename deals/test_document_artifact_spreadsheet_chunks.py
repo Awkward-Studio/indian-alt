@@ -4,6 +4,35 @@ from deals.services.document_artifacts import DocumentArtifactService
 
 
 class SpreadsheetEmbeddingChunkTests(SimpleTestCase):
+    def test_rebuilds_cell_manifest_from_coordinate_rendering(self):
+        manifest = DocumentArtifactService.spreadsheet_manifest_from_text(
+            file_name="Legacy Model.xlsx",
+            text=(
+                "[Sheet: Revenue Build]\n\n"
+                "A1=Metric\tB1=FY25\n\n"
+                "A2=Revenue\tB2==SUM(B3:B4) [cached value: 125]"
+            ),
+        )
+
+        self.assertEqual(manifest["kind"], "spreadsheet")
+        self.assertEqual(manifest["fallback_fidelity"], "reconstructed_from_stored_text")
+        cells = manifest["sheets"][0]["cells"]
+        self.assertEqual(cells[0], {"coordinate": "A1", "value": "Metric"})
+        self.assertEqual(cells[-1]["coordinate"], "B2")
+        self.assertEqual(cells[-1]["value"], "=SUM(B3:B4)")
+        self.assertEqual(cells[-1]["cached_value"], "125")
+        self.assertEqual(manifest["chunks"][0]["metadata"]["cell_range"], "A1:B2")
+
+    def test_rebuilds_cell_manifest_from_numbered_legacy_rows(self):
+        manifest = DocumentArtifactService.spreadsheet_manifest_from_text(
+            file_name="Legacy Model.xlsb",
+            text="[Sheet: P&L]\n1\tMetric\tFY25\n2\tRevenue\t100",
+        )
+
+        cells = manifest["sheets"][0]["cells"]
+        self.assertIn({"coordinate": "A2", "value": "Revenue"}, cells)
+        self.assertIn({"coordinate": "B2", "value": "100"}, cells)
+
     def test_cell_manifest_becomes_coordinate_aware_chunks(self):
         manifest = {
             "schema_version": "2",

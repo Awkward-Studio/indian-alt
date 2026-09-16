@@ -1569,6 +1569,31 @@ def process_single_document_async(
                     doc,
                     artifact_source_metadata,
                 )
+
+            def persist_segment_progress(completed: int, total: int) -> None:
+                """Expose durable per-segment progress without replacing the checkpoint."""
+                stored = DealDocument.objects.filter(pk=doc.pk).values_list(
+                    "evidence_json", flat=True,
+                ).first()
+                if not isinstance(stored, dict):
+                    return
+                stored_metadata = dict(stored.get("source_metadata") or {})
+                if (
+                    stored_metadata.get("artifact_run_id")
+                    and str(stored_metadata.get("artifact_run_id")) != str(artifact_run_id)
+                ):
+                    return
+                previous = int(stored_metadata.get("artifact_segments_completed") or 0)
+                if completed <= previous and int(stored_metadata.get("artifact_segment_count") or 0) == total:
+                    return
+                stored_metadata.update({
+                    "artifact_segment_count": total,
+                    "artifact_segments_completed": max(previous, completed),
+                })
+                checkpoint = dict(stored)
+                checkpoint["source_metadata"] = stored_metadata
+                DealDocument.objects.filter(pk=doc.pk).update(evidence_json=checkpoint)
+
             artifact = DocumentArtifactService.build_document_artifact(
                 file_name=doc.title,
                 extracted_text=normalized_text,
@@ -1578,6 +1603,7 @@ def process_single_document_async(
                 source_metadata=artifact_source_metadata,
                 cancel_check=delivery_cancelled,
                 yield_check=higher_priority_work_is_waiting,
+                segment_progress=persist_segment_progress,
                 force_fresh=force_fresh,
             )
             if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():

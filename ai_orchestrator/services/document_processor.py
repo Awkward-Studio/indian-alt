@@ -12,6 +12,7 @@ import requests
 from django.conf import settings
 from docx import Document
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from pptx import Presentation
 
 from .llm_providers import VLLMProviderService
@@ -94,6 +95,7 @@ class DocumentProcessorService:
         sections = []
         failed_pages = []
         native_warnings = []
+        structured_data = {}
         vision_pages = 0
 
         def read_image(image, page_number):
@@ -140,6 +142,7 @@ class DocumentProcessorService:
                 native = self.get_native_extraction_result(file_content, filename)
                 sections.append(native["normalized_text"])
                 native_warnings.extend(native.get("quality_flags") or [])
+                structured_data = native.get("structured_data") or {}
             else:
                 sections.append(self.extract_text_fallback(file_content, filename))
         except Exception:
@@ -160,6 +163,7 @@ class DocumentProcessorService:
             "transcription_status": "partial" if text and (failed_pages or partial_warnings) else "complete" if text else "failed",
             "quality_flags": flags,
             "render_metadata": {"failed_pages": failed_pages, "vision_pages": vision_pages},
+            "structured_data": structured_data,
             "error": "No readable content was extracted. Scanned pages and images require dedicated OCR, or an explicitly enabled vision model." if not text else "",
         }
 
@@ -170,18 +174,15 @@ class DocumentProcessorService:
         *,
         allow_remote_fallback: bool = True,
     ) -> dict:
-        """Use the same lossless extraction order as deal/global chat."""
-        extraction = self.get_chat_extraction_result(file_content, filename)
-        text = extraction.get("normalized_text") or extraction.get("text") or ""
-        if not allow_remote_fallback or (text.strip() and extraction.get("transcription_status") == "complete"):
-            return extraction
-        if self.docproc_url:
+        """Prefer docproc for evidence, retaining its page/cell-level manifest."""
+        if allow_remote_fallback and self.docproc_url:
             remote = self.get_extraction_result(
                 file_content, filename, page_limit=None, allow_local_fallback=False,
             )
-            if remote.get("transcription_status") == "complete" or not text.strip():
+            remote_text = remote.get("normalized_text") or remote.get("text") or ""
+            if remote_text.strip() and remote.get("transcription_status") != "failed":
                 return remote
-        return extraction
+        return self.get_chat_extraction_result(file_content, filename)
 
     def get_native_extraction_result(self, file_content: bytes, filename: str) -> dict:
         """Full native extraction for deal uploads, with no remote or vision calls."""
@@ -225,20 +226,49 @@ class DocumentProcessorService:
                 for sheet in formulas:
                     sections.append(f"[Sheet: {sheet.title}]")
                     sheet_lines = []
+                    sheet_cells = []
                     for row, cached_row in zip(sheet.iter_rows(), values[sheet.title].iter_rows()):
                         cells = []
                         for cell, cached in zip(row, cached_row):
                             if cell.value is None:
                                 continue
                             value = str(cell.value)
+                            manifest_value = (
+                                cell.value
+                                if isinstance(cell.value, (str, int, float, bool))
+                                else str(cell.value)
+                            )
+                            manifest_cell = {
+                                "coordinate": cell.coordinate,
+                                "value": manifest_value,
+                                "number_format": cell.number_format,
+                            }
                             if cell.data_type == "f":
                                 value += f" [cached value: {cached.value if cached.value is not None else 'unavailable'}]"
+                                if cached.value is not None:
+                                    manifest_cell["cached_value"] = (
+                                        cached.value
+                                        if isinstance(cached.value, (str, int, float, bool))
+                                        else str(cached.value)
+                                    )
+                            hyperlink = getattr(cell, "hyperlink", None)
+                            comment = getattr(cell, "comment", None)
+                            if hyperlink:
+                                manifest_cell["hyperlink"] = hyperlink.target
+                            if comment:
+                                manifest_cell["comment"] = comment.text
+                            sheet_cells.append(manifest_cell)
                             cells.append(f"{cell.coordinate}={value}")
                         if cells:
                             line = "\t".join(cells)
                             sections.append(line)
                             sheet_lines.append(line)
-                    sheets.append({"name": sheet.title, "row_count": sheet.max_row, "column_count": sheet.max_column})
+                    sheets.append({
+                        "name": sheet.title,
+                        "row_count": sheet.max_row,
+                        "column_count": sheet.max_column,
+                        "cells": sheet_cells,
+                    })
                     for start in range(0, len(sheet_lines), 200):
                         chunks.append({
                             "text": "\n".join(sheet_lines[start:start + 200]),
@@ -258,7 +288,21 @@ class DocumentProcessorService:
                 rows = workbook.get_sheet_by_name(sheet_name).to_python(skip_empty_area=False)
                 lines = [f"{index + 1}\t" + "\t".join("" if value is None else str(value) for value in row) for index, row in enumerate(rows)]
                 sections.extend([f"[Sheet: {sheet_name}]", *lines])
-                sheets.append({"name": sheet_name, "row_count": len(rows), "column_count": max((len(row) for row in rows), default=0)})
+                sheet_cells = [
+                    {
+                        "coordinate": f"{get_column_letter(column_index)}{row_index}",
+                        "value": value if isinstance(value, (str, int, float, bool)) else str(value),
+                    }
+                    for row_index, row in enumerate(rows, start=1)
+                    for column_index, value in enumerate(row, start=1)
+                    if value is not None
+                ]
+                sheets.append({
+                    "name": sheet_name,
+                    "row_count": len(rows),
+                    "column_count": max((len(row) for row in rows), default=0),
+                    "cells": sheet_cells,
+                })
                 for start in range(0, len(lines), 200):
                     chunks.append({"text": "\n".join(lines[start:start + 200]), "metadata": {"chunk_kind": "spreadsheet_range", "sheet_name": sheet_name, "row_start": start + 1, "row_end": min(start + 200, len(lines))}})
             structured_data = {"schema_version": "2", "kind": "spreadsheet", "format": ext.lstrip("."), "filename": filename, "content_sha256": hashlib.sha256(file_content).hexdigest(), "sheets": sheets, "chunks": chunks, "fallback_fidelity": "cell_values"}
