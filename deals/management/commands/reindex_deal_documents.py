@@ -27,6 +27,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Only rebuild documents whose extraction manifest is a spreadsheet.",
         )
+        parser.add_argument(
+            "--manifests-only",
+            action="store_true",
+            help="Rebuild recoverable spreadsheet cell manifests without regenerating embeddings.",
+        )
         parser.add_argument("--dry-run", action="store_true", help="List documents without changing them.")
 
     def handle(self, *args, **options):
@@ -90,15 +95,24 @@ class Command(BaseCommand):
             self.stdout.write(f"Would reindex {len(documents)} document(s).")
             return
 
+        for document in documents:
+            rebuilt_manifest = reconstructed.get(document.id)
+            if rebuilt_manifest:
+                document.extraction_manifest = rebuilt_manifest
+                document.save(update_fields=["extraction_manifest"])
+
+        if options["manifests_only"]:
+            self.stdout.write(self.style.SUCCESS(
+                f"Rebuilt {len(reconstructed)} spreadsheet cell manifest(s); "
+                f"{len(missing_manifests) - len(reconstructed)} require source re-extraction."
+            ))
+            return
+
         service = EmbeddingService()
         completed = 0
         failures = []
         for document in documents:
             try:
-                rebuilt_manifest = reconstructed.get(document.id)
-                if rebuilt_manifest:
-                    document.extraction_manifest = rebuilt_manifest
-                    document.save(update_fields=["extraction_manifest"])
                 if service.vectorize_document(document):
                     completed += 1
                 else:
