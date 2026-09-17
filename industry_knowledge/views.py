@@ -30,6 +30,7 @@ from .services import (
     ingest_source,
     merge_industries,
     pull_industry_news,
+    reconcile_industry_taxonomy,
     sync_industries_from_deals,
 )
 
@@ -153,9 +154,9 @@ class IndustryViewSet(viewsets.ModelViewSet):
         if self.action != "list":
             return Industry.objects.all()
 
-        sync_industries_from_deals()
+        reconcile_industry_taxonomy()
         counts_map = get_industry_deal_counts()
-        queryset = Industry.objects.all().prefetch_related("documents", "news_articles")
+        queryset = Industry.objects.select_related("parent").prefetch_related("documents", "news_articles", "sub_industries")
 
         search = self.request.query_params.get("search")
         if search:
@@ -167,7 +168,8 @@ class IndustryViewSet(viewsets.ModelViewSet):
         industries = list(queryset)
 
         for ind in industries:
-            ind.deals_count = counts_map.get(ind.name.strip(), 0)
+            child_names = [child.name for child in ind.sub_industries.all()]
+            ind.deals_count = counts_map.get(ind.name.strip(), 0) + sum(counts_map.get(name.strip(), 0) for name in child_names)
             ind.documents_count = ind.documents.count()
             ind.news_count = ind.news_articles.count()
 
@@ -182,6 +184,13 @@ class IndustryViewSet(viewsets.ModelViewSet):
 
         return industries
 
+    def perform_update(self, serializer):
+        industry = serializer.save()
+        if "parent" in serializer.validated_data:
+            industry.classification_status = "HUMAN_REVIEWED"
+            industry.classification_basis = "Confirmed by an IA user"
+            industry.save(update_fields=["classification_status", "classification_basis", "updated_at"])
+
     def list(self, request, *args, **kwargs):
         industries = self.get_queryset()
         serializer = self.get_serializer(industries, many=True)
@@ -192,6 +201,17 @@ class IndustryViewSet(viewsets.ModelViewSet):
         industry = self.get_object()
         articles = pull_industry_news(industry)
         return Response(IndustryNewsArticleSerializer(articles, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="start-research")
+    def start_research(self, request, pk=None):
+        industry = self.get_object()
+        if industry.research_status not in {Industry.ResearchStatus.QUEUED, Industry.ResearchStatus.RUNNING}:
+            industry.research_status = Industry.ResearchStatus.QUEUED
+            industry.research_error = ""
+            industry.save(update_fields=["research_status", "research_error", "updated_at"])
+            from .tasks import refresh_industry_research
+            refresh_industry_research.delay(str(industry.id))
+        return Response({"status": industry.research_status}, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["post"], url_path="upload-document")
     def upload_document(self, request, pk=None):
@@ -265,4 +285,3 @@ class IndustryViewSet(viewsets.ModelViewSet):
             return Response({"error": str(exc)}, status=400)
         except Exception as exc:
             return Response({"error": f"Merge failed: {exc}"}, status=500)
-

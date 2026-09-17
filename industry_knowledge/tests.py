@@ -129,6 +129,34 @@ class IndustryViewSetTests(TestCase):
         self.assertIn("Cold Chain", names)
         fintech = next(item for item in response.data if item["name"] == "Fintech")
         self.assertEqual(fintech["deals_count"], 2)
+        self.assertEqual(fintech["parent_name"], "Financial Services")
+        self.assertEqual(fintech["classification_status"], "AUTO_CHECKED")
+
+    def test_list_consolidates_formatting_duplicates(self):
+        Deal.objects.create(title="Spacing variant", industry="Fin tech", deal_status="New")
+        response = self.client.get("/api/industry-knowledge/industries/")
+
+        self.assertEqual(response.status_code, 200)
+        fintech_rows = [item for item in response.data if item["name"].replace(" ", "").lower() == "fintech"]
+        self.assertEqual(len(fintech_rows), 1)
+        self.assertEqual(fintech_rows[0]["deals_count"], 3)
+
+    def test_human_taxonomy_correction_survives_automatic_checks(self):
+        first = self.client.get("/api/industry-knowledge/industries/")
+        cold_chain = next(item for item in first.data if item["name"] == "Cold Chain")
+        healthcare = next(item for item in first.data if item["name"] == "Healthcare")
+
+        updated = self.client.patch(
+            f"/api/industry-knowledge/industries/{cold_chain['id']}/",
+            {"parent": healthcare["id"]},
+            format="json",
+        )
+        refreshed = self.client.get("/api/industry-knowledge/industries/")
+        row = next(item for item in refreshed.data if item["name"] == "Cold Chain")
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(row["parent"], healthcare["id"])
+        self.assertEqual(row["classification_status"], "HUMAN_REVIEWED")
 
     def test_retrieve_industry_returns_historic_deals(self):
         response = self.client.get("/api/industry-knowledge/industries/")
@@ -180,3 +208,15 @@ class IndustryViewSetTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data), 1)
         self.assertEqual(response.data[0]["title"], "Fintech growth in India accelerates")
+
+    @patch("industry_knowledge.tasks.refresh_industry_research.delay")
+    def test_selecting_industry_queues_background_research(self, delay):
+        self.client.get("/api/industry-knowledge/industries/")
+        from industry_knowledge.models import Industry
+        fintech = Industry.objects.get(name="Fintech")
+
+        response = self.client.post(f"/api/industry-knowledge/industries/{fintech.id}/start-research/")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], "QUEUED")
+        delay.assert_called_once_with(str(fintech.id))

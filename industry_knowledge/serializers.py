@@ -118,7 +118,7 @@ class IndustryDocumentSerializer(serializers.ModelSerializer):
 class IndustryNewsArticleSerializer(serializers.ModelSerializer):
     class Meta:
         model = IndustryNewsArticle
-        fields = ["id", "industry_id", "title", "url", "source_name", "summary", "published_at", "created_at"]
+        fields = ["id", "industry_id", "title", "url", "source_name", "summary", "category", "published_at", "created_at"]
 
 
 class DealSummaryForIndustrySerializer(serializers.ModelSerializer):
@@ -135,31 +135,56 @@ class IndustryListSerializer(serializers.ModelSerializer):
     deals_count = serializers.IntegerField(read_only=True)
     documents_count = serializers.IntegerField(read_only=True)
     news_count = serializers.IntegerField(read_only=True)
+    parent_name = serializers.CharField(source="parent.name", read_only=True, allow_null=True)
 
     class Meta:
         model = Industry
         fields = [
-            "id", "name", "overview", "context", "deals_count",
-            "documents_count", "news_count", "created_at", "updated_at",
+            "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
+            "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
+            "deals_count", "documents_count", "news_count", "created_at", "updated_at",
         ]
 
 
 class IndustryDetailSerializer(serializers.ModelSerializer):
     deals_count = serializers.SerializerMethodField()
-    documents = IndustryDocumentSerializer(many=True, read_only=True)
-    news_articles = IndustryNewsArticleSerializer(many=True, read_only=True)
+    documents = serializers.SerializerMethodField()
+    news_articles = serializers.SerializerMethodField()
     deals = serializers.SerializerMethodField()
+    parent_name = serializers.CharField(source="parent.name", read_only=True, allow_null=True)
+    sub_industries = serializers.SerializerMethodField()
 
     class Meta:
         model = Industry
         fields = [
-            "id", "name", "overview", "context", "deals_count",
-            "documents", "news_articles", "deals", "created_at", "updated_at",
+            "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
+            "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
+            "documents", "news_articles", "deals", "sub_industries", "deals_count", "created_at", "updated_at",
         ]
 
     def get_deals_count(self, obj):
-        return Deal.objects.filter(industry=obj.name).count()
+        names = [obj.name, *obj.sub_industries.values_list("name", flat=True)]
+        return Deal.objects.filter(industry__in=names).count()
+
+    def get_sub_industries(self, obj):
+        children = list(obj.sub_industries.select_related("parent").prefetch_related("documents", "news_articles"))
+        for child in children:
+            child.deals_count = Deal.objects.filter(industry=child.name).count()
+            child.documents_count = child.documents.count()
+            child.news_count = child.news_articles.count()
+        return IndustryListSerializer(children, many=True, context=self.context).data
+
+    def get_documents(self, obj):
+        ids = [obj.id, *obj.sub_industries.values_list("id", flat=True)]
+        rows = IndustryDocument.objects.filter(industry_id__in=ids).select_related("deal_document__deal", "uploaded_by")
+        return IndustryDocumentSerializer(rows, many=True, context=self.context).data
+
+    def get_news_articles(self, obj):
+        ids = [obj.id, *obj.sub_industries.values_list("id", flat=True)]
+        rows = IndustryNewsArticle.objects.filter(industry_id__in=ids).order_by("-published_at", "-created_at")[:100]
+        return IndustryNewsArticleSerializer(rows, many=True, context=self.context).data
 
     def get_deals(self, obj):
-        deals = Deal.objects.filter(industry=obj.name).order_by("-received_at", "-created_at")[:100]
+        names = [obj.name, *obj.sub_industries.values_list("name", flat=True)]
+        deals = Deal.objects.filter(industry__in=names).order_by("-received_at", "-created_at")[:100]
         return DealSummaryForIndustrySerializer(deals, many=True).data

@@ -170,6 +170,83 @@ def sync_industries_from_deals() -> int:
     return 0
 
 
+MAIN_INDUSTRY_RULES = {
+    "Financial Services": ("fintech", "finance", "financial", "banking", "lending", "payments", "insurance", "wealth"),
+    "Healthcare": ("health", "pharma", "medical", "hospital", "diagnostic", "medtech", "biotech"),
+    "Consumer": ("consumer", "retail", "food", "beverage", "beauty", "apparel", "commerce"),
+    "Technology": ("technology", "software", "saas", "artificial intelligence", "deeptech", "cyber", "cloud"),
+    "Industrials": ("industrial", "manufacturing", "logistics", "mobility", "automotive", "chemical", "aerospace"),
+    "Climate & Energy": ("climate", "energy", "renewable", "solar", "battery", "cleantech", "sustainability"),
+    "Education": ("education", "edtech", "learning"),
+    "Real Estate": ("real estate", "proptech", "construction"),
+}
+
+
+def _industry_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+
+
+def reconcile_industry_taxonomy() -> dict:
+    """Deduplicate formatting variants and assign a conservative two-level taxonomy."""
+    from django.db import transaction
+    from deals.models import Deal
+    from .models import Industry
+
+    sync_industries_from_deals()
+    merged = 0
+    with transaction.atomic():
+        by_key = {}
+        industry_rows = list(Industry.objects.all())
+        industry_rows.sort(key=lambda item: (_industry_key(item.name), len(item.name), item.name.casefold()))
+        for industry in industry_rows:
+            key = _industry_key(industry.name)
+            if not key:
+                continue
+            target = by_key.get(key)
+            if target is None:
+                by_key[key] = industry
+                continue
+            Deal.objects.filter(industry=industry.name).update(industry=target.name)
+            industry.documents.update(industry=target)
+            industry.sub_industries.update(parent=target)
+            for article in industry.news_articles.all():
+                if target.news_articles.filter(url=article.url).exists():
+                    article.delete()
+                else:
+                    article.industry = target
+                    article.save(update_fields=["industry"])
+            industry.delete()
+            merged += 1
+
+        parents = {}
+        for parent_name in MAIN_INDUSTRY_RULES:
+            parent, _ = Industry.objects.get_or_create(name=parent_name)
+            parents[parent_name] = parent
+
+        for industry in Industry.objects.all():
+            if industry.classification_status == "HUMAN_REVIEWED":
+                continue
+            if industry.name in parents:
+                parent = None
+                basis = "Canonical main industry"
+            else:
+                folded = industry.name.casefold()
+                matches = [
+                    (name, keyword)
+                    for name, keywords in MAIN_INDUSTRY_RULES.items()
+                    for keyword in keywords
+                    if keyword in folded
+                ]
+                parent = parents[matches[0][0]] if len({match[0] for match in matches}) == 1 else None
+                basis = f"Matched '{matches[0][1]}'" if parent else "No single confident main-industry match"
+            Industry.objects.filter(pk=industry.pk).update(
+                parent=parent,
+                classification_status="AUTO_CHECKED",
+                classification_basis=basis,
+            )
+    return {"duplicates_merged": merged}
+
+
 def get_industry_deal_counts() -> dict[str, int]:
     """Return mapping of cleaned industry name to number of deals."""
     from deals.models import Deal
@@ -188,41 +265,34 @@ def get_industry_deal_counts() -> dict[str, int]:
 
 
 def pull_industry_news(industry, limit: int = 15):
-    """Query SearXNG for recent industry news in India and store them."""
+    """Discover recent transactions and readable market reports for an industry."""
     from ai_orchestrator.services.search_provider import SearXNGProviderService
     from .models import IndustryNewsArticle
 
     provider = SearXNGProviderService()
-    search_query = f'"{industry.name}" industry India market business news'
-    try:
+    searches = [
+        (IndustryNewsArticle.Category.TRANSACTION, f'"{industry.name}" India acquisition investment funding transaction'),
+        (IndustryNewsArticle.Category.REPORT, f'"{industry.name}" India market report TAM growth filetype:pdf'),
+    ]
+    for category, search_query in searches:
         results = provider.search_results(
             search_query,
             num_results=limit,
-            context={"purpose": "industry news", "industry": industry.name, "geography": "India"},
+            context={"purpose": category.lower(), "industry": industry.name, "geography": "India"},
         )
-    except Exception:
-        results = []
-
-    for hit in results:
-        url = hit.get("url")
-        title = (hit.get("title") or "").strip()
-        if not url or not title:
-            continue
-        summary = (hit.get("snippet") or hit.get("content") or "").strip()
-        domain = urlparse(url).netloc.removeprefix("www.")
-        pub_date_str = hit.get("published_date") or hit.get("publishedDate")
-        published_at = _published(pub_date_str)
-
-        IndustryNewsArticle.objects.update_or_create(
-            industry=industry,
-            url=url[:1000],
-            defaults={
-                "title": title[:600],
-                "source_name": domain[:255],
-                "summary": summary,
-                "published_at": published_at,
-            },
-        )
+        for hit in results:
+            url = hit.get("url")
+            title = (hit.get("title") or "").strip()
+            if not url or not title:
+                continue
+            summary = (hit.get("snippet") or hit.get("content") or "").strip()
+            domain = urlparse(url).netloc.removeprefix("www.")
+            published_at = _published(hit.get("published_date") or hit.get("publishedDate"))
+            IndustryNewsArticle.objects.update_or_create(
+                industry=industry,
+                url=url[:1000],
+                defaults={"title": title[:600], "source_name": domain[:255], "summary": summary, "published_at": published_at, "category": category},
+            )
 
     return list(industry.news_articles.all().order_by("-published_at", "-created_at")[:50])
 
@@ -316,4 +386,3 @@ def merge_industries(
         "target_name": target.name,
         "deals_updated": total_deals_updated,
     }
-

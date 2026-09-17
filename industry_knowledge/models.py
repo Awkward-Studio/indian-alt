@@ -93,10 +93,25 @@ class NewsArticle(models.Model):
 
 
 class Industry(models.Model):
+    class ResearchStatus(models.TextChoices):
+        IDLE = "IDLE", "Ready"
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Searching"
+        COMPLETE = "COMPLETE", "Complete"
+        FAILED = "FAILED", "Failed"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, unique=True, db_index=True)
+    parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="sub_industries")
     overview = models.TextField(blank=True, default="", help_text="Industry overview and sector dynamics")
     context = models.TextField(blank=True, default="", help_text="Analyst notes, thesis, and investment context")
+    market_size = models.CharField(max_length=255, blank=True, default="")
+    growth_rate = models.CharField(max_length=255, blank=True, default="")
+    classification_status = models.CharField(max_length=30, default="AUTO_CHECKED")
+    classification_basis = models.CharField(max_length=500, blank=True, default="")
+    research_status = models.CharField(max_length=20, choices=ResearchStatus.choices, default=ResearchStatus.IDLE)
+    last_researched_at = models.DateTimeField(null=True, blank=True)
+    research_error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -130,12 +145,18 @@ class IndustryDocument(models.Model):
 
 
 class IndustryNewsArticle(models.Model):
+    class Category(models.TextChoices):
+        TRANSACTION = "TRANSACTION", "Transaction"
+        REPORT = "REPORT", "Web report"
+        NEWS = "NEWS", "News"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     industry = models.ForeignKey(Industry, on_delete=models.CASCADE, related_name="news_articles")
     title = models.CharField(max_length=600)
     url = models.URLField(max_length=1000)
     source_name = models.CharField(max_length=255, blank=True)
     summary = models.TextField(blank=True)
+    category = models.CharField(max_length=20, choices=Category.choices, default=Category.NEWS)
     published_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -147,4 +168,3 @@ class IndustryNewsArticle(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.industry.name})"
-
