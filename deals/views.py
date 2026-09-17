@@ -1037,6 +1037,21 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             - analysis_running
             - analysis_failed
         )
+        analysis_counts_by_fund = {}
+        for row in analysis_queryset.values('fund', 'dashboard_has_analysis', 'processing_status').annotate(count=Count('id')):
+            fund = (row['fund'] or '').strip() or 'UNASSIGNED'
+            counts = analysis_counts_by_fund.setdefault(
+                fund,
+                {'available': 0, 'running': 0, 'failed': 0, 'notStarted': 0},
+            )
+            if row['dashboard_has_analysis']:
+                counts['available'] += row['count']
+            elif row['processing_status'] == 'processing':
+                counts['running'] += row['count']
+            elif row['processing_status'] == 'failed':
+                counts['failed'] += row['count']
+            else:
+                counts['notStarted'] += row['count']
 
         total_value = 0.0
         portfolio_value = 0.0
@@ -1063,6 +1078,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 'failed': analysis_failed,
                 'notStarted': analysis_not_started,
             },
+            'analysisCountsByFund': [
+                {'fund': fund, **counts}
+                for fund, counts in sorted(analysis_counts_by_fund.items())
+            ],
         })
 
     @action(detail=False, methods=['get'], url_path='document-gaps')
