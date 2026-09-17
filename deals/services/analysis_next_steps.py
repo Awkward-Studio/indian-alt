@@ -59,14 +59,19 @@ def _classify_table(headers: list[str]) -> str | None:
     normalized = [_normalized_header(header) for header in headers]
     joined = " | ".join(normalized)
     has_task = any("task" in header or "next step" in header for header in normalized)
-    has_workflow_columns = any(
-        token in joined for token in ("owner", "assigned", "assignee", "status", "serial number")
+    has_action = any(
+        header == "action" or header.startswith("action ") or header.endswith(" action")
+        for header in normalized
     )
-    if has_task and has_workflow_columns and len(headers) >= 3:
+    has_workflow_columns = any(
+        token in joined
+        for token in ("owner", "assigned", "assignee", "status", "serial number", "sn")
+    )
+    if (has_task or has_action) and has_workflow_columns and len(headers) >= 3:
         return "canonical_task_table"
     if any("next step" in header or "further diligence" in header for header in normalized):
         return "section_next_steps"
-    if any(header == "action" or header.startswith("action ") for header in normalized):
+    if has_action:
         return "action_table"
     return None
 
@@ -87,12 +92,14 @@ def _value_at(row: list[str], index: int | None) -> str | None:
 
 
 def _normalize_task(headers: list[str], row: list[str], table_kind: str) -> dict[str, Any]:
-    serial_index = _matching_index(headers, "serial number", "serial", "number", "no")
+    serial_index = _matching_index(headers, "serial number", "serial", "sn", "number", "no")
     owner_index = _matching_index(headers, "task owner", "owner")
     assignee_index = _matching_index(headers, "task assigned to", "assigned to", "assignee")
     status_index = _matching_index(headers, "status")
     priority_index = _matching_index(headers, "priority")
-    due_date_index = _matching_index(headers, "due date", "deadline", "timeline")
+    due_date_index = _matching_index(
+        headers, "due date", "target date", "target timing", "deadline", "timeline", "timing",
+    )
 
     if table_kind == "section_next_steps":
         category_index = 0
@@ -101,8 +108,12 @@ def _normalize_task(headers: list[str], row: list[str], table_kind: str) -> dict
         category_index = _matching_index(headers, "item", "category", "area")
         task_index = _matching_index(headers, "action")
     else:
-        category_index = _matching_index(headers, "category", "item", "area")
-        task_index = _matching_index(headers, "tasks next step", "task", "next step", "action")
+        category_index = _matching_index(
+            headers, "category", "question risk", "question", "risk", "item", "area",
+        )
+        task_index = _matching_index(
+            headers, "tasks next step", "task exact action", "exact action", "task", "next step", "action",
+        )
 
     task = _value_at(row, task_index)
     normalized = {

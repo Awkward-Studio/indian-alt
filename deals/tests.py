@@ -176,6 +176,45 @@ class AnalysisNextStepsInspectionTests(SimpleTestCase):
         self.assertEqual(canonical_task["status"], "Pending")
         self.assertEqual(canonical_task["missing_fields"], ["priority", "due_date"])
 
+    def test_extracts_generated_exact_action_schema_and_legacy_aliases(self):
+        report = """
+## Next Steps
+| SN | Question / Risk | Exact Action | Why it Matters | Required Document / Evidence | Owner | Assignee | Status | Target Date | Dependency | Expected Output |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.1 | Revenue recognition | Reconcile monthly MIS revenue to audited revenue. | Establish the underwriting base. | MIS and audited statements | Finance | Deal Team | Pending | Before IC | Data-room access | Signed reconciliation |
+"""
+
+        result = inspect_analysis_next_steps(report)
+
+        self.assertEqual(result["summary"]["canonical_task_tables"], 1)
+        self.assertEqual(result["summary"]["task_candidates"], 1)
+        task = result["tasks"][0]
+        self.assertEqual(task["serial_number"], "1.1")
+        self.assertEqual(task["category"], "Revenue recognition")
+        self.assertEqual(task["task"], "Reconcile monthly MIS revenue to audited revenue.")
+        self.assertEqual(task["owner"], "Finance")
+        self.assertEqual(task["assignee"], "Deal Team")
+        self.assertEqual(task["status"], "Pending")
+        self.assertEqual(task["due_date"], "Before IC")
+        self.assertEqual(task["missing_fields"], ["priority"])
+
+    def test_extracts_new_canonical_schema_with_all_task_fields(self):
+        report = """
+## Next Steps
+| Serial Number | Category / Question or Risk | Task / Exact Action | Why It Matters | Required Document / Evidence | Owner | Assignee | Status | Priority | Due Date / Timing | Dependency | Expected Output |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Customer concentration | Obtain the top-20 customer schedule and test retention. | Tests revenue durability. | Customer schedule | Commercial DD | Deal Team | Pending | High | Before IC | NDA | Retention analysis |
+"""
+
+        task = inspect_analysis_next_steps(report)["tasks"][0]
+
+        self.assertEqual(task["serial_number"], "1")
+        self.assertEqual(task["category"], "Customer concentration")
+        self.assertEqual(task["task"], "Obtain the top-20 customer schedule and test retention.")
+        self.assertEqual(task["priority"], "High")
+        self.assertEqual(task["due_date"], "Before IC")
+        self.assertEqual(task["missing_fields"], [])
+
     def test_extracts_action_table_and_ignores_analysis_table(self):
         report = """
 ## Transaction
