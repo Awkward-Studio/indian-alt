@@ -164,6 +164,37 @@ class WorkItemAPITests(TestCase):
         second.refresh_from_db()
         self.assertEqual((first.position, second.position), (2, 1))
 
+    def test_move_to_places_task_at_drop_target(self):
+        first = Task.objects.create(deal=self.deal, title="First", created_by=self.profile, position=1)
+        second = Task.objects.create(deal=self.deal, title="Second", created_by=self.profile, position=2)
+        third = Task.objects.create(deal=self.deal, title="Third", created_by=self.profile, position=3)
+
+        response = self.client.post(
+            reverse("task-move-to", kwargs={"pk": third.id}),
+            {"target_id": str(first.id), "placement": "before"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        ordered_ids = list(Task.objects.filter(deal=self.deal).order_by("position").values_list("id", flat=True))
+        self.assertEqual(ordered_ids, [third.id, first.id, second.id])
+        self.assertEqual(TaskActivity.objects.get().action, TaskActivity.Action.REORDERED)
+
+    def test_move_to_supports_one_saved_order_across_deals(self):
+        other_deal = Deal.objects.create(title="Other")
+        task = Task.objects.create(deal=self.deal, title="First", created_by=self.profile, position=1)
+        target = Task.objects.create(deal=other_deal, title="Other", created_by=self.profile, position=2)
+
+        response = self.client.post(
+            reverse("task-move-to", kwargs={"pk": task.id}),
+            {"target_id": str(target.id), "placement": "after"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        ordered_ids = list(Task.objects.order_by("position").values_list("id", flat=True))
+        self.assertEqual(ordered_ids, [target.id, task.id])
+
     def test_delete_activity_retains_task_and_deal_snapshot(self):
         task = Task.objects.create(deal=self.deal, title="Retained deletion", created_by=self.profile)
         task_id = task.id

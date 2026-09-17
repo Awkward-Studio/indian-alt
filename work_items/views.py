@@ -118,6 +118,37 @@ class TaskViewSet(viewsets.ModelViewSet):
             record_task_activity(task, actor=request.user.profile, before=before, action=TaskActivity.Action.REORDERED)
         return Response(TaskSerializer(task, context={"request": request}).data)
 
+    @action(detail=True, methods=["post"], url_path="move-to")
+    @transaction.atomic
+    def move_to(self, request, pk=None):
+        task = Task.objects.select_for_update().get(pk=pk)
+        target_id = request.data.get("target_id")
+        placement = request.data.get("placement")
+        if placement not in {"before", "after"}:
+            return Response({"detail": "Placement must be before or after."}, status=400)
+
+        target = Task.objects.select_for_update().filter(pk=target_id).first()
+        if not target:
+            return Response({"detail": "Target task was not found."}, status=404)
+        if target.pk == task.pk:
+            return Response(TaskSerializer(task, context={"request": request}).data)
+
+        siblings = list(
+            Task.objects.select_for_update()
+            .order_by("position", "created_at", "id")
+        )
+        before = task_activity_snapshot(task)
+        siblings.remove(task)
+        target_index = siblings.index(target)
+        insert_at = target_index if placement == "before" else target_index + 1
+        siblings.insert(insert_at, task)
+        for position, sibling in enumerate(siblings, start=1):
+            sibling.position = position
+        Task.objects.bulk_update(siblings, ["position"])
+        task.refresh_from_db()
+        record_task_activity(task, actor=request.user.profile, before=before, action=TaskActivity.Action.REORDERED)
+        return Response(TaskSerializer(task, context={"request": request}).data)
+
     @transaction.atomic
     def perform_destroy(self, instance):
         instance = Task.objects.select_for_update().select_related("deal").get(pk=instance.pk)
