@@ -102,3 +102,15 @@ class DealFolderScopeAPITests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("scope", response.data["details"])
+
+    @patch("microsoft.views.GraphAPIService.get_drive_item_download_url")
+    def test_download_uses_item_drive_id(self, get_download_url):
+        get_download_url.return_value = "https://download.example/file"
+
+        response = self.client.get(
+            reverse("onedrive-download"),
+            {"item_id": "file-1", "drive_id": "shared-drive-1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        get_download_url.assert_called_once_with("shared-drive-1", "file-1")

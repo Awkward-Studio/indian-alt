@@ -905,12 +905,14 @@ class OneDriveFileDetailView(APIView):
         tags=["OneDrive"],
         parameters=[
             OpenApiParameter(name='item_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+            OpenApiParameter(name='drive_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False),
         ],
         responses={200: DriveItemSerializer},
     )
     def get(self, request):
         """Retrieve metadata for a single drive item."""
         item_id = request.query_params.get('item_id')
+        drive_id = request.query_params.get('drive_id') or DMS_DRIVE_ID
         if not item_id:
             return Response(
                 {
@@ -923,7 +925,7 @@ class OneDriveFileDetailView(APIView):
 
         try:
             graph = GraphAPIService()
-            item = graph.get_drive_item(DMS_DRIVE_ID, item_id)
+            item = graph.get_drive_item(drive_id, item_id)
             serializer = DriveItemSerializer(item)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValueError as e:
@@ -960,12 +962,14 @@ class OneDriveDownloadView(APIView):
         tags=["OneDrive"],
         parameters=[
             OpenApiParameter(name='item_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=True),
+            OpenApiParameter(name='drive_id', type=OpenApiTypes.STR, location=OpenApiParameter.QUERY, required=False),
         ],
         responses={200: OpenApiTypes.OBJECT},
     )
     def get(self, request):
         """Return a short-lived pre-authenticated download URL."""
         item_id = request.query_params.get('item_id')
+        drive_id = request.query_params.get('drive_id') or DMS_DRIVE_ID
         if not item_id:
             return Response(
                 {
@@ -978,7 +982,7 @@ class OneDriveDownloadView(APIView):
 
         try:
             graph = GraphAPIService()
-            download_url = graph.get_drive_item_download_url(DMS_DRIVE_ID, item_id)
+            download_url = graph.get_drive_item_download_url(drive_id, item_id)
             if not download_url:
                 return Response(
                     {
