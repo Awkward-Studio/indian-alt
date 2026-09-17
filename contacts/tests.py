@@ -115,6 +115,18 @@ class BankerAnalyticsAPITests(TestCase):
         }
         self.assertNotIn(str(self.additional_only_deal.id), activity_ids)
 
+    def test_contact_detail_lists_all_linked_deals_with_dates_newest_first(self):
+        response = self.client.get(
+            reverse("contact-detail", kwargs={"pk": self.banker.id}),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        linked_deals = response.data["linked_deals"]
+        self.assertEqual(len(linked_deals), 6)
+        self.assertEqual(linked_deals[0]["deal_id"], str(self.additional_only_deal.id))
+        self.assertEqual(linked_deals[0]["activity_date"], "2026-07-25")
+        self.assertFalse(linked_deals[0]["is_primary"])
+
     def test_bank_metrics_include_all_deals_linked_to_the_bank(self):
         response = self.client.get(
             reverse("banker-analytics-detail", kwargs={"pk": self.bank.id}),

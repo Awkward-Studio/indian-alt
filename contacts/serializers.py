@@ -20,6 +20,10 @@ class ContactSerializer(serializers.ModelSerializer):
         deals = Deal.objects.filter(primary_contact=obj).select_related('bank')
         additional = Deal.objects.filter(additional_contacts=obj).select_related('bank')
         combined = list(deals) + [deal for deal in additional if deal.id not in {item.id for item in deals}]
+        combined.sort(
+            key=lambda deal: deal.received_at or deal.created_at.date(),
+            reverse=True,
+        )
         return [
             {
                 "deal_id": str(deal.id),
@@ -28,6 +32,7 @@ class ContactSerializer(serializers.ModelSerializer):
                 "bank": str(deal.bank_id) if deal.bank_id else None,
                 "bank_name": deal.bank.name if deal.bank else None,
                 "is_primary": deal.primary_contact_id == obj.id,
+                "activity_date": deal.received_at or deal.created_at.date(),
             }
             for deal in combined
         ]
