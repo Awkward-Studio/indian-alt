@@ -61,7 +61,7 @@ class CeleryQueueSnapshotServiceTests(SimpleTestCase):
 @override_settings(VLLM_BASE_URL="http://inference.test:8080/v1")
 class QueueStatusEndpointTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user("queue-admin", password="test-only", is_staff=True)
+        self.user = User.objects.create_user("queue-user", password="test-only")
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 

@@ -452,9 +452,6 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'], url_path='queue-status')
     def queue_status(self, request):
         """Return Redis order, Celery execution, and durable VDR hierarchy."""
-        if not _is_ai_admin(request.user):
-            return Response({'error': 'Administrator access is required.'}, status=403)
-
         from config.celery import app as celery_app
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
 
