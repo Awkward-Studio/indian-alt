@@ -33,6 +33,10 @@ DMS_SHARED_FOLDER_URL = config(
     'DMS_SHARED_FOLDER_URL',
     default=os.environ.get('DMS_SHARED_FOLDER_URL', ''),
 )
+DMS_DEAL_FOLDER_URL = config(
+    'DMS_DEAL_FOLDER_URL',
+    default=os.environ.get('DMS_DEAL_FOLDER_URL', DMS_SHARED_FOLDER_URL),
+)
 DMS_DEAL_FOLDER_PATH = os.environ.get('DMS_DEAL_FOLDER_PATH') or config(
     'DMS_DEAL_FOLDER_PATH',
     default=f"{DMS_FOLDER_PATH.rstrip('/')}/4. Deal Folder/4. All - 16062026",
@@ -522,9 +526,17 @@ class GraphAPIService:
 
     def get_deal_folder_root_children(self, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
         """List every company folder below the configured deal-folder corpus root."""
+        if DMS_DEAL_FOLDER_URL:
+            data = self.list_shared_folder(DMS_DEAL_FOLDER_URL, user_email)
+            for item in data.get('value', []):
+                parent_reference = item.get('parentReference', {})
+                item['driveId'] = parent_reference.get('driveId')
+            return data
+
         if not DMS_DRIVE_ID or not DMS_DEAL_FOLDER_PATH:
             raise ValueError(
-                "Deal-folder browsing is not configured. Set DMS_DRIVE_ID and DMS_DEAL_FOLDER_PATH."
+                "Deal-folder browsing is not configured. Set DMS_DEAL_FOLDER_URL or "
+                "DMS_DRIVE_ID and DMS_DEAL_FOLDER_PATH."
             )
 
         root = self.get_drive_item(

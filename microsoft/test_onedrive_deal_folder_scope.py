@@ -9,6 +9,33 @@ from microsoft.services.graph_service import GraphAPIService
 
 
 class DealFolderRootServiceTests(SimpleTestCase):
+    @patch(
+        "microsoft.services.graph_service.DMS_DEAL_FOLDER_URL",
+        "https://indiaalt.sharepoint.com/Shared%20Documents/Deals%20-%20DMS",
+    )
+    def test_prefers_dedicated_shared_folder_url(self):
+        service = object.__new__(GraphAPIService)
+        children = {
+            "value": [
+                {
+                    "id": "folder-1",
+                    "name": "Acme",
+                    "folder": {},
+                    "parentReference": {"driveId": "sharepoint-drive"},
+                }
+            ]
+        }
+
+        with patch.object(service, "list_shared_folder", return_value=children) as list_shared:
+            result = service.get_deal_folder_root_children("dms@example.com")
+
+        list_shared.assert_called_once_with(
+            "https://indiaalt.sharepoint.com/Shared%20Documents/Deals%20-%20DMS",
+            "dms@example.com",
+        )
+        self.assertEqual(result["value"][0]["driveId"], "sharepoint-drive")
+
+    @patch("microsoft.services.graph_service.DMS_DEAL_FOLDER_URL", "")
     @patch("microsoft.services.graph_service.DMS_DEAL_FOLDER_PATH", "Documents/Dataroom/4. Deal Folder/4. All - 16062026")
     @patch("microsoft.services.graph_service.DMS_DRIVE_ID", "drive-1")
     def test_resolves_root_then_returns_all_paginated_children(self):

@@ -97,6 +97,7 @@ GRAPH_API_ENDPOINT=https://graph.microsoft.com/v1.0
 
 DMS_USER_EMAIL=<delegated-dms-user-email>
 DMS_SHARED_FOLDER_URL=<sharepoint-or-onedrive-shared-folder-url>
+DMS_DEAL_FOLDER_URL=<optional-deal-linking-folder-url; defaults-to-DMS_SHARED_FOLDER_URL>
 ```
 
 Worker-only variable:
