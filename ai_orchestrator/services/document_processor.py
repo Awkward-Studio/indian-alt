@@ -51,6 +51,9 @@ class DocumentProcessorService:
         self.provider = VLLMProviderService()
         self.docproc_url = (getattr(settings, "DOC_PROCESSOR_URL", "") or "").rstrip("/")
         self.docproc_api_key = getattr(settings, "DOC_PROCESSOR_API_KEY", "") or ""
+        self.docproc_connect_timeout = max(
+            1.0, float(getattr(settings, "DOC_PROCESSOR_CONNECT_TIMEOUT", 30)),
+        )
         self.docproc_timeout = getattr(settings, "DOC_PROCESSOR_TIMEOUT", 300)
 
     def get_extraction_result(
@@ -379,9 +382,12 @@ class DocumentProcessorService:
             headers = {}
             if self.docproc_api_key:
                 headers["Authorization"] = f"Bearer {self.docproc_api_key}"
-            timeout_val = self.docproc_timeout
-            if timeout_val != 123:
-                timeout_val = (1.0, self.docproc_timeout)
+            # urllib3 uses the connect timeout while it opens the connection
+            # and writes the multipart request body. A one-second value made
+            # larger PDFs and spreadsheets fail during upload even though
+            # docproc itself was healthy. The read side retains the longer
+            # extraction allowance and is kept alive by docproc heartbeats.
+            timeout_val = (self.docproc_connect_timeout, self.docproc_timeout)
             response = requests.post(
                 f"{self.docproc_url}/v2/extract/document",
                 headers=headers,

@@ -1848,6 +1848,7 @@ class DocumentProcessorServiceTests(SimpleTestCase):
     @override_settings(
         DOC_PROCESSOR_URL="http://docproc.internal",
         DOC_PROCESSOR_API_KEY="secret-token",
+        DOC_PROCESSOR_CONNECT_TIMEOUT=30,
         DOC_PROCESSOR_TIMEOUT=123,
     )
     @patch("ai_orchestrator.services.document_processor.requests.post")
@@ -1875,7 +1876,7 @@ class DocumentProcessorServiceTests(SimpleTestCase):
         self.assertEqual(result["render_metadata"]["page_count"], 2)
 
         _, kwargs = mock_post.call_args
-        self.assertEqual(kwargs["timeout"], 123)
+        self.assertEqual(kwargs["timeout"], (30.0, 123))
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
         self.assertEqual(kwargs["data"]["filename"], "example.pdf")
         self.assertEqual(kwargs["data"]["page_limit"], "5")
