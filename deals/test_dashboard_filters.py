@@ -81,6 +81,23 @@ class DealTableFilterTests(TestCase):
         )
         self.assertNotIn(str(portfolio.id), {row["id"] for row in response.data["results"]})
 
+    def test_deal_status_filter_accepts_multiple_statuses(self):
+        new_deal = Deal.objects.create(title="New deal", deal_status="New")
+        interesting_deal = Deal.objects.create(title="Interesting deal", deal_status="Interesting")
+        passed_deal = Deal.objects.create(title="Passed deal", deal_status="Passed")
+
+        response = self.client.get(
+            "/api/deals/",
+            {"deal_status": "New,Interesting", "page_size": 100},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {row["id"] for row in response.data["results"]},
+            {str(new_deal.id), str(interesting_deal.id)},
+        )
+        self.assertNotIn(str(passed_deal.id), {row["id"] for row in response.data["results"]})
+
     def test_dashboard_exposes_folder_and_deal_document_counts(self):
         linked = Deal.objects.create(
             title="Linked dataroom",

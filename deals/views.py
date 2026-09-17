@@ -29,6 +29,7 @@ from drf_spectacular.utils import extend_schema, extend_schema_view
 from core.mixins import ErrorHandlingMixin
 from .models import (
     Deal, DealAnalysis, DealContradiction, DealDocument,
+    DealStatus,
     DealPassReasonRemediationAudit,
     DealReceiptDateAudit, DealReceiptDateSuggestion,
     FundClassificationSourceType, FundClassificationState,
@@ -208,6 +209,7 @@ def filter_by_fund_alias(queryset, fund):
 
 
 class DealFilterSet(django_filters.FilterSet):
+    deal_status = django_filters.CharFilter(method='filter_deal_status')
     deal_group = django_filters.ChoiceFilter(
         choices=[
             ('active', 'In process'),
@@ -285,6 +287,13 @@ class DealFilterSet(django_filters.FilterSet):
         if value == 'active':
             return queryset.filter(deal_status__in=['New', 'Interesting', 'Semi Interesting', 'To Pass'])
         return queryset
+
+    def filter_deal_status(self, queryset, name, value):
+        """Allow the ledger to request several statuses in one query."""
+        requested = {status.strip() for status in str(value).split(',') if status.strip()}
+        valid_statuses = {status.value for status in DealStatus}
+        statuses = requested & valid_statuses
+        return queryset.filter(deal_status__in=statuses) if statuses else queryset.none()
 
     def filter_fund(self, queryset, name, value):
         return filter_by_fund_alias(queryset, value)
@@ -978,6 +987,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             .annotate(count=Count('id'))
             .order_by('deal_status')
         ]
+        status_counts_by_fund = [
+            {
+                'fund': (row['fund'] or '').strip() or 'UNASSIGNED',
+                'status': row['deal_status'],
+                'count': row['count'],
+            }
+            for row in queryset.values('fund', 'deal_status')
+            .annotate(count=Count('id'))
+            .order_by('fund', 'deal_status')
+        ]
         fund_counts = [
             {
                 'fund': (row['fund'] or '').strip() or 'UNASSIGNED',
@@ -1034,6 +1053,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'totalValue': total_value,
             'portfolioValue': portfolio_value,
             'statusCounts': status_counts,
+            'statusCountsByFund': status_counts_by_fund,
             'fundCounts': fund_counts,
             'priorityCounts': priority_counts,
             'femaleLedCounts': female_led_counts,
