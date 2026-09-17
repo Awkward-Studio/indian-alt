@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from django.test import SimpleTestCase, override_settings
 from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService, split_utf8
 from ai_orchestrator.services.llm_providers import VLLMProviderService
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 
 class ChatDocumentChunksTests(SimpleTestCase):
@@ -63,11 +64,15 @@ class ChatDocumentChunksTests(SimpleTestCase):
 
     @override_settings(CHAT_MODEL_CONTEXT_TOKENS=8192)
     def test_smaller_model_window_is_respected(self):
-        with self.assertRaisesRegex(ValueError, 'safe model context budget'):
+        with self.assertRaisesRegex(ContextBudgetExceeded, 'safe model context budget') as raised:
             VLLMProviderService()._build_chat_body({
                 'model': 'local', 'prompt': 'x' * 12000,
                 'options': {'max_tokens': 1000}, '_enforce_context_budget': True,
             }, stream=False)
+        self.assertGreater(raised.exception.estimated_input_tokens, 0)
+        self.assertEqual(raised.exception.max_output_tokens, 1000)
+        self.assertEqual(raised.exception.reserve_tokens, 4096)
+        self.assertEqual(raised.exception.context_window_tokens, 8192)
 
     @override_settings(CHAT_MODEL_CONTEXT_TOKENS=65536)
     def test_report_split_allows_40k_input_and_reserves_16k_output(self):

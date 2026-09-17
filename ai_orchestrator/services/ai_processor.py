@@ -14,7 +14,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .inference_queue import InferenceQueueLease
 from .runtime import AIRuntimeService
-from .token_budget import estimate_tokens
+from .token_budget import ContextBudgetExceeded, ModelOutputTruncated, estimate_tokens
 from .pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .search_provider import SearXNGProviderService
 from django.conf import settings
@@ -241,7 +241,12 @@ class AIProcessorService:
                 },
             }
             audit_log.save(update_fields=["source_metadata"])
-        if model_provider != "anthropic" and metadata and metadata.get("max_input_tokens"):
+        if (
+            model_provider != "anthropic"
+            and metadata
+            and metadata.get("max_input_tokens")
+            and not metadata.get("lossless_input")
+        ):
             user_prompt = self._truncate_prompt_to_token_budget(
                 user_prompt,
                 system_instructions,
@@ -545,6 +550,7 @@ class AIProcessorService:
             getattr(settings, "AI_INFERENCE_QUEUE_ENABLED", True)
         )
         max_queue_wait = payload.pop("_inference_queue_max_wait", 0)
+        deferred_error = None
         try:
             def execute_request(lease=None):
                 request_timeout = payload.pop("_request_timeout", None)
@@ -573,6 +579,11 @@ class AIProcessorService:
                         "finish_reason": finish,
                         "incomplete_response_chars": len(str(raw_response or "")),
                     }
+                    if finish == "length":
+                        raise ModelOutputTruncated(
+                            finish_reason=finish,
+                            response_chars=len(str(raw_response or "")),
+                        )
                     raise ValueError(f"Incomplete segment response: finish_reason={finish}.")
             
             extraction_skills = {
@@ -674,6 +685,8 @@ class AIProcessorService:
             audit_log.status = 'FAILED'
             audit_log.error_message = str(e)
             parsed_json = {"error": str(e)}
+            if isinstance(e, (ContextBudgetExceeded, ModelOutputTruncated)):
+                deferred_error = e
         finally:
             if serialize_inference:
                 metadata = dict(audit_log.source_metadata or {})
@@ -704,5 +717,7 @@ class AIProcessorService:
                 event_type="terminal" if audit_log.status in ['COMPLETED', 'FAILED'] else "snapshot",
                 done=audit_log.status in ['COMPLETED', 'FAILED'],
             )
-            
+
+        if deferred_error is not None:
+            raise deferred_error
         return parsed_json

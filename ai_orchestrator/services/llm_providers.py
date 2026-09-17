@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 import requests
 from django.conf import settings
-from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -301,10 +301,13 @@ class VLLMProviderService:
                 ensure_ascii=False,
             )
             input_tokens = estimate_tokens(serialized_input)
-            if input_tokens + int(max_tokens or 8192) + reserve > window:
-                raise ValueError(
-                    "The complete chat request exceeds the safe model context budget. "
-                    "Please shorten the question/history or remove extra context; no document text was silently discarded."
+            output_tokens = int(max_tokens or 8192)
+            if input_tokens + output_tokens + reserve > window:
+                raise ContextBudgetExceeded(
+                    estimated_input_tokens=input_tokens,
+                    max_output_tokens=output_tokens,
+                    reserve_tokens=reserve,
+                    context_window_tokens=window,
                 )
 
         return body

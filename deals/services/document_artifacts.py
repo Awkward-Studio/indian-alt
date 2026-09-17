@@ -18,7 +18,11 @@ from ai_orchestrator.services.bulk_prompt_contracts import (
     BULK2_INTEL_SYSTEM_PROMPT,
     build_bulk2_segment_prompt,
 )
-from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import (
+    ContextBudgetExceeded,
+    ModelOutputTruncated,
+    estimate_tokens,
+)
 
 if TYPE_CHECKING:
     from ai_orchestrator.services.ai_processor import AIProcessorService
@@ -93,6 +97,8 @@ class DocumentArtifactService:
     STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
     ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v2"
+    MIN_SUBDIVISION_SOURCE_TOKENS = 256
+    MAX_SUBDIVISION_DEPTH = 8
     SPREADSHEET_EMBEDDING_ROWS_PER_CHUNK = 8
     SPREADSHEET_EMBEDDING_CHARS_PER_CHUNK = 900
 
@@ -591,6 +597,7 @@ class DocumentArtifactService:
                 "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)),
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
+                "lossless_input": True,
                 "serialize_inference": True,
                 "celery_task_id": source_metadata.get("celery_task_id"),
                 "vdr_parent_audit_id": source_metadata.get("vdr_parent_audit_id"),
@@ -598,34 +605,38 @@ class DocumentArtifactService:
             def run_model(
                 source_segment: str,
                 *,
-                subdivision_index: int | None = None,
+                piece_cache_key: str = cache_key,
+                subdivision_path: tuple[int, ...] = (),
                 subdivision_count: int | None = None,
             ):
                 attempt_metadata = deepcopy(metadata)
                 attempt_context = deepcopy(segment_context)
-                if subdivision_index is not None and subdivision_count is not None:
-                    subdivision_cache_key = "vdr-document-artifact-subsegment:" + hashlib.sha256(
-                        f"{cache_key}:{subdivision_index}:{subdivision_count}:{source_segment}".encode("utf-8")
-                    ).hexdigest()
+                attempt_metadata["_source_metadata"]["lossless_input"] = True
+                if subdivision_path and subdivision_count is not None:
+                    path_label = ".".join(str(item + 1) for item in subdivision_path)
                     attempt_metadata["_source_metadata"].update({
                         "artifact_parent_segment_cache_key": cache_key,
-                        "artifact_segment_cache_key": subdivision_cache_key,
-                        "segment_subdivision_index": subdivision_index,
+                        "artifact_segment_cache_key": piece_cache_key,
+                        "segment_subdivision_index": subdivision_path[-1],
                         "segment_subdivision_count": subdivision_count,
+                        "segment_subdivision_depth": len(subdivision_path),
+                        "segment_subdivision_path": [item + 1 for item in subdivision_path],
                         "segment_estimated_tokens": estimate_tokens(source_segment),
                     })
                     attempt_metadata["context_label"] += (
-                        f" [full subdivision {subdivision_index + 1}/{subdivision_count}]"
+                        f" [full subdivision {path_label}; {subdivision_path[-1] + 1}/{subdivision_count}]"
                     )
                     attempt_context.update({
                         "source_location": (
                             f"{file_name} | segment {index + 1}/{len(segments)} | "
-                            f"subsegment {subdivision_index + 1}/{subdivision_count}"
+                            f"subsegment {path_label}"
                         ),
                         "segment_metadata": {
                             "parent_segment_index": index + 1,
-                            "subsegment_index": subdivision_index + 1,
+                            "subsegment_index": subdivision_path[-1] + 1,
                             "subsegment_count": subdivision_count,
+                            "subsegment_depth": len(subdivision_path),
+                            "subsegment_path": [item + 1 for item in subdivision_path],
                         },
                         "segment_estimated_tokens": estimate_tokens(source_segment),
                     })
@@ -658,39 +669,133 @@ class DocumentArtifactService:
                     raise RuntimeError("AI segment response did not produce a complete evidence artifact.")
                 return normalized
 
-            try:
-                artifact = normalize_result(run_model(segment))
-            except Exception as exc:
-                if "finish_reason=length" not in str(exc):
-                    raise
-                subdivision_source_tokens = max(4_000, source_token_budget // 2)
-                subdivisions = cls._split_for_artifact(
-                    segment,
-                    source_tokens=subdivision_source_tokens,
-                    overlap_tokens=min(overlap_token_budget, subdivision_source_tokens // 8),
+            def subdivision_cache_key(path: tuple[int, ...], source_segment: str) -> str:
+                fingerprint = json.dumps(
+                    [cls.ARTIFACT_PIPELINE_VERSION, cache_key, list(path), source_segment],
+                    ensure_ascii=False,
                 )
-                if len(subdivisions) < 2:
-                    raise
-                subdivision_artifacts = [
-                    normalize_result(run_model(
-                        subdivision,
-                        subdivision_index=subdivision_index,
-                        subdivision_count=len(subdivisions),
+                return "vdr-document-artifact-subsegment:" + hashlib.sha256(
+                    fingerprint.encode("utf-8")
+                ).hexdigest()
+
+            def recover_piece(piece_cache_key: str) -> dict[str, Any] | None:
+                if force_fresh:
+                    return None
+                try:
+                    stored = cache.get(piece_cache_key)
+                except Exception:
+                    stored = None
+                if cls._segment_artifact_usable(stored):
+                    return stored
+                if stored:
+                    try:
+                        cache.delete(piece_cache_key)
+                    except Exception:
+                        pass
+                if not source_metadata.get("artifact_run_id"):
+                    return None
+                from ai_orchestrator.models import AIAuditLog
+                completed = AIAuditLog.objects.filter(
+                    source_type="document_evidence_segment",
+                    status="COMPLETED",
+                    is_success=True,
+                    source_metadata__artifact_segment_cache_key=piece_cache_key,
+                ).order_by("-completed_at").values_list("parsed_json", flat=True).first()
+                if not isinstance(completed, dict):
+                    return None
+                recovered = cls._normalize_segment_artifact(completed, fallback=fallback)
+                return recovered if cls._segment_artifact_usable(recovered) else None
+
+            def cache_piece(piece_cache_key: str, piece_artifact: dict[str, Any]) -> None:
+                try:
+                    cache.set(
+                        piece_cache_key,
+                        piece_artifact,
+                        timeout=int(getattr(settings, "VDR_ARTIFACT_CACHE_TTL", 30 * 24 * 60 * 60)),
+                    )
+                except Exception:
+                    pass
+
+            def should_subdivide(exc: Exception) -> bool:
+                return isinstance(exc, (ContextBudgetExceeded, ModelOutputTruncated)) or (
+                    "finish_reason=length" in str(exc)
+                )
+
+            def analyze_piece(
+                source_segment: str,
+                *,
+                path: tuple[int, ...] = (),
+                sibling_count: int | None = None,
+            ) -> dict[str, Any]:
+                piece_cache_key = cache_key if not path else subdivision_cache_key(path, source_segment)
+                if path:
+                    recovered = recover_piece(piece_cache_key)
+                    if recovered is not None:
+                        return recovered
+                    if cancel_check and cancel_check():
+                        raise DocumentArtifactCancelled("Document artifact processing was cancelled.")
+                    if yield_check and yield_check():
+                        raise DocumentArtifactYielded(
+                            "Higher-priority AI work is waiting; yielding before the next VDR subdivision."
+                        )
+                try:
+                    artifact = normalize_result(run_model(
+                        source_segment,
+                        piece_cache_key=piece_cache_key,
+                        subdivision_path=path,
+                        subdivision_count=sibling_count,
                     ))
-                    for subdivision_index, subdivision in enumerate(subdivisions)
-                ]
-                artifact = cls._normalize_segment_artifact(
-                    cls._merge_segment_artifacts(subdivision_artifacts, fallback=fallback),
-                    fallback=fallback,
-                )
-            try:
-                cache.set(
-                    cache_key,
-                    artifact,
-                    timeout=int(getattr(settings, "VDR_ARTIFACT_CACHE_TTL", 30 * 24 * 60 * 60)),
-                )
-            except Exception:
-                pass
+                except Exception as exc:
+                    if not should_subdivide(exc):
+                        raise
+                    if len(path) >= cls.MAX_SUBDIVISION_DEPTH:
+                        raise RuntimeError(
+                            f"Lossless evidence subdivision reached depth {cls.MAX_SUBDIVISION_DEPTH} "
+                            f"without fitting the model context: {exc}"
+                        ) from exc
+                    estimated_piece_tokens = estimate_tokens(source_segment)
+                    subdivision_source_tokens = max(
+                        cls.MIN_SUBDIVISION_SOURCE_TOKENS,
+                        estimated_piece_tokens // 2,
+                    )
+                    if subdivision_source_tokens >= estimated_piece_tokens:
+                        subdivision_source_tokens = max(
+                            cls.MIN_SUBDIVISION_SOURCE_TOKENS,
+                            estimated_piece_tokens - 1,
+                        )
+                    subdivisions = cls._split_for_artifact(
+                        source_segment,
+                        source_tokens=subdivision_source_tokens,
+                        overlap_tokens=min(
+                            overlap_token_budget,
+                            max(0, subdivision_source_tokens // 8),
+                        ),
+                        minimum_source_tokens=cls.MIN_SUBDIVISION_SOURCE_TOKENS,
+                    )
+                    if (
+                        len(subdivisions) < 2
+                        or any(len(subdivision) >= len(source_segment) for subdivision in subdivisions)
+                    ):
+                        raise RuntimeError(
+                            "Lossless evidence subdivision could not produce smaller source pieces: "
+                            f"{exc}"
+                        ) from exc
+                    subdivision_artifacts = [
+                        analyze_piece(
+                            subdivision,
+                            path=(*path, subdivision_index),
+                            sibling_count=len(subdivisions),
+                        )
+                        for subdivision_index, subdivision in enumerate(subdivisions)
+                    ]
+                    artifact = cls._normalize_segment_artifact(
+                        cls._merge_segment_artifacts(subdivision_artifacts, fallback=fallback),
+                        fallback=fallback,
+                    )
+                cache_piece(piece_cache_key, artifact)
+                return artifact
+
+            artifact = analyze_piece(segment)
             return index, artifact, False
 
         # Keep Celery context and database connections on the document thread.
@@ -768,8 +873,10 @@ class DocumentArtifactService:
         *,
         source_tokens: int | None = None,
         overlap_tokens: int | None = None,
+        minimum_source_tokens: int = 4_000,
     ) -> list[str]:
-        source_tokens = max(4_000, int(
+        minimum_source_tokens = max(1, int(minimum_source_tokens))
+        source_tokens = max(minimum_source_tokens, int(
             source_tokens
             if source_tokens is not None
             else getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)

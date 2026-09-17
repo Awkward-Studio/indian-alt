@@ -11,6 +11,7 @@ from ai_orchestrator.services.slot_request import (
 )
 from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.realtime import _send_audit_event, broadcast_audit_log_update
+from ai_orchestrator.services.token_budget import ModelOutputTruncated
 
 
 class SlotClockTests(SimpleTestCase):
@@ -300,7 +301,8 @@ class SegmentPersistenceTests(TestCase):
 
     def test_truncated_response_is_not_completed(self):
         self.service.current_provider.execute_standard.return_value["raw"]["choices"][0]["finish_reason"] = "length"
-        self.assertIn("error", self.run_segment())
+        with self.assertRaisesRegex(ModelOutputTruncated, "finish_reason=length"):
+            self.run_segment()
         self.audit.refresh_from_db()
         self.assertEqual(self.audit.status, "FAILED")
 

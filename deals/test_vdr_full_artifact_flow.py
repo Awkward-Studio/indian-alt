@@ -3,6 +3,8 @@ from unittest.mock import MagicMock, call, patch
 
 from django.test import SimpleTestCase, override_settings
 
+from ai_orchestrator.services.llm_providers import VLLMProviderService
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 from deals.services.document_artifacts import (
     DocumentArtifactCancelled,
     DocumentArtifactService,
@@ -631,6 +633,188 @@ class FullVDRArtifactTests(SimpleTestCase):
             "full subdivision" in item.kwargs["metadata"]["context_label"]
             for item in retry_calls
         ))
+
+    @override_settings(
+        CHAT_MODEL_CONTEXT_TOKENS=20_000,
+        VDR_ARTIFACT_SEGMENT_INPUT_TOKENS=14_336,
+        VDR_ARTIFACT_SEGMENT_MAX_TOKENS=4_000,
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=8_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("deals.services.document_artifacts.cache")
+    def test_dense_spreadsheet_context_overflow_is_subdivided_losslessly(self, mock_cache):
+        mock_cache.get.return_value = None
+        provider = VLLMProviderService()
+        service = MagicMock()
+        successful_prompts = []
+        complete = {
+            "parsed_json": {
+                "document_name": "Dense Model.xlsx",
+                "document_summary": "Complete evidence from one full subdivision.",
+                "quality_flags": [],
+            },
+        }
+
+        def enforce_real_serialized_budget(**kwargs):
+            provider._build_chat_body({
+                "model": "local",
+                "prompt": kwargs["content"],
+                "system": "Extract complete spreadsheet evidence.",
+                "options": {"max_tokens": kwargs["metadata"]["max_tokens"]},
+                "_enforce_context_budget": True,
+            }, stream=False)
+            successful_prompts.append(kwargs["content"])
+            return complete
+
+        service.process_content.side_effect = enforce_real_serialized_budget
+        source_text = "".join(
+            f'{{"coordinate":"A{index}","value":"Revenue 100, EBITDA 20"}}\n'
+            for index in range(1, 300)
+        )
+        self.assertEqual(
+            len(DocumentArtifactService._split_for_artifact(
+                source_text,
+                source_tokens=8_000,
+                overlap_tokens=100,
+            )),
+            1,
+        )
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Dense Model.xlsx",
+            extracted_text=source_text,
+            ai_service=service,
+        )
+
+        self.assertEqual(DocumentArtifactService.artifact_status(artifact), "complete")
+        self.assertGreater(service.process_content.call_count, len(successful_prompts))
+        self.assertTrue(all(
+            call_item.kwargs["metadata"]["lossless_input"]
+            for call_item in service.process_content.call_args_list
+        ))
+        successful_source = "\n".join(successful_prompts)
+        for index in range(1, 300):
+            self.assertIn(f'"coordinate":"A{index}"', successful_source)
+        self.assertNotIn("COMPACT MODE", successful_source)
+        self.assertNotIn("CONTEXT TRUNCATED", successful_source)
+
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=8_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("deals.services.document_artifacts.cache")
+    def test_context_overflow_can_recurse_beyond_one_subdivision_level(self, mock_cache):
+        mock_cache.get.return_value = None
+        service = MagicMock()
+        complete = {
+            "parsed_json": {
+                "document_name": "Dense Model.xlsx",
+                "document_summary": "Complete recursive subdivision evidence.",
+                "quality_flags": [],
+            },
+        }
+        attempts = 0
+
+        def overflow_twice(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                raise ContextBudgetExceeded(
+                    estimated_input_tokens=40_000,
+                    max_output_tokens=32_768,
+                    reserve_tokens=4_096,
+                    context_window_tokens=65_536,
+                )
+            return complete
+
+        service.process_content.side_effect = overflow_twice
+        source_text = "financial evidence with exact values 100 200 300 " * 350
+
+        artifact = DocumentArtifactService.build_document_artifact(
+            file_name="Dense Model.xlsx",
+            extracted_text=source_text,
+            ai_service=service,
+        )
+
+        self.assertEqual(DocumentArtifactService.artifact_status(artifact), "complete")
+        subdivision_depths = [
+            item.kwargs["metadata"]["_source_metadata"].get("segment_subdivision_depth", 0)
+            for item in service.process_content.call_args_list
+        ]
+        self.assertGreaterEqual(max(subdivision_depths), 2)
+
+    @override_settings(
+        VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS=8_000,
+        VDR_ARTIFACT_SEGMENT_OVERLAP_TOKENS=100,
+    )
+    @patch("ai_orchestrator.models.AIAuditLog.objects.filter")
+    @patch("deals.services.document_artifacts.cache")
+    def test_retry_reuses_completed_subdivisions(self, mock_cache, audit_filter):
+        stored = {}
+        mock_cache.get.side_effect = stored.get
+        mock_cache.set.side_effect = lambda key, value, timeout: stored.__setitem__(key, value)
+        audit_filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
+        complete = {
+            "parsed_json": {
+                "document_name": "Dense Model.xlsx",
+                "document_summary": "Complete subdivision evidence.",
+                "quality_flags": [],
+            },
+        }
+
+        def context_overflow():
+            return ContextBudgetExceeded(
+                estimated_input_tokens=40_000,
+                max_output_tokens=32_768,
+                reserve_tokens=4_096,
+                context_window_tokens=65_536,
+            )
+
+        first_service = MagicMock()
+
+        def fail_after_first_child(**kwargs):
+            path = kwargs["metadata"]["_source_metadata"].get("segment_subdivision_path")
+            if not path:
+                raise context_overflow()
+            if path == [1]:
+                return complete
+            raise RuntimeError("later subdivision failed")
+
+        first_service.process_content.side_effect = fail_after_first_child
+        source_text = "financial evidence with exact values 100 200 300 " * 350
+        incomplete = DocumentArtifactService.build_document_artifact(
+            file_name="Dense Model.xlsx",
+            extracted_text=source_text,
+            ai_service=first_service,
+            source_metadata={"artifact_run_id": "audit-1"},
+            force_fresh=True,
+        )
+
+        self.assertIn("artifact_segment_processing_incomplete", incomplete["quality_flags"])
+        self.assertEqual(len(stored), 1)
+
+        second_service = MagicMock()
+        second_paths = []
+
+        def complete_remaining_children(**kwargs):
+            path = kwargs["metadata"]["_source_metadata"].get("segment_subdivision_path")
+            if not path:
+                raise context_overflow()
+            second_paths.append(path)
+            return complete
+
+        second_service.process_content.side_effect = complete_remaining_children
+        completed = DocumentArtifactService.build_document_artifact(
+            file_name="Dense Model.xlsx",
+            extracted_text=source_text,
+            ai_service=second_service,
+            source_metadata=incomplete["source_metadata"],
+            force_fresh=True,
+        )
+
+        self.assertEqual(DocumentArtifactService.artifact_status(completed), "complete")
+        self.assertNotIn([1], second_paths)
+        self.assertTrue(second_paths)
 
     def test_complete_artifact_remains_usable_with_partial_source_coverage(self):
         artifact = DocumentArtifactService._fallback_artifact(
