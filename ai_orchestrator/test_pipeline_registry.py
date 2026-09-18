@@ -2,6 +2,11 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase
 
 from ai_orchestrator.models import AIAuditLog, AIPipelineDefinition, AIPipelineStage, AIPromptDefinition
+from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
+from ai_orchestrator.services.bulk_prompt_contracts import (
+    BULK3_SECTION_INSTRUCTIONS,
+    IC_REPORT_SECTION_STAGE_KEYS,
+)
 from ai_orchestrator.views import _pipeline_inventory
 from ai_orchestrator.services.pipeline_registry import (
     PipelineRegistryService,
@@ -108,6 +113,25 @@ class PromptRevisionLifecycleTests(TestCase):
         self.assertEqual(public_search.stage.kind, AIPipelineStage.Kind.OPERATION)
         self.assertEqual(private_search.stage.depends_on, ["query_planner"])
         self.assertEqual(screener.stage.depends_on, ["grounding"])
+
+    def test_seed_registers_all_eleven_live_report_section_prompts(self):
+        call_command("seed_ai_prompts", verbosity=0)
+
+        pipeline = AIPipelineDefinition.objects.get(key="ic_report_generation")
+        stages = list(pipeline.stages.order_by("position"))
+
+        self.assertEqual([stage.name for stage in stages], list(IC_SECTION_TITLES))
+        self.assertEqual(len(stages), 11)
+        for title in IC_SECTION_TITLES:
+            resolved = PipelineRegistryService.resolve_stage(
+                "ic_report_generation", IC_REPORT_SECTION_STAGE_KEYS[title]
+            )
+            self.assertEqual(resolved.prompt_revision.status, "published")
+            self.assertEqual(
+                resolved.stage.required_variables,
+                ["section_title", "minimum_words", "target_words", "model_data_json", "content"],
+            )
+            self.assertIn(BULK3_SECTION_INSTRUCTIONS[title], resolved.prompt_revision.user_template)
 
     def test_inventory_exposes_registered_topology_and_live_stage_state(self):
         call_command("seed_ai_prompts", verbosity=0)

@@ -395,6 +395,7 @@ class PipelineRegistryService:
             )
         cls.ensure_core_pipeline_defaults()
         cls.ensure_research_pipeline_defaults()
+        cls.ensure_report_pipeline_defaults()
 
     @classmethod
     @transaction.atomic
@@ -617,3 +618,98 @@ Include only companies explicitly supported as competitors by supplied evidence.
                     changed_fields.append(field)
             if changed_fields:
                 stage.save(update_fields=[*changed_fields, "updated_at"])
+
+    @classmethod
+    @transaction.atomic
+    def ensure_report_pipeline_defaults(cls) -> None:
+        """Register one independently editable live prompt for every IC section."""
+        from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
+        from ai_orchestrator.services.bulk_prompt_contracts import (
+            IC_REPORT_SECTION_STAGE_KEYS,
+            IC_REPORT_SECTION_SYSTEM_PROMPT,
+            build_ic_report_section_user_template,
+        )
+
+        pipeline, _ = AIPipelineDefinition.objects.get_or_create(
+            key="ic_report_generation",
+            defaults={
+                "name": "11-section IC report",
+                "description": "Live prompts used to generate each section of the investment committee report.",
+            },
+        )
+        pipeline_updates = []
+        for field, value in {
+            "name": "11-section IC report",
+            "description": "Live prompts used to generate each section of the investment committee report.",
+            "is_active": True,
+        }.items():
+            if getattr(pipeline, field) != value:
+                setattr(pipeline, field, value)
+                pipeline_updates.append(field)
+        if pipeline_updates:
+            pipeline.save(update_fields=[*pipeline_updates, "updated_at"])
+
+        variables = ["section_title", "minimum_words", "target_words", "model_data_json", "content"]
+        for position, title in enumerate(IC_SECTION_TITLES):
+            stage_key = IC_REPORT_SECTION_STAGE_KEYS[title]
+            definition_key = f"ic_report_section_{stage_key}"
+            definition, _ = AIPromptDefinition.objects.get_or_create(
+                key=definition_key,
+                defaults={
+                    "name": title,
+                    "category": "11-section IC report",
+                    "description": f"Live generation prompt for the {title} section.",
+                    "variables": variables,
+                },
+            )
+            definition_updates = []
+            for field, value in {
+                "name": title,
+                "category": "11-section IC report",
+                "description": f"Live generation prompt for the {title} section.",
+                "variables": variables,
+            }.items():
+                if getattr(definition, field) != value:
+                    setattr(definition, field, value)
+                    definition_updates.append(field)
+            if definition_updates:
+                definition.save(update_fields=[*definition_updates, "updated_at"])
+            if not definition.revisions.exists():
+                revision = AIPromptRevision.objects.create(
+                    definition=definition,
+                    revision=1,
+                    status=AIPromptRevision.Status.DRAFT,
+                    system_template=IC_REPORT_SECTION_SYSTEM_PROMPT,
+                    user_template=build_ic_report_section_user_template(title),
+                )
+                cls.publish_prompt(revision)
+
+            stage, _ = AIPipelineStage.objects.get_or_create(
+                pipeline=pipeline,
+                key=stage_key,
+                defaults={
+                    "name": title,
+                    "description": f"Generates the {title} section from section-ranked deal evidence.",
+                    "position": position,
+                    "kind": AIPipelineStage.Kind.PROMPT,
+                    "prompt_definition": definition,
+                    "required_variables": variables,
+                    "depends_on": [],
+                },
+            )
+            stage_updates = []
+            for field, value in {
+                "name": title,
+                "description": f"Generates the {title} section from section-ranked deal evidence.",
+                "position": position,
+                "kind": AIPipelineStage.Kind.PROMPT,
+                "prompt_definition": definition,
+                "required_variables": variables,
+                "depends_on": [],
+                "is_required": True,
+            }.items():
+                if getattr(stage, field) != value:
+                    setattr(stage, field, value)
+                    stage_updates.append(field)
+            if stage_updates:
+                stage.save(update_fields=[*stage_updates, "updated_at"])

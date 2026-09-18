@@ -1,12 +1,13 @@
 from unittest.mock import Mock, patch
 
-from django.test import SimpleTestCase, override_settings
+from django.test import TestCase, override_settings
 
 from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLES
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import ICReportSectionService
 
 
-class ICReportSectionServiceTests(SimpleTestCase):
+class ICReportSectionServiceTests(TestCase):
     def complete_report(self):
         return "\n\n".join(f"{header}\n\nComplete evidence-backed content for {header}." for header in IC_REPORT_HEADERS)
 
@@ -30,7 +31,7 @@ class ICReportSectionServiceTests(SimpleTestCase):
         service = Mock()
         service.process_content.side_effect = lambda **kwargs: {
             "response": (
-                f"## {kwargs['content'].split('Required heading: ## ', 1)[1].splitlines()[0]}"
+                f"## {kwargs['metadata']['section_title']}"
                 "\n\nFresh report section with enough evidence-backed detail."
             )
         }
@@ -57,7 +58,7 @@ class ICReportSectionServiceTests(SimpleTestCase):
         report_cache.get.return_value = None
         service = Mock()
         service.process_content.side_effect = lambda **kwargs: {
-            "response": f"## {kwargs['content'].split('Required heading: ## ', 1)[1].splitlines()[0]}\n\nGenerated section with enough evidence-backed detail to pass validation."
+            "response": f"## {kwargs['metadata']['section_title']}\n\nGenerated section with enough evidence-backed detail to pass validation."
         }
         partial = "\n\n".join(
             f"{header}\n\nExisting complete section with enough detail."
@@ -118,13 +119,57 @@ class ICReportSectionServiceTests(SimpleTestCase):
             service.process_content.call_args.kwargs["metadata"]["_source_metadata"]["force_regenerate"]
         )
 
+    @patch("ai_orchestrator.services.report_sections.cache")
+    def test_published_prompt_revision_invalidates_section_cache(self, report_cache):
+        report_cache.get.return_value = None
+        PipelineRegistryService.ensure_report_pipeline_defaults()
+        resolved = PipelineRegistryService.resolve_stage(
+            "ic_report_generation", "executive_summary"
+        )
+        service = Mock()
+        service.process_content.return_value = {
+            "response": "## Executive Summary\n\nEvidence-backed content for the investment committee."
+        }
+
+        ICReportSectionService._generate_section(
+            ai_service=service,
+            evidence="Same evidence",
+            analysis={"deal_model_data": {}},
+            title="Executive Summary",
+            source_id="report-1",
+        )
+        first_key = report_cache.get.call_args.args[0]
+
+        edited = PipelineRegistryService.create_prompt_draft(
+            resolved.stage.prompt_definition,
+            user_template=resolved.prompt_revision.user_template.replace(
+                "Write exactly one section", "Write one revised section"
+            ),
+            system_template=resolved.prompt_revision.system_template,
+        )
+        PipelineRegistryService.publish_prompt(edited)
+        ICReportSectionService._generate_section(
+            ai_service=service,
+            evidence="Same evidence",
+            analysis={"deal_model_data": {}},
+            title="Executive Summary",
+            source_id="report-1",
+        )
+        second_key = report_cache.get.call_args.args[0]
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(
+            service.process_content.call_args.kwargs["metadata"]["_source_metadata"]["prompt_revision"],
+            f"{edited.id}:r{edited.revision}",
+        )
+
     @override_settings(VDR_REPORT_SECTION_MIN_WORDS=0)
     @patch("ai_orchestrator.services.report_sections.cache")
     def test_each_section_can_receive_distinct_retrieved_evidence(self, report_cache):
         report_cache.get.return_value = None
         service = Mock()
         service.process_content.side_effect = lambda **kwargs: {
-            "response": f"## {kwargs['content'].split('Required heading: ## ', 1)[1].splitlines()[0]}\n\nGenerated section with complete evidence-backed detail."
+            "response": f"## {kwargs['metadata']['section_title']}\n\nGenerated section with complete evidence-backed detail."
         }
 
         result = ICReportSectionService.complete(
@@ -150,8 +195,9 @@ class ICReportSectionServiceTests(SimpleTestCase):
             self.assertEqual(call.kwargs["source_type"], "vdr_report_section")
             self.assertEqual(call.kwargs["metadata"]["max_tokens"], 16_384)
             self.assertEqual(call.kwargs["metadata"]["max_input_tokens"], 40_960)
-            self.assertIn("Cite every material factual statement", call.kwargs["content"])
-            self.assertIn("Do not write a References section", call.kwargs["content"])
+            self.assertEqual(call.kwargs["metadata"]["pipeline_key"], "ic_report_generation")
+            self.assertEqual(call.kwargs["metadata"]["section_title"], title)
+            self.assertTrue(call.kwargs["metadata"]["_source_metadata"]["prompt_revision"])
 
     def test_internal_evidence_reference_becomes_linked_precise_citation(self):
         source_url = "https://contoso.sharepoint.com/document?id=123"
