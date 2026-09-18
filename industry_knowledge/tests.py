@@ -230,6 +230,18 @@ class IndustryViewSetTests(TestCase):
         self.assertEqual(response.data["status"], "QUEUED")
         delay.assert_called_once_with(str(fintech.id))
 
+    @patch("industry_knowledge.tasks.generate_industry_summary.delay")
+    def test_umbrella_summary_is_queued_explicitly(self, delay):
+        self.client.get("/api/industry-knowledge/industries/")
+        from industry_knowledge.models import Industry
+        umbrella = Industry.objects.get(name="Financial Services")
+
+        response = self.client.post(f"/api/industry-knowledge/industries/{umbrella.id}/generate-summary/")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["status"], "QUEUED")
+        delay.assert_called_once_with(str(umbrella.id))
+
     def test_web_result_can_be_deleted_from_umbrella_industry(self):
         self.client.get("/api/industry-knowledge/industries/")
         from industry_knowledge.models import Industry, IndustryNewsArticle

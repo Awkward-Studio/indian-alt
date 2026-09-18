@@ -142,6 +142,7 @@ class IndustryListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
             "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
+            "summary_status", "summary_error", "summary_sources", "last_summarized_at",
             "deals_count", "documents_count", "news_count", "created_at", "updated_at",
         ]
 
@@ -159,6 +160,7 @@ class IndustryDetailSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
             "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
+            "summary_status", "summary_error", "summary_sources", "last_summarized_at",
             "documents", "news_articles", "deals", "sub_industries", "deals_count", "created_at", "updated_at",
         ]
 

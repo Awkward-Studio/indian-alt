@@ -112,6 +112,10 @@ class Industry(models.Model):
     research_status = models.CharField(max_length=20, choices=ResearchStatus.choices, default=ResearchStatus.IDLE)
     last_researched_at = models.DateTimeField(null=True, blank=True)
     research_error = models.TextField(blank=True, default="")
+    summary_status = models.CharField(max_length=20, choices=ResearchStatus.choices, default=ResearchStatus.IDLE)
+    summary_error = models.TextField(blank=True, default="")
+    summary_sources = models.JSONField(default=dict, blank=True)
+    last_summarized_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

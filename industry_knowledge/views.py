@@ -186,6 +186,11 @@ class IndustryViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         industry = serializer.save()
+        if {"overview", "context", "market_size", "growth_rate"} & set(serializer.validated_data):
+            industry.summary_status = Industry.ResearchStatus.IDLE
+            industry.summary_sources = {}
+            industry.last_summarized_at = None
+            industry.save(update_fields=["summary_status", "summary_sources", "last_summarized_at", "updated_at"])
         if "parent" in serializer.validated_data:
             industry.classification_status = "HUMAN_REVIEWED"
             industry.classification_basis = "Confirmed by an IA user"
@@ -212,6 +217,19 @@ class IndustryViewSet(viewsets.ModelViewSet):
             from .tasks import refresh_industry_research
             refresh_industry_research.delay(str(industry.id))
         return Response({"status": industry.research_status}, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"], url_path="generate-summary")
+    def generate_summary(self, request, pk=None):
+        industry = self.get_object()
+        if industry.parent_id:
+            return Response({"error": "AI summaries can only be generated for umbrella industries."}, status=400)
+        if industry.summary_status not in {Industry.ResearchStatus.QUEUED, Industry.ResearchStatus.RUNNING}:
+            industry.summary_status = Industry.ResearchStatus.QUEUED
+            industry.summary_error = ""
+            industry.save(update_fields=["summary_status", "summary_error", "updated_at"])
+            from .tasks import generate_industry_summary
+            generate_industry_summary.delay(str(industry.id))
+        return Response({"status": industry.summary_status}, status=status.HTTP_202_ACCEPTED)
 
     @action(
         detail=True,
