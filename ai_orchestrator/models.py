@@ -315,6 +315,12 @@ class AISkillRevision(models.Model):
         PUBLISHED = "published", "Published"
         ARCHIVED = "archived", "Archived"
 
+    class CompatibilityStatus(models.TextChoices):
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
+        UNVERIFIED = "unverified", "Unverified"
+        COMPATIBLE = "compatible", "Compatible"
+        INCOMPATIBLE = "incompatible", "Incompatible"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     skill = models.ForeignKey(AISkill, on_delete=models.CASCADE, related_name="revisions")
     revision = models.PositiveIntegerField()
@@ -324,6 +330,18 @@ class AISkillRevision(models.Model):
     input_schema = models.JSONField(default=dict, blank=True)
     output_schema = models.JSONField(default=dict, blank=True)
     skill_format = models.CharField(max_length=30, choices=AISkill.Format.choices, default=AISkill.Format.NATIVE_PROMPT_V1)
+    # These fields remain part of the production schema after the packaged-skill
+    # experiment. Keep them mapped so ordinary revision inserts satisfy the
+    # database constraints even when a revision is a native prompt.
+    package_manifest = models.JSONField(default=dict, blank=True)
+    package_files = models.JSONField(default=dict, blank=True)
+    package_digest = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    validation_report = models.JSONField(default=dict, blank=True)
+    compatibility_status = models.CharField(
+        max_length=20,
+        choices=CompatibilityStatus.choices,
+        default=CompatibilityStatus.NOT_APPLICABLE,
+    )
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_ai_skill_revisions")
     published_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="published_ai_skill_revisions")
     published_at = models.DateTimeField(null=True, blank=True)

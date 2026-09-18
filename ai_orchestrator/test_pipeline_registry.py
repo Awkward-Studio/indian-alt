@@ -1,7 +1,13 @@
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase
 
-from ai_orchestrator.models import AIAuditLog, AIPipelineDefinition, AIPipelineStage, AIPromptDefinition
+from ai_orchestrator.models import (
+    AIAuditLog,
+    AIPipelineDefinition,
+    AIPipelineStage,
+    AIPromptDefinition,
+    AISkill,
+)
 from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 from ai_orchestrator.services.bulk_prompt_contracts import (
     BULK3_SECTION_INSTRUCTIONS,
@@ -80,6 +86,20 @@ class PromptRevisionLifecycleTests(TestCase):
         first.refresh_from_db()
         self.assertEqual(first.status, "archived")
         self.assertEqual(resolved.prompt_revision.pk, second.pk)
+
+    def test_native_skill_revision_populates_package_compatibility_defaults(self):
+        skill = AISkill.objects.create(
+            name="native_revision_test",
+            prompt_template="Summarize {{ content }}",
+        )
+
+        revision = PipelineRegistryService.snapshot_skill(skill, publish=True)
+
+        self.assertEqual(revision.package_manifest, {})
+        self.assertEqual(revision.package_files, {})
+        self.assertEqual(revision.package_digest, "")
+        self.assertEqual(revision.validation_report, {})
+        self.assertEqual(revision.compatibility_status, "not_applicable")
 
     def test_seed_backfills_core_stages_with_published_revisions(self):
         call_command("seed_ai_prompts", verbosity=0)
