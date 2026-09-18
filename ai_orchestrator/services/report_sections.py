@@ -158,7 +158,10 @@ class ICReportSectionService:
         rendered_location = str(location or citation.get("location") or "").strip()
         label = f"{title}, {rendered_location}" if rendered_location else title
         url = cls._location_url(citation, rendered_location)
-        return f"[{label}](<{url}>)" if url else label
+        # Email evidence often has no public URL. Make those source labels
+        # visibly distinct from prose instead of emitting a bare repeated
+        # filename/message title that looks like model text.
+        return f"[{label}](<{url}>)" if url else f"**[Source: {label}]**"
 
     @staticmethod
     def _strip_model_references(text: str) -> str:
@@ -219,7 +222,17 @@ class ICReportSectionService:
                 location=used_citation["used_location"],
             )
 
-        return cls.INTERNAL_CITATION_PATTERN.sub(replace, text), used
+        rendered = cls.INTERNAL_CITATION_PATTERN.sub(replace, text)
+        # Models sometimes emit the same marker several times in one citation
+        # cluster (for example ``[R001, R001]``). Keep one readable citation
+        # while preserving repetitions that are separated by substantive text.
+        for item in used:
+            label = cls._render_inline_citation(item, location=item.get("used_location") or "")
+            repeated = re.compile(
+                rf"({re.escape(label)})(?:\s*(?:[,;|]\s*)\1)+"
+            )
+            rendered = repeated.sub(r"\1", rendered)
+        return rendered, used
 
     @staticmethod
     def _append_references(text: str, citations: dict | None, used: list[dict]) -> str:
