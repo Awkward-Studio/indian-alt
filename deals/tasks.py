@@ -3225,8 +3225,42 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
         # section at a time so a short model response cannot silently omit IC sections.
         try:
             from ai_orchestrator.services.report_sections import ICReportSectionService
+            from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
 
             analysis = dict(analysis)
+            # The legacy email synthesis prompt embeds source names directly
+            # in the context, which produces repeated ``[FW: ...]`` strings in
+            # the report. Reuse the same ranked retrieval/citation contract as
+            # the durable VDR report path whenever captured email documents are
+            # available. This gives the section generator verified R-markers,
+            # page/sheet/cell locators, and one deduplicated references block.
+            email_section_evidence = None
+            if deal:
+                email_docs = list(
+                    DealDocument.objects.filter(
+                        deal=deal,
+                        transcription_status=TranscriptionStatus.COMPLETE,
+                    ).order_by("created_at", "id")
+                )
+                if email_docs:
+                    email_section_evidence = ICReportSectionEvidenceService(
+                        deal=deal,
+                        documents=email_docs,
+                    )
+
+            def retrieve_email_section(title):
+                if email_section_evidence is None:
+                    return {"context": final_content, "metadata": {"strategy": "legacy_context"}, "citations": None}
+                try:
+                    return email_section_evidence.retrieve(title)
+                except Exception as exc:
+                    log_worker_event(
+                        audit_log,
+                        f"Section retrieval fallback for {title}: {exc}",
+                        status="PROCESSING",
+                    )
+                    return {"context": final_content, "metadata": {"strategy": "legacy_context_fallback"}, "citations": None}
+
             analysis["analyst_report"] = ICReportSectionService.complete(
                 ai_service=ai_service,
                 report=analysis.get("analyst_report") or "",
@@ -3234,6 +3268,12 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
                 analysis=analysis,
                 source_id=str(audit_log.source_id or audit_log_id),
                 progress=lambda message: log_worker_event(audit_log, message, status="PROCESSING"),
+                evidence_for_section=retrieve_email_section,
+                # The first email fusion pass can return a complete-looking
+                # report with legacy ``[FW: ...]`` source text. Force the
+                # section pass when ranked document evidence is available so
+                # every section is rebuilt with verified R-marker citations.
+                force_regenerate=bool(email_section_evidence),
             )
         except Exception as exc:
             error_msg = f"Incomplete IC report: {exc}"
