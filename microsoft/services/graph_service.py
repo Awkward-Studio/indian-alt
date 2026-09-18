@@ -312,7 +312,12 @@ class GraphAPIService:
     def get_message_attachments(self, user_email: str, message_id: str) -> List[Dict]:
         """Get attachments metadata for a specific email. Prefers application permissions."""
         token = self.get_access_token(user_email, prefer_application=True)
-        data = self._make_request('GET', f"/users/{user_email}/messages/{message_id}/attachments", token)
+        # Expand attached messages so forwarded .eml items are not silently
+        # reduced to an opaque attachment id during mailbox synchronization.
+        data = self._make_request(
+            'GET', f"/users/{user_email}/messages/{message_id}/attachments", token,
+            {'$expand': 'microsoft.graph.itemAttachment/item'},
+        )
         return data.get('value', [])
 
     def get_attachment_content(self, user_email: str, message_id: str, attachment_id: str) -> Dict:

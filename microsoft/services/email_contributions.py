@@ -31,8 +31,13 @@ class Contribution:
 class EmailContributionParser:
     # Header blocks must contain a date. Ordinary prose beginning with "From:"
     # alone is insufficient to infer a new message identity.
+    # Outlook and forwarded messages are not consistent about whether the
+    # value follows ``From:`` on the same line.  Match the complete header
+    # block, but only use its start as a contribution boundary so the header
+    # remains attached to the message it describes.
     HEADER = re.compile(
-        r'(?im)^\s*From:\s*[^\n]+\n(?:\s*(?:Sent|Date|To|Cc|Subject|Message-ID):[^\n]*\n?){1,8}'
+        r'(?ims)^[ \t]*From:[ \t]*(?:\n[ \t]*)?(?P<from>[^\n]*)\n'
+        r'(?P<fields>(?:[ \t]*(?:Sent|Date|To|Cc|Subject|Message-ID):[^\n]*\n?){1,8})'
     )
     REPLY = re.compile(r'(?im)^\s*On [^\n]{3,300} wrote:\s*$')
 
@@ -48,10 +53,16 @@ class EmailContributionParser:
         boundaries = {0, len(text)}
         header_at = {}
         for match in cls.HEADER.finditer(text):
-            headers = {k.lower(): v.strip() for k, v in re.findall(r'(?im)^\s*([\w-]+):\s*([^\n]*)', match.group())}
+            headers = {k.lower(): v.strip() for k, v in re.findall(
+                r'(?im)^\s*([\w-]+):\s*([^\n]*)', match.group()
+            )}
+            # ``From:\nAlice`` is parsed as an empty From value by the
+            # generic line parser; use the captured continuation in that case.
+            if not headers.get('from'):
+                headers['from'] = match.group('from').strip()
             if not (headers.get('sent') or headers.get('date')):
                 continue
-            boundaries.update([match.start(), match.end()])
+            boundaries.add(match.start())
             header_at[match.start()] = headers
         for match in cls.REPLY.finditer(text):
             boundaries.add(match.start())
@@ -71,11 +82,21 @@ class EmailContributionParser:
                     known_at[(idx, end)] = item
                 start = end
         points = sorted(boundaries)
-        headers = {'from': source.get('from_email') or '', 'date': source.get('date_sent') or source.get('date_received') or '', 'subject': source.get('subject') or ''}
+        headers = {
+            'from': source.get('from_email') or '',
+            'date': source.get('date_sent') or source.get('date_received') or '',
+            'subject': source.get('subject') or '',
+        }
+        if source.get('source_email_id') is not None:
+            headers['email_id'] = str(source['source_email_id'])
+        if source.get('source_graph_id'):
+            headers['graph_id'] = str(source['source_graph_id'])
         result = []
         for start, end in zip(points, points[1:]):
             if start in header_at:
-                headers = header_at[start]
+                # Retain provenance from the stored message while allowing
+                # embedded forwarded headers to refine sender/date/subject.
+                headers = {**headers, **header_at[start]}
             part = text[start:end].strip()
             if not part:
                 continue

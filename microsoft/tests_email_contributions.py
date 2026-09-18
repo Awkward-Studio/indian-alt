@@ -29,6 +29,22 @@ class ContributionParserTests(SimpleTestCase):
         result = Parser.parse({'body_text': source}, email_id='3')
         self.assertEqual('\n'.join(p.text for p in result), source)
 
+    def test_multiline_outlook_from_header_starts_a_forwarded_contribution(self):
+        source = 'New reply\nFrom:\nAlice Example <alice@example.test>\nSent: Monday\nSubject: Opportunity\nOld body'
+        result = Parser.parse({'body_text': source}, email_id='3')
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[1].headers['from'], 'Alice Example <alice@example.test>')
+        self.assertIn('Old body', result[1].text)
+
+    def test_source_provenance_survives_embedded_forward_headers(self):
+        result = Parser.parse({
+            'body_text': 'Wrapper\nFrom: sender@example.test\nSent: Monday\nSubject: Old\nBody',
+            'source_email_id': '42',
+            'source_graph_id': 'graph-42',
+        }, email_id='42')
+        self.assertEqual(result[1].headers['email_id'], '42')
+        self.assertEqual(result[1].headers['graph_id'], 'graph-42')
+
     def test_unknown_identity_is_not_deduplicated_across_mail(self):
         a = Parser.parse({'body_text': 'Yes'}, email_id='1')[0]
         b = Parser.parse({'body_text': 'Yes'}, email_id='2')[0]

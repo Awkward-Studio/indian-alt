@@ -34,6 +34,34 @@ class EmailEvidenceTests(TestCase):
         self.email.refresh_from_db()
         self.assertEqual(self.email.deal, self.deal)
 
+    @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content')
+    def test_thread_capture_includes_every_message_and_its_attachment(self, download):
+        download.return_value = {'contentBytes': base64.b64encode(b'reply attachment').decode()}
+        self.email.conversation_id = 'conversation-evidence'
+        self.email.attachments = [{'id': 'first-file', 'name': 'first.txt'}]
+        self.email.save(update_fields=['conversation_id', 'attachments'])
+        reply = Email.objects.create(
+            email_account=self.account,
+            graph_id='evidence-reply',
+            conversation_id='conversation-evidence',
+            subject='Re: Update',
+            body_text='The revised amount is 160 crore.',
+            attachments=[{'id': 'reply-file', 'name': 'reply.txt'}],
+        )
+        run = Evidence.snapshot(reply)
+        parts = Evidence.parts(run, self.deal)
+        self.assertEqual([part.text for part in parts], [
+            'Revised amount is 140 crore.', 'The revised amount is 160 crore.',
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = EmailPrivateBlob._meta.get_field('file').storage
+            with patch.object(storage, '_location', tmp):
+                storage.__dict__.pop('location', None)
+                self.assertEqual(Evidence.save_attachments(run, self.deal), [])
+                storage.__dict__.pop('location', None)
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual({call.args[1] for call in download.call_args_list}, {'evidence', 'evidence-reply'})
+
     def test_html_anchor_destination_is_saved_as_deal_evidence(self):
         self.email.body_html = '<p>Review the <a href="https://drive.example.test/deck/123">deck</a>.</p>'
         self.email.save(update_fields=['body_html'])

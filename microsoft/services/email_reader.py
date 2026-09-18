@@ -306,7 +306,15 @@ class EmailReaderService:
                                                 'name': att.get('name'),
                                                 'contentType': att.get('contentType'),
                                                 'size': att.get('size'),
-                                                'isInline': att.get('isInline', False)
+                                                'isInline': att.get('isInline', False),
+                                                # Keep attachment kind and nested
+                                                # item metadata so evidence capture
+                                                # can distinguish files, attached
+                                                # messages, and reference links.
+                                                'odata_type': att.get('@odata.type') or att.get('odata.type'),
+                                                'contentId': att.get('contentId'),
+                                                'item': att.get('item'),
+                                                'lastModifiedDateTime': att.get('lastModifiedDateTime'),
                                             })
                                     except Exception as att_err:
                                         logger.warning(f"Failed to fetch attachments for {graph_id}: {str(att_err)}")
