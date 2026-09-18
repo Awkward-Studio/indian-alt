@@ -751,11 +751,25 @@ class FolderAnalysisService:
             }
             origin_log.save(update_fields=["source_metadata"])
         cache.delete(f"folder_sync_{session_id}")
+
+        if source_type == 'onedrive_folder' and deal.source_onedrive_id and deal.source_drive_id:
+            deal_id = str(deal.id)
+
+            def queue_complete_folder_processing():
+                queued_deal = Deal.objects.get(pk=deal_id)
+                result = FolderAnalysisService.trigger_vdr_processing(queued_deal)
+                if result.get("error"):
+                    Deal.objects.filter(pk=deal_id).update(
+                        processing_status="failed",
+                        processing_error=result["error"],
+                    )
+
+            transaction.on_commit(queue_complete_folder_processing)
         
         return {
             "status": "success",
             "deal_id": deal.id,
-            "message": "Deal created. Start VDR processing from the deal page when ready."
+            "message": "Deal created. Full folder indexing and deal-field synthesis were queued."
         }
 
     @staticmethod
@@ -972,9 +986,7 @@ class FolderAnalysisService:
 
     @staticmethod
     def rerun_vdr_documents(deal: Deal, document_ids: list[str]) -> dict:
-        """Queue selected linked documents through the full VDR artifact pipeline."""
-        if not deal.source_onedrive_id or not deal.source_drive_id:
-            return {"error": "This deal is not linked to a OneDrive folder."}
+        """Queue selected OneDrive or email documents through their durable pipeline."""
         if deal.processing_status == "processing":
             return {
                 "error": (
@@ -1011,6 +1023,42 @@ class FolderAnalysisService:
             return {
                 "error": f"These documents are already being processed: {', '.join(active_titles)}."
             }
+
+        from microsoft.models import EmailEvidenceLink
+
+        email_document_ids = {
+            str(value)
+            for value in EmailEvidenceLink.objects.filter(
+                deal=deal,
+                document_id__in=requested_ids,
+                active=True,
+            ).values_list('document_id', flat=True)
+        }
+        onedrive_documents = [
+            document for document in documents
+            if document.onedrive_id and str(document.id) not in email_document_ids
+        ]
+        onedrive_document_ids = {str(document.id) for document in onedrive_documents}
+        unsupported_ids = found_ids - email_document_ids - onedrive_document_ids
+        if unsupported_ids:
+            unsupported_titles = [
+                document.title for document in documents if str(document.id) in unsupported_ids
+            ]
+            return {
+                "error": "These documents have no durable email or OneDrive source: "
+                + ", ".join(unsupported_titles)
+            }
+        if email_document_ids and onedrive_document_ids:
+            return {
+                "error": "Rerun email and OneDrive documents separately so each source can report its own progress."
+            }
+        if email_document_ids:
+            from microsoft.services.email_ingestion import EmailIngestionService
+
+            return EmailIngestionService.rerun_documents(deal, requested_ids)
+
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return {"error": "This deal is not linked to a OneDrive folder."}
 
         file_tree = FolderAnalysisService.get_persisted_file_tree_for_deal(deal)
         files_by_id = {str(item.get("id")): item for item in file_tree if item.get("id")}

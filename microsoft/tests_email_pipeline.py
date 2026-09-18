@@ -319,6 +319,29 @@ class EmailThreadUnfolderTests(TestCase):
 
 
 class EmailThreadOriginatorTests(TestCase):
+    def test_reads_split_forwarded_header_and_excludes_internal_forwarder(self):
+        account = SimpleNamespace(email="dms-demo@india-alt.com")
+        message = SimpleNamespace(
+            id="forwarded",
+            from_email="sheersha.mathur@india-alt.com",
+            email_account=account,
+            date_received=timezone.now(),
+            body_html="",
+            body_text=(
+                "Please create this deal.\n\n"
+                "From: Rajesh Katare <\nrajesh@thewhiteowlventures.com\n>\n"
+                "Sent: Thursday, 17 September 2026\n"
+                "To: Sheersha Mathur <sheersha.mathur@india-alt.com>\n"
+                "Subject: Longway"
+            ),
+        )
+
+        originator = EmailThreadOriginatorResolver.resolve([message])
+
+        self.assertEqual(originator.address, "rajesh@thewhiteowlventures.com")
+        self.assertEqual(originator.name, "Rajesh Katare")
+        self.assertEqual(originator.evidence, "forwarded_message_header")
+
     def test_selects_oldest_external_sender_and_ignores_mailbox_messages(self):
         account = SimpleNamespace(email="pipeline@example.test")
         now = timezone.now()

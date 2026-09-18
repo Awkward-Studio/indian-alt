@@ -416,6 +416,7 @@ class PipelineRegistryService:
             ("universal_chat", "answer", "Universal chat answer", "skill", "universal_chat"),
             ("deal_ingestion", "synthesis", "Deal synthesis", "skill", "deal_synthesis"),
             ("deal_ingestion", "extraction", "Deal extraction", "skill", "deal_extraction"),
+            ("deal_ingestion", "field_synthesis", "Deal field synthesis", "skill", "deal_field_synthesis"),
             ("deal_ingestion", "normalization", "Document normalization", "skill", "document_normalization"),
             ("deal_ingestion", "evidence", "Document evidence extraction", "skill", "document_evidence_extraction"),
             ("deal_ingestion", "incremental_analysis", "VDR incremental analysis", "skill", "vdr_incremental_analysis"),

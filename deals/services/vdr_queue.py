@@ -451,7 +451,7 @@ def unit_finished(audit_log_id: str, *, task_id: str, generation: int, unit_key:
 
 def _finish_job(audit_log_id: str) -> None:
     from ai_orchestrator.models import AIAuditLog
-    from deals.tasks import assemble_vdr_report
+    from deals.tasks import assemble_vdr_report, finalize_durable_vdr_indexing
 
     audit = AIAuditLog.objects.filter(id=audit_log_id).first()
     if not audit or audit.status not in ACTIVE_STATUSES:
@@ -481,6 +481,30 @@ def _finish_job(audit_log_id: str) -> None:
             document for document in DealDocument.objects.filter(deal_id=audit.source_id)
             if not DocumentArtifactService.artifact_complete(document)
         ]
+    if metadata.get("queue_kind") == "indexing" and not failed and not remaining:
+        task_id = str(uuid.uuid4())
+        with transaction.atomic():
+            locked = AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+            locked_metadata = dict(locked.source_metadata or {})
+            if locked_metadata.get("queue_state") not in {
+                "queued", "waiting_next_unit", "recovering", "field_synthesis_retry",
+            }:
+                return
+            locked.status = "PROCESSING"
+            locked.celery_task_id = task_id
+            locked.source_metadata = {
+                **locked_metadata,
+                "queue_state": "field_synthesis",
+                "workflow_stage": "field_synthesis",
+                "field_synthesis_status": "queued",
+                "field_synthesis_task_id": task_id,
+            }
+            locked.save(update_fields=["status", "celery_task_id", "source_metadata"])
+            transaction.on_commit(lambda: finalize_durable_vdr_indexing.apply_async(
+                args=[audit_log_id], queue="vdr_work", task_id=task_id,
+            ))
+        _broadcast(audit_log_id)
+        return
     audit.status = "FAILED" if failed else "COMPLETED"
     audit.is_success = not failed
     audit.completed_at = timezone.now()

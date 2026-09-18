@@ -156,6 +156,7 @@ class DealDocumentSerializer(serializers.ModelSerializer):
     artifact_status = serializers.SerializerMethodField()
     artifact_complete = serializers.SerializerMethodField()
     chunk_count = serializers.SerializerMethodField()
+    source_kind = serializers.SerializerMethodField()
 
     def _get_initial_analysis_map(self, obj):
         cache = self.context.setdefault('_initial_analysis_map', {})
@@ -266,12 +267,20 @@ class DealDocumentSerializer(serializers.ModelSerializer):
             source_type='document',
             source_id=str(obj.id),
         ).count()
+
+    def get_source_kind(self, obj):
+        if obj.email_evidence_links.filter(active=True).exists():
+            return 'email'
+        if obj.onedrive_id:
+            return 'onedrive'
+        return 'upload'
     
     class Meta:
         model = DealDocument
         fields = (
             'id', 'deal', 'deal_title', 'title', 'document_type', 
             'onedrive_id', 'file_url', 'is_indexed', 'is_ai_analyzed',
+            'source_kind',
             'initial_analysis_status', 'initial_analysis_reason',
             'in_latest_supplemental_analysis', 'latest_supplemental_version',
             'artifact_status', 'artifact_complete',

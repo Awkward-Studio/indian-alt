@@ -439,7 +439,46 @@ class EmailIngestionService:
             run.save(update_fields=['classification', 'stages', 'updated_at'])
             indexing = cls.index_outputs(run, allow_remote=available)
             run.stages['index'] = 'completed' if indexing else 'waiting_service'
-            run.status = 'completed' if indexing and not capture_failures else 'waiting_service'
+            if indexing and not capture_failures and use_ai is False:
+                # Explicit deterministic mode is used by evidence/indexing
+                # tests and maintenance tools. Production calls leave use_ai
+                # unset, so field synthesis remains a required stage there.
+                run.stages['deal_fields'] = 'skipped'
+                run.status = 'completed'
+            elif indexing and not capture_failures and available:
+                from deals.services.deal_field_synthesis import DealFieldSynthesisService
+                from microsoft.services.email_deal_relationships import EmailDealRelationshipService
+
+                EmailDealRelationshipService.link_primary_contact(deal, run.email)
+                document_ids = list(
+                    EmailEvidenceLink.objects.filter(
+                        occurrences__run=run,
+                        active=True,
+                        document__isnull=False,
+                    ).values_list('document_id', flat=True).distinct()
+                )
+                analysis = DealFieldSynthesisService.synthesize(
+                    deal,
+                    batch_key=(
+                        f'email-ingestion:{run.id}:'
+                        f'{int((run.source or {}).get("_rerun_generation") or 0)}'
+                    ),
+                    source_type='email',
+                    required_document_ids=[str(value) for value in document_ids],
+                )
+                run.stages['deal_fields'] = 'completed'
+                run.match = {
+                    **run.match,
+                    'field_synthesis_analysis_id': str(analysis.id),
+                }
+                run.status = 'completed'
+                Deal.objects.filter(pk=deal.pk).update(
+                    processing_status='completed', processing_error=None,
+                )
+            else:
+                run.stages['deal_fields'] = 'pending'
+                run.status = 'waiting_service'
+            run.save(update_fields=['match', 'stages', 'status', 'updated_at'])
             return cls.release(run)
         except EmailIngestionCancelled as exc:
             run.error = str(exc)
@@ -558,6 +597,118 @@ class EmailIngestionService:
         run.stages['chunks'] = 'completed' if ready else 'waiting_service'
         run.save(update_fields=['stages', 'updated_at'])
         return ready
+
+    @classmethod
+    def rerun_documents(cls, deal, document_ids: list[str]) -> dict:
+        """Reset selected email-backed documents and replay their durable source runs."""
+        from ai_orchestrator.models import AIAuditLog, DocumentChunk
+
+        requested_ids = list(dict.fromkeys(str(value) for value in document_ids if value))
+        links = list(
+            EmailEvidenceLink.objects.filter(
+                deal=deal,
+                document_id__in=requested_ids,
+                active=True,
+            ).select_related('document', 'blob')
+        )
+        linked_ids = {str(link.document_id) for link in links}
+        if linked_ids != set(requested_ids):
+            return {"error": "One or more selected documents do not have durable email evidence."}
+
+        run_ids = list(
+            EmailIngestionRun.objects.filter(
+                occurrences__evidence__in=links,
+            ).values_list('id', flat=True).distinct()
+        )
+        if not run_ids:
+            return {"error": "No email ingestion run owns the selected documents."}
+
+        with transaction.atomic():
+            for link in links:
+                document = link.document
+                DocumentChunk.objects.filter(
+                    deal=deal,
+                    source_type='document',
+                    source_id=str(document.id),
+                ).delete()
+                update_values = {
+                    'evidence_json': {},
+                    'table_json': [],
+                    'key_metrics_json': [],
+                    'reasoning': '',
+                    'is_indexed': False,
+                    'is_ai_analyzed': False,
+                    'chunking_status': 'not_chunked',
+                    'last_chunked_at': None,
+                    'error_message': None,
+                }
+                if link.kind in {'email_attachment', 'email_link'}:
+                    update_values.update({
+                        'extracted_text': '',
+                        'normalized_text': '',
+                        'source_map_json': {},
+                        'extraction_manifest': {},
+                        'extraction_mode': None,
+                        'transcription_status': 'pending',
+                        'last_transcribed_at': None,
+                    })
+                Deal.objects.filter(pk=deal.pk).update(
+                    processing_status='processing', processing_error=None,
+                )
+                type(document).objects.filter(pk=document.pk).update(**update_values)
+                link.index_status = 'pending'
+                link.error = ''
+                link.provenance = {
+                    **(link.provenance or {}),
+                    'rerun_requested_at': timezone.now().isoformat(),
+                }
+                link.save(update_fields=['index_status', 'error', 'provenance'])
+
+            runs = list(EmailIngestionRun.objects.select_for_update().filter(id__in=run_ids))
+            for run in runs:
+                run.status = 'pending'
+                run.error = ''
+                run.lease_token = None
+                run.lease_until = None
+                run.next_attempt_at = None
+                run.source = {
+                    **(run.source or {}),
+                    '_rerun_generation': int((run.source or {}).get('_rerun_generation') or 0) + 1,
+                }
+                run.stages = {
+                    **(run.stages or {}),
+                    'artifacts': 'pending',
+                    'chunks': 'pending',
+                    'index': 'pending',
+                    'deal_fields': 'pending',
+                }
+                run.save()
+                audit = cls._audit_log_for_run(run)
+                if audit:
+                    audit.status = 'PENDING'
+                    audit.is_success = False
+                    audit.error_message = ''
+                    audit.completed_at = None
+                    audit.source_metadata = {
+                        **(audit.source_metadata or {}),
+                        'rerun_generation': run.source['_rerun_generation'],
+                        'run_status': 'pending',
+                    }
+                    audit.save(update_fields=[
+                        'status', 'is_success', 'error_message', 'completed_at', 'source_metadata',
+                    ])
+                transaction.on_commit(lambda run_id=run.id: cls.dispatch(run_id))
+            Email.objects.filter(id__in=[run.email_id for run in runs]).update(
+                is_indexed=False,
+                processing_status='pending',
+                processing_error=None,
+            )
+        return {
+            'status': 'queued',
+            'document_count': len(links),
+            'run_count': len(run_ids),
+            'message': f'Queued {len(links)} email document(s) for complete reprocessing.',
+        }
 
     @classmethod
     def reconcile(cls, limit=50):

@@ -1962,6 +1962,95 @@ def vdr_unit_completed(result, audit_log_id: str, task_id: str, generation: int,
     )}
 
 
+@shared_task(bind=True, max_retries=2, acks_late=True, reject_on_worker_lost=True)
+def finalize_durable_vdr_indexing(self, audit_log_id: str):
+    """Fill deal fields before a durable indexing job becomes terminal."""
+    from ai_orchestrator.models import AIAuditLog
+    from deals.services import vdr_queue
+    from deals.services.deal_field_synthesis import DealFieldSynthesisService
+
+    audit = AIAuditLog.objects.get(id=audit_log_id)
+    metadata = dict(audit.source_metadata or {})
+    if metadata.get("queue_state") == "completed":
+        return {
+            "status": "completed",
+            "analysis_id": metadata.get("field_synthesis_analysis_id"),
+            "idempotent_replay": True,
+        }
+    if metadata.get("cancel_requested"):
+        return {"status": "cancelled"}
+
+    document_ids = [
+        str(item.get("document_id"))
+        for item in metadata.get("document_queue") or []
+        if item.get("status") in {"completed", "cached"} and item.get("document_id")
+    ]
+    try:
+        deal = Deal.objects.get(id=audit.source_id)
+        analysis = DealFieldSynthesisService.synthesize(
+            deal,
+            batch_key=f"vdr-indexing:{audit.id}",
+            source_type="onedrive_folder",
+            required_document_ids=document_ids,
+        )
+        with transaction.atomic():
+            audit = AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+            metadata = dict(audit.source_metadata or {})
+            audit.status = "COMPLETED"
+            audit.is_success = True
+            audit.error_message = ""
+            audit.completed_at = timezone.now()
+            audit.source_metadata = {
+                **metadata,
+                "queue_state": "completed",
+                "workflow_stage": "artifacts_ready",
+                "field_synthesis_status": "completed",
+                "field_synthesis_analysis_id": str(analysis.id),
+                "analysis_confirmation_required": True,
+            }
+            audit.save(update_fields=[
+                "status", "is_success", "error_message", "completed_at", "source_metadata",
+            ])
+            Deal.objects.filter(id=audit.source_id).update(
+                processing_status="completed", processing_error=None,
+            )
+        broadcast_audit_log_update(audit, event_type="terminal", done=True)
+        vdr_queue.kick()
+        return {"status": "completed", "analysis_id": str(analysis.id)}
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            AIAuditLog.objects.filter(id=audit_log_id).update(
+                error_message=f"Deal field synthesis retry pending: {exc}",
+                source_metadata={
+                    **metadata,
+                    "queue_state": "field_synthesis_retry",
+                    "workflow_stage": "field_synthesis_retry",
+                    "field_synthesis_status": "retrying",
+                },
+            )
+            raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
+        AIAuditLog.objects.filter(id=audit_log_id).update(
+            status="FAILED",
+            is_success=False,
+            error_message=str(exc),
+            completed_at=timezone.now(),
+            source_metadata={
+                **metadata,
+                "queue_state": "failed",
+                "workflow_stage": "field_synthesis_failed",
+                "field_synthesis_status": "failed",
+            },
+        )
+        Deal.objects.filter(id=audit.source_id).update(
+            processing_status="failed",
+            processing_error=f"Documents were indexed, but deal fields could not be filled: {exc}",
+        )
+        failed_audit = AIAuditLog.objects.get(id=audit_log_id)
+        broadcast_audit_log_update(failed_audit, event_type="terminal", done=True)
+        vdr_queue.kick()
+        raise
+
+
 @shared_task(
     bind=True, max_retries=2, soft_time_limit=0, time_limit=0,
     acks_late=True, reject_on_worker_lost=True,
@@ -2080,7 +2169,7 @@ def assemble_vdr_report(audit_log_id: str) -> DealAnalysis:
         audit.save(update_fields=["status", "is_success", "completed_at", "source_metadata"])
         return analysis
 
-@shared_task(bind=True)
+@shared_task(bind=True, max_retries=2)
 def finalize_folder_background(self, results, deal_id, audit_log_id):
     """
     Callback task to finalize the deal and audit log once all documents are processed.
@@ -2119,6 +2208,27 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
                 if not DocumentArtifactService.artifact_complete(document)
             ]
 
+        field_analysis = None
+        if not errors and not remaining_documents:
+            from deals.services.deal_field_synthesis import DealFieldSynthesisService
+
+            batch_document_ids = [
+                str(result.get("document_id"))
+                for result in results
+                if result.get("status") in {"success", "cached"} and result.get("document_id")
+            ]
+            log_worker_event(
+                audit_log,
+                "All document jobs are complete. Filling deal fields from indexed evidence.",
+                status="PROCESSING",
+            )
+            field_analysis = DealFieldSynthesisService.synthesize(
+                deal,
+                batch_key=f"vdr-indexing:{audit_log_id}",
+                source_type="onedrive_folder",
+                required_document_ids=batch_document_ids,
+            )
+
         deal.processing_status = 'completed' if not errors and not remaining_documents else 'failed'
         if errors:
             from deals.services.vdr_failures import vdr_failure_message
@@ -2148,7 +2258,7 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
         else:
             audit_log.system_prompt = (
                 f"Indexed {processed_count} documents and reused {cached_count} cached documents. "
-                "Document artifacts are ready; final analysis is waiting for user confirmation."
+                "Deal fields were refreshed from indexed evidence; the full report is waiting for user confirmation."
             )
         audit_log.source_metadata = {
             **(audit_log.source_metadata or {}),
@@ -2159,6 +2269,8 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             "failed_count": len(errors),
             "remaining_document_count": len(remaining_documents),
             "analysis_confirmation_required": not errors and not remaining_documents,
+            "field_synthesis_status": "completed" if field_analysis else "not_run",
+            "field_synthesis_analysis_id": str(field_analysis.id) if field_analysis else None,
         }
         if errors:
             audit_log.error_message = deal.processing_error
@@ -2178,11 +2290,29 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
             "errors": len(errors),
             "remaining_document_count": len(remaining_documents),
             "analysis_confirmation_required": not errors and not remaining_documents,
+            "field_synthesis_analysis_id": str(field_analysis.id) if field_analysis else None,
         }
         
     except Exception as e:
         logger.error(f"Failed to finalize deal {deal_id}: {str(e)}")
         audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if self.request.retries < self.max_retries and audit_log and not _is_cancel_requested(audit_log_id):
+            audit_log.status = "PROCESSING"
+            audit_log.is_success = False
+            audit_log.error_message = f"Deal field synthesis retry pending: {e}"
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "workflow_stage": "field_synthesis_retry",
+                "field_synthesis_status": "retrying",
+            }
+            audit_log.save(update_fields=[
+                "status", "is_success", "error_message", "source_metadata",
+            ])
+            Deal.objects.filter(id=deal_id).update(
+                processing_status="processing",
+                processing_error=audit_log.error_message,
+            )
+            raise self.retry(exc=e, countdown=15 * (self.request.retries + 1))
         if audit_log:
             audit_log.status = "FAILED"
             audit_log.is_success = False

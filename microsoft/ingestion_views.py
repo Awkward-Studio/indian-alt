@@ -19,6 +19,7 @@ from deals.services.field_provenance import record_deal_field_changes
 from .models import Email, EmailIngestionRun, EmailEvidenceLink
 from .services.email_ingestion import EmailIngestionService
 from .services.email_ingestion_review import confirm_decision, run_status, StaleEmailDecision
+from .services.email_deal_relationships import EmailDealRelationshipService
 
 
 class EmailIngestionActions:
@@ -230,18 +231,13 @@ class EmailIngestionActions:
                     profile = None
                     if responsibility_id:
                         profile = get_object_or_404(Profile, pk=responsibility_id, is_disabled=False)
-                    else:
-                        candidate = getattr(request.user, 'profile', None)
-                        if candidate and not candidate.is_disabled:
-                            profile = candidate
-                    if profile:
-                        previous_responsibility = list(deal.responsibility.all())
-                        deal.responsibility.set([profile])
-                        record_deal_field_changes(
-                            deal, {'responsibility': (previous_responsibility, [profile])},
-                            source_type=DealFieldProvenance.SourceType.HUMAN,
-                            source_id=f'email-ingestion:{run.id}', changed_by=request.user,
-                        )
+                    EmailDealRelationshipService.assign_ia_team(
+                        deal,
+                        email,
+                        fallback_user=request.user,
+                        explicit_profile=profile,
+                    )
+                    EmailDealRelationshipService.link_primary_contact(deal, email)
                 elif deal_id:
                     deal = get_object_or_404(Deal, pk=deal_id)
                 else:

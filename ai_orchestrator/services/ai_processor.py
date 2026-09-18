@@ -30,6 +30,7 @@ CORE_SKILL_STAGE_BINDINGS = {
     "universal_chat": ("universal_chat", "answer"),
     "deal_synthesis": ("deal_ingestion", "synthesis"),
     "deal_extraction": ("deal_ingestion", "extraction"),
+    "deal_field_synthesis": ("deal_ingestion", "field_synthesis"),
     "deal_helper_directive_document": ("deal_helper", "directive_document"),
     "document_normalization": ("deal_ingestion", "normalization"),
     "document_evidence_extraction": ("deal_ingestion", "evidence"),
@@ -588,6 +589,7 @@ class AIProcessorService:
             
             extraction_skills = {
                 "deal_extraction", 
+                "deal_field_synthesis",
                 "document_evidence_extraction", 
                 "document_normalization",
                 "deal_synthesis", 

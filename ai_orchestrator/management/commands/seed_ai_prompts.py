@@ -1,6 +1,9 @@
 from django.core.management.base import BaseCommand
 from ai_orchestrator.models import AIPersonality, AISkill
 from ai_orchestrator.prompt_contracts import (
+    DEAL_FIELD_SYNTHESIS_JSON_SCHEMA,
+    DEAL_FIELD_SYNTHESIS_PROMPT_TEMPLATE,
+    DEAL_FIELD_SYNTHESIS_SYSTEM_TEMPLATE,
     DEAL_SYNTHESIS_JSON_SCHEMA,
     DEAL_SYNTHESIS_PROMPT_TEMPLATE,
     DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
@@ -99,6 +102,13 @@ class Command(BaseCommand):
                 "system_template": DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
                 "prompt_template": DEAL_SYNTHESIS_PROMPT_TEMPLATE,
                 "output_schema": DEAL_SYNTHESIS_JSON_SCHEMA
+            },
+            {
+                "name": "deal_field_synthesis",
+                "description": "Fills deal ledger fields after every source document is indexed.",
+                "system_template": DEAL_FIELD_SYNTHESIS_SYSTEM_TEMPLATE,
+                "prompt_template": DEAL_FIELD_SYNTHESIS_PROMPT_TEMPLATE,
+                "output_schema": DEAL_FIELD_SYNTHESIS_JSON_SCHEMA,
             },
             {
                 "name": "deal_routing",

@@ -4,9 +4,14 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
+from banks.models import Bank
+from contacts.models import Contact
 from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal, DealDocument
-from microsoft.models import Email, EmailAccount, EmailEvidenceLink, EmailContributionOccurrence
+from microsoft.models import (
+    Email, EmailAccount, EmailEvidenceLink, EmailContributionOccurrence,
+    EmailPrivateBlob,
+)
 from microsoft.services.email_evidence import EmailEvidenceService as Evidence
 from microsoft.services.email_ingestion import EmailIngestionService as Ingestion
 
@@ -105,6 +110,93 @@ class EmailIngestionAPITests(TestCase):
         self.assertFalse(DealDocument.objects.filter(pk=document.pk).exists())
 
     @patch.object(Ingestion, 'dispatch')
+    def test_email_attachment_can_be_rerun_from_deal_document_workspace(self, dispatch):
+        self.run.status = 'completed'
+        self.run.match = {'status': 'matched', 'deal_id': str(self.deal.id)}
+        self.run.stages = {
+            'classification': 'completed', 'match': 'matched', 'save': 'completed',
+            'artifacts': 'completed', 'chunks': 'completed', 'index': 'completed',
+            'deal_fields': 'completed',
+        }
+        self.run.save(update_fields=['status', 'match', 'stages'])
+        document = DealDocument.objects.create(
+            deal=self.deal,
+            title='Pitch Deck.pdf',
+            extracted_text='old partial text',
+            normalized_text='old partial text',
+            evidence_json={'artifact_status': 'complete'},
+            is_indexed=True,
+            is_ai_analyzed=True,
+            transcription_status='partial',
+            chunking_status='chunked',
+        )
+        blob = EmailPrivateBlob.objects.create(
+            email_account=self.email.email_account,
+            sha256='a' * 64,
+            size=3,
+            payload=b'pdf',
+        )
+        link = EmailEvidenceLink.objects.create(
+            email_account=self.email.email_account,
+            deal=self.deal,
+            source_key='blob:' + blob.sha256,
+            kind='email_attachment',
+            document=document,
+            blob=blob,
+            index_status='completed',
+        )
+        occurrence = EmailContributionOccurrence.objects.create(
+            run=self.run,
+            source_key='attachment:deck',
+            evidence=link,
+            blob=blob,
+            status='saved',
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = Ingestion.rerun_documents(self.deal, [str(document.id)])
+
+        self.assertEqual(result['status'], 'queued')
+        document.refresh_from_db()
+        self.run.refresh_from_db()
+        link.refresh_from_db()
+        self.assertFalse(document.is_indexed)
+        self.assertEqual(document.normalized_text, '')
+        self.assertEqual(document.transcription_status, 'pending')
+        self.assertEqual(link.index_status, 'pending')
+        self.assertEqual(self.run.status, 'pending')
+        self.assertEqual(self.run.source['_rerun_generation'], 1)
+        dispatch.assert_called_once_with(self.run.id)
+
+    @patch('deals.services.deal_field_synthesis.DealFieldSynthesisService.synthesize')
+    @patch.object(Ingestion, 'index_outputs', return_value=True)
+    @patch.object(Evidence, 'save_links', return_value=[])
+    @patch.object(Evidence, 'save_attachments', return_value=[])
+    def test_confirmed_email_fills_fields_after_indexing(
+        self, _attachments, _links, _index_outputs, synthesize,
+    ):
+        analysis = type('Analysis', (), {'id': 'field-analysis'})()
+        synthesize.return_value = analysis
+        self.run.classification = {
+            'type': 'NORMAL_EMAIL',
+            'status': 'completed',
+            'method': 'manual',
+            'segment_roles': [],
+        }
+        self.run.match = {'status': 'matched', 'deal_id': str(self.deal.id)}
+        self.run.stages = {'review': 'confirmed'}
+        self.run.save(update_fields=['classification', 'match', 'stages'])
+
+        result = Ingestion.process(self.run.id, use_ai=True)
+
+        self.run.refresh_from_db()
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.run.stages['index'], 'completed')
+        self.assertEqual(self.run.stages['deal_fields'], 'completed')
+        self.assertEqual(self.run.match['field_synthesis_analysis_id'], 'field-analysis')
+        synthesize.assert_called_once()
+
+    @patch.object(Ingestion, 'dispatch')
     def test_repeated_create_reuses_hydrated_deal(self, dispatch):
         self.email.deal = None
         self.email.save(update_fields=['deal'])
@@ -162,6 +254,52 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(created.analyses.count(), 1)
         self.assertEqual(created.source_email_id, self.email.graph_id)
         self.assertEqual(list(created.responsibility.values_list('id', flat=True)), [self.profile.id])
+
+    @patch.object(Ingestion, 'dispatch')
+    def test_forwarder_owns_new_deal_and_forwarded_sender_is_primary_contact(self, dispatch):
+        admin = self.profile
+        forwarder_user = User.objects.create_user(username='sheersha', password='test-only')
+        forwarder = Profile.objects.create(
+            user=forwarder_user,
+            email='sheersha.mathur@india-alt.com',
+            name='Sheersha Mathur',
+        )
+        bank = Bank.objects.create(name='White Owl Ventures')
+        contact = Contact.objects.create(
+            name='Rajesh Katare',
+            email='rajesh@thewhiteowlventures.com',
+            bank=bank,
+        )
+        self.email.deal = None
+        self.email.from_email = forwarder.email
+        self.email.body_text = (
+            'Please create this deal.\n\n'
+            'From: Rajesh Katare <\nrajesh@thewhiteowlventures.com\n>\n'
+            'Sent: Thursday\nTo: Sheersha Mathur\nSubject: Longway'
+        )
+        self.email.save(update_fields=['deal', 'from_email', 'body_text'])
+        self.run.source = {**self.run.source, 'from_email': self.email.from_email, 'body_text': self.email.body_text}
+        self.run.match = {
+            'status': 'needs_review',
+            'initialization': {'deal_model_data': {'title': 'Longway'}},
+        }
+        self.run.save(update_fields=['source', 'match'])
+
+        response = self.client.post(self.url + 'ingestion-confirm/', {
+            'run_id': str(self.run.id),
+            'expected_revision': self.run.revision,
+            'create_new_deal': True,
+            'new_deal_title': 'Longway',
+            'classification': 'NORMAL_EMAIL',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.email.refresh_from_db()
+        deal = self.email.deal
+        self.assertEqual(list(deal.responsibility.values_list('id', flat=True)), [forwarder.id])
+        self.assertNotEqual(list(deal.responsibility.values_list('id', flat=True)), [admin.id])
+        self.assertEqual(deal.primary_contact_id, contact.id)
+        self.assertEqual(deal.bank_id, bank.id)
 
     @patch.object(Ingestion, 'dispatch')
     def test_create_request_hydrates_existing_blank_linked_deal(self, dispatch):
