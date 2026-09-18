@@ -1,14 +1,23 @@
 from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
 from deals.models import Deal, DealDocument
 from meetings.models import MeetingNote
 from .models import IATheme, KnowledgeDocument, NewsArticle, NewsSource
-from .services import ingest_source
+from .services import classify_industry_name, ingest_source
+
+
+class IndustryClassificationTests(SimpleTestCase):
+    def test_mixed_label_uses_leading_business(self):
+        self.assertEqual(classify_industry_name("Fintech / Consumer Lending")[0], "Financial Services")
+        self.assertEqual(classify_industry_name("Agri-Tech / E-commerce")[0], "Agriculture & Food")
+
+    def test_missing_classification_is_explicit(self):
+        self.assertEqual(classify_industry_name("External diligence required")[0], "Other / Unclassified")
 
 
 class IndustryKnowledgeApiTests(TestCase):
@@ -220,3 +229,23 @@ class IndustryViewSetTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.data["status"], "QUEUED")
         delay.assert_called_once_with(str(fintech.id))
+
+    def test_web_result_can_be_deleted_from_umbrella_industry(self):
+        self.client.get("/api/industry-knowledge/industries/")
+        from industry_knowledge.models import Industry, IndustryNewsArticle
+
+        financial_services = Industry.objects.get(name="Financial Services")
+        fintech = Industry.objects.get(name="Fintech")
+        article = IndustryNewsArticle.objects.create(
+            industry=fintech,
+            title="Fintech market report",
+            url="https://example.com/fintech-report",
+            category=IndustryNewsArticle.Category.REPORT,
+        )
+
+        response = self.client.delete(
+            f"/api/industry-knowledge/industries/{financial_services.id}/news-articles/{article.id}/"
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(IndustryNewsArticle.objects.filter(id=article.id).exists())

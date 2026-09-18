@@ -186,5 +186,5 @@ class IndustryDetailSerializer(serializers.ModelSerializer):
 
     def get_deals(self, obj):
         names = [obj.name, *obj.sub_industries.values_list("name", flat=True)]
-        deals = Deal.objects.filter(industry__in=names).order_by("-received_at", "-created_at")[:100]
+        deals = Deal.objects.filter(industry__in=names).order_by("-received_at", "-created_at")
         return DealSummaryForIndustrySerializer(deals, many=True).data

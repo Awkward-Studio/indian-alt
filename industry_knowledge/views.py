@@ -213,6 +213,22 @@ class IndustryViewSet(viewsets.ModelViewSet):
             refresh_industry_research.delay(str(industry.id))
         return Response({"status": industry.research_status}, status=status.HTTP_202_ACCEPTED)
 
+    @action(
+        detail=True,
+        methods=["delete"],
+        url_path=r"news-articles/(?P<article_id>[^/.]+)",
+    )
+    def delete_news_article(self, request, pk=None, article_id=None):
+        industry = self.get_object()
+        article = IndustryNewsArticle.objects.filter(id=article_id).select_related("industry").first()
+        if not article or (
+            article.industry_id != industry.id
+            and article.industry.parent_id != industry.id
+        ):
+            return Response({"error": "Web result not found for this industry."}, status=status.HTTP_404_NOT_FOUND)
+        article.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=["post"], url_path="upload-document")
     def upload_document(self, request, pk=None):
         industry = self.get_object()

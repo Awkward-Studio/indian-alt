@@ -171,19 +171,40 @@ def sync_industries_from_deals() -> int:
 
 
 MAIN_INDUSTRY_RULES = {
-    "Financial Services": ("fintech", "finance", "financial", "banking", "lending", "payments", "insurance", "wealth"),
-    "Healthcare": ("health", "pharma", "medical", "hospital", "diagnostic", "medtech", "biotech"),
-    "Consumer": ("consumer", "retail", "food", "beverage", "beauty", "apparel", "commerce"),
-    "Technology": ("technology", "software", "saas", "artificial intelligence", "deeptech", "cyber", "cloud"),
-    "Industrials": ("industrial", "manufacturing", "logistics", "mobility", "automotive", "chemical", "aerospace"),
-    "Climate & Energy": ("climate", "energy", "renewable", "solar", "battery", "cleantech", "sustainability"),
-    "Education": ("education", "edtech", "learning"),
-    "Real Estate": ("real estate", "proptech", "construction"),
+    "Agriculture & Food": ("agriculture", "agri", "agro", "fertilizer", "seed", "farm", "food processing", "dairy"),
+    "Consumer": ("consumer", "consumption", "retail", "fmcg", "food & beverage", "beverage", "qsr", "restaurant", "apparel", "fashion", "beauty & wellness", "beauty", "personal care", "jewellery", "jewelry", "gaming", "sports", "home care", "houseware", "bathware"),
+    "Financial Services": ("financial services", "ficial services", "bfsi", "fintech", "finance", "banking", "banktech", "nbfc", "lending", "payments", "insurance", "insurtech", "wealth", "investment platform", "microfinance", "remittance", "asset reconstruction", "atm"),
+    "Healthcare": ("healthcare", "healthtech", "health tech", "digital health", "pharma", "medical", "hospital", "diagnostic", "medtech", "biotech", "biologics", "dialysis", "ivf", "eldercare", "senior care", "nutraceutical", "pharmacy", "wellness"),
+    "Technology": ("technology", "software", "saas", "artificial intelligence", "ai infrastructure", "analytics", "data services", "deep tech", "deeptech", "cyber", "cloud", "iot", "digital transformation", "observability", "cpaas", "telecom"),
+    "Industrials": ("industrial", "manufacturing", "logistics", "supply chain", "mobility", "automotive", "auto", "chemical", "aerospace", "defense", "defence", "drone", "electronics manufacturing", "packaging", "mining", "infrastructure", "construction", "equipment", "engineering", "textile", "steel"),
+    "Climate & Energy": ("climate", "energy", "renewable", "solar", "battery", "cleantech", "sustainability", "biofuel", "ethanol", "waste", "recycling", "water treatment", "hydropower", "power generation"),
+    "Education": ("education", "edtech", "ed-tech", "learning", "training", "upskilling", "test prep"),
+    "Real Estate": ("real estate", "proptech", "housing", "co-living", "student housing", "student accommodation", "workspace", "co-working", "interior fit-out"),
+    "Media & Entertainment": ("media", "entertainment", "advertising", "adtech", "ad-tech", "animation", "ott", "content production", "marketing & communications"),
+    "Business Services": ("business services", "facility management", "facilities management", "security services", "staffing", "recruitment", "human resources", "hr tech", "hr-tech", "market research", "testing, inspection", "compliance", "legaltech", "talent solutions", "offshore support"),
+    "Travel & Hospitality": ("hospitality", "travel", "tourism", "hotel", "vacation rental", "guest house"),
+    "Other / Unclassified": ("unknown", "not specified", "external diligence required"),
 }
 
 
 def _industry_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+
+
+def classify_industry_name(value: str) -> tuple[str, str]:
+    """Choose one umbrella using the leading segment first, then the most specific keyword."""
+    folded = re.sub(r"\s+", " ", (value or "").casefold()).strip()
+    primary_segment = re.split(r"\s+(?:/|-|&)\s+", folded, maxsplit=1)[0]
+    candidates = []
+    for order, (umbrella, keywords) in enumerate(MAIN_INDUSTRY_RULES.items()):
+        for keyword in keywords:
+            if keyword in folded:
+                in_primary = keyword in primary_segment
+                candidates.append((int(in_primary), len(keyword), -order, umbrella, keyword))
+    if not candidates:
+        return "Other / Unclassified", "No confident keyword match"
+    _, _, _, umbrella, keyword = max(candidates)
+    return umbrella, f"Matched '{keyword}' in {'primary segment' if keyword in primary_segment else 'full label'}"
 
 
 def reconcile_industry_taxonomy() -> dict:
@@ -230,15 +251,8 @@ def reconcile_industry_taxonomy() -> dict:
                 parent = None
                 basis = "Canonical main industry"
             else:
-                folded = industry.name.casefold()
-                matches = [
-                    (name, keyword)
-                    for name, keywords in MAIN_INDUSTRY_RULES.items()
-                    for keyword in keywords
-                    if keyword in folded
-                ]
-                parent = parents[matches[0][0]] if len({match[0] for match in matches}) == 1 else None
-                basis = f"Matched '{matches[0][1]}'" if parent else "No single confident main-industry match"
+                parent_name, basis = classify_industry_name(industry.name)
+                parent = parents[parent_name]
             Industry.objects.filter(pk=industry.pk).update(
                 parent=parent,
                 classification_status="AUTO_CHECKED",
