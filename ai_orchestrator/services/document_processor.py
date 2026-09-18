@@ -3,6 +3,7 @@ import io
 import hashlib
 import logging
 import os
+import re
 import tempfile
 from email import policy
 from email.parser import BytesParser
@@ -233,7 +234,9 @@ class DocumentProcessorService:
                     for row, cached_row in zip(sheet.iter_rows(), values[sheet.title].iter_rows()):
                         cells = []
                         for cell, cached in zip(row, cached_row):
-                            if cell.value is None:
+                            if cell.value is None or (
+                                isinstance(cell.value, str) and not cell.value.strip()
+                            ):
                                 continue
                             value = str(cell.value)
                             manifest_value = (
@@ -266,6 +269,8 @@ class DocumentProcessorService:
                             line = "\t".join(cells)
                             sections.append(line)
                             sheet_lines.append(line)
+                    if not sheet_lines:
+                        sections.append("[Empty: no populated cells]")
                     sheets.append({
                         "name": sheet.title,
                         "row_count": sheet.max_row,
@@ -289,8 +294,6 @@ class DocumentProcessorService:
             chunks = []
             for sheet_name in workbook.sheet_names:
                 rows = workbook.get_sheet_by_name(sheet_name).to_python(skip_empty_area=False)
-                lines = [f"{index + 1}\t" + "\t".join("" if value is None else str(value) for value in row) for index, row in enumerate(rows)]
-                sections.extend([f"[Sheet: {sheet_name}]", *lines])
                 sheet_cells = [
                     {
                         "coordinate": f"{get_column_letter(column_index)}{row_index}",
@@ -298,16 +301,37 @@ class DocumentProcessorService:
                     }
                     for row_index, row in enumerate(rows, start=1)
                     for column_index, value in enumerate(row, start=1)
-                    if value is not None
+                    if value is not None and not (isinstance(value, str) and not value.strip())
                 ]
+                cells_by_row = {}
+                for cell in sheet_cells:
+                    match = re.fullmatch(r"([A-Z]+)([1-9]\d*)", cell["coordinate"])
+                    if match:
+                        cells_by_row.setdefault(int(match.group(2)), []).append(cell)
+                lines = [
+                    "\t".join(
+                        f"{cell['coordinate']}={str(cell['value']).strip()}"
+                        for cell in cells_by_row[row_number]
+                    )
+                    for row_number in sorted(cells_by_row)
+                ]
+                sections.extend([
+                    f"[Sheet: {sheet_name}]",
+                    *(lines or ["[Empty: no populated cells]"]),
+                ])
+                populated_rows = sorted(cells_by_row)
                 sheets.append({
                     "name": sheet_name,
-                    "row_count": len(rows),
-                    "column_count": max((len(row) for row in rows), default=0),
+                    "row_count": populated_rows[-1] if populated_rows else 0,
+                    "column_count": max((len(row) for row in rows), default=0) if sheet_cells else 0,
+                    "physical_row_count": len(rows),
+                    "physical_column_count": max((len(row) for row in rows), default=0),
+                    "populated_row_count": len(populated_rows),
                     "cells": sheet_cells,
                 })
                 for start in range(0, len(lines), 200):
-                    chunks.append({"text": "\n".join(lines[start:start + 200]), "metadata": {"chunk_kind": "spreadsheet_range", "sheet_name": sheet_name, "row_start": start + 1, "row_end": min(start + 200, len(lines))}})
+                    batch_rows = populated_rows[start:start + 200]
+                    chunks.append({"text": "\n".join(lines[start:start + 200]), "metadata": {"chunk_kind": "spreadsheet_cells", "sheet_name": sheet_name, "row_start": batch_rows[0], "row_end": batch_rows[-1]}})
             structured_data = {"schema_version": "2", "kind": "spreadsheet", "format": ext.lstrip("."), "filename": filename, "content_sha256": hashlib.sha256(file_content).hexdigest(), "sheets": sheets, "chunks": chunks, "fallback_fidelity": "cell_values"}
             warnings.extend(["backend_fallback_extraction", "calamine"])
         elif ext == ".msg":

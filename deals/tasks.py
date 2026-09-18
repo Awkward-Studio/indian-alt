@@ -739,6 +739,12 @@ def _persist_folder_analysis_document(
 ) -> FolderAnalysisDocument:
     raw_extracted_text = (extraction.get("raw_extracted_text") or extraction.get("text") or "").strip()
     normalized_text = (extraction.get("normalized_text") or extraction.get("text") or raw_extracted_text).strip()
+    extraction_manifest = extraction.get("structured_data") or {}
+    normalized_text = DocumentArtifactService.normalize_source_text(
+        file_name=file_info.get("name") or "unknown_file",
+        extracted_text=normalized_text,
+        extraction_manifest=extraction_manifest,
+    )
     extraction_mode = extraction.get("mode")
     if extraction_mode not in {ExtractionMode.DOCPROC_REMOTE, ExtractionMode.MULTIMODAL_MODEL, ExtractionMode.FALLBACK_TEXT}:
         extraction_mode = extraction_mode or None
@@ -757,7 +763,7 @@ def _persist_folder_analysis_document(
         "chunking_status": ChunkingStatus.NOT_CHUNKED,
         "quality_flags": extraction.get("quality_flags") or [],
         "render_metadata": extraction.get("render_metadata") or {},
-        "extraction_manifest": extraction.get("structured_data") or {},
+        "extraction_manifest": extraction_manifest,
         "error_message": extraction.get("error") if not normalized_text else None,
         "last_transcribed_at": timezone.now() if normalized_text else None,
     }
@@ -779,10 +785,11 @@ def _persist_folder_analysis_document(
             # LEGACY: Trigger a new analysis pass (standard folder behavior)
             artifact = DocumentArtifactService.build_document_artifact(
                 file_name=analysis_doc.file_name,
-                extracted_text=raw_extracted_text or normalized_text,
+                extracted_text=normalized_text,
                 document_type=analysis_doc.document_type,
                 extraction_mode=analysis_doc.extraction_mode,
                 ai_service=ai_service,
+                extraction_manifest=extraction_manifest,
                 source_metadata={
                     "audit_log_id": audit_log_id,
                     "source_id": analysis_doc.source_file_id,
@@ -1546,6 +1553,19 @@ def process_single_document_async(
                 f"Full extraction was not completed for {file_name}: {extraction.get('error') or transcription_status}"
             )
 
+        # Spreadsheet processors retain a structured cell manifest. Persist and
+        # analyze its coordinate-aware compact rendering so styled-but-empty rows
+        # and whitespace-only cells never become document evidence or subdivisions.
+        compact_normalized_text = DocumentArtifactService.normalize_source_text(
+            file_name=doc.title,
+            extracted_text=normalized_text,
+            extraction_manifest=doc.extraction_manifest or {},
+        )
+        if compact_normalized_text != normalized_text:
+            normalized_text = compact_normalized_text
+            doc.normalized_text = normalized_text
+            doc.save(update_fields=["normalized_text"])
+
         if normalized_text:
             artifact_source_metadata = {
                 **(existing_source if resume_extraction else {}),
@@ -1568,6 +1588,7 @@ def process_single_document_async(
                 artifact_source_metadata = DocumentArtifactService.begin_document_artifact_run(
                     doc,
                     artifact_source_metadata,
+                    extraction_manifest=doc.extraction_manifest or {},
                 )
 
             def persist_segment_progress(completed: int, total: int) -> None:
@@ -1605,6 +1626,7 @@ def process_single_document_async(
                 yield_check=higher_priority_work_is_waiting,
                 segment_progress=persist_segment_progress,
                 force_fresh=force_fresh,
+                extraction_manifest=doc.extraction_manifest or {},
             )
             if delivery_cancelled() or not DealDocument.objects.filter(pk=doc.pk).exists():
                 return {

@@ -164,11 +164,18 @@ class ResearchAcquisitionService:
         extracted_text = str(extraction.get("normalized_text") or extraction.get("extracted_text") or "").strip()
         if not extracted_text:
             raise ResearchAcquisitionError("EXTRACTION_EMPTY", "The acquired document contained no extractable text.")
+        extraction_manifest = extraction.get("structured_data") or {}
+        extracted_text = DocumentArtifactService.normalize_source_text(
+            file_name=filename,
+            extracted_text=extracted_text,
+            extraction_manifest=extraction_manifest,
+        )
         artifact = DocumentArtifactService.build_document_artifact(
             file_name=filename,
             extracted_text=extracted_text,
             document_type=DocumentType.OTHER,
             extraction_mode=extraction.get("mode"),
+            extraction_manifest=extraction_manifest,
             source_metadata={
                 "research_recommendation_id": str(acquisition.recommendation_id),
                 "research_acquisition_id": str(acquisition.id),
@@ -188,6 +195,7 @@ class ResearchAcquisitionService:
             source_map_json=artifact.get("source_map") or {},
             reasoning=artifact.get("reasoning") or "",
             extraction_mode=extraction.get("mode"),
+            extraction_manifest=extraction_manifest,
             transcription_status="complete",
         )
         acquisition.document = document

@@ -96,11 +96,16 @@ class DocumentArtifactService:
     STATUS_DEGRADED = "degraded"
     STATUS_FAILED = "failed"
     STATUS_MISSING = "missing"
-    ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v2"
+    ARTIFACT_PIPELINE_VERSION = "vdr-bulk2-segment-artifact-v3"
     MIN_SUBDIVISION_SOURCE_TOKENS = 256
     MAX_SUBDIVISION_DEPTH = 8
     SPREADSHEET_EMBEDDING_ROWS_PER_CHUNK = 8
     SPREADSHEET_EMBEDDING_CHARS_PER_CHUNK = 900
+    # The evidence prompt and output schema consume substantial context. Compact
+    # spreadsheet segments stay below this source cap while retaining every
+    # populated cell across as many full-fidelity requests as necessary.
+    SPREADSHEET_ARTIFACT_SOURCE_TOKENS = 6_000
+    SPREADSHEET_ARTIFACT_OUTPUT_TOKENS = 16_384
 
     @staticmethod
     def _spreadsheet_coordinate(value: Any) -> tuple[str, int] | None:
@@ -243,6 +248,7 @@ class DocumentArtifactService:
         manifest: dict[str, Any],
         *,
         base_metadata: dict[str, Any],
+        number_format_mode: str = "full",
     ) -> list[dict[str, Any]]:
         """Build bounded retrieval units from the exact workbook cell manifest."""
         chunks: list[dict[str, Any]] = []
@@ -256,6 +262,8 @@ class DocumentArtifactService:
                     continue
                 parsed = cls._spreadsheet_coordinate(cell.get("coordinate"))
                 if not parsed:
+                    continue
+                if not cls._spreadsheet_cell_has_content(cell):
                     continue
                 column, row_number = parsed
                 cells_by_row.setdefault(row_number, []).append((column, cell))
@@ -305,18 +313,23 @@ class DocumentArtifactService:
                     coordinate = f"{column}{row_number}"
                     raw_value = cell.get("value")
                     cached_value = cell.get("cached_value")
-                    rendered = f"{coordinate}={raw_value}"
+                    rendered = f"{coordinate}={cls._compact_spreadsheet_value(raw_value)}"
                     if (
                         cached_value not in (None, "")
                         and str(cached_value) != str(raw_value)
                     ):
-                        rendered += f" [calculated: {cached_value}]"
-                    if cell.get("number_format") not in (None, "", "General"):
-                        rendered += f" [format: {cell['number_format']}]"
+                        rendered += f" [calculated: {cls._compact_spreadsheet_value(cached_value)}]"
+                    number_format = cell.get("number_format")
+                    if number_format_mode == "semantic":
+                        number_format = cls._semantic_spreadsheet_format(number_format)
+                    elif number_format_mode == "none":
+                        number_format = ""
+                    if number_format not in (None, "", "General"):
+                        rendered += f" [format: {cls._compact_spreadsheet_value(number_format)}]"
                     if cell.get("hyperlink"):
-                        rendered += f" [link: {cell['hyperlink']}]"
+                        rendered += f" [link: {cls._compact_spreadsheet_value(cell['hyperlink'])}]"
                     if cell.get("comment"):
-                        rendered += f" [comment: {cell['comment']}]"
+                        rendered += f" [comment: {cls._compact_spreadsheet_value(cell['comment'])}]"
                     rendered_cells.append(rendered)
                 row_text = " | ".join(rendered_cells)
                 row_start_column = row_cells[0][0]
@@ -334,6 +347,211 @@ class DocumentArtifactService:
                 window_chars += len(row_text) + 1
             flush()
         return chunks
+
+    @staticmethod
+    def _compact_spreadsheet_value(value: Any) -> str:
+        lines = [
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in str(value if value is not None else "").splitlines()
+        ]
+        return " ⏎ ".join(line for line in lines if line).strip()
+
+    @classmethod
+    def _spreadsheet_cell_has_content(cls, cell: dict[str, Any]) -> bool:
+        return any(
+            cls._compact_spreadsheet_value(cell.get(field))
+            for field in ("value", "cached_value", "hyperlink", "comment")
+        )
+
+    @staticmethod
+    def _semantic_spreadsheet_format(value: Any) -> str:
+        """Collapse verbose Excel display codes to evidence-relevant semantics."""
+        number_format = str(value or "").strip()
+        if not number_format or number_format.lower() == "general":
+            return ""
+        lowered = number_format.lower()
+        labels = []
+        if "%" in number_format:
+            labels.append("percent")
+        currency_symbols = "".join(
+            symbol for symbol in ("₹", "$", "€", "£", "¥") if symbol in number_format
+        )
+        if currency_symbols or "[$" in number_format:
+            labels.append(f"currency {currency_symbols}".strip())
+        # Excel date/time formats use these tokens; numeric/financial formats
+        # without a year/day token are intentionally not labelled as dates.
+        if re.search(r"(?:^|[^a-z])[dmy]{1,4}(?:[^a-z]|$)", lowered):
+            labels.append("date")
+        elif re.search(r"(?:^|[^a-z])[hs]{1,2}(?:[^a-z]|$)", lowered):
+            labels.append("time")
+        return ", ".join(dict.fromkeys(labels))
+
+    @classmethod
+    def _manifest_has_spreadsheet_cell_contract(cls, manifest: Any) -> bool:
+        if not isinstance(manifest, dict) or manifest.get("kind") != "spreadsheet":
+            return False
+        sheets = manifest.get("sheets")
+        return isinstance(sheets, list) and all(
+            isinstance(sheet, dict) and isinstance(sheet.get("cells"), list)
+            for sheet in sheets
+        )
+
+    @classmethod
+    def compact_spreadsheet_text(
+        cls,
+        *,
+        file_name: str,
+        manifest: dict[str, Any],
+    ) -> str:
+        """Render a coordinate-stable workbook without blank row/cell padding."""
+        chunks = cls._spreadsheet_manifest_chunks(
+            manifest,
+            base_metadata={},
+            number_format_mode="semantic",
+        )
+        chunks_by_sheet: dict[str, list[dict[str, Any]]] = {}
+        for chunk in chunks:
+            sheet_name = str(chunk["metadata"].get("sheet_name") or "Unknown Sheet")
+            chunks_by_sheet.setdefault(sheet_name, []).append(chunk)
+
+        lines = [f"# WORKBOOK: {file_name}"]
+        if manifest.get("content_sha256"):
+            lines.append(f"SHA256: {manifest['content_sha256']}")
+        for sheet in manifest.get("sheets") or []:
+            if not isinstance(sheet, dict):
+                continue
+            sheet_name = str(sheet.get("name") or "Unknown Sheet")
+            lines.extend(["", f"## SHEET: {sheet_name}"])
+            sheet_chunks = chunks_by_sheet.get(sheet_name) or []
+            if not sheet_chunks:
+                lines.append("EMPTY: no populated cells")
+                continue
+            populated_rows = {
+                row
+                for cell in sheet.get("cells") or []
+                if isinstance(cell, dict) and cls._spreadsheet_cell_has_content(cell)
+                for parsed in [cls._spreadsheet_coordinate(cell.get("coordinate"))]
+                if parsed
+                for row in [parsed[1]]
+            }
+            lines.append(f"POPULATED ROWS: {len(populated_rows)}")
+            lines.extend(chunk["text"] for chunk in sheet_chunks)
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def normalize_source_text(
+        cls,
+        *,
+        file_name: str,
+        extracted_text: str,
+        extraction_manifest: dict[str, Any] | None = None,
+    ) -> str:
+        if cls._manifest_has_spreadsheet_cell_contract(extraction_manifest):
+            return cls.compact_spreadsheet_text(
+                file_name=file_name,
+                manifest=extraction_manifest or {},
+            )
+        return (extracted_text or "").strip()
+
+    @classmethod
+    def _spreadsheet_artifact_segments(
+        cls,
+        *,
+        file_name: str,
+        manifest: dict[str, Any],
+        source_tokens: int,
+    ) -> list[str]:
+        """Build sheet-aware inference segments from populated manifest cells only."""
+        source_cap = max(256, min(
+            int(source_tokens),
+            int(getattr(
+                settings,
+                "VDR_ARTIFACT_SPREADSHEET_SOURCE_TOKENS",
+                cls.SPREADSHEET_ARTIFACT_SOURCE_TOKENS,
+            )),
+        ))
+        cell_chunks = cls._spreadsheet_manifest_chunks(
+            manifest,
+            base_metadata={},
+            number_format_mode="semantic",
+        )
+        if not cell_chunks:
+            empty_sheets = [
+                str(sheet.get("name") or "Unknown Sheet")
+                for sheet in manifest.get("sheets") or []
+                if isinstance(sheet, dict)
+            ]
+            sheet_lines = "\n".join(
+                f"[SHEET: {name}]\nEMPTY: no populated cells"
+                for name in empty_sheets
+            )
+            return [f"[WORKBOOK: {file_name}]\n{sheet_lines}".strip()]
+
+        segments: list[str] = []
+        pending: list[dict[str, Any]] = []
+        pending_sheet = ""
+
+        def render(items: list[dict[str, Any]]) -> str:
+            metadata = [item["metadata"] for item in items]
+            row_start = min(int(item["row_start"]) for item in metadata)
+            row_end = max(int(item["row_end"]) for item in metadata)
+            column_start = min(
+                (str(item["column_start"]) for item in metadata),
+                key=cls._spreadsheet_column_number,
+            )
+            column_end = max(
+                (str(item["column_end"]) for item in metadata),
+                key=cls._spreadsheet_column_number,
+            )
+            header = (
+                f"[WORKBOOK: {file_name}]\n"
+                f"[SHEET: {pending_sheet}]\n"
+                f"[RANGE: {column_start}{row_start}:{column_end}{row_end}]\n"
+                "[POPULATED CELLS ONLY; BLANK CELLS AND ROWS OMITTED]\n"
+                "[CELLS]\n"
+            )
+            return header + "\n".join(item["text"] for item in items)
+
+        def flush() -> None:
+            nonlocal pending
+            if pending:
+                segments.append(render(pending))
+                pending = []
+
+        for chunk in cell_chunks:
+            sheet_name = str(chunk["metadata"].get("sheet_name") or "Unknown Sheet")
+            if pending and sheet_name != pending_sheet:
+                flush()
+            pending_sheet = sheet_name
+            candidate = [*pending, chunk]
+            if pending and estimate_tokens(render(candidate)) > source_cap:
+                flush()
+                pending_sheet = sheet_name
+            pending.append(chunk)
+        flush()
+        return segments
+
+    @classmethod
+    def _artifact_source_segments(
+        cls,
+        *,
+        file_name: str,
+        extracted_text: str,
+        extraction_manifest: dict[str, Any] | None,
+        source_tokens: int,
+        overlap_tokens: int,
+    ) -> list[str]:
+        if cls._manifest_has_spreadsheet_cell_contract(extraction_manifest):
+            return cls._spreadsheet_artifact_segments(
+                file_name=file_name,
+                manifest=extraction_manifest or {},
+                source_tokens=source_tokens,
+            )
+        return cls._split_for_artifact(
+            extracted_text,
+            source_tokens=source_tokens,
+            overlap_tokens=overlap_tokens,
+        )
 
     @staticmethod
     def _segment_artifact_usable(artifact: Any) -> bool:
@@ -385,6 +603,7 @@ class DocumentArtifactService:
         cls,
         extracted_text: str,
         source_metadata: dict[str, Any] | None = None,
+        extraction_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Freeze every input that determines segment identity for one artifact run."""
         raw_text = (extracted_text or "").strip()
@@ -422,6 +641,35 @@ class DocumentArtifactService:
             "artifact_segment_source_token_budget": source_token_budget,
             "artifact_segment_overlap_token_budget": overlap_token_budget,
         })
+        if cls._manifest_has_spreadsheet_cell_contract(extraction_manifest):
+            manifest_payload = json.dumps(
+                extraction_manifest,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            prepared.update({
+                "artifact_source_kind": "spreadsheet_cells",
+                "artifact_segment_effective_source_token_budget": min(
+                    source_token_budget,
+                    int(getattr(
+                        settings,
+                        "VDR_ARTIFACT_SPREADSHEET_SOURCE_TOKENS",
+                        cls.SPREADSHEET_ARTIFACT_SOURCE_TOKENS,
+                    )),
+                ),
+                "artifact_segment_effective_output_token_budget": min(
+                    int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)),
+                    int(getattr(
+                        settings,
+                        "VDR_ARTIFACT_SPREADSHEET_MAX_TOKENS",
+                        cls.SPREADSHEET_ARTIFACT_OUTPUT_TOKENS,
+                    )),
+                ),
+                "artifact_manifest_sha256": hashlib.sha256(
+                    manifest_payload.encode("utf-8")
+                ).hexdigest(),
+            })
         return prepared
 
     @classmethod
@@ -429,12 +677,24 @@ class DocumentArtifactService:
         cls,
         document: Any,
         source_metadata: dict[str, Any],
+        extraction_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist the exact extraction and splitter contract before inference starts."""
-        text = (document.normalized_text or document.extracted_text or "").strip()
-        prepared = cls.prepare_artifact_run_metadata(text, source_metadata)
-        segments = cls._split_for_artifact(
+        manifest = extraction_manifest or getattr(document, "extraction_manifest", None)
+        text = cls.normalize_source_text(
+            file_name=document.title,
+            extracted_text=document.normalized_text or document.extracted_text or "",
+            extraction_manifest=manifest,
+        )
+        prepared = cls.prepare_artifact_run_metadata(
             text,
+            source_metadata,
+            extraction_manifest=manifest,
+        )
+        segments = cls._artifact_source_segments(
+            file_name=document.title,
+            extracted_text=text,
+            extraction_manifest=manifest,
             source_tokens=prepared["artifact_segment_source_token_budget"],
             overlap_tokens=prepared["artifact_segment_overlap_token_budget"],
         )
@@ -470,15 +730,32 @@ class DocumentArtifactService:
         yield_check: Callable[[], bool] | None = None,
         segment_progress: Callable[[int, int], None] | None = None,
         force_fresh: bool = False,
+        extraction_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        raw_text = (extracted_text or "").strip()
-        source_metadata = cls.prepare_artifact_run_metadata(raw_text, source_metadata)
+        raw_text = cls.normalize_source_text(
+            file_name=file_name,
+            extracted_text=extracted_text,
+            extraction_manifest=extraction_manifest,
+        )
+        source_metadata = cls.prepare_artifact_run_metadata(
+            raw_text,
+            source_metadata,
+            extraction_manifest=extraction_manifest,
+        )
         # Run-scoped keys already isolate a fresh run from earlier results.
         # Retrying that run must still recover its own completed segments.
         force_fresh = force_fresh and not bool(source_metadata.get("artifact_run_id"))
         artifact_model = source_metadata["artifact_model"]
         source_token_budget = source_metadata["artifact_segment_source_token_budget"]
         overlap_token_budget = source_metadata["artifact_segment_overlap_token_budget"]
+        spreadsheet_cell_source = cls._manifest_has_spreadsheet_cell_contract(
+            extraction_manifest
+        )
+        output_token_budget = int(
+            source_metadata.get("artifact_segment_effective_output_token_budget")
+            if spreadsheet_cell_source
+            else getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)
+        )
         fallback = cls._fallback_artifact(
             file_name=file_name,
             extracted_text=raw_text,
@@ -499,8 +776,10 @@ class DocumentArtifactService:
         # Match bulk_2's lossless map/merge contract: every bounded segment is
         # analyzed, cached by content, and merged. The full extracted source is
         # retained separately and is never replaced by an LLM-cleaned excerpt.
-        segments = cls._split_for_artifact(
-            raw_text,
+        segments = cls._artifact_source_segments(
+            file_name=file_name,
+            extracted_text=raw_text,
+            extraction_manifest=extraction_manifest,
             source_tokens=source_token_budget,
             overlap_tokens=overlap_token_budget,
         )
@@ -566,7 +845,8 @@ class DocumentArtifactService:
                 "segment_metadata": {},
                 "segment_estimated_tokens": estimate_tokens(segment),
                 "segment_source_token_budget": int(
-                    getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
+                    source_metadata.get("artifact_segment_effective_source_token_budget")
+                    or getattr(settings, "VDR_ARTIFACT_SEGMENT_SOURCE_TOKENS", 10_000)
                 ),
             }
             metadata = {
@@ -582,7 +862,7 @@ class DocumentArtifactService:
                         getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                     ),
                     "segment_output_token_budget": int(
-                        getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)
+                        output_token_budget
                     ),
                     "artifact_pipeline_version": cls.ARTIFACT_PIPELINE_VERSION,
                     "artifact_segment_cache_key": cache_key,
@@ -594,7 +874,7 @@ class DocumentArtifactService:
                 "max_input_tokens": int(
                     getattr(settings, "VDR_ARTIFACT_SEGMENT_INPUT_TOKENS", 14_336)
                 ),
-                "max_tokens": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_MAX_TOKENS", 32_768)),
+                "max_tokens": output_token_budget,
                 "request_timeout": int(getattr(settings, "VDR_ARTIFACT_SEGMENT_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
                 "lossless_input": True,
@@ -763,7 +1043,7 @@ class DocumentArtifactService:
                             cls.MIN_SUBDIVISION_SOURCE_TOKENS,
                             estimated_piece_tokens - 1,
                         )
-                    subdivisions = cls._split_for_artifact(
+                    subdivisions = cls._split_for_subdivision(
                         source_segment,
                         source_tokens=subdivision_source_tokens,
                         overlap_tokens=min(
@@ -896,6 +1176,39 @@ class DocumentArtifactService:
             separators=["\n\n", "\n", " ", ""],
         )
         return splitter.split_text(text) or [text]
+
+    @classmethod
+    def _split_for_subdivision(
+        cls,
+        text: str,
+        *,
+        source_tokens: int,
+        overlap_tokens: int,
+        minimum_source_tokens: int,
+    ) -> list[str]:
+        """Retain workbook/sheet/range context on every recursive spreadsheet piece."""
+        marker = "[CELLS]\n"
+        if marker not in text:
+            return cls._split_for_artifact(
+                text,
+                source_tokens=source_tokens,
+                overlap_tokens=overlap_tokens,
+                minimum_source_tokens=minimum_source_tokens,
+            )
+        prefix, body = text.split(marker, 1)
+        prefix = prefix + marker
+        body_tokens = max(
+            minimum_source_tokens,
+            int(source_tokens) - estimate_tokens(prefix),
+        )
+        body_overlap = min(int(overlap_tokens), body_tokens // 4)
+        pieces = cls._split_for_artifact(
+            body,
+            source_tokens=body_tokens,
+            overlap_tokens=body_overlap,
+            minimum_source_tokens=minimum_source_tokens,
+        )
+        return [prefix + piece for piece in pieces]
 
     @classmethod
     def _segment_cache_key(
@@ -1071,6 +1384,7 @@ class DocumentArtifactService:
             document_type=document.document_type,
             extraction_mode=document.extraction_mode,
             ai_service=ai_service,
+            extraction_manifest=getattr(document, "extraction_manifest", None),
             source_metadata={
                 "source_id": getattr(document, "id", None),
                 "source_url": getattr(document, "file_url", None),
