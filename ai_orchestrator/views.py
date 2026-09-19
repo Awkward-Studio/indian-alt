@@ -451,11 +451,19 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='queue-status')
     def queue_status(self, request):
-        """Return Redis order, Celery execution, and durable VDR hierarchy."""
+        """Return the fast durable queue ledger, with diagnostics on request."""
         from config.celery import app as celery_app
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
 
-        redis_state = CeleryQueueSnapshotService.snapshot(celery_app)
+        include_diagnostics = request.query_params.get('diagnostics') == '1'
+        redis_state = (
+            CeleryQueueSnapshotService.snapshot(celery_app)
+            if include_diagnostics
+            else {
+                'queues': [], 'messages': [],
+                'unacked': {'count': 0, 'messages': []}, 'warning': None,
+            }
+        )
         processing_logs = list(AIAuditLog.objects.filter(
             status__in=['PENDING', 'PROCESSING'],
         ).order_by('created_at'))
@@ -494,16 +502,17 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             lease_owner = {key: value for key, value in lease_owner.items() if key != 'lease_token'}
         slots = []
         slot_warning = None
-        try:
-            parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
-            slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
-            headers = {'Authorization': f"Bearer {getattr(settings, 'VLLM_API_KEY', '')}"} if getattr(settings, 'VLLM_API_KEY', '') else {}
-            response = requests.get(slot_url, headers=headers, timeout=5)
-            response.raise_for_status()
-            slot_payload = response.json()
-            slots = slot_payload if isinstance(slot_payload, list) else []
-        except Exception as exc:
-            slot_warning = str(exc)
+        if include_diagnostics:
+            try:
+                parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
+                slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
+                headers = {'Authorization': f"Bearer {getattr(settings, 'VLLM_API_KEY', '')}"} if getattr(settings, 'VLLM_API_KEY', '') else {}
+                response = requests.get(slot_url, headers=headers, timeout=5)
+                response.raise_for_status()
+                slot_payload = response.json()
+                slots = slot_payload if isinstance(slot_payload, list) else []
+            except Exception as exc:
+                slot_warning = str(exc)
 
         celery_state = {'active': [], 'reserved': [], 'scheduled': [], 'warning': None}
 
@@ -523,13 +532,14 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                     })
             return flattened
 
-        try:
-            inspector = celery_app.control.inspect(timeout=2)
-            celery_state['active'] = flatten_worker_tasks(inspector.active(), 'active')
-            celery_state['reserved'] = flatten_worker_tasks(inspector.reserved(), 'reserved')
-            celery_state['scheduled'] = flatten_worker_tasks(inspector.scheduled(), 'scheduled')
-        except Exception as exc:
-            celery_state['warning'] = str(exc)
+        if include_diagnostics:
+            try:
+                inspector = celery_app.control.inspect(timeout=2)
+                celery_state['active'] = flatten_worker_tasks(inspector.active(), 'active')
+                celery_state['reserved'] = flatten_worker_tasks(inspector.reserved(), 'reserved')
+                celery_state['scheduled'] = flatten_worker_tasks(inspector.scheduled(), 'scheduled')
+            except Exception as exc:
+                celery_state['warning'] = str(exc)
 
         worker_tasks = [
             *celery_state['active'],
@@ -864,6 +874,94 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'documents': [],
             })
 
+        # Keep the deal ledger broad without loading large prompt/response or
+        # report-section JSON blobs. Deal ownership may be direct, inherited
+        # through a document/parent audit, or recorded by an ingestion match.
+        from django.db.models.fields.json import KeyTextTransform
+        history_rows = list(
+            AIAuditLog.objects.filter(status__in=['COMPLETED', 'FAILED'])
+            .annotate(
+                metadata_deal_id=KeyTextTransform('deal_id', 'source_metadata'),
+                matched_deal_id=KeyTextTransform(
+                    'deal_id', KeyTextTransform('match', 'source_metadata'),
+                ),
+                vdr_parent_id=KeyTextTransform('vdr_parent_audit_id', 'source_metadata'),
+                queue_kind=KeyTextTransform('queue_kind', 'source_metadata'),
+                queue_state=KeyTextTransform('queue_state', 'source_metadata'),
+            )
+            .values(
+                'id', 'source_id', 'source_type', 'context_label', 'status',
+                'is_success', 'error_message', 'created_at', 'completed_at',
+                'celery_task_id', 'metadata_deal_id', 'matched_deal_id',
+                'vdr_parent_id', 'queue_kind', 'queue_state',
+            ).order_by('-created_at')[:250]
+        )
+        history_source_ids = {
+            str(row.get('source_id') or '') for row in history_rows if row.get('source_id')
+        }
+
+        def uuid_values(values):
+            valid = set()
+            for value in values:
+                try:
+                    valid.add(str(uuid.UUID(str(value))))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            return valid
+
+        history_source_uuids = uuid_values(history_source_ids)
+        history_parent_ids = {
+            str(row.get('vdr_parent_id') or '') for row in history_rows if row.get('vdr_parent_id')
+        } | history_source_uuids
+        history_parent_uuids = uuid_values(history_parent_ids)
+        history_documents = {
+            str(document.id): str(document.deal_id)
+            for document in DealDocument.objects.filter(id__in=history_source_uuids).only('id', 'deal_id')
+        }
+        history_parent_deals = {
+            str(parent.id): str(parent.source_id)
+            for parent in AIAuditLog.objects.filter(id__in=history_parent_uuids).only('id', 'source_id')
+        }
+        possible_deal_ids = history_source_uuids | set(history_documents.values()) | set(history_parent_deals.values())
+        possible_deal_ids.update(
+            str(row.get(key) or '')
+            for row in history_rows
+            for key in ('metadata_deal_id', 'matched_deal_id')
+            if row.get(key)
+        )
+        history_deals = {
+            str(deal.id): deal.title
+            for deal in Deal.objects.filter(id__in=uuid_values(possible_deal_ids)).only('id', 'title')
+        }
+        queue_history = []
+        for row in history_rows:
+            source_id = str(row.get('source_id') or '')
+            parent_id = str(row.get('vdr_parent_id') or '') or source_id
+            deal_id = next((candidate for candidate in (
+                str(row.get('metadata_deal_id') or ''),
+                str(row.get('matched_deal_id') or ''),
+                history_documents.get(source_id, ''),
+                history_parent_deals.get(parent_id, ''),
+                source_id,
+            ) if candidate in history_deals), '')
+            if not deal_id:
+                continue
+            job_kind = row.get('queue_kind') or row['source_type']
+            queue_history.append({
+                'audit_log_id': str(row['id']),
+                'celery_task_id': row.get('celery_task_id'),
+                'deal_id': deal_id,
+                'deal_title': history_deals[deal_id],
+                'title': row.get('context_label') or row['source_type'].replace('_', ' ').title(),
+                'job_kind': job_kind,
+                'source_type': row['source_type'],
+                'status': row.get('queue_state') or row['status'].lower(),
+                'audit_status': row['status'],
+                'queued_at': row['created_at'],
+                'completed_at': row.get('completed_at'),
+                'error': row.get('error_message'),
+            })
+
         deal_title_by_id = {
             str(run.get('deal_id')): run.get('deal_title') for run in vdr_runs if run.get('deal_id')
         }
@@ -906,6 +1004,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             },
             'redis': redis_state,
             'vdr_runs': vdr_runs,
+            'queue_history': queue_history,
             'task_groups': task_groups,
             'inference': {
                 'slots': slots,
@@ -915,6 +1014,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             },
             'celery': celery_state,
             'services': {
+                'diagnostics_included': include_diagnostics,
                 'durable_queue_enabled': bool(getattr(settings, 'VDR_DURABLE_QUEUE_ENABLED', False)),
                 'worker': cache.get('vdr:presence:worker:current'),
                 'coordinator': cache.get('vdr:presence:coordinator:current'),

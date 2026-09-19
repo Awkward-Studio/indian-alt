@@ -1,10 +1,30 @@
 from unittest.mock import Mock, patch
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLES
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import ICReportSectionService
+
+
+class CitationNormalizationTests(SimpleTestCase):
+    def test_repeated_ranks_for_the_same_document_render_once_per_cluster(self):
+        citation = {
+            "document_id": "email-1",
+            "title": "Longway investment email",
+            "reference": "Longway investment email",
+        }
+        rendered, used = ICReportSectionService._replace_internal_citations(
+            "Revenue is INR 175 crore [R001], [R002], [R001].",
+            {"1": citation, "2": citation},
+        )
+
+        self.assertEqual(len(used), 3)
+        self.assertEqual(rendered.count("Source: Longway investment email"), 1)
+        self.assertEqual(
+            rendered,
+            "Revenue is INR 175 crore **[Source: Longway investment email]**.",
+        )
 
 
 class ICReportSectionServiceTests(TestCase):

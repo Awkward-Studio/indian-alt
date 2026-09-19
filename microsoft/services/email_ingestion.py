@@ -743,7 +743,11 @@ class EmailIngestionService:
 
     @classmethod
     def _recover_replaced_worker_runs(cls, *, now=None) -> int:
-        """Fence leases left by a replaced Railway worker and requeue them."""
+        """Fence leases left by a replaced Railway worker and requeue them.
+
+        Deployment identity is authoritative after the handoff window. Celery
+        inspection is best-effort and may be unavailable during a rollout.
+        """
         from ai_orchestrator.models import AIAuditLog
 
         now = now or timezone.now()
@@ -768,7 +772,6 @@ class EmailIngestionService:
                 owner_worker_id
                 and owner_worker_id != current_worker_id
                 and handoff_elapsed
-                and task_id not in observed_task_ids
             )
             legacy_orphan = bool(
                 not owner_worker_id

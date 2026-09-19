@@ -37,7 +37,7 @@ class EmailRecoveryTests(TestCase):
         self.assertIsNone(Ingestion.claim(run.id))
 
     @override_settings(EMAIL_INGESTION_ENABLED=True)
-    @patch.object(Ingestion, '_observed_task_ids', return_value=set())
+    @patch.object(Ingestion, '_observed_task_ids', return_value={'old-task'})
     @patch('microsoft.services.email_ingestion.cache.get')
     @patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'old-deploy'})
     def test_reconcile_recovers_live_lease_from_replaced_worker(self, cache_get, _observed):

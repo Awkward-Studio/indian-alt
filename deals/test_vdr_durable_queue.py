@@ -292,9 +292,11 @@ class DurableVdrQueueTests(TestCase):
             "instance_id": "new-deploy",
             "started_at": timezone.now().timestamp() - 91,
         }
-        snapshot.return_value = {"messages": [], "unacked": {"messages": []}}
-        inspect.return_value.active.return_value = {}
-        inspect.return_value.reserved.return_value = {}
+        # Deployment fencing must not depend on Celery inspection being
+        # available while the broker/worker is restarting.
+        snapshot.return_value = {"warning": "inspection unavailable", "messages": [], "unacked": {"messages": []}}
+        inspect.return_value.active.return_value = None
+        inspect.return_value.reserved.return_value = None
 
         result = vdr_queue.reconcile()
 

@@ -580,6 +580,9 @@ def reconcile() -> dict:
         age = now - heartbeat_time
         hard_stale = age >= timedelta(seconds=int(getattr(settings, "VDR_HARD_STALE_SECONDS", 1800)))
         worker_replaced = bool(
+            # The deployment presence key is the authoritative handoff
+            # signal. Celery inspect can be unavailable while the broker and
+            # workers restart, so replacement recovery must not wait for it.
             metadata.get("queue_state") == "active"
             and owner_worker_id
             and current_worker_id
@@ -587,8 +590,6 @@ def reconcile() -> dict:
             and current_worker_started_at
             and time.time() - current_worker_started_at
             >= int(getattr(settings, "VDR_DEPLOYMENT_HANDOFF_SECONDS", 90))
-            and inspection_available
-            and str(metadata.get("current_task_id") or "") not in observed_task_ids
         )
         missing_after_grace = (
             inspection_available

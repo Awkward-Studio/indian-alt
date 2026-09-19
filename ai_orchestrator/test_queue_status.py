@@ -143,7 +143,7 @@ class QueueStatusEndpointTests(TestCase):
             "warning": None,
         }
 
-        response = self.client.get("/api/ai/history/queue-status/")
+        response = self.client.get("/api/ai/history/queue-status/?diagnostics=1")
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["summary"]["redis_ready"], 1)
@@ -222,6 +222,54 @@ class QueueStatusEndpointTests(TestCase):
         self.assertTrue(group["has_delivery_conflict"])
         self.assertEqual(group["delivery_count"], 2)
         self.assertEqual(sum(child["can_cancel"] for child in group["children"]), 1)
+
+    @patch("ai_orchestrator.views.requests.get")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    @patch("config.celery.app.control.inspect")
+    def test_fast_queue_status_groups_all_recent_task_types_by_deal(
+        self, inspect, snapshot, get_slots,
+    ):
+        deal = Deal.objects.create(title="Ledger Deal")
+        document = DealDocument.objects.create(deal=deal, title="Ledger Deck.pdf")
+        direct = AIAuditLog.objects.create(
+            source_type="competitor_research", source_id=str(deal.id),
+            context_label="Competitor research", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="COMPLETED",
+            is_success=True,
+        )
+        segment = AIAuditLog.objects.create(
+            source_type="document_evidence_segment", source_id=str(document.id),
+            context_label="Document Evidence: Ledger Deck.pdf [1/1]", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="COMPLETED",
+            is_success=True,
+        )
+        ingestion = AIAuditLog.objects.create(
+            source_type="email_ingestion", source_id="email-1",
+            context_label="Email ingestion", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="FAILED",
+            is_success=False, error_message="Stored failure",
+            source_metadata={"match": {"deal_id": str(deal.id)}},
+        )
+        AIAuditLog.objects.create(
+            source_type="public_news_research", source_id="not-a-deal",
+            context_label="Unscoped news", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="COMPLETED",
+            is_success=True,
+        )
+
+        response = self.client.get("/api/ai/history/queue-status/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["services"]["diagnostics_included"])
+        self.assertEqual(response.data["redis"]["messages"], [])
+        self.assertEqual(
+            {item["audit_log_id"] for item in response.data["queue_history"]},
+            {str(direct.id), str(segment.id), str(ingestion.id)},
+        )
+        self.assertTrue(all(item["deal_title"] == "Ledger Deal" for item in response.data["queue_history"]))
+        snapshot.assert_not_called()
+        inspect.assert_not_called()
+        get_slots.assert_not_called()
 
 
 class QueueCancellationEndpointTests(TestCase):
