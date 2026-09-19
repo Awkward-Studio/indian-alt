@@ -798,14 +798,22 @@ class EmailIngestionService:
                 }
                 run.save()
                 if previous_task_id:
-                    AIAuditLog.objects.filter(
+                    superseded_segments = AIAuditLog.objects.filter(
                         source_type='document_evidence_segment',
                         celery_task_id=previous_task_id,
                         status__in=['PENDING', 'PROCESSING'],
-                    ).update(
+                    )
+                    superseded_ids = list(superseded_segments.values_list('id', flat=True))
+                    superseded_segments.update(
                         status='FAILED', is_success=False, completed_at=now,
                         error_message='Inference workflow was superseded after worker redeploy.',
                     )
+                    if superseded_ids:
+                        from ai_orchestrator.services.inference_queue import InferenceQueueLease
+                        transaction.on_commit(
+                            lambda audit_ids=tuple(superseded_ids):
+                            InferenceQueueLease.release_for_audits(audit_ids)
+                        )
                 cls._sync_audit_log(run)
                 recovered += 1
         return recovered

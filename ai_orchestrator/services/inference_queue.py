@@ -156,6 +156,41 @@ class InferenceQueueLease:
         except Exception:
             return False
 
+    @classmethod
+    def release_for_audits(cls, audit_log_ids) -> bool:
+        """Release the lease only when one of the supplied audits owns it."""
+        audit_ids = {str(value) for value in audit_log_ids if value}
+        if not audit_ids:
+            return False
+        try:
+            owner = cache.get(cls.KEY)
+            if (
+                not isinstance(owner, dict)
+                or str(owner.get("audit_log_id") or "") not in audit_ids
+            ):
+                return False
+            backend = getattr(cache, "client", None)
+            if backend is not None:
+                client = backend.get_client(write=True)
+                script = (
+                    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                    "return redis.call('del', KEYS[1]) else return 0 end"
+                )
+                return bool(
+                    client.eval(
+                        script,
+                        1,
+                        cache.make_key(cls.KEY),
+                        backend.encode(owner),
+                    )
+                )
+            current = cache.get(cls.KEY)
+            if current == owner:
+                return bool(cache.delete(cls.KEY))
+        except Exception:
+            return False
+        return False
+
     def __enter__(self) -> "InferenceQueueLease":
         self.wait_started_at = timezone.now()
         self._update_audit(

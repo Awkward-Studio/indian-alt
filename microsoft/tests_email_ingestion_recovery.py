@@ -58,8 +58,11 @@ class EmailRecoveryTests(TestCase):
             'started_at': timezone.now().timestamp() - 91,
         }
 
-        with patch.object(Ingestion, 'dispatch') as dispatch:
-            recovered = Ingestion.reconcile()
+        from ai_orchestrator.services.inference_queue import InferenceQueueLease
+        with patch.object(Ingestion, 'dispatch') as dispatch, \
+                patch.object(InferenceQueueLease, 'release_for_audits') as release_lease:
+            with self.captureOnCommitCallbacks(execute=True):
+                recovered = Ingestion.reconcile()
 
         claimed.refresh_from_db()
         segment.refresh_from_db()
@@ -68,6 +71,7 @@ class EmailRecoveryTests(TestCase):
         self.assertIsNone(claimed.lease_until)
         self.assertEqual(claimed.source['_deployment_recovery_count'], 1)
         self.assertEqual(segment.status, 'FAILED')
+        release_lease.assert_called_once_with((segment.id,))
         dispatch.assert_called_once_with(claimed.id)
 
     @override_settings(EMAIL_INGESTION_ENABLED=True)

@@ -532,6 +532,45 @@ def _finish_job(audit_log_id: str) -> None:
     kick()
 
 
+def _retire_superseded_inference_children(
+    *, parent_audit_id: str, dispatch_generation: int, now,
+) -> list[str]:
+    """Fence child model requests left behind by an abandoned VDR delivery."""
+    from ai_orchestrator.models import AIAuditLog
+
+    retired_ids = []
+    children = AIAuditLog.objects.select_for_update().filter(
+        status__in=ACTIVE_STATUSES,
+        source_metadata__vdr_parent_audit_id=str(parent_audit_id),
+    )
+    for child in children:
+        child_metadata = dict(child.source_metadata or {})
+        try:
+            child_generation = int(child_metadata.get("vdr_dispatch_generation"))
+        except (TypeError, ValueError):
+            continue
+        # A previous recovery may already have advanced the parent while an
+        # even older child kept the Redis lease. Every generation through the
+        # abandoned delivery is fenced by the replacement generation.
+        if child_generation > int(dispatch_generation):
+            continue
+        child.status = "FAILED"
+        child.is_success = False
+        child.error_message = "Inference request was superseded during VDR delivery recovery."
+        child.completed_at = now
+        child.source_metadata = {
+            **child_metadata,
+            "inference_state": "superseded",
+            "inference_failure_kind": "vdr_delivery_recovery",
+            "inference_finished_at": now.isoformat(),
+        }
+        child.save(update_fields=[
+            "status", "is_success", "error_message", "completed_at", "source_metadata",
+        ])
+        retired_ids.append(str(child.id))
+    return retired_ids
+
+
 def reconcile() -> dict:
     """Recover abandoned ownership and ensure queued DB work has a dispatcher."""
     from ai_orchestrator.models import AIAuditLog
@@ -601,6 +640,12 @@ def reconcile() -> dict:
         with transaction.atomic():
             audit = AIAuditLog.objects.select_for_update().get(id=candidate.id)
             metadata = dict(audit.source_metadata or {})
+            abandoned_generation = int(metadata.get("dispatch_generation") or 0)
+            retired_inference_ids = _retire_superseded_inference_children(
+                parent_audit_id=str(audit.id),
+                dispatch_generation=abandoned_generation,
+                now=now,
+            )
             recoveries = int(metadata.get("recovery_count") or 0) + (0 if worker_replaced else 1)
             if recoveries > int(metadata.get("max_recoveries") or 3):
                 audit.status = "FAILED"
@@ -636,5 +681,11 @@ def reconcile() -> dict:
             transaction.on_commit(lambda audit_id=str(audit.id), done=audit.status == "FAILED": _broadcast(
                 audit_id, done=done,
             ))
+            if retired_inference_ids:
+                from ai_orchestrator.services.inference_queue import InferenceQueueLease
+                transaction.on_commit(
+                    lambda audit_ids=tuple(retired_inference_ids):
+                    InferenceQueueLease.release_for_audits(audit_ids)
+                )
     kick()
     return {"recovered": recovered, "failed": failed}

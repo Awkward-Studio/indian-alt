@@ -288,6 +288,28 @@ class DurableVdrQueueTests(TestCase):
         audit.status = "PROCESSING"
         audit.source_metadata = metadata
         audit.save()
+        older_segment = AIAuditLog.objects.create(
+            source_type="document_evidence_segment", source_id="document-a",
+            context_label="Document Evidence: a.pdf [1/1]", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "vdr_parent_audit_id": str(audit.id),
+                "vdr_dispatch_generation": 1,
+                "inference_state": "processing",
+            },
+        )
+        segment = AIAuditLog.objects.create(
+            source_type="document_evidence_segment", source_id="document-a",
+            context_label="Document Evidence: a.pdf [1/1]", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "vdr_parent_audit_id": str(audit.id),
+                "vdr_dispatch_generation": 2,
+                "inference_state": "processing",
+            },
+        )
         cache_get.return_value = {
             "instance_id": "new-deploy",
             "started_at": timezone.now().timestamp() - 91,
@@ -298,14 +320,27 @@ class DurableVdrQueueTests(TestCase):
         inspect.return_value.active.return_value = None
         inspect.return_value.reserved.return_value = None
 
-        result = vdr_queue.reconcile()
+        from ai_orchestrator.services.inference_queue import InferenceQueueLease
+        with patch.object(InferenceQueueLease, "release_for_audits") as release_lease:
+            with self.captureOnCommitCallbacks(execute=True):
+                result = vdr_queue.reconcile()
 
         audit.refresh_from_db()
+        older_segment.refresh_from_db()
+        segment.refresh_from_db()
         self.assertEqual(result["recovered"], 1)
         self.assertEqual(audit.source_metadata["queue_state"], "recovering")
         self.assertEqual(audit.source_metadata["recovery_count"], 2)
         self.assertEqual(audit.source_metadata["deployment_recovery_count"], 1)
         self.assertIsNone(audit.source_metadata["worker_instance_id"])
+        self.assertEqual(segment.status, "FAILED")
+        self.assertEqual(older_segment.status, "FAILED")
+        self.assertEqual(segment.source_metadata["inference_state"], "superseded")
+        release_lease.assert_called_once()
+        self.assertCountEqual(
+            release_lease.call_args.args[0],
+            (str(older_segment.id), str(segment.id)),
+        )
 
     @patch("deals.services.vdr_queue.kick")
     @patch("config.celery.app.control.inspect")

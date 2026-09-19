@@ -367,6 +367,18 @@ class SegmentPersistenceTests(TestCase):
         self.assertNotIn("error", self.run_segment())
         self.assertIsNone(cache.get(InferenceQueueLease.KEY))
 
+    def test_recovery_releases_only_the_named_audit_lease(self):
+        from django.core.cache import cache
+        from ai_orchestrator.services.inference_queue import InferenceQueueLease
+
+        owner = {"audit_log_id": str(self.audit.pk), "lease_token": "owner-token"}
+        cache.set(InferenceQueueLease.KEY, owner)
+
+        self.assertFalse(InferenceQueueLease.release_for_audits(["different-audit"]))
+        self.assertEqual(cache.get(InferenceQueueLease.KEY), owner)
+        self.assertTrue(InferenceQueueLease.release_for_audits([self.audit.pk]))
+        self.assertIsNone(cache.get(InferenceQueueLease.KEY))
+
     def test_completed_audit_recovers_checkpoint_without_another_model_request(self):
         from ai_orchestrator.models import AIAuditLog
         from deals.services.document_artifacts import DocumentArtifactService
