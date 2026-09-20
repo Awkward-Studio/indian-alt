@@ -58,6 +58,47 @@ COMPETITOR_RESEARCH_LOCK_SECONDS = 45 * 60
 COMPANY_NEWS_RESEARCH_LOCK_SECONDS = 15 * 60
 
 
+def _folder_scan_batch_payload(audit):
+    if not audit:
+        return {
+            "batch_id": None,
+            "status": "idle",
+            "queue_state": "idle",
+            "queued_count": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "files_found": 0,
+            "readable_files_found": 0,
+            "progress_percent": 0,
+            "started_at": None,
+            "completed_at": None,
+            "failures": [],
+        }
+    metadata = audit.source_metadata or {}
+    total = int(metadata.get("queued_count") or 0)
+    completed = int(metadata.get("completed_count") or 0)
+    failed = int(metadata.get("failed_count") or 0)
+    skipped = int(metadata.get("skipped_count") or 0)
+    processed = completed + failed + skipped
+    return {
+        "batch_id": str(audit.id),
+        "status": str(audit.status or "PENDING").lower(),
+        "queue_state": metadata.get("queue_state") or "queued",
+        "queued_count": total,
+        "completed_count": completed,
+        "failed_count": failed,
+        "skipped_count": skipped,
+        "files_found": int(metadata.get("files_found") or 0),
+        "readable_files_found": int(metadata.get("readable_files_found") or 0),
+        "progress_percent": round((processed / total) * 100) if total else (100 if audit.completed_at else 0),
+        "current_deal": metadata.get("current_deal"),
+        "started_at": metadata.get("started_at") or audit.created_at.isoformat(),
+        "completed_at": audit.completed_at.isoformat() if audit.completed_at else None,
+        "failures": metadata.get("failures") or [],
+    }
+
+
 def _competitor_research_cache_key(deal_id):
     return f"deal:{deal_id}:competitor-research-task"
 
@@ -1120,29 +1161,73 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'missing_documents': serialize(missing_documents),
         })
 
-    @action(detail=False, methods=['post'], url_path='scan-linked-folders')
+    @action(detail=False, methods=['get', 'post'], url_path='scan-linked-folders')
     def scan_linked_folders(self, request):
-        """Queue a fresh OneDrive tree scan for every linked deal folder."""
+        """Start or inspect a read-only OneDrive count refresh for linked deals."""
         from deals.tasks import rescan_linked_deal_folder_async
 
-        linked_ids = list(
+        active = AIAuditLog.objects.filter(
+            source_type="linked_folder_scan_batch",
+            status__in=["PENDING", "PROCESSING"],
+        ).order_by("-created_at").first()
+        if request.method == "GET":
+            latest = active or AIAuditLog.objects.filter(
+                source_type="linked_folder_scan_batch",
+            ).order_by("-created_at").first()
+            return Response(_folder_scan_batch_payload(latest))
+        if active:
+            payload = _folder_scan_batch_payload(active)
+            payload["message"] = "A linked-folder scan is already running."
+            return Response(payload, status=status.HTTP_200_OK)
+
+        linked_deals = list(
             Deal.objects.exclude(source_onedrive_id__isnull=True)
             .exclude(source_onedrive_id='')
             .exclude(source_drive_id__isnull=True)
             .exclude(source_drive_id='')
-            .values_list('id', flat=True)
+            .values('id', 'title')
         )
-        for deal_id in linked_ids:
-            rescan_linked_deal_folder_async.apply_async(
-                kwargs={'deal_id': str(deal_id)},
-                queue='low_priority',
-            )
+        now = timezone.now()
+        batch = AIRuntimeService.create_audit_log(
+            source_type="linked_folder_scan_batch",
+            source_id=None,
+            context_label="Linked OneDrive folder count refresh",
+            status="PENDING" if linked_deals else "COMPLETED",
+            is_success=not linked_deals,
+            model_used="onedrive-folder-scan",
+            system_prompt="Refresh file counts for every linked OneDrive deal folder without running VDR processing.",
+            user_prompt=f"Scan {len(linked_deals)} linked deal folders.",
+            requested_by=request.user,
+            source_metadata={
+                "queue_state": "queued" if linked_deals else "completed",
+                "queued_count": len(linked_deals),
+                "completed_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "files_found": 0,
+                "readable_files_found": 0,
+                "started_at": now.isoformat(),
+                "last_progress_at": now.isoformat(),
+                "failures": [],
+                "scan_mode": "counts_only",
+            },
+        )
+        if not linked_deals:
+            batch.completed_at = now
+            batch.save(update_fields=["completed_at"])
+        else:
+            for item in linked_deals:
+                rescan_linked_deal_folder_async.apply_async(
+                    kwargs={
+                        'deal_id': str(item['id']),
+                        'batch_audit_id': str(batch.id),
+                    },
+                    queue='low_priority',
+                )
 
-        return Response({
-            'status': 'queued',
-            'queued_count': len(linked_ids),
-            'message': f'Queued scans for {len(linked_ids)} linked deal folders.',
-        }, status=status.HTTP_202_ACCEPTED)
+        payload = _folder_scan_batch_payload(batch)
+        payload["message"] = f"Queued count refreshes for {len(linked_deals)} linked deal folders."
+        return Response(payload, status=status.HTTP_202_ACCEPTED)
 
     def get_serializer_class(self):
         # Use lightweight serializer for list views to reduce payload size

@@ -5,8 +5,10 @@ from rest_framework.test import APIClient
 from unittest.mock import patch
 
 from accounts.models import Profile
+from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from deals.models import Deal, DealDocument
+from deals.tasks import rescan_linked_deal_folder_async
 
 
 class DocumentGapQueueTests(TestCase):
@@ -97,10 +99,97 @@ class DocumentGapQueueTests(TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["queued_count"], 1)
+        batch = AIAuditLog.objects.get(id=response.json()["batch_id"])
+        self.assertEqual(batch.source_metadata["scan_mode"], "counts_only")
         apply_async.assert_called_once_with(
-            kwargs={"deal_id": str(linked.id)},
+            kwargs={"deal_id": str(linked.id), "batch_audit_id": str(batch.id)},
             queue="low_priority",
         )
+
+    @patch("deals.tasks.rescan_linked_deal_folder_async.apply_async")
+    def test_scan_linked_folders_reuses_active_batch(self, apply_async):
+        Deal.objects.create(
+            title="Linked", source_onedrive_id="folder-1", source_drive_id="drive-1"
+        )
+        first = self.client.post(reverse("deal-scan-linked-folders"))
+        second = self.client.post(reverse("deal-scan-linked-folders"))
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["batch_id"], first.json()["batch_id"])
+        self.assertEqual(apply_async.call_count, 1)
+
+    def test_scan_linked_folders_get_returns_latest_progress(self):
+        audit = AIAuditLog.objects.create(
+            source_type="linked_folder_scan_batch",
+            source_id=None,
+            context_label="Folder scan",
+            model_used="onedrive-folder-scan",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "queue_state": "scanning",
+                "queued_count": 4,
+                "completed_count": 2,
+                "failed_count": 1,
+                "skipped_count": 0,
+                "files_found": 12,
+                "readable_files_found": 9,
+            },
+        )
+
+        response = self.client.get(reverse("deal-scan-linked-folders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["batch_id"], str(audit.id))
+        self.assertEqual(response.json()["progress_percent"], 75)
+        self.assertEqual(response.json()["readable_files_found"], 9)
+
+    @patch("deals.services.folder_analysis.FolderAnalysisService._enqueue_vdr_processing")
+    @patch("deals.services.folder_analysis.FolderAnalysisService.persist_folder_tree")
+    def test_folder_scan_updates_counts_and_batch_without_queuing_vdr(
+        self, persist_folder_tree, enqueue_vdr
+    ):
+        persist_folder_tree.return_value = 7
+        deal = Deal.objects.create(
+            title="Counts only",
+            source_onedrive_id="folder-1",
+            source_drive_id="drive-1",
+            folder_readable_file_count=5,
+        )
+        batch = AIAuditLog.objects.create(
+            source_type="linked_folder_scan_batch",
+            source_id=None,
+            context_label="Folder scan",
+            model_used="onedrive-folder-scan",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PENDING",
+            is_success=False,
+            source_metadata={
+                "queue_state": "queued",
+                "queued_count": 1,
+                "completed_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "files_found": 0,
+                "readable_files_found": 0,
+            },
+        )
+
+        result = rescan_linked_deal_folder_async.run(str(deal.id), str(batch.id))
+
+        self.assertEqual(result["status"], "completed")
+        enqueue_vdr.assert_not_called()
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, "COMPLETED")
+        self.assertEqual(batch.source_metadata["completed_count"], 1)
+        self.assertEqual(batch.source_metadata["files_found"], 7)
+        self.assertEqual(batch.source_metadata["readable_files_found"], 5)
 
     def test_returns_every_missing_folder_with_dialog_metadata(self):
         Deal.objects.bulk_create([

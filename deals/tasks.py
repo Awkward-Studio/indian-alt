@@ -2661,8 +2661,64 @@ def prepare_linked_folder_vdr_async(
         raise
 
 
+def _record_linked_folder_scan_result(
+    batch_audit_id: str | None,
+    *,
+    outcome: str,
+    deal_id: str,
+    deal_title: str = "",
+    file_count: int = 0,
+    readable_file_count: int = 0,
+    error: str = "",
+) -> None:
+    """Atomically advance one counts-only linked-folder scan batch."""
+    if not batch_audit_id:
+        return
+    from ai_orchestrator.models import AIAuditLog
+
+    with transaction.atomic():
+        batch = AIAuditLog.objects.select_for_update().filter(id=batch_audit_id).first()
+        if not batch or batch.status in {"COMPLETED", "FAILED"}:
+            return
+        metadata = dict(batch.source_metadata or {})
+        counter = {
+            "completed": "completed_count",
+            "failed": "failed_count",
+            "skipped": "skipped_count",
+        }[outcome]
+        metadata[counter] = int(metadata.get(counter) or 0) + 1
+        metadata["files_found"] = int(metadata.get("files_found") or 0) + int(file_count or 0)
+        metadata["readable_files_found"] = int(metadata.get("readable_files_found") or 0) + int(
+            readable_file_count or 0
+        )
+        metadata["current_deal"] = deal_title or deal_id
+        metadata["last_progress_at"] = timezone.now().isoformat()
+        if error:
+            failures = list(metadata.get("failures") or [])
+            failures.append({"deal_id": deal_id, "deal_title": deal_title, "error": error})
+            metadata["failures"] = failures[-25:]
+        total = int(metadata.get("queued_count") or 0)
+        processed = sum(int(metadata.get(key) or 0) for key in (
+            "completed_count", "failed_count", "skipped_count",
+        ))
+        done = processed >= total
+        metadata["queue_state"] = (
+            "completed_with_errors" if done and int(metadata.get("failed_count") or 0) else
+            "completed" if done else "scanning"
+        )
+        batch.status = "COMPLETED" if done else "PROCESSING"
+        batch.is_success = done and not int(metadata.get("failed_count") or 0)
+        batch.completed_at = timezone.now() if done else None
+        batch.source_metadata = metadata
+        batch.save(update_fields=["status", "is_success", "completed_at", "source_metadata"])
+
+
 @shared_task(bind=True, max_retries=2)
-def rescan_linked_deal_folder_async(self, deal_id: str):
+def rescan_linked_deal_folder_async(
+    self,
+    deal_id: str,
+    batch_audit_id: str | None = None,
+):
     """Refresh one linked deal's persisted OneDrive tree without running VDR analysis."""
     from deals.services.folder_analysis import FolderAnalysisService
     from microsoft.services.graph_service import DMS_USER_EMAIL
@@ -2670,6 +2726,9 @@ def rescan_linked_deal_folder_async(self, deal_id: str):
     try:
         deal = Deal.objects.get(id=deal_id)
         if not deal.source_onedrive_id or not deal.source_drive_id:
+            _record_linked_folder_scan_result(
+                batch_audit_id, outcome="skipped", deal_id=deal_id, deal_title=deal.title or "",
+            )
             return {"status": "skipped", "reason": "folder_not_linked"}
 
         file_count = FolderAnalysisService.persist_folder_tree(
@@ -2678,16 +2737,35 @@ def rescan_linked_deal_folder_async(self, deal_id: str):
             drive_id=deal.source_drive_id,
             user_email=DMS_USER_EMAIL,
         )
+        deal.refresh_from_db(fields=["folder_readable_file_count"])
+        _record_linked_folder_scan_result(
+            batch_audit_id,
+            outcome="completed",
+            deal_id=deal_id,
+            deal_title=deal.title or "",
+            file_count=file_count,
+            readable_file_count=deal.folder_readable_file_count or 0,
+        )
         return {
             "status": "completed",
             "deal_id": str(deal.id),
             "file_count": file_count,
         }
     except Deal.DoesNotExist:
+        _record_linked_folder_scan_result(
+            batch_audit_id, outcome="skipped", deal_id=deal_id,
+        )
         return {"status": "skipped", "reason": "deal_not_found"}
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=min(60, 10 * (2 ** self.request.retries)))
+        _record_linked_folder_scan_result(
+            batch_audit_id,
+            outcome="failed",
+            deal_id=deal_id,
+            deal_title=locals().get("deal").title if locals().get("deal") else "",
+            error=str(exc),
+        )
         raise
 
 @shared_task(bind=True)
