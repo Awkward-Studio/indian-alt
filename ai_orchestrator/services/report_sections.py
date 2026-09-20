@@ -16,8 +16,12 @@ from ai_orchestrator.services.bulk_prompt_contracts import IC_REPORT_SECTION_STA
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 
 
+class ReportSectionValidationError(ValueError):
+    """A deterministic model-output validation failure that should not be retried unchanged."""
+
+
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v5"
+    CACHE_VERSION = "ic-report-sections-v6"
     INTERNAL_CITATION_PATTERN = re.compile(
         r"\[(?:Evidence\s+(?P<evidence>\d+)|R0*(?P<rank>\d+))"
         r"(?:@(?P<locator>[^\]\n]+))?\]"
@@ -27,6 +31,11 @@ class ICReportSectionService:
     SPREADSHEET_LOCATOR_PATTERN = re.compile(
         r"^(?:(?:'(?P<quoted_sheet>(?:[^']|'')+)'|(?P<sheet>[^!]+))!)?"
         r"(?P<start>[A-Za-z]{1,4}[1-9]\d*)(?::(?P<end>[A-Za-z]{1,4}[1-9]\d*))?$"
+    )
+    CITATION_CLUSTER_PATTERN = re.compile(
+        r"\[(?P<items>(?:Evidence\s+\d+|R0*\d+)"
+        r"(?:\s*[,;|]\s*(?:Evidence\s+\d+|R0*\d+))+)]",
+        flags=re.IGNORECASE,
     )
 
     @classmethod
@@ -165,7 +174,11 @@ class ICReportSectionService:
 
     @staticmethod
     def _strip_model_references(text: str) -> str:
-        heading = re.search(r"^###\s+References\s*$", text, flags=re.MULTILINE | re.IGNORECASE)
+        heading = re.search(
+            r"^###\s+(?:References|Citations)\s*$",
+            text,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
         return text[:heading.start()].rstrip() if heading else text.rstrip()
 
     @staticmethod
@@ -198,6 +211,17 @@ class ICReportSectionService:
     def _replace_internal_citations(cls, text: str, citations: dict | None) -> tuple[str, list[dict]]:
         citation_map = citations or {}
         used: list[dict] = []
+        citation_numbers: dict[tuple[str, str, str], int] = {}
+
+        # Expand multi-rank clusters first so each rank can be resolved or
+        # removed independently without leaving malformed nested brackets.
+        text = cls.CITATION_CLUSTER_PATTERN.sub(
+            lambda match: ", ".join(
+                f"[{item.strip()}]"
+                for item in re.split(r"\s*[,;|]\s*", match.group("items"))
+            ),
+            text,
+        )
 
         def replace(match: re.Match) -> str:
             rank = (
@@ -208,7 +232,10 @@ class ICReportSectionService:
             )
             citation = citation_map.get(str(int(rank))) if rank else None
             if not isinstance(citation, dict):
-                return match.group(0)
+                # When a retrieval map exists, an unknown rank is a model-only
+                # marker. Omit it instead of linking it to an unrelated source
+                # or rerunning the same deterministic request.
+                return "" if citation_map else match.group(0)
             requested_locator = str(match.group("locator") or "").strip()
             resolved_location = (
                 cls._validated_spreadsheet_location(requested_locator, citation)
@@ -216,48 +243,46 @@ class ICReportSectionService:
             )
             used_citation = dict(citation)
             used_citation["used_location"] = resolved_location or str(citation.get("location") or "")
-            used.append(used_citation)
-            return cls._render_inline_citation(
-                citation,
-                location=used_citation["used_location"],
+            identity = (
+                str(citation.get("document_id") or citation.get("title") or ""),
+                str(citation.get("url") or ""),
+                used_citation["used_location"],
             )
+            number = citation_numbers.get(identity)
+            if number is None:
+                number = len(used) + 1
+                citation_numbers[identity] = number
+                used_citation["citation_number"] = number
+                used.append(used_citation)
+            return f"[{number}]"
 
         rendered = cls.INTERNAL_CITATION_PATTERN.sub(replace, text)
-        # Models sometimes emit the same marker several times in one citation
-        # cluster (for example ``[R001, R001]``). Keep one readable citation
-        # while preserving repetitions that are separated by substantive text.
-        for item in used:
-            label = cls._render_inline_citation(item, location=item.get("used_location") or "")
-            repeated = re.compile(
-                rf"({re.escape(label)})(?:\s*(?:[,;|]\s*)\1)+"
-            )
-            rendered = repeated.sub(r"\1", rendered)
+        # Collapse a repeated marker within one citation cluster while keeping
+        # repetitions attached to separate claims intact.
+        rendered = re.sub(r"(\[\d+])(\s*(?:[,;|]\s*)\1)+", r"\1", rendered)
+        if citation_map:
+            rendered = re.sub(r"\[\s*(?:[,;|]\s*)*]", "", rendered)
+            rendered = re.sub(r"\s+([,.;:])", r"\1", rendered)
+            rendered = re.sub(r"([,;|])(?:\s*[,;|])+", r"\1", rendered)
+            rendered = re.sub(r"[,;|]\s*([.?!])", r"\1", rendered)
         return rendered, used
 
-    @staticmethod
-    def _append_references(text: str, citations: dict | None, used: list[dict]) -> str:
-        candidates = used
-        documents: dict[str, dict] = {}
-        for item in candidates:
-            document_key = str(item.get("document_id") or item.get("title") or "")
-            if not document_key:
-                continue
-            entry = documents.setdefault(document_key, {"citation": item, "locations": []})
-            location = str(item.get("used_location") or item.get("location") or "").strip()
-            if location and location not in entry["locations"]:
-                entry["locations"].append(location)
+    @classmethod
+    def _append_references(cls, text: str, citations: dict | None, used: list[dict]) -> str:
         references = []
-        for entry in documents.values():
-            item = entry["citation"]
-            reference = str(item.get("reference") or item.get("title") or "").strip()
-            if not reference:
+        for item in used:
+            if not str(item.get("document_id") or item.get("title") or "").strip():
                 continue
-            locations = entry["locations"]
-            location_note = f"; cited at {'; '.join(locations)}" if locations else ""
-            references.append(f"- {reference}{location_note}")
+            location = str(item.get("used_location") or item.get("location") or "").strip()
+            reference = cls._render_inline_citation(item, location=location)
+            location_note = f"; cited at {location}" if location else ""
+            references.append(
+                f"{int(item.get('citation_number') or len(references) + 1)}. "
+                f"{reference}{location_note}"
+            )
         if not references:
             return text
-        return text.rstrip() + "\n\n### References\n\n" + "\n".join(references)
+        return text.rstrip() + "\n\n### Citations\n\n" + "\n".join(references)
 
     @classmethod
     def _normalize_section(
@@ -282,27 +307,27 @@ class ICReportSectionService:
         text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
         if citations and not used_citations:
-            raise ValueError(
+            raise ReportSectionValidationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
             )
         text = cls._append_references(text, citations, used_citations)
         body = text[len(target):].strip()
         if len(body) < 40:
-            raise ValueError(f"Report section '{title}' was empty or incomplete.")
+            raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
         unresolved = cls.INTERNAL_CITATION_PATTERN.search(body)
         if unresolved:
-            raise ValueError(
+            raise ReportSectionValidationError(
                 f"Report section '{title}' returned unresolved internal citation "
                 f"'{unresolved.group(0)}'."
             )
         unverified_links = cls._unverified_links(body, citations)
         if unverified_links:
-            raise ValueError(
+            raise ReportSectionValidationError(
                 f"Report section '{title}' returned an unverified source link."
             )
         word_count = len(re.findall(r"\b\w+\b", body))
         if minimum_words and word_count < minimum_words:
-            raise ValueError(
+            raise ReportSectionValidationError(
                 f"Report section '{title}' was too short: {word_count} words; "
                 f"minimum is {minimum_words}."
             )

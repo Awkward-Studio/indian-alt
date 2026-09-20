@@ -509,7 +509,10 @@ def _finish_job(audit_log_id: str) -> None:
     audit.is_success = not failed
     audit.completed_at = timezone.now()
     from deals.services.vdr_failures import vdr_failure_message
-    audit.error_message = vdr_failure_message(failed)
+    audit.error_message = vdr_failure_message(
+        failed,
+        item_kind="report section" if metadata.get("queue_kind") == "report" else "document",
+    )
     audit.source_metadata = {
         **metadata, "queue_state": "failed" if failed else "completed",
         "processed_count": sum(item.get("status") == "completed" for item in manifest),

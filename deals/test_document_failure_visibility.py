@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.serializers import AIAuditLogSerializer
@@ -72,3 +72,16 @@ class DocumentFailureVisibilityTests(TestCase):
 
         self.assertIn("First.doc: Conversion failed", message)
         self.assertIn("Second.xls: Workbook is encrypted", message)
+
+
+class VDRFailureMessageTests(SimpleTestCase):
+    def test_report_failure_message_uses_section_titles(self):
+        message = vdr_failure_message(
+            [{"title": "Key Financials", "error": "No verifiable citations."}],
+            item_kind="report section",
+        )
+
+        self.assertEqual(
+            message,
+            "1 VDR report section failed. Key Financials: No verifiable citations.",
+        )

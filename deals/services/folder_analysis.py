@@ -101,6 +101,18 @@ class FolderAnalysisService:
             max_depth=None,
             strict=True,
         )
+
+        from ai_orchestrator.services.document_processor import DocumentProcessorService
+
+        supported_extensions = tuple(
+            extension.lower() for extension in DocumentProcessorService.SUPPORTED_EXTENSIONS
+        )
+        readable_file_count = sum(
+            1
+            for item in file_tree
+            if isinstance(item, dict)
+            and str(item.get("name") or "").lower().endswith(supported_extensions)
+        )
         
         # 2. Persist in Audit Log so serializers can find it
         AIAuditLog.objects.create(
@@ -120,6 +132,15 @@ class FolderAnalysisService:
                 "workflow_stage": "traversal_complete"
             }
         )
+        scanned_at = timezone.now()
+        Deal.objects.filter(pk=deal.pk).update(
+            folder_file_count=len(file_tree),
+            folder_readable_file_count=readable_file_count,
+            folder_last_scanned_at=scanned_at,
+        )
+        deal.folder_file_count = len(file_tree)
+        deal.folder_readable_file_count = readable_file_count
+        deal.folder_last_scanned_at = scanned_at
         return len(file_tree)
 
     @staticmethod

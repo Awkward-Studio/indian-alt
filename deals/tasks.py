@@ -2067,7 +2067,10 @@ def process_vdr_report_section(
     """Generate exactly one canonical report section for a durable VDR job."""
     from ai_orchestrator.models import AIAuditLog
     from ai_orchestrator.services.ai_processor import AIProcessorService
-    from ai_orchestrator.services.report_sections import ICReportSectionService
+    from ai_orchestrator.services.report_sections import (
+        ICReportSectionService,
+        ReportSectionValidationError,
+    )
     from deals.services.vdr_queue import delivery_is_current, heartbeat, start_heartbeat
 
     task_id = str(self.request.id)
@@ -2109,6 +2112,8 @@ def process_vdr_report_section(
             force_regenerate=bool((audit.source_metadata or {}).get("force_regenerate")),
         )
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
+    except ReportSectionValidationError as exc:
+        return {"status": "failed", "error": str(exc)}
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
@@ -2639,6 +2644,36 @@ def prepare_linked_folder_vdr_async(
             processing_status="failed",
             processing_error=f"Folder preparation failed: {exc}",
         )
+        raise
+
+
+@shared_task(bind=True, max_retries=2)
+def rescan_linked_deal_folder_async(self, deal_id: str):
+    """Refresh one linked deal's persisted OneDrive tree without running VDR analysis."""
+    from deals.services.folder_analysis import FolderAnalysisService
+    from microsoft.services.graph_service import DMS_USER_EMAIL
+
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        if not deal.source_onedrive_id or not deal.source_drive_id:
+            return {"status": "skipped", "reason": "folder_not_linked"}
+
+        file_count = FolderAnalysisService.persist_folder_tree(
+            deal=deal,
+            folder_id=deal.source_onedrive_id,
+            drive_id=deal.source_drive_id,
+            user_email=DMS_USER_EMAIL,
+        )
+        return {
+            "status": "completed",
+            "deal_id": str(deal.id),
+            "file_count": file_count,
+        }
+    except Deal.DoesNotExist:
+        return {"status": "skipped", "reason": "deal_not_found"}
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=min(60, 10 * (2 ** self.request.retries)))
         raise
 
 @shared_task(bind=True)

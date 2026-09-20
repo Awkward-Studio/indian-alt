@@ -4,7 +4,10 @@ from django.test import SimpleTestCase, TestCase, override_settings
 
 from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLES
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
-from ai_orchestrator.services.report_sections import ICReportSectionService
+from ai_orchestrator.services.report_sections import (
+    ICReportSectionService,
+    ReportSectionValidationError,
+)
 
 
 class CitationNormalizationTests(SimpleTestCase):
@@ -19,12 +22,44 @@ class CitationNormalizationTests(SimpleTestCase):
             {"1": citation, "2": citation},
         )
 
-        self.assertEqual(len(used), 3)
-        self.assertEqual(rendered.count("Source: Longway investment email"), 1)
-        self.assertEqual(
-            rendered,
-            "Revenue is INR 175 crore **[Source: Longway investment email]**.",
+        self.assertEqual(len(used), 1)
+        self.assertEqual(rendered, "Revenue is INR 175 crore [1].")
+
+    def test_unknown_rank_is_removed_without_discarding_verified_cluster_citation(self):
+        citation = {
+            "document_id": "doc-1",
+            "title": "Investment memo.pdf",
+            "url": "https://contoso.example/investment-memo.pdf",
+            "reference": "[Investment memo.pdf](<https://contoso.example/investment-memo.pdf>)",
+        }
+
+        rendered = ICReportSectionService._normalize_section(
+            "Company Details",
+            (
+                "## Company Details\n\n"
+                "The company operates a scaled sourcing platform with verified enterprise demand "
+                "and a growing customer base [R001, R060]."
+            ),
+            citations={"1": citation},
         )
+
+        body, citations = rendered.split("### Citations", 1)
+        self.assertIn("customer base [1].", body)
+        self.assertNotIn("Investment memo.pdf", body)
+        self.assertIn("1. [Investment memo.pdf](<https://contoso.example/investment-memo.pdf>)", citations)
+        self.assertNotIn("R060", rendered)
+        self.assertNotIn("[,", rendered)
+
+    def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
+        with self.assertRaises(ReportSectionValidationError):
+            ICReportSectionService._normalize_section(
+                "Company Details",
+                (
+                    "## Company Details\n\n"
+                    "The company operates a scaled sourcing platform with enterprise demand [R060]."
+                ),
+                citations={"1": {"document_id": "doc-1", "title": "Memo.pdf"}},
+            )
 
 
 class ICReportSectionServiceTests(TestCase):
@@ -238,12 +273,10 @@ class ICReportSectionServiceTests(TestCase):
         )
 
         self.assertNotIn("Evidence 20", section)
-        self.assertIn(
-            f"[Investment Memorandum 2025.pdf, p. 7](<{source_url}>)",
-            section,
-        )
-        self.assertIn("### References", section)
-        self.assertIn(citation["reference"], section)
+        body, citations = section.split("### Citations", 1)
+        self.assertIn("Revenue was INR 100 crore [1].", body)
+        self.assertNotIn("Investment Memorandum", body)
+        self.assertIn(f"1. [Investment Memorandum 2025.pdf, p. 7](<{source_url}>)", citations)
         self.assertIn("cited at p. 7", section)
 
     def test_model_references_are_removed_before_marker_expansion(self):
@@ -277,7 +310,8 @@ class ICReportSectionServiceTests(TestCase):
 
         self.assertNotIn("example.com", section)
         self.assertNotIn("Used for", section)
-        self.assertEqual(section.count("### References"), 1)
+        self.assertEqual(section.count("### Citations"), 1)
+        self.assertEqual(section.count("### References"), 0)
         self.assertEqual(section.count("cited at Revenue!A1:H8"), 1)
 
     def test_spreadsheet_subrange_is_validated_and_rendered(self):
@@ -304,7 +338,10 @@ class ICReportSectionServiceTests(TestCase):
             citations={"42": citation},
         )
 
-        self.assertIn("Project Fit - FM.xlsx, Revenue Build!F42:H42", section)
+        body, citations = section.split("### Citations", 1)
+        self.assertIn("Revenue increased [1].", body)
+        self.assertNotIn("Project Fit - FM.xlsx", body)
+        self.assertIn("Project Fit - FM.xlsx, Revenue Build!F42:H42", citations)
         self.assertIn("cited at Revenue Build!F42:H42", section)
         self.assertIn("activeCell=%27Revenue+Build%27%21F42", section)
 

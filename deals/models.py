@@ -178,6 +178,14 @@ class Deal(models.Model):
         blank=True,
         help_text='The OneDrive/SharePoint Drive ID this deal belongs to'
     )
+    folder_not_available = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='Whether the deal has been confirmed not to have a OneDrive folder'
+    )
+    folder_file_count = models.PositiveIntegerField(null=True, blank=True)
+    folder_readable_file_count = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    folder_last_scanned_at = models.DateTimeField(null=True, blank=True)
     source_email_id = models.CharField(
         max_length=255,
         null=True,

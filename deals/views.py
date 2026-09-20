@@ -1086,12 +1086,18 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='document-gaps')
     def document_gaps(self, request):
-        """Return separate, actionable queues for folder and document gaps."""
-        queryset = Deal.objects.annotate(
-            dashboard_has_documents=Exists(DealDocument.objects.filter(deal_id=OuterRef('pk')))
-        ).order_by('title')
-        missing_folders = queryset.filter(Q(source_onedrive_id__isnull=True) | Q(source_onedrive_id=''))
-        missing_documents = queryset.filter(dashboard_has_documents=False)
+        """Return folder exceptions based on explicit resolution and the latest scan."""
+        queryset = Deal.objects.order_by('title')
+        missing_folders = queryset.filter(folder_not_available=False).filter(
+            Q(source_onedrive_id__isnull=True) | Q(source_onedrive_id='')
+        )
+        missing_documents = (
+            queryset.exclude(source_onedrive_id__isnull=True)
+            .exclude(source_onedrive_id='')
+            .exclude(source_drive_id__isnull=True)
+            .exclude(source_drive_id='')
+            .filter(folder_readable_file_count=0)
+        )
 
         def serialize(items):
             return [
@@ -1113,6 +1119,30 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             'missing_folders': serialize(missing_folders),
             'missing_documents': serialize(missing_documents),
         })
+
+    @action(detail=False, methods=['post'], url_path='scan-linked-folders')
+    def scan_linked_folders(self, request):
+        """Queue a fresh OneDrive tree scan for every linked deal folder."""
+        from deals.tasks import rescan_linked_deal_folder_async
+
+        linked_ids = list(
+            Deal.objects.exclude(source_onedrive_id__isnull=True)
+            .exclude(source_onedrive_id='')
+            .exclude(source_drive_id__isnull=True)
+            .exclude(source_drive_id='')
+            .values_list('id', flat=True)
+        )
+        for deal_id in linked_ids:
+            rescan_linked_deal_folder_async.apply_async(
+                kwargs={'deal_id': str(deal_id)},
+                queue='low_priority',
+            )
+
+        return Response({
+            'status': 'queued',
+            'queued_count': len(linked_ids),
+            'message': f'Queued scans for {len(linked_ids)} linked deal folders.',
+        }, status=status.HTTP_202_ACCEPTED)
 
     def get_serializer_class(self):
         # Use lightweight serializer for list views to reduce payload size
@@ -2076,7 +2106,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             
         deal.source_onedrive_id = folder_id
         deal.source_drive_id = drive_id
-        deal.save(update_fields=['source_onedrive_id', 'source_drive_id'])
+        deal.folder_not_available = False
+        deal.folder_file_count = None
+        deal.folder_readable_file_count = None
+        deal.folder_last_scanned_at = None
+        deal.save(update_fields=[
+            'source_onedrive_id', 'source_drive_id', 'folder_not_available',
+            'folder_file_count', 'folder_readable_file_count', 'folder_last_scanned_at',
+        ])
 
         user_email = DMS_USER_EMAIL
         from deals.tasks import prepare_linked_folder_vdr_async
@@ -2100,6 +2137,23 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             "source_onedrive_id": deal.source_onedrive_id,
             "source_drive_id": deal.source_drive_id,
             "task_id": task.id,
+        })
+
+    @action(detail=True, methods=['post'], url_path='mark-no-folder')
+    def mark_no_folder(self, request, pk=None):
+        """Resolve a missing-folder exception without deleting any deal data."""
+        deal = self.get_object()
+        if deal.source_onedrive_id or deal.source_drive_id:
+            return Response(
+                {"error": "Unlink the connected OneDrive folder before marking this deal as having no folder."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deal.folder_not_available = True
+        deal.save(update_fields=['folder_not_available'])
+        return Response({
+            "status": "completed",
+            "message": "Deal marked as having no OneDrive folder.",
         })
 
     @action(detail=True, methods=['post', 'delete'], url_path='unlink_onedrive')
@@ -2169,9 +2223,17 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         # 3. Reset deal fields
         deal.source_onedrive_id = None
         deal.source_drive_id = None
+        deal.folder_not_available = False
+        deal.folder_file_count = None
+        deal.folder_readable_file_count = None
+        deal.folder_last_scanned_at = None
         deal.processing_status = 'idle'
         deal.processing_error = None
-        deal.save(update_fields=['source_onedrive_id', 'source_drive_id', 'processing_status', 'processing_error'])
+        deal.save(update_fields=[
+            'source_onedrive_id', 'source_drive_id', 'folder_not_available',
+            'folder_file_count', 'folder_readable_file_count', 'folder_last_scanned_at',
+            'processing_status', 'processing_error',
+        ])
 
         return Response({
             'status': 'unlinked',
