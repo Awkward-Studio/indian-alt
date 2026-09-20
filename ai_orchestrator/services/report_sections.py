@@ -329,16 +329,20 @@ class ICReportSectionService:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
             )
-        text = cls._append_references(text, citations, used_citations)
         body = text[len(target):].strip()
-        if len(body) < 40:
-            raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
+        # Check the model-authored body before appending verified references.
+        # Spreadsheet citation locations such as ``Overall PL!R60`` are valid
+        # Excel cells, not unresolved retrieval markers.
         unresolved = cls.INTERNAL_CITATION_PATTERN.search(body)
         if unresolved:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned unresolved internal citation "
                 f"'{unresolved.group(0)}'."
             )
+        text = cls._append_references(text, citations, used_citations)
+        body = text[len(target):].strip()
+        if len(body) < 40:
+            raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
         unverified_links = cls._unverified_links(body, citations)
         if unverified_links:
             raise ReportSectionValidationError(

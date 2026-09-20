@@ -7,7 +7,7 @@ from rest_framework.test import APIClient
 
 from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.consumers import _user_from_ticket
-from deals.models import Deal
+from deals.models import Deal, DealDocument
 from microsoft.models import Email, EmailAccount, EmailIngestionRun
 
 
@@ -79,6 +79,31 @@ class AuditTaskControlTests(TestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertNotIn('child_audits', response.data['results'][0])
+
+    def test_audit_list_includes_deal_name_for_direct_and_report_section_tasks(self):
+        deal = Deal.objects.create(title='Showroom B2B')
+        document = DealDocument.objects.create(deal=deal, title='Financial model.xlsx')
+        direct = AIAuditLog.objects.create(
+            source_type='document_indexing', source_id=document.id, model_used='test',
+            system_prompt='test', user_prompt='test', status='COMPLETED',
+        )
+        parent = AIAuditLog.objects.create(
+            source_type='deal_full_synthesis', source_id=deal.id, model_used='test',
+            system_prompt='test', user_prompt='test', status='PROCESSING',
+        )
+        section = AIAuditLog.objects.create(
+            source_type='vdr_report_section', source_id=parent.id, model_used='test',
+            system_prompt='test', user_prompt='test', status='COMPLETED',
+            source_metadata={'vdr_parent_audit_id': str(parent.id)},
+        )
+
+        response = self.client.get('/api/ai/history/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = {row['id']: row for row in response.data['results']}
+        self.assertEqual(rows[str(direct.id)]['deal_name'], 'Showroom B2B')
+        self.assertEqual(rows[str(parent.id)]['deal_name'], 'Showroom B2B')
+        self.assertEqual(rows[str(section.id)]['deal_name'], 'Showroom B2B')
 
     def test_audit_list_searches_across_the_full_paginated_queryset(self):
         for index in range(25):

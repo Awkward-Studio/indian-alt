@@ -1,6 +1,93 @@
+import uuid
+
 from django.db.models import Q
 from rest_framework import serializers
 from .models import AIConversation, AIMessage, AIPersonality, AISkill, AnalysisProtocol, AIAuditLog, AIFlowDefinition, AIFlowVersion
+
+
+def _uuid_strings(values):
+    valid = set()
+    for value in values:
+        try:
+            valid.add(str(uuid.UUID(str(value))))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return valid
+
+
+def _ordered_uuid_strings(values):
+    valid = []
+    for value in values:
+        try:
+            normalized = str(uuid.UUID(str(value)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if normalized not in valid:
+            valid.append(normalized)
+    return valid
+
+
+def audit_deal_names(logs):
+    """Resolve deal ownership for a page of heterogeneous audit records."""
+    from deals.models import Deal, DealDocument
+
+    logs = list(logs)
+    source_ids = _uuid_strings(log.source_id for log in logs if log.source_id)
+    parent_ids = _uuid_strings(
+        (log.source_metadata or {}).get('vdr_parent_audit_id')
+        for log in logs
+    ) | source_ids
+    parents = {
+        str(parent.id): parent
+        for parent in AIAuditLog.objects.filter(id__in=parent_ids).only(
+            'id', 'source_id', 'source_metadata',
+        )
+    }
+
+    document_ids = set(source_ids)
+    for parent in parents.values():
+        document_ids.update(_uuid_strings([parent.source_id]))
+    document_deals = {
+        str(document.id): str(document.deal_id)
+        for document in DealDocument.objects.filter(id__in=document_ids).only('id', 'deal_id')
+    }
+
+    candidates_by_log = {}
+    all_deal_ids = set()
+    for log in logs:
+        metadata = log.source_metadata or {}
+        match = metadata.get('match') if isinstance(metadata.get('match'), dict) else {}
+        source_id = str(log.source_id or '')
+        parent_id = str(metadata.get('vdr_parent_audit_id') or source_id)
+        parent = parents.get(parent_id)
+        parent_metadata = parent.source_metadata or {} if parent else {}
+        parent_match = (
+            parent_metadata.get('match')
+            if isinstance(parent_metadata.get('match'), dict)
+            else {}
+        )
+        parent_source_id = str(parent.source_id or '') if parent else ''
+        candidates = _ordered_uuid_strings([
+            metadata.get('deal_id'),
+            match.get('deal_id'),
+            document_deals.get(source_id),
+            parent_metadata.get('deal_id'),
+            parent_match.get('deal_id'),
+            document_deals.get(parent_source_id),
+            parent_source_id,
+            source_id,
+        ])
+        candidates_by_log[str(log.id)] = candidates
+        all_deal_ids.update(candidates)
+
+    deals = {
+        str(deal.id): deal.title or 'Untitled deal'
+        for deal in Deal.objects.filter(id__in=all_deal_ids).only('id', 'title')
+    }
+    return {
+        audit_id: next((deals[deal_id] for deal_id in candidates if deal_id in deals), None)
+        for audit_id, candidates in candidates_by_log.items()
+    }
 
 
 def related_audits(obj):
@@ -65,6 +152,7 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
     requested_by_name = serializers.SerializerMethodField()
     child_audits = serializers.SerializerMethodField()
     token_usage = serializers.SerializerMethodField()
+    deal_name = serializers.SerializerMethodField()
     
     class Meta:
         model = AIAuditLog
@@ -77,7 +165,7 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
             'token_count_is_estimate', 'token_usage', 'is_success', 'status',
             'celery_task_id', 'created_at', 'completed_at', 'error_message', 'worker_logs',
             'raw_response', 'raw_thinking', 'user_prompt', 'system_prompt', 'parsed_json',
-            'source_metadata', 'child_audits'
+            'source_metadata', 'child_audits', 'deal_name'
         ]
 
     def get_child_audits(self, obj):
@@ -88,6 +176,14 @@ class AIAuditLogSerializer(serializers.ModelSerializer):
     def get_token_usage(self, obj):
         children = related_audits(obj) if self.context.get('include_child_audits') else ()
         return token_usage(obj, children)
+
+    def get_deal_name(self, obj):
+        cache = self.context.get('_audit_deal_names')
+        if cache is None:
+            instances = self.parent.instance if getattr(self.parent, 'many', False) else [obj]
+            cache = audit_deal_names(instances)
+            self.context['_audit_deal_names'] = cache
+        return cache.get(str(obj.id))
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

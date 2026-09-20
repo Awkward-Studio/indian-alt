@@ -70,6 +70,31 @@ class CitationNormalizationTests(SimpleTestCase):
         self.assertNotIn("R060", rendered)
         self.assertNotIn("[,", rendered)
 
+    def test_spreadsheet_row_in_citation_footer_is_not_an_internal_rank(self):
+        rendered = ICReportSectionService._normalize_section(
+            "Key Financials",
+            "## Key Financials\n\nRevenue increased and EBITDA improved [R001].",
+            citations={
+                "1": {
+                    "document_id": "doc-1",
+                    "title": "Financial Model.xlsx",
+                    "url": "https://contoso.sharepoint.com/financial-model.xlsx",
+                    "location": "Overall PL!R60",
+                    "locator": {
+                        "sheet_name": "Overall PL",
+                        "row_start": 60,
+                        "row_end": 60,
+                        "column_start": "R",
+                        "column_end": "R",
+                    },
+                }
+            },
+        )
+
+        body, citations = rendered.split("### Citations", 1)
+        self.assertIn("EBITDA improved [1].", body)
+        self.assertIn("Overall PL!R60", citations)
+
     def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
         with self.assertRaises(ReportSectionValidationError):
             ICReportSectionService._normalize_section(
