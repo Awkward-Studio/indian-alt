@@ -168,7 +168,7 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(self.run.source['_rerun_generation'], 1)
         dispatch.assert_called_once_with(self.run.id)
 
-    @patch('deals.services.deal_field_synthesis.DealFieldSynthesisService.synthesize')
+    @patch('deals.services.deal_synthesis.DealSynthesisService.run')
     @patch.object(Ingestion, 'index_outputs', return_value=True)
     @patch.object(Evidence, 'save_links', return_value=[])
     @patch.object(Evidence, 'save_attachments', return_value=[])
@@ -176,7 +176,10 @@ class EmailIngestionAPITests(TestCase):
         self, _attachments, _links, _index_outputs, synthesize,
     ):
         analysis = type('Analysis', (), {'id': 'field-analysis'})()
-        synthesize.return_value = analysis
+        synthesize.return_value = {
+            'analysis': analysis,
+            'financial': {'status': 'completed', 'summary': {}, 'warning': None},
+        }
         self.run.classification = {
             'type': 'NORMAL_EMAIL',
             'status': 'completed',
@@ -193,6 +196,7 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(self.run.stages['index'], 'completed')
         self.assertEqual(self.run.stages['deal_fields'], 'completed')
+        self.assertEqual(self.run.stages['financial_synthesis'], 'completed')
         self.assertEqual(self.run.match['field_synthesis_analysis_id'], 'field-analysis')
         synthesize.assert_called_once()
 

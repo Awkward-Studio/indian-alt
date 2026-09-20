@@ -2358,6 +2358,107 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             return Response(result, status=400)
         return Response(result, status=status.HTTP_202_ACCEPTED)
 
+    @action(detail=True, methods=['post'], url_path='redo-deal-synthesis')
+    def redo_deal_synthesis(self, request, pk=None):
+        """Refresh AI-owned deal and financial fields from indexed evidence only."""
+        deal = self.get_object()
+        with transaction.atomic():
+            locked_deal = Deal.objects.select_for_update().get(pk=deal.pk)
+            if locked_deal.processing_status == "processing":
+                return Response(
+                    {"error": "VDR processing is still running for this deal."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            active = AIAuditLog.objects.filter(
+                source_type="deal_synthesis",
+                source_id=str(deal.id),
+                status__in=["PENDING", "PROCESSING"],
+            ).order_by("-created_at").first()
+            if active:
+                return Response({
+                    "status": "queued" if active.status == "PENDING" else "processing",
+                    "task_id": active.celery_task_id,
+                    "audit_log_id": str(active.id),
+                    "reused": True,
+                    "message": "Deal synthesis is already running.",
+                }, status=status.HTTP_202_ACCEPTED)
+            financial_fill = AIAuditLog.objects.filter(
+                source_type="internal_financial_profile_fill",
+                source_id=str(deal.id),
+                status__in=["PENDING", "PROCESSING"],
+            ).exists()
+            if financial_fill:
+                return Response(
+                    {"error": "Financial extraction is already running for this deal."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            document_ids = list(
+                deal.documents.filter(is_indexed=True).values_list("id", flat=True)
+            )
+            if not document_ids:
+                return Response(
+                    {"error": "No indexed documents are available for deal synthesis."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            audit = AIRuntimeService.create_audit_log(
+                source_type="deal_synthesis",
+                source_id=str(deal.id),
+                context_label=f"Redo deal synthesis: {deal.title}",
+                requested_by=request.user,
+                status="PENDING",
+                is_success=False,
+                system_prompt="Refresh AI-owned deal fields and financial data from indexed evidence.",
+                user_prompt=f"Redo deal synthesis for {deal.title} without reprocessing documents.",
+                source_metadata={
+                    "deal_id": str(deal.id),
+                    "deal_title": deal.title,
+                    "queue_kind": "deal_synthesis",
+                    "queue_state": "queued",
+                    "workflow_stage": "queued",
+                    "indexed_document_count": len(document_ids),
+                    "required_document_ids": [str(value) for value in document_ids],
+                    "write_policy": "refresh_ai_owned_only",
+                    "reprocess_documents": False,
+                    "regenerate_report": False,
+                    "result_route": (
+                        f"/deals/{deal.id}?tab=key-financials"
+                        "#venture-intelligence-section"
+                    ),
+                },
+            )
+
+        from .tasks import redo_deal_synthesis_task
+
+        try:
+            task = redo_deal_synthesis_task.apply_async(
+                kwargs={"deal_id": str(deal.id), "audit_log_id": str(audit.id)},
+                queue="high_priority",
+            )
+        except Exception as exc:
+            audit.status = "FAILED"
+            audit.is_success = False
+            audit.error_message = str(exc)
+            audit.completed_at = timezone.now()
+            audit.source_metadata = {
+                **(audit.source_metadata or {}),
+                "queue_state": "failed",
+                "workflow_stage": "queue_failed",
+            }
+            audit.save(update_fields=[
+                "status", "is_success", "error_message", "completed_at", "source_metadata",
+            ])
+            raise
+        audit.celery_task_id = task.id
+        audit.save(update_fields=["celery_task_id"])
+        return Response({
+            "status": "queued",
+            "task_id": task.id,
+            "audit_log_id": str(audit.id),
+            "reused": False,
+            "message": "Deal synthesis queued from existing indexed evidence.",
+        }, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=['post'], url_path='rerun-vdr-documents')
     def rerun_vdr_documents(self, request, pk=None):
         """Rerun selected linked documents through the full VDR pipeline."""

@@ -190,8 +190,11 @@ class FolderFieldSynthesisFinalizerTests(TestCase):
             source_metadata={"coverage_policy": "all_supported_files"},
         )
         with patch(
-            "deals.services.deal_field_synthesis.DealFieldSynthesisService.synthesize",
-            return_value=type("Analysis", (), {"id": "analysis-1"})(),
+            "deals.services.deal_synthesis.DealSynthesisService.run",
+            return_value={
+                "analysis": type("Analysis", (), {"id": "analysis-1"})(),
+                "financial": {"status": "completed", "summary": {}, "warning": None},
+            },
         ) as synthesize:
             result = finalize_folder_background.run(
                 [{"status": "success", "document_id": "doc-1"}],
@@ -207,7 +210,7 @@ class FolderFieldSynthesisFinalizerTests(TestCase):
         synthesize.assert_called_once()
 
     @patch("deals.tasks.broadcast_audit_log_update")
-    @patch("deals.services.deal_field_synthesis.DealFieldSynthesisService.synthesize")
+    @patch("deals.services.deal_synthesis.DealSynthesisService.run")
     def test_durable_vdr_finalizer_persists_field_synthesis_result(self, synthesize, _broadcast):
         from deals.tasks import finalize_durable_vdr_indexing
 
@@ -226,7 +229,10 @@ class FolderFieldSynthesisFinalizerTests(TestCase):
                 "document_queue": [{"status": "completed", "document_id": "doc-1"}],
             },
         )
-        synthesize.return_value = type("Analysis", (), {"id": "analysis-2"})()
+        synthesize.return_value = {
+            "analysis": type("Analysis", (), {"id": "analysis-2"})(),
+            "financial": {"status": "completed", "summary": {}, "warning": None},
+        }
 
         result = finalize_durable_vdr_indexing.run(str(audit.id))
 

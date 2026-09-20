@@ -185,6 +185,41 @@ class QueueStatusEndpointTests(TestCase):
     @patch("ai_orchestrator.views.requests.get")
     @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
     @patch("config.celery.app.control.inspect")
+    def test_queue_status_groups_manual_synthesis_under_its_deal(self, inspect, snapshot, get_slots):
+        inspect.return_value.active.return_value = {}
+        inspect.return_value.reserved.return_value = {}
+        inspect.return_value.scheduled.return_value = {}
+        snapshot.return_value = {"queues": [], "messages": [], "unacked": {"count": 0, "messages": []}, "warning": None}
+        get_slots.return_value.json.return_value = []
+        get_slots.return_value.raise_for_status.return_value = None
+        deal = Deal.objects.create(title="Synthesis Queue Deal")
+        audit = AIAuditLog.objects.create(
+            source_type="deal_synthesis",
+            source_id=str(deal.id),
+            context_label="Redo deal synthesis: Synthesis Queue Deal",
+            model_used="model",
+            system_prompt="synthesis",
+            user_prompt="synthesis",
+            status="PENDING",
+            is_success=False,
+            celery_task_id="synthesis-task",
+            source_metadata={"deal_id": str(deal.id), "queue_kind": "deal_synthesis"},
+        )
+
+        response = self.client.get("/api/ai/history/queue-status/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        group = next(
+            item for item in response.data["task_groups"]
+            if item["audit_log_id"] == str(audit.id)
+        )
+        self.assertEqual(group["deal_id"], str(deal.id))
+        self.assertEqual(group["deal_title"], deal.title)
+        self.assertEqual(group["kind"], "deal_synthesis")
+
+    @patch("ai_orchestrator.views.requests.get")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    @patch("config.celery.app.control.inspect")
     def test_email_umbrella_exposes_current_and_superseded_document_deliveries(
         self, inspect, snapshot, get_slots,
     ):

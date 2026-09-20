@@ -77,6 +77,10 @@ FINANCIAL_FIELDS_BY_STATEMENT = {
 }
 
 
+class NoSupportedFinancialData(ValueError):
+    """Raised when indexed evidence contains no verifiable profile or financial facts."""
+
+
 class InternalFinancialProfileService:
     """Fill missing target-company fields using indexed internal evidence only."""
 
@@ -302,8 +306,10 @@ INDEXED INTERNAL EVIDENCE:
                     break
             if has_supported_financial:
                 break
-        if profile is None and not supported_profile and not has_supported_financial:
-            raise ValueError("The indexed documents did not contain supported company or financial fields.")
+        if not supported_profile and not has_supported_financial:
+            raise NoSupportedFinancialData(
+                "The indexed documents did not contain supported company or financial fields."
+            )
 
         if profile is None:
             cin = supported_profile.get("cin", (None, []))[0]
@@ -322,23 +328,45 @@ INDEXED INTERNAL EVIDENCE:
             )
 
         profile_updates: list[str] = []
+        profile_fields_added = 0
+        profile_fields_refreshed = 0
         provenance = deepcopy(profile.raw_profile_json or {})
         internal_provenance = provenance.setdefault("internal_document_extraction", {})
         profile_provenance = internal_provenance.setdefault("profile", {})
+        profile_provenance_changed = False
         for field, (value, refs) in supported_profile.items():
             if field == "cin" and VentureIntelligenceCompanyProfile.objects.exclude(pk=profile.pk).filter(cin=value).exists():
                 continue
-            if not self._is_known(getattr(profile, field, None)):
-                setattr(profile, field, value)
-                profile_updates.append(field)
-                profile_provenance[field] = {
+            current_value = getattr(profile, field, None)
+            prior_provenance = profile_provenance.get(field)
+            ai_owned = isinstance(prior_provenance, dict)
+            if not self._is_known(current_value) or ai_owned:
+                next_provenance = {
+                    "source": "local_ai",
+                    "value": value,
                     "evidence_refs": refs,
                     "sources": [citations[ref] for ref in refs],
                 }
+                if current_value == value and prior_provenance:
+                    if prior_provenance != next_provenance:
+                        profile_provenance[field] = next_provenance
+                        profile_provenance_changed = True
+                    continue
+                setattr(profile, field, value)
+                profile_updates.append(field)
+                if self._is_known(current_value):
+                    profile_fields_refreshed += 1
+                else:
+                    profile_fields_added += 1
+                profile_provenance[field] = next_provenance
+                profile_provenance_changed = True
 
         statement_count = 0
         metric_count = 0
+        metrics_added = 0
+        metrics_refreshed = 0
         statement_provenance = internal_provenance.setdefault("financial_statements", {})
+        statement_provenance_changed = False
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
                 continue
@@ -384,31 +412,50 @@ INDEXED INTERNAL EVIDENCE:
                 },
             )
             data = dict(statement.data or {})
-            added = []
+            changed = []
+            provenance_refreshed = []
+            row_provenance = deepcopy(statement.provenance or {})
+            existing_metric_provenance = row_provenance.setdefault("metrics", {})
             for key, value in supported_metrics.items():
-                if not self._is_known(data.get(key)):
+                current_value = data.get(key)
+                current_provenance = existing_metric_provenance.get(key)
+                ai_owned = (
+                    isinstance(current_provenance, dict)
+                    and current_provenance.get("source") == "local_ai"
+                )
+                if not self._is_known(current_value) or ai_owned:
+                    if current_value == value and current_provenance:
+                        next_provenance = {**metric_sources[key], "source": "local_ai"}
+                        if current_provenance != next_provenance:
+                            existing_metric_provenance[key] = next_provenance
+                            provenance_refreshed.append(key)
+                        continue
                     data[key] = value
-                    added.append(key)
-            if added:
+                    changed.append(key)
+                    if self._is_known(current_value):
+                        metrics_refreshed += 1
+                    else:
+                        metrics_added += 1
+            if changed or provenance_refreshed:
                 statement.data = data
                 statement.data_source = "local_ai" if created or statement.data_source == "local_ai" else "mixed"
-                row_provenance = deepcopy(statement.provenance or {})
                 row_provenance.setdefault("metrics", {}).update({
                     key: {**metric_sources[key], "source": "local_ai"}
-                    for key in added
+                    for key in changed
                 })
                 statement.provenance = row_provenance
                 statement.save(update_fields=["data", "data_source", "provenance"])
-                statement_count += 1
-                metric_count += len(added)
+                statement_count += bool(changed)
+                metric_count += len(changed)
                 statement_key = f"{statement_type}:{fy}:{fin_type}"
                 statement_provenance.setdefault(statement_key, {}).update(
-                    {key: metric_sources[key] for key in added}
+                    {key: metric_sources[key] for key in [*changed, *provenance_refreshed]}
                 )
+                statement_provenance_changed = True
             elif created:
                 statement.delete()
 
-        if profile_updates or metric_count:
+        if profile_updates or metric_count or profile_provenance_changed or statement_provenance_changed:
             profile.raw_profile_json = provenance
             update_fields = [*profile_updates, "raw_profile_json", "updated_at"]
             profile.save(update_fields=list(dict.fromkeys(update_fields)))
@@ -416,8 +463,12 @@ INDEXED INTERNAL EVIDENCE:
         return {
             "profile_id": str(profile.id),
             "relation_id": str(relation.id),
-            "profile_fields_added": len(profile_updates),
+            "profile_fields_added": profile_fields_added,
+            "profile_fields_refreshed": profile_fields_refreshed,
+            "profile_fields_updated": len(profile_updates),
             "financial_rows_updated": statement_count,
-            "financial_metrics_added": metric_count,
+            "financial_metrics_added": metrics_added,
+            "financial_metrics_refreshed": metrics_refreshed,
+            "financial_metrics_updated": metric_count,
             "indexed_documents_used": len({source["document_id"] for source in citations.values()}),
         }

@@ -446,7 +446,7 @@ class EmailIngestionService:
                 run.stages['deal_fields'] = 'skipped'
                 run.status = 'completed'
             elif indexing and not capture_failures and available:
-                from deals.services.deal_field_synthesis import DealFieldSynthesisService
+                from deals.services.deal_synthesis import DealSynthesisService
                 from microsoft.services.email_deal_relationships import EmailDealRelationshipService
 
                 EmailDealRelationshipService.link_primary_contact(deal, run.email)
@@ -457,7 +457,7 @@ class EmailIngestionService:
                         document__isnull=False,
                     ).values_list('document_id', flat=True).distinct()
                 )
-                analysis = DealFieldSynthesisService.synthesize(
+                synthesis = DealSynthesisService.run(
                     deal,
                     batch_key=(
                         f'email-ingestion:{run.id}:'
@@ -465,11 +465,15 @@ class EmailIngestionService:
                     ),
                     source_type='email',
                     required_document_ids=[str(value) for value in document_ids],
+                    parent_audit_log_id=str((run.source or {}).get('_audit_log_id') or ''),
                 )
+                analysis = synthesis['analysis']
                 run.stages['deal_fields'] = 'completed'
+                run.stages['financial_synthesis'] = synthesis['financial']['status']
                 run.match = {
                     **run.match,
                     'field_synthesis_analysis_id': str(analysis.id),
+                    'financial_synthesis': synthesis['financial'],
                 }
                 run.status = 'completed'
                 Deal.objects.filter(pk=deal.pk).update(

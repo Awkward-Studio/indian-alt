@@ -571,7 +571,27 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             ], start=1)
         }
         parent_ids = [str(parent.id) for parent in active_parents]
+        direct_deal_source_types = {
+            'deal_chat', 'deal_full_synthesis', 'deal_synthesis', 'vdr_indexing',
+            'competitor_research', 'company_news', 'public_news_research',
+        }
         parent_deal_ids = [parent.source_id for parent in active_parents if parent.source_id]
+        parent_deal_ids.extend(
+            log.source_id for log in processing_logs
+            if log.source_id and log.source_type in direct_deal_source_types
+        )
+
+        def is_uuid(value):
+            try:
+                uuid.UUID(str(value))
+                return True
+            except (TypeError, ValueError, AttributeError):
+                return False
+
+        parent_deal_ids = [
+            str(value) for value in parent_deal_ids
+            if value and is_uuid(value)
+        ]
         deals_by_id = {
             str(deal.id): deal
             for deal in Deal.objects.filter(
@@ -659,10 +679,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 continue
             document = queue_documents_by_id.get(str(log.source_id or ''))
             deal_id = str(document.deal_id) if document else (
-                str(log.source_id) if log.source_type in {
-                    'deal_chat', 'deal_full_synthesis', 'vdr_indexing',
-                    'competitor_research', 'company_news', 'public_news_research',
-                } else ''
+                str(log.source_id) if log.source_type in direct_deal_source_types else ''
             )
             deal = deals_by_id.get(deal_id) or (document.deal if document else None)
             task_groups.append({
@@ -888,12 +905,16 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 vdr_parent_id=KeyTextTransform('vdr_parent_audit_id', 'source_metadata'),
                 queue_kind=KeyTextTransform('queue_kind', 'source_metadata'),
                 queue_state=KeyTextTransform('queue_state', 'source_metadata'),
+                financial_synthesis_warning=KeyTextTransform(
+                    'financial_synthesis_warning', 'source_metadata',
+                ),
             )
             .values(
                 'id', 'source_id', 'source_type', 'context_label', 'status',
                 'is_success', 'error_message', 'created_at', 'completed_at',
                 'celery_task_id', 'metadata_deal_id', 'matched_deal_id',
                 'vdr_parent_id', 'queue_kind', 'queue_state',
+                'financial_synthesis_warning',
             ).order_by('-created_at')[:250]
         )
         history_source_ids = {
@@ -960,6 +981,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'queued_at': row['created_at'],
                 'completed_at': row.get('completed_at'),
                 'error': row.get('error_message'),
+                'warning': row.get('financial_synthesis_warning'),
             })
 
         deal_title_by_id = {
