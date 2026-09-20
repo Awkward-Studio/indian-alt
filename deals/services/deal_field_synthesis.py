@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from django.db import transaction
 
@@ -101,94 +101,71 @@ class DealFieldSynthesisService:
         return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
     @classmethod
-    def _evidence_batches(cls, documents: list[DealDocument]) -> list[str]:
-        """Return bounded contexts without silently dropping evidence or documents."""
+    def _pack_contexts(
+        cls,
+        items: Iterable[dict],
+        *,
+        phase: str,
+        instructions: str,
+        item_key: str,
+        transform: Callable[[dict], dict] | None = None,
+    ) -> list[str]:
+        """Pack JSON items in linear time while respecting the exact character cap."""
         batches: list[str] = []
         current: list[dict] = []
-        all_fragments = (
-            fragment
-            for document in documents
-            for fragment in cls._document_fragments(document)
-        )
-        for fragment in all_fragments:
-            candidate = current + [fragment]
-            content = cls._serialize({
-                "phase": "evidence_map",
-                "instructions": (
-                    "Extract candidate deal fields from these ordered evidence fragments. "
-                    "Paths and part numbers reconstruct values split across fragments. "
-                    "Preserve conflicts and do not infer unsupported values."
-                ),
-                "evidence_fragments": candidate,
-            })
-            if current and len(content) > cls.MAX_CONTEXT_CHARS:
-                batches.append(cls._serialize({
-                    "phase": "evidence_map",
-                    "instructions": (
-                        "Extract candidate deal fields from these ordered evidence fragments. "
-                        "Paths and part numbers reconstruct values split across fragments. "
-                        "Preserve conflicts and do not infer unsupported values."
-                    ),
-                    "evidence_fragments": current,
-                }))
-                current = [fragment]
+        base_context = {"phase": phase, "instructions": instructions, item_key: []}
+        base_chars = len(cls._serialize(base_context))
+        current_chars = base_chars
+
+        for source_item in items:
+            item = transform(source_item) if transform else source_item
+            item_chars = len(cls._serialize(item))
+            separator_chars = 1 if current else 0
+            if current and current_chars + separator_chars + item_chars > cls.MAX_CONTEXT_CHARS:
+                batches.append(cls._serialize({**base_context, item_key: current}))
+                current = [item]
+                current_chars = base_chars + item_chars
             else:
-                current = candidate
+                current.append(item)
+                current_chars += separator_chars + item_chars
         if current:
-            batches.append(cls._serialize({
-                "phase": "evidence_map",
-                "instructions": (
-                    "Extract candidate deal fields from these ordered evidence fragments. "
-                    "Paths and part numbers reconstruct values split across fragments. "
-                    "Preserve conflicts and do not infer unsupported values."
-                ),
-                "evidence_fragments": current,
-            }))
+            batches.append(cls._serialize({**base_context, item_key: current}))
         return batches
 
     @classmethod
+    def _evidence_batches(cls, documents: list[DealDocument]) -> list[str]:
+        """Return bounded contexts without silently dropping evidence or documents."""
+        return cls._pack_contexts(
+            (
+                fragment
+                for document in documents
+                for fragment in cls._document_fragments(document)
+            ),
+            phase="evidence_map",
+            instructions=(
+                "Extract candidate deal fields from these ordered evidence fragments. "
+                "Paths and part numbers reconstruct values split across fragments. "
+                "Preserve conflicts and do not infer unsupported values."
+            ),
+            item_key="evidence_fragments",
+        )
+
+    @classmethod
     def _candidate_batches(cls, candidates: list[dict]) -> list[str]:
-        batches: list[str] = []
-        current: list[dict] = []
-        for candidate in candidates:
-            cleaned = {
+        return cls._pack_contexts(
+            candidates,
+            phase="candidate_reduce",
+            instructions=(
+                "Merge these candidate syntheses into one evidence-only result. "
+                "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
+                "and list every source document represented by the candidates."
+            ),
+            item_key="candidates",
+            transform=lambda candidate: {
                 key: value for key, value in candidate.items()
                 if key not in {"response", "thinking", "_raw_response"}
-            }
-            proposed = current + [cleaned]
-            content = cls._serialize({
-                "phase": "candidate_reduce",
-                "instructions": (
-                    "Merge these candidate syntheses into one evidence-only result. "
-                    "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
-                    "and list every source document represented by the candidates."
-                ),
-                "candidates": proposed,
-            })
-            if current and len(content) > cls.MAX_CONTEXT_CHARS:
-                batches.append(cls._serialize({
-                    "phase": "candidate_reduce",
-                    "instructions": (
-                        "Merge these candidate syntheses into one evidence-only result. "
-                        "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
-                        "and list every source document represented by the candidates."
-                    ),
-                    "candidates": current,
-                }))
-                current = [cleaned]
-            else:
-                current = proposed
-        if current:
-            batches.append(cls._serialize({
-                "phase": "candidate_reduce",
-                "instructions": (
-                    "Merge these candidate syntheses into one evidence-only result. "
-                    "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
-                    "and list every source document represented by the candidates."
-                ),
-                "candidates": current,
-            }))
-        return batches
+            },
+        )
 
     @classmethod
     def _run_model(
