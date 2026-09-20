@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -20,6 +21,10 @@ class ReportSectionValidationError(ValueError):
     """A deterministic model-output validation failure that should not be retried unchanged."""
 
 
+class ReportSectionDegenerateOutputError(ReportSectionValidationError):
+    """A transient repetition loop that warrants a fresh model request."""
+
+
 class ICReportSectionService:
     CACHE_VERSION = "ic-report-sections-v6"
     INTERNAL_CITATION_PATTERN = re.compile(
@@ -32,9 +37,12 @@ class ICReportSectionService:
         r"^(?:(?:'(?P<quoted_sheet>(?:[^']|'')+)'|(?P<sheet>[^!]+))!)?"
         r"(?P<start>[A-Za-z]{1,4}[1-9]\d*)(?::(?P<end>[A-Za-z]{1,4}[1-9]\d*))?$"
     )
-    CITATION_CLUSTER_PATTERN = re.compile(
-        r"\[(?P<items>(?:Evidence\s+\d+|R0*\d+)"
-        r"(?:\s*[,;|]\s*(?:Evidence\s+\d+|R0*\d+))+)]",
+    # Keep this deliberately bounded. The former nested repetition pattern
+    # could spend minutes backtracking when a model emitted thousands of
+    # citation tokens without a closing bracket.
+    CITATION_CLUSTER_PATTERN = re.compile(r"\[(?P<items>[^\]\n]{1,2000})\]")
+    CITATION_TOKEN_PATTERN = re.compile(
+        r"\b(?:Evidence\s+\d+|R0*\d+)\b",
         flags=re.IGNORECASE,
     )
 
@@ -215,13 +223,15 @@ class ICReportSectionService:
 
         # Expand multi-rank clusters first so each rank can be resolved or
         # removed independently without leaving malformed nested brackets.
-        text = cls.CITATION_CLUSTER_PATTERN.sub(
-            lambda match: ", ".join(
-                f"[{item.strip()}]"
-                for item in re.split(r"\s*[,;|]\s*", match.group("items"))
-            ),
-            text,
-        )
+        def expand_cluster(match: re.Match) -> str:
+            items = re.split(r"\s*[,;|]\s*", match.group("items"))
+            if len(items) < 2 or not all(
+                cls.CITATION_TOKEN_PATTERN.fullmatch(item.strip()) for item in items
+            ):
+                return match.group(0)
+            return ", ".join(f"[{item.strip()}]" for item in items)
+
+        text = cls.CITATION_CLUSTER_PATTERN.sub(expand_cluster, text)
 
         def replace(match: re.Match) -> str:
             rank = (
@@ -294,6 +304,15 @@ class ICReportSectionService:
         minimum_words: int = 0,
     ) -> str:
         text = str(response or "").strip()
+        citation_tokens = [
+            token.casefold() for token in cls.CITATION_TOKEN_PATTERN.findall(text)
+        ]
+        if citation_tokens:
+            most_common_count = Counter(citation_tokens).most_common(1)[0][1]
+            if len(citation_tokens) > 500 or most_common_count > 100:
+                raise ReportSectionDegenerateOutputError(
+                    f"Report section '{title}' contained degenerate repeated citation output."
+                )
         text = re.sub(r"^```(?:markdown)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text).strip()
         target = f"## {title}"
@@ -396,6 +415,9 @@ class ICReportSectionService:
                 "personality_only_system": True,
                 "response_mode": "markdown",
                 "temperature": 0.0,
+                "repetition_penalty": float(
+                    getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)
+                ),
                 "max_tokens": int(max_tokens or getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192)),
                 **({"max_input_tokens": int(max_input_tokens)} if max_input_tokens else {}),
                 "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),

@@ -12,6 +12,7 @@ from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from ai_orchestrator.services.token_budget import estimate_tokens
 from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
@@ -23,6 +24,7 @@ class DealFieldSynthesisService:
     # simple chars/4 estimate, so leave ample room for the skill prompt,
     # response schema, output, and provider reserve.
     MAX_CONTEXT_CHARS = 72_000
+    MAX_CONTEXT_TOKENS = 30_000
     MAX_FRAGMENT_CHARS = 24_000
     STRING_FRAGMENT_CHARS = 6_000
     TEXT_PER_DOCUMENT = 16_000
@@ -115,19 +117,29 @@ class DealFieldSynthesisService:
         current: list[dict] = []
         base_context = {"phase": phase, "instructions": instructions, item_key: []}
         base_chars = len(cls._serialize(base_context))
+        base_tokens = estimate_tokens(cls._serialize(base_context))
         current_chars = base_chars
+        current_tokens = base_tokens
 
         for source_item in items:
             item = transform(source_item) if transform else source_item
-            item_chars = len(cls._serialize(item))
+            serialized_item = cls._serialize(item)
+            item_chars = len(serialized_item)
+            item_tokens = estimate_tokens(serialized_item)
             separator_chars = 1 if current else 0
-            if current and current_chars + separator_chars + item_chars > cls.MAX_CONTEXT_CHARS:
+            separator_tokens = 1 if current else 0
+            if current and (
+                current_chars + separator_chars + item_chars > cls.MAX_CONTEXT_CHARS
+                or current_tokens + separator_tokens + item_tokens > cls.MAX_CONTEXT_TOKENS
+            ):
                 batches.append(cls._serialize({**base_context, item_key: current}))
                 current = [item]
                 current_chars = base_chars + item_chars
+                current_tokens = base_tokens + item_tokens
             else:
                 current.append(item)
                 current_chars += separator_chars + item_chars
+                current_tokens += separator_tokens + item_tokens
         if current:
             batches.append(cls._serialize({**base_context, item_key: current}))
         return batches
@@ -208,6 +220,7 @@ class DealFieldSynthesisService:
                 "ingestion_source_type": source_type,
                 "temperature": 0.0,
                 "max_tokens": cls.MAX_OUTPUT_TOKENS,
+                "lossless_input": True,
                 "enforce_context_budget": True,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "context_label": f"{deal.title}: field synthesis {phase} {phase_index + 1}",

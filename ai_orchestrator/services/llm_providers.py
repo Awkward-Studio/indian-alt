@@ -271,6 +271,12 @@ class VLLMProviderService:
             "stream": stream,
             "temperature": ((payload.get("options") or {}).get("temperature", 0.1)),
         }
+        options = payload.get("options") or {}
+        for option_name in (
+            "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty",
+        ):
+            if option_name in options:
+                body[option_name] = options[option_name]
 
         if template_kwargs:
             body["chat_template_kwargs"] = template_kwargs

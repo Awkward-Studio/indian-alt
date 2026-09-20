@@ -138,6 +138,18 @@ class DealHelperAnalysisTaskTests(SimpleTestCase):
         self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
         self.assertTrue(body["messages"][-1]["content"].endswith("/no_think"))
 
+    def test_vllm_forwards_repetition_controls(self):
+        body = VLLMProviderService()._build_chat_body(
+            {
+                "model": "gemma-4-12b-it-q8",
+                "prompt": "Write the report section.",
+                "options": {"temperature": 0, "repetition_penalty": 1.08},
+            },
+            stream=False,
+        )
+
+        self.assertEqual(body["repetition_penalty"], 1.08)
+
     @override_settings(VLLM_BASE_URL="http://shared-model:8000/v1")
     def test_multimodal_requests_use_shared_text_endpoint(self):
         provider = VLLMProviderService()

@@ -35,6 +35,7 @@ from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.realtime import broadcast_audit_log_update, log_worker_event
 from ai_orchestrator.services.runtime import AIRuntimeService
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -2024,7 +2025,10 @@ def finalize_durable_vdr_indexing(self, audit_log_id: str):
         vdr_queue.kick()
         return {"status": "completed", "analysis_id": str(analysis.id)}
     except Exception as exc:
-        if self.request.retries < self.max_retries:
+        if (
+            not isinstance(exc, ContextBudgetExceeded)
+            and self.request.retries < self.max_retries
+        ):
             AIAuditLog.objects.filter(id=audit_log_id).update(
                 error_message=f"Deal field synthesis retry pending: {exc}",
                 source_metadata={
@@ -2069,6 +2073,7 @@ def process_vdr_report_section(
     from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.services.report_sections import (
         ICReportSectionService,
+        ReportSectionDegenerateOutputError,
         ReportSectionValidationError,
     )
     from deals.services.vdr_queue import delivery_is_current, heartbeat, start_heartbeat
@@ -2112,6 +2117,10 @@ def process_vdr_report_section(
             force_regenerate=bool((audit.source_metadata or {}).get("force_regenerate")),
         )
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
+    except ReportSectionDegenerateOutputError as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
+        return {"status": "failed", "error": str(exc)}
     except ReportSectionValidationError as exc:
         return {"status": "failed", "error": str(exc)}
     except Exception as exc:
@@ -2318,7 +2327,12 @@ def finalize_folder_background(self, results, deal_id, audit_log_id):
     except Exception as e:
         logger.error(f"Failed to finalize deal {deal_id}: {str(e)}")
         audit_log = AIAuditLog.objects.filter(id=audit_log_id).first()
-        if self.request.retries < self.max_retries and audit_log and not _is_cancel_requested(audit_log_id):
+        if (
+            not isinstance(e, ContextBudgetExceeded)
+            and self.request.retries < self.max_retries
+            and audit_log
+            and not _is_cancel_requested(audit_log_id)
+        ):
             audit_log.status = "PROCESSING"
             audit_log.is_success = False
             audit_log.error_message = f"Deal field synthesis retry pending: {e}"

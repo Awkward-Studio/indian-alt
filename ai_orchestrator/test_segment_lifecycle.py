@@ -306,6 +306,33 @@ class SegmentPersistenceTests(TestCase):
         self.audit.refresh_from_db()
         self.assertEqual(self.audit.status, "FAILED")
 
+    def test_truncated_report_section_is_not_completed(self):
+        from ai_orchestrator.models import AIAuditLog
+
+        self.audit = AIAuditLog.objects.create(
+            source_type="vdr_report_section",
+            status="PROCESSING",
+        )
+        self.service.current_provider.execute_standard.return_value = {
+            "response": "## Industry Overview\n\nPartial repeated output [R010, R010",
+            "raw": {"choices": [{"finish_reason": "length"}]},
+        }
+
+        with self.assertRaisesRegex(ModelOutputTruncated, "finish_reason=length"):
+            self.service._standard_response(
+                {
+                    "model": "test",
+                    "_serialize_inference": True,
+                    "_request_timeout": 10,
+                },
+                self.audit,
+                "markdown",
+            )
+
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, "FAILED")
+        self.assertEqual(self.audit.source_metadata["finish_reason"], "length")
+
     def test_incomplete_json_cannot_be_repaired_into_completed_checkpoint(self):
         self.service.current_provider.execute_standard.return_value["response"] = '{"document_summary":"Partial evidence"'
         self.assertIn("error", self.run_segment())

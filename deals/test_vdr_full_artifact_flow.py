@@ -860,6 +860,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         self.assertNotEqual(first_run, second_run)
 
     @patch("deals.tasks.synthesize_complete_deal_analysis")
+    @patch("deals.services.deal_synthesis.DealSynthesisService.run")
     @patch("deals.tasks._is_cancel_requested", return_value=False)
     @patch("ai_orchestrator.models.AIAuditLog.objects.get")
     @patch("deals.tasks.Deal.objects.get")
@@ -868,12 +869,18 @@ class FullVDRArtifactTests(SimpleTestCase):
         mock_deal_get,
         mock_audit_get,
         _mock_cancel,
+        mock_deal_synthesis,
         mock_synthesize,
     ):
         from deals.tasks import finalize_folder_background
 
         deal = MagicMock(processing_status="processing", processing_error=None)
         audit = MagicMock(source_metadata={})
+        field_analysis = MagicMock(id="00000000-0000-0000-0000-000000000001")
+        mock_deal_synthesis.return_value = {
+            "analysis": field_analysis,
+            "financial": {"status": "skipped", "summary": {}, "warning": None},
+        }
         mock_deal_get.return_value = deal
         mock_audit_get.return_value = audit
 
@@ -884,6 +891,7 @@ class FullVDRArtifactTests(SimpleTestCase):
         )
 
         mock_synthesize.assert_not_called()
+        mock_deal_synthesis.assert_called_once()
         self.assertEqual(deal.processing_status, "completed")
         self.assertTrue(result["analysis_confirmation_required"])
         self.assertEqual(audit.source_metadata["workflow_stage"], "artifacts_ready")

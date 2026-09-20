@@ -7,6 +7,8 @@ from django.test import TestCase
 from deals.models import Deal, DealDocument
 from deals.services.deal_field_synthesis import DealFieldSynthesisService
 from ai_orchestrator.models import AIAuditLog
+from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 
 class DealFieldSynthesisServiceTests(TestCase):
@@ -105,8 +107,10 @@ class DealFieldSynthesisServiceTests(TestCase):
             transcription_status="complete",
         )
 
-        with patch.object(DealFieldSynthesisService, "MAX_CONTEXT_CHARS", 1_800), patch.object(
-            DealFieldSynthesisService, "MAX_FRAGMENT_CHARS", 300,
+        with (
+            patch.object(DealFieldSynthesisService, "MAX_CONTEXT_CHARS", 1_800),
+            patch.object(DealFieldSynthesisService, "MAX_CONTEXT_TOKENS", 500),
+            patch.object(DealFieldSynthesisService, "MAX_FRAGMENT_CHARS", 300),
         ):
             batches = DealFieldSynthesisService._evidence_batches(
                 [self.document, later_document],
@@ -115,6 +119,7 @@ class DealFieldSynthesisServiceTests(TestCase):
         combined = "".join(batches)
         self.assertGreater(len(batches), 1)
         self.assertTrue(all(len(batch) <= 1_800 for batch in batches))
+        self.assertTrue(all(estimate_tokens(batch) <= 500 for batch in batches))
         self.assertIn("pitch-claim-19", combined)
         self.assertIn("later-document-unique-claim", combined)
         self.assertIn("later-document-revenue", combined)
@@ -153,6 +158,7 @@ class DealFieldSynthesisServiceTests(TestCase):
         calls = ai_cls.return_value.process_content.call_args_list
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0].kwargs["metadata"]["max_tokens"], 4_096)
+        self.assertTrue(calls[0].kwargs["metadata"]["lossless_input"])
         self.assertEqual(
             calls[2].kwargs["metadata"]["_source_metadata"]["field_synthesis_phase"],
             "candidate_reduce_0",
@@ -173,6 +179,50 @@ class DealFieldSynthesisServiceTests(TestCase):
 
 
 class FolderFieldSynthesisFinalizerTests(TestCase):
+    @patch("deals.tasks.broadcast_audit_log_update")
+    @patch("deals.services.vdr_queue.kick")
+    @patch("deals.services.deal_synthesis.DealSynthesisService.run")
+    def test_context_budget_failure_is_not_retried_unchanged(
+        self, synthesize, _kick, _broadcast,
+    ):
+        from deals.tasks import finalize_durable_vdr_indexing
+
+        deal = Deal.objects.create(title="Oversized synthesis", processing_status="processing")
+        audit = AIAuditLog.objects.create(
+            source_type="vdr_indexing",
+            source_id=str(deal.id),
+            model_used="test-model",
+            system_prompt="test",
+            user_prompt="test",
+            raw_response="",
+            status="PROCESSING",
+            is_success=False,
+            source_metadata={
+                "queue_state": "field_synthesis",
+                "document_queue": [],
+            },
+        )
+        error = ContextBudgetExceeded(
+            estimated_input_tokens=60_000,
+            max_output_tokens=4_096,
+            reserve_tokens=4_096,
+            context_window_tokens=65_536,
+        )
+        synthesize.side_effect = error
+
+        with (
+            patch.object(finalize_durable_vdr_indexing, "retry") as retry,
+            self.assertRaises(ContextBudgetExceeded),
+        ):
+            finalize_durable_vdr_indexing.run(str(audit.id))
+
+        audit.refresh_from_db()
+        deal.refresh_from_db()
+        retry.assert_not_called()
+        self.assertEqual(audit.status, "FAILED")
+        self.assertEqual(audit.source_metadata["field_synthesis_status"], "failed")
+        self.assertEqual(deal.processing_status, "failed")
+
     @patch("deals.tasks.log_worker_event")
     def test_regular_vdr_finalizer_completes_only_after_field_synthesis(self, _log):
         from deals.tasks import finalize_folder_background

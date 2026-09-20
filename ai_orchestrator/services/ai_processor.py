@@ -296,6 +296,11 @@ class AIProcessorService:
                 payload["chat_template_kwargs"] = metadata["chat_template_kwargs"]
             if "max_tokens" in metadata:
                 payload["options"]["max_tokens"] = metadata["max_tokens"]
+            for option_name in (
+                "top_p", "frequency_penalty", "presence_penalty", "repetition_penalty",
+            ):
+                if option_name in metadata:
+                    payload["options"][option_name] = metadata[option_name]
             if "request_timeout" in metadata:
                 payload["_request_timeout"] = metadata["request_timeout"]
             if model_provider != "anthropic" and metadata.get("serialize_inference", True):
@@ -572,7 +577,9 @@ class AIProcessorService:
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
             self._record_token_usage(audit_log, data.get("usage"), raw_response, thinking)
-            if audit_log.source_type == "document_evidence_segment":
+            if audit_log.source_type in {
+                "document_evidence_segment", "vdr_report_section", "email_report_section",
+            }:
                 finish = ((data.get("raw") or {}).get("choices") or [{}])[0].get("finish_reason")
                 if finish in {"length", "content_filter"}:
                     audit_log.source_metadata = {

@@ -11,6 +11,26 @@ from ai_orchestrator.services.report_sections import (
 
 
 class CitationNormalizationTests(SimpleTestCase):
+    def test_runaway_unclosed_citation_cluster_fails_without_regex_backtracking(self):
+        raw = (
+            "## Industry Overview\n\n"
+            "The market is fragmented [R001, "
+            + ", ".join(["R010"] * 4_000)
+        )
+
+        with self.assertRaisesRegex(
+            ReportSectionValidationError,
+            "degenerate repeated citation output",
+        ):
+            ICReportSectionService._normalize_section(
+                "Industry Overview",
+                raw,
+                citations={
+                    "1": {"document_id": "doc-1", "title": "Memo.pdf"},
+                    "10": {"document_id": "doc-2", "title": "Market.pdf"},
+                },
+            )
+
     def test_repeated_ranks_for_the_same_document_render_once_per_cluster(self):
         citation = {
             "document_id": "email-1",
