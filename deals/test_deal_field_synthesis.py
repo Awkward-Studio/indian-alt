@@ -1,3 +1,5 @@
+import json
+from copy import deepcopy
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -20,13 +22,11 @@ class DealFieldSynthesisServiceTests(TestCase):
             transcription_status="complete",
         )
 
-    @patch("deals.services.deal_field_synthesis.EmbeddingService")
-    @patch("deals.services.deal_field_synthesis.AIProcessorService")
-    def test_fills_fields_only_after_indexing_and_is_idempotent(self, ai_cls, _embedding_cls):
-        ai_cls.return_value.process_content.return_value = {
+    def _synthesis_result(self, *, industry="Logistics"):
+        return {
             "deal_model_data": {
                 "title": self.deal.title,
-                "industry": "Logistics",
+                "industry": industry,
                 "sector": "Industrials",
                 "funding_ask": "INR 75 Cr",
                 "funding_ask_for": "Growth capital",
@@ -59,6 +59,11 @@ class DealFieldSynthesisServiceTests(TestCase):
             },
         }
 
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_fills_fields_only_after_indexing_and_is_idempotent(self, ai_cls, _embedding_cls):
+        ai_cls.return_value.process_content.return_value = self._synthesis_result()
+
         first = DealFieldSynthesisService.synthesize(
             self.deal,
             batch_key="test:batch-1",
@@ -78,6 +83,81 @@ class DealFieldSynthesisServiceTests(TestCase):
         self.assertEqual(self.deal.funding_ask, "INR 75 Cr")
         self.assertEqual(self.deal.deal_summary, "Logistics growth-capital opportunity.")
         self.assertEqual(ai_cls.return_value.process_content.call_count, 1)
+
+    def test_evidence_batches_keep_every_document_and_structured_value(self):
+        self.document.evidence_json = {
+            "document_name": "Pitch Deck.pdf",
+            "claims": [f"pitch-claim-{index}" for index in range(20)],
+            "metrics": [{"name": f"metric-{index}", "value": index} for index in range(20)],
+        }
+        self.document.save(update_fields=["evidence_json"])
+        later_document = DealDocument.objects.create(
+            deal=self.deal,
+            title="Later Financials.xlsx",
+            normalized_text="later-document-raw-evidence",
+            evidence_json={
+                "document_name": "Later Financials.xlsx",
+                "claims": ["later-document-unique-claim"],
+                "metrics": [{"name": "later-document-revenue", "value": "INR 42 Cr"}],
+            },
+            is_indexed=True,
+            chunking_status="chunked",
+            transcription_status="complete",
+        )
+
+        with patch.object(DealFieldSynthesisService, "MAX_CONTEXT_CHARS", 1_800), patch.object(
+            DealFieldSynthesisService, "MAX_FRAGMENT_CHARS", 300,
+        ):
+            batches = DealFieldSynthesisService._evidence_batches(
+                [self.document, later_document],
+            )
+
+        combined = "".join(batches)
+        self.assertGreater(len(batches), 1)
+        self.assertTrue(all(len(batch) <= 1_800 for batch in batches))
+        self.assertIn("pitch-claim-19", combined)
+        self.assertIn("later-document-unique-claim", combined)
+        self.assertIn("later-document-revenue", combined)
+        document_ids = {
+            fragment["document_id"]
+            for batch in batches
+            for fragment in json.loads(batch)["evidence_fragments"]
+        }
+        self.assertEqual(document_ids, {str(self.document.id), str(later_document.id)})
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_multiple_evidence_batches_are_merged_before_persisting(self, ai_cls, _embedding_cls):
+        candidate_one = self._synthesis_result(industry="Logistics")
+        candidate_two = self._synthesis_result(industry="Transportation")
+        merged = self._synthesis_result(industry="Logistics and Transportation")
+        ai_cls.return_value.process_content.side_effect = [
+            deepcopy(candidate_one),
+            deepcopy(candidate_two),
+            deepcopy(merged),
+        ]
+
+        with patch.object(
+            DealFieldSynthesisService,
+            "_evidence_batches",
+            return_value=["evidence-batch-1", "evidence-batch-2"],
+        ):
+            DealFieldSynthesisService.synthesize(
+                self.deal,
+                batch_key="test:multi-batch",
+                source_type="onedrive_folder",
+                required_document_ids=[str(self.document.id)],
+            )
+
+        self.deal.refresh_from_db()
+        calls = ai_cls.return_value.process_content.call_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0].kwargs["metadata"]["max_tokens"], 4_096)
+        self.assertEqual(
+            calls[2].kwargs["metadata"]["_source_metadata"]["field_synthesis_phase"],
+            "candidate_reduce_0",
+        )
+        self.assertEqual(self.deal.industry, "Logistics and Transportation")
 
     def test_rejects_unindexed_batch_document(self):
         self.document.is_indexed = False

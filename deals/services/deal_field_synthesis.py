@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from typing import Any, Iterator
 
 from django.db import transaction
 
+from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -15,38 +18,245 @@ from deals.services.document_artifacts import DocumentArtifactService
 
 
 class DealFieldSynthesisService:
-    MAX_CONTEXT_CHARS = 160_000
+    # The provider enforces a 65,536-token context window across the complete
+    # request. Dense artifact JSON consumes materially more tokens than a
+    # simple chars/4 estimate, so leave ample room for the skill prompt,
+    # response schema, output, and provider reserve.
+    MAX_CONTEXT_CHARS = 72_000
+    MAX_FRAGMENT_CHARS = 24_000
+    STRING_FRAGMENT_CHARS = 6_000
     TEXT_PER_DOCUMENT = 16_000
+    MAX_OUTPUT_TOKENS = 4_096
 
     @classmethod
-    def _document_payload(cls, document: DealDocument, remaining: int) -> dict:
+    def _document_payload(cls, document: DealDocument) -> dict:
         artifact = DocumentArtifactService.artifact_from_document(document)
+        # These fields are intentionally excluded from synthesis input: the
+        # normalized source is represented by text_excerpt, while reasoning is
+        # model-generated scratch work rather than source evidence. The stored
+        # artifact itself is never changed.
         artifact.pop("normalized_text", None)
         artifact.pop("reasoning", None)
         text = (document.normalized_text or document.extracted_text or "").strip()
-        excerpt_limit = max(0, min(cls.TEXT_PER_DOCUMENT, remaining))
         return {
             "document_id": str(document.id),
             "name": document.title,
             "document_type": document.document_type,
             "transcription_status": document.transcription_status,
             "artifact": artifact,
-            "text_excerpt": text[:excerpt_limit],
-            "text_truncated": len(text) > excerpt_limit,
+            "text_excerpt": text[:cls.TEXT_PER_DOCUMENT],
+            "text_truncated": len(text) > cls.TEXT_PER_DOCUMENT,
         }
 
     @classmethod
-    def _evidence_context(cls, documents: list[DealDocument]) -> str:
-        payload = []
-        remaining = cls.MAX_CONTEXT_CHARS
-        for document in documents:
-            item = cls._document_payload(document, remaining)
-            serialized = json.dumps(item, ensure_ascii=False, default=str)
-            if len(serialized) > remaining and payload:
-                break
-            payload.append(item)
-            remaining -= min(len(serialized), remaining)
-        return json.dumps(payload, ensure_ascii=False, default=str)
+    def _value_fragments(cls, value: Any, path: str) -> Iterator[dict]:
+        serialized = json.dumps(value, ensure_ascii=False, default=str)
+        if len(serialized) <= cls.MAX_FRAGMENT_CHARS:
+            yield {"evidence_path": path, "value": value}
+            return
+
+        if isinstance(value, dict):
+            if not value:
+                yield {"evidence_path": path, "value": {}}
+                return
+            for key, nested_value in value.items():
+                yield from cls._value_fragments(nested_value, f"{path}.{key}")
+            return
+
+        if isinstance(value, list):
+            if not value:
+                yield {"evidence_path": path, "value": []}
+                return
+            for index, nested_value in enumerate(value):
+                yield from cls._value_fragments(nested_value, f"{path}[{index}]")
+            return
+
+        source = str(value)
+        parts = [
+            source[offset:offset + cls.STRING_FRAGMENT_CHARS]
+            for offset in range(0, len(source), cls.STRING_FRAGMENT_CHARS)
+        ] or [""]
+        for index, part in enumerate(parts):
+            yield {
+                "evidence_path": path,
+                "value": part,
+                "string_part": index + 1,
+                "string_part_count": len(parts),
+            }
+
+    @classmethod
+    def _document_fragments(cls, document: DealDocument) -> Iterator[dict]:
+        payload = cls._document_payload(document)
+        descriptor = {
+            "document_id": payload.pop("document_id"),
+            "name": payload.pop("name"),
+            "document_type": payload.pop("document_type"),
+            "transcription_status": payload.pop("transcription_status"),
+        }
+        for fragment in cls._value_fragments(payload, "document"):
+            yield {**descriptor, **fragment}
+
+    @staticmethod
+    def _serialize(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+
+    @classmethod
+    def _evidence_batches(cls, documents: list[DealDocument]) -> list[str]:
+        """Return bounded contexts without silently dropping evidence or documents."""
+        batches: list[str] = []
+        current: list[dict] = []
+        all_fragments = (
+            fragment
+            for document in documents
+            for fragment in cls._document_fragments(document)
+        )
+        for fragment in all_fragments:
+            candidate = current + [fragment]
+            content = cls._serialize({
+                "phase": "evidence_map",
+                "instructions": (
+                    "Extract candidate deal fields from these ordered evidence fragments. "
+                    "Paths and part numbers reconstruct values split across fragments. "
+                    "Preserve conflicts and do not infer unsupported values."
+                ),
+                "evidence_fragments": candidate,
+            })
+            if current and len(content) > cls.MAX_CONTEXT_CHARS:
+                batches.append(cls._serialize({
+                    "phase": "evidence_map",
+                    "instructions": (
+                        "Extract candidate deal fields from these ordered evidence fragments. "
+                        "Paths and part numbers reconstruct values split across fragments. "
+                        "Preserve conflicts and do not infer unsupported values."
+                    ),
+                    "evidence_fragments": current,
+                }))
+                current = [fragment]
+            else:
+                current = candidate
+        if current:
+            batches.append(cls._serialize({
+                "phase": "evidence_map",
+                "instructions": (
+                    "Extract candidate deal fields from these ordered evidence fragments. "
+                    "Paths and part numbers reconstruct values split across fragments. "
+                    "Preserve conflicts and do not infer unsupported values."
+                ),
+                "evidence_fragments": current,
+            }))
+        return batches
+
+    @classmethod
+    def _candidate_batches(cls, candidates: list[dict]) -> list[str]:
+        batches: list[str] = []
+        current: list[dict] = []
+        for candidate in candidates:
+            cleaned = {
+                key: value for key, value in candidate.items()
+                if key not in {"response", "thinking", "_raw_response"}
+            }
+            proposed = current + [cleaned]
+            content = cls._serialize({
+                "phase": "candidate_reduce",
+                "instructions": (
+                    "Merge these candidate syntheses into one evidence-only result. "
+                    "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
+                    "and list every source document represented by the candidates."
+                ),
+                "candidates": proposed,
+            })
+            if current and len(content) > cls.MAX_CONTEXT_CHARS:
+                batches.append(cls._serialize({
+                    "phase": "candidate_reduce",
+                    "instructions": (
+                        "Merge these candidate syntheses into one evidence-only result. "
+                        "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
+                        "and list every source document represented by the candidates."
+                    ),
+                    "candidates": current,
+                }))
+                current = [cleaned]
+            else:
+                current = proposed
+        if current:
+            batches.append(cls._serialize({
+                "phase": "candidate_reduce",
+                "instructions": (
+                    "Merge these candidate syntheses into one evidence-only result. "
+                    "Resolve agreement, preserve conflicts as ambiguities, do not invent values, "
+                    "and list every source document represented by the candidates."
+                ),
+                "candidates": current,
+            }))
+        return batches
+
+    @classmethod
+    def _run_model(
+        cls,
+        processor: AIProcessorService,
+        *,
+        deal: Deal,
+        content: str,
+        batch_key: str,
+        source_type: str,
+        phase: str,
+        phase_index: int,
+    ) -> dict:
+        existing_deal_json = cls._serialize(cls._existing_deal_payload(deal))
+        request_sha = hashlib.sha256(cls._serialize({
+            "batch_key": batch_key,
+            "phase": phase,
+            "phase_index": phase_index,
+            "existing_deal_json": existing_deal_json,
+            "content": content,
+        }).encode("utf-8")).hexdigest()
+        completed = AIAuditLog.objects.filter(
+            source_type="deal_field_synthesis",
+            source_id=str(deal.id),
+            status="COMPLETED",
+            is_success=True,
+            source_metadata__field_synthesis_request_sha=request_sha,
+        ).order_by("-created_at").first()
+        if completed and isinstance(completed.parsed_json, dict) and not completed.parsed_json.get("error"):
+            return dict(completed.parsed_json)
+
+        result = processor.process_content(
+            content=content,
+            skill_name="deal_field_synthesis",
+            source_type="deal_field_synthesis",
+            source_id=str(deal.id),
+            metadata={
+                "existing_deal_json": existing_deal_json,
+                "batch_key": batch_key,
+                "ingestion_source_type": source_type,
+                "temperature": 0.0,
+                "max_tokens": cls.MAX_OUTPUT_TOKENS,
+                "enforce_context_budget": True,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "context_label": f"{deal.title}: field synthesis {phase} {phase_index + 1}",
+                "_source_metadata": {
+                    "field_synthesis_key": batch_key,
+                    "field_synthesis_phase": phase,
+                    "field_synthesis_phase_index": phase_index,
+                    "field_synthesis_request_sha": request_sha,
+                },
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "deal_field_synthesis",
+                        "schema": DEAL_FIELD_SYNTHESIS_JSON_SCHEMA,
+                        "strict": True,
+                    },
+                },
+            },
+        )
+        if not isinstance(result, dict) or result.get("error"):
+            raise ValueError(
+                (result or {}).get("error", "Deal field synthesis returned no structured result.")
+                if isinstance(result, dict)
+                else "Deal field synthesis returned no structured result."
+            )
+        return dict(result)
 
     @staticmethod
     def _existing_deal_payload(deal: Deal) -> dict:
@@ -99,39 +309,37 @@ class DealFieldSynthesisService:
         if not documents:
             raise ValueError("Deal field synthesis requires at least one indexed document.")
 
-        result = AIProcessorService().process_content(
-            content=cls._evidence_context(documents),
-            skill_name="deal_field_synthesis",
-            source_type="deal_field_synthesis",
-            source_id=str(deal.id),
-            metadata={
-                "existing_deal_json": json.dumps(
-                    cls._existing_deal_payload(deal), ensure_ascii=False, default=str,
-                ),
-                "batch_key": batch_key,
-                "ingestion_source_type": source_type,
-                "temperature": 0.0,
-                "max_tokens": 8192,
-                "enforce_context_budget": True,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "deal_field_synthesis",
-                        "schema": DEAL_FIELD_SYNTHESIS_JSON_SCHEMA,
-                        "strict": True,
-                    },
-                },
-            },
-        )
-        if not isinstance(result, dict) or result.get("error"):
-            raise ValueError(
-                (result or {}).get("error", "Deal field synthesis returned no structured result.")
-                if isinstance(result, dict)
-                else "Deal field synthesis returned no structured result."
+        processor = AIProcessorService()
+        evidence_batches = cls._evidence_batches(documents)
+        results = [
+            cls._run_model(
+                processor,
+                deal=deal,
+                content=content,
+                batch_key=batch_key,
+                source_type=source_type,
+                phase="evidence_map",
+                phase_index=index,
             )
-
-        result = dict(result)
+            for index, content in enumerate(evidence_batches)
+        ]
+        reduction_round = 0
+        while len(results) > 1:
+            candidate_batches = cls._candidate_batches(results)
+            results = [
+                cls._run_model(
+                    processor,
+                    deal=deal,
+                    content=content,
+                    batch_key=batch_key,
+                    source_type=source_type,
+                    phase=f"candidate_reduce_{reduction_round}",
+                    phase_index=index,
+                )
+                for index, content in enumerate(candidate_batches)
+            ]
+            reduction_round += 1
+        result = dict(results[0])
         model_data = dict(result.get("deal_model_data") or {})
         if not deal.deal_summary and str(model_data.get("deal_summary") or "").strip():
             result["analyst_report"] = str(model_data["deal_summary"]).strip()
