@@ -151,6 +151,8 @@ Presentation standard:
 - Organize the section into three to seven descriptive `###` subsections. Use short paragraphs, decision-oriented bullets and tables instead of uninterrupted walls of text.
 - Start with the most decision-relevant conclusion or snapshot; put detailed support, reconciliations and diligence gaps after it.
 - Use Markdown tables for time series, comparisons, mixes, bridges, scenarios, risks and action plans. Keep one metric per row, periods or comparable entities in columns, and state currency and scale in the first-column header.
+- Put each Markdown table row on its own physical line. The header, separator and data rows must never be concatenated into one line.
+- Use the correct axes for the subject. Financial time series use metrics as rows and chronological periods as columns. Comparable-company and transaction tables use entities as rows and comparable attributes as columns. Risk and action tables use one risk or action per row and their fields as columns.
 - Order financial periods chronologically and suffix period labels with `A` for actual, `B` for budget and `E` for estimate or forecast when the evidence supports that classification.
 - Keep values, signs, units and bases consistent within a table. Use `N/A` for genuinely unavailable cells and explain material gaps below the table. Never invent a value to complete a layout.
 - Use bold sparingly for conclusions, totals and decision gates. Do not simulate charts with ASCII art or emit Mermaid code; the interface builds verified charts from canonical tables.

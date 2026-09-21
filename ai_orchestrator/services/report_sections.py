@@ -26,7 +26,7 @@ class ReportSectionDegenerateOutputError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v6"
+    CACHE_VERSION = "ic-report-sections-v7"
     INTERNAL_CITATION_PATTERN = re.compile(
         r"\[(?:Evidence\s+(?P<evidence>\d+)|R0*(?P<rank>\d+))"
         r"(?:@(?P<locator>[^\]\n]+))?\]"
@@ -43,6 +43,15 @@ class ICReportSectionService:
     CITATION_CLUSTER_PATTERN = re.compile(r"\[(?P<items>[^\]\n]{1,2000})\]")
     CITATION_TOKEN_PATTERN = re.compile(
         r"\b(?:Evidence\s+\d+|R0*\d+)\b",
+        flags=re.IGNORECASE,
+    )
+    FINANCIAL_PERIOD_PATTERN = re.compile(
+        r"^(?:(?:FY|CY)\s*\d{2,4}[A-Z]?|20\d{2}[A-Z]?|Q[1-4]\b|H[12]\b|Period\b|Month\b)",
+        flags=re.IGNORECASE,
+    )
+    FINANCIAL_METRIC_PATTERN = re.compile(
+        r"revenue|sales|gross profit|margin|ebitda|ebit|pat|net income|cash|capex|"
+        r"debt|borrowings|receivable|payable|inventory|working capital|roce|roic|roe",
         flags=re.IGNORECASE,
     )
 
@@ -272,10 +281,78 @@ class ICReportSectionService:
         rendered = re.sub(r"(\[\d+])(\s*(?:[,;|]\s*)\1)+", r"\1", rendered)
         if citation_map:
             rendered = re.sub(r"\[\s*(?:[,;|]\s*)*]", "", rendered)
-            rendered = re.sub(r"\s+([,.;:])", r"\1", rendered)
-            rendered = re.sub(r"([,;|])(?:\s*[,;|])+", r"\1", rendered)
-            rendered = re.sub(r"[,;|]\s*([.?!])", r"\1", rendered)
+            # Citation punctuation cleanup must never cross line boundaries or
+            # treat Markdown table pipes as punctuation. Collapsing ``|\n|``
+            # turns an otherwise valid table into one long paragraph.
+            rendered = re.sub(r"[ \t]+([,.;:])", r"\1", rendered)
+            rendered = re.sub(r"([,;])(?:[ \t]*[,;])+", r"\1", rendered)
+            rendered = re.sub(r"[,;][ \t]*([.?!])", r"\1", rendered)
         return rendered, used
+
+    @staticmethod
+    def _table_cells(line: str) -> list[str]:
+        value = str(line or "").strip()
+        if value.startswith("|"):
+            value = value[1:]
+        if value.endswith("|") and not value.endswith(r"\|"):
+            value = value[:-1]
+        return [cell.strip() for cell in re.split(r"(?<!\\)\|", value)]
+
+    @classmethod
+    def _is_table_separator(cls, line: str) -> bool:
+        cells = cls._table_cells(line)
+        return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+    @staticmethod
+    def _plain_table_label(value: str) -> str:
+        value = re.sub(r"\[(?:R?\d+|Evidence\s+\d+)]", "", str(value or ""), flags=re.I)
+        return re.sub(r"[*_`]", "", value).strip()
+
+    @classmethod
+    def _normalize_financial_table_axes(cls, text: str, title: str) -> str:
+        """Keep financial metrics on rows and reporting periods on columns."""
+        if title != "Key Financials":
+            return text
+        lines = text.splitlines()
+        output = []
+        index = 0
+        while index < len(lines):
+            if index + 2 >= len(lines) or "|" not in lines[index] or not cls._is_table_separator(lines[index + 1]):
+                output.append(lines[index])
+                index += 1
+                continue
+            block = [lines[index], lines[index + 1]]
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                block.append(lines[index])
+                index += 1
+            header = cls._table_cells(block[0])
+            rows = [cls._table_cells(line) for line in block[2:]]
+            consistent = len(header) >= 3 and rows and all(len(row) == len(header) for row in rows)
+            metric_headers = sum(
+                bool(cls.FINANCIAL_METRIC_PATTERN.search(cls._plain_table_label(cell)))
+                for cell in header[1:]
+            )
+            period_rows = sum(
+                bool(cls.FINANCIAL_PERIOD_PATTERN.search(cls._plain_table_label(row[0])))
+                for row in rows
+            ) if consistent else 0
+            should_transpose = (
+                consistent
+                and metric_headers >= max(2, len(header[1:]) // 2)
+                and period_rows >= max(2, len(rows) // 2)
+            )
+            if not should_transpose:
+                output.extend(block)
+                continue
+            transposed = [["Metric", *[row[0] for row in rows]]]
+            transposed.append(["---"] * (len(rows) + 1))
+            transposed.extend([
+                [header[column], *[row[column] for row in rows]]
+                for column in range(1, len(header))
+            ])
+            output.extend("| " + " | ".join(row) + " |" for row in transposed)
+        return "\n".join(output)
 
     @classmethod
     def _append_references(cls, text: str, citations: dict | None, used: list[dict]) -> str:
@@ -325,6 +402,7 @@ class ICReportSectionService:
             text = f"{target}\n\n{text}"
         text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
+        text = cls._normalize_financial_table_axes(text, title)
         if citations and not used_citations:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned no verifiable evidence citations."

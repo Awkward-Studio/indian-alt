@@ -95,6 +95,41 @@ class CitationNormalizationTests(SimpleTestCase):
         self.assertIn("EBITDA improved [1].", body)
         self.assertIn("Overall PL!R60", citations)
 
+    def test_citation_cleanup_preserves_markdown_table_row_boundaries(self):
+        rendered = ICReportSectionService._normalize_section(
+            "Key Financials",
+            (
+                "## Key Financials\n\n"
+                "| Metric | FY24A | FY25A |\n"
+                "| --- | ---: | ---: |\n"
+                "| Revenue | 100 [R001] | 125 [R001] |\n"
+                "| EBITDA | 10 [R001] | 15 [R001] |"
+            ),
+            citations={"1": {"document_id": "doc-1", "title": "Model.xlsx"}},
+        )
+
+        body = rendered.split("### Citations", 1)[0]
+        table_lines = [line for line in body.splitlines() if line.startswith("|")]
+        self.assertEqual(len(table_lines), 4)
+        self.assertEqual(table_lines[1], "| --- | ---: | ---: |")
+
+    def test_key_financials_transposes_period_rows_to_metric_rows(self):
+        rendered = ICReportSectionService._normalize_section(
+            "Key Financials",
+            (
+                "## Key Financials\n\n"
+                "| Period | Revenue | EBITDA | PAT |\n"
+                "| --- | ---: | ---: | ---: |\n"
+                "| FY24A | 100 | 10 | 4 |\n"
+                "| FY25A | 125 | 15 | 6 |"
+            ),
+        )
+
+        self.assertIn("| Metric | FY24A | FY25A |", rendered)
+        self.assertIn("| Revenue | 100 | 125 |", rendered)
+        self.assertIn("| EBITDA | 10 | 15 |", rendered)
+        self.assertNotIn("| Period | Revenue | EBITDA |", rendered)
+
     def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
         with self.assertRaises(ReportSectionValidationError):
             ICReportSectionService._normalize_section(
