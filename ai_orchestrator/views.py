@@ -1007,6 +1007,25 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'warning': row.get('financial_synthesis_warning'),
             })
 
+        # A Celery retry keeps the same task id. The failed inference audit is
+        # useful history, but it should not make a completed workflow look
+        # failed in the deal queue.
+        completed_deliveries = {
+            (str(item.get('celery_task_id') or ''), str(item.get('deal_id') or ''))
+            for item in queue_history
+            if item.get('audit_status') == 'COMPLETED'
+            and item.get('celery_task_id')
+        }
+        for item in queue_history:
+            delivery_key = (
+                str(item.get('celery_task_id') or ''),
+                str(item.get('deal_id') or ''),
+            )
+            resolved = item.get('audit_status') == 'FAILED' and delivery_key in completed_deliveries
+            item['retry_resolved'] = resolved
+            if resolved:
+                item['status'] = 'completed'
+
         deal_title_by_id = {
             str(run.get('deal_id')): run.get('deal_title') for run in vdr_runs if run.get('deal_id')
         }

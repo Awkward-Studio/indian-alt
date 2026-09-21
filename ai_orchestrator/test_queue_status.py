@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from ai_orchestrator.models import AIAuditLog
@@ -338,6 +339,52 @@ class QueueStatusEndpointTests(TestCase):
         snapshot.assert_not_called()
         inspect.assert_not_called()
         get_slots.assert_not_called()
+
+    @patch("ai_orchestrator.views.requests.get")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    @patch("config.celery.app.control.inspect")
+    def test_queue_history_resolves_intermediate_failure_after_retry(
+        self, inspect, snapshot, get_slots,
+    ):
+        inspect.return_value.active.return_value = {}
+        inspect.return_value.reserved.return_value = {}
+        inspect.return_value.scheduled.return_value = {}
+        snapshot.return_value = {"queues": [], "messages": [], "unacked": {"count": 0, "messages": []}, "warning": None}
+        get_slots.return_value.json.return_value = []
+        get_slots.return_value.raise_for_status.return_value = None
+        deal = Deal.objects.create(title="Retry resolved deal")
+        AIAuditLog.objects.create(
+            source_type="deal_field_synthesis", source_id=str(deal.id),
+            context_label="Intermediate reduction", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="FAILED",
+            is_success=False, celery_task_id="same-delivery",
+            completed_at=timezone.now(), error_message="Context budget exceeded",
+        )
+        completed = AIAuditLog.objects.create(
+            source_type="deal_synthesis", source_id=str(deal.id),
+            context_label="Redo deal synthesis", model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="COMPLETED",
+            is_success=True, celery_task_id="same-delivery",
+            completed_at=timezone.now(),
+        )
+
+        response = self.client.get("/api/ai/history/queue-status/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        failed_attempt = next(
+            item for item in response.data["queue_history"]
+            if item["title"] == "Intermediate reduction"
+        )
+        self.assertTrue(failed_attempt["retry_resolved"])
+        self.assertEqual(failed_attempt["status"], "completed")
+        history_card_items = [
+            item for item in response.data["queue_history"]
+            if item["deal_id"] == str(deal.id)
+        ]
+        self.assertEqual(sum(
+            item["audit_status"] == "FAILED" and not item["retry_resolved"]
+            for item in history_card_items
+        ), 0)
 
     def test_fast_queue_status_hides_folder_tree_snapshots_from_ai_history(self):
         deal = Deal.objects.create(title="Folder Snapshot Deal")
