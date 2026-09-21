@@ -110,11 +110,11 @@ CELERY_WORKER_PREFETCH_MULTIPLIER=1
 ```
 
 Keep the worker at one process/concurrency while the shared inference VM is
-single-slot. Competitor discovery is intentionally routed to `low_priority`,
-the same queue used by VDR document extraction and analyst-report generation,
-so a request waits in Redis instead of starting a second model workload while
-an extraction/report task is active. Keep `CELERY_WORKER_PREFETCH_MULTIPLIER=1`
-so one waiting task is reserved at a time.
+single-slot. Queue order is intentional: interactive chat and competitor
+research use `high_priority`, email evidence ingestion uses `email_priority`,
+and VDR/document extraction plus analyst-report work use the lower queues.
+Keep `CELERY_WORKER_PREFETCH_MULTIPLIER=1` so one waiting task is reserved at
+a time.
 
 Web-only variable:
 

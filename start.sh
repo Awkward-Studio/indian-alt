@@ -50,7 +50,9 @@ if [ "$RUN_AS_COORDINATOR_NORMALIZED" = "true" ]; then
 elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
-    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,vdr_control,vdr_work,low_priority,default}"
+    # Interactive chat and competitor research outrank email ingestion;
+    # email ingestion outranks VDR/report work.
+    CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,email_priority,vdr_control,vdr_work,low_priority,default}"
     CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
     CELERY_BEAT_ARGS=()
     if [ "$RUN_VDR_COORDINATOR_NORMALIZED" = "true" ]; then

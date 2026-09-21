@@ -9,7 +9,7 @@ from typing import Any
 class CeleryQueueSnapshotService:
     """Read a safe, ordered snapshot directly from Celery's Redis queues."""
 
-    DEFAULT_QUEUES = ("high_priority", "vdr_control", "vdr_work", "default", "low_priority")
+    DEFAULT_QUEUES = ("high_priority", "email_priority", "vdr_control", "vdr_work", "default", "low_priority")
     MAX_MESSAGES_PER_QUEUE = 500
     # Counts-only folder refreshes are infrastructure work, not AI tasks. Their
     # parent batch audit carries the useful portfolio progress without flooding

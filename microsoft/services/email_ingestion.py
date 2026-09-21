@@ -296,7 +296,7 @@ class EmailIngestionService:
         from microsoft.tasks import ingest_email_evidence
         try:
             result = ingest_email_evidence.apply_async(
-                args=[str(run_id)], queue='low_priority', countdown=countdown, retry=False,
+                args=[str(run_id)], queue='email_priority', countdown=countdown, retry=False,
             )
             if audit_log_id:
                 from ai_orchestrator.models import AIAuditLog
@@ -537,7 +537,7 @@ class EmailIngestionService:
                 from microsoft.tasks import ingest_email_evidence
                 ingest_email_evidence.apply_async(
                     args=[str(run.id)],
-                    queue='low_priority',
+                    queue='email_priority',
                     countdown=delay,
                     retry=False,
                 )

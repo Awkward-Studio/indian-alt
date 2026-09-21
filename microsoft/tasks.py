@@ -20,7 +20,11 @@ def ingest_email_evidence(self, run_id):
     from .services.email_ingestion import EmailIngestionService
     if not getattr(settings, 'EMAIL_INGESTION_ENABLED', False):
         return {'status': 'disabled'}
-    return EmailIngestionService.process(run_id, task_id=self.request.id, stop_after_decision=True)
+    # A verified linked email can run through capture, indexing, and deal
+    # synthesis in one click. Ambiguous/unlinked messages still stop at the
+    # review checkpoint inside process(). Analyst report generation remains a
+    # separate action from the deal page.
+    return EmailIngestionService.process(run_id, task_id=self.request.id, stop_after_decision=False)
 
 
 @shared_task

@@ -37,6 +37,19 @@ class EmailRecoveryTests(TestCase):
         self.assertIsNone(Ingestion.claim(run.id))
 
     @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, 'process', return_value={'status': 'completed'})
+    def test_worker_runs_full_pipeline_without_review_pause(self, process):
+        from microsoft.tasks import ingest_email_evidence
+
+        run = Evidence.snapshot(self.email)
+        result = ingest_email_evidence.run(str(run.id))
+
+        self.assertEqual(result['status'], 'completed')
+        process.assert_called_once()
+        self.assertEqual(process.call_args.args[0], str(run.id))
+        self.assertFalse(process.call_args.kwargs['stop_after_decision'])
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
     @patch.object(Ingestion, '_observed_task_ids', return_value={'old-task'})
     @patch('microsoft.services.email_ingestion.cache.get')
     @patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'old-deploy'})
@@ -112,6 +125,7 @@ class EmailRecoveryTests(TestCase):
     def test_broker_outage_keeps_durable_pending_run(self, enqueue):
         with self.captureOnCommitCallbacks(execute=True):
             run = Ingestion.enqueue(self.email)
+        self.assertEqual(enqueue.call_args.kwargs['queue'], 'email_priority')
         run.refresh_from_db()
         self.assertEqual(run.status, 'pending')
         self.assertEqual(run.stages['dispatch'], 'pending')
