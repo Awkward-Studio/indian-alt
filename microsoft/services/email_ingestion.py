@@ -164,6 +164,8 @@ class EmailIngestionService:
             status = 'FAILED'
         elif run.status in ('completed', 'needs_review'):
             status = 'COMPLETED'
+        elif run.status in ('pending', 'waiting_service'):
+            status = 'PENDING'
         else:
             status = 'PROCESSING'
         now = timezone.now()
@@ -210,13 +212,12 @@ class EmailIngestionService:
             run = EmailIngestionRun.objects.select_for_update().get(pk=run_id)
             if run.status != 'running':
                 return run
-            audit = cls._audit_log_for_run(run)
-            if audit and audit.status in ('PENDING', 'PROCESSING') and audit.celery_task_id:
+            if run.lease_until and run.lease_until > timezone.now():
                 return run
             run.status = 'pending'
             run.lease_until = None
             run.lease_token = None
-            run.error = 'Recovered an interrupted web-request ingestion.'
+            run.error = 'Recovered an interrupted email ingestion; it will be queued again.'
             run.next_attempt_at = None
             run.save(update_fields=['status', 'lease_until', 'lease_token', 'error', 'next_attempt_at', 'updated_at'])
             return run
@@ -225,6 +226,11 @@ class EmailIngestionService:
     def start(cls, email, *, requested_by=None):
         """Start ingestion asynchronously and return its run and audit row."""
         run = cls.enqueue(email, dispatch=False)
+        run.refresh_from_db()
+        if run.status in ('completed', 'needs_review', 'superseded', 'cancelled', 'failed'):
+            # A manual Process-evidence action must never reuse a terminal
+            # snapshot whose audit/task can no longer be claimed.
+            run = cls.enqueue(email, dispatch=False, force_new=True)
         cls.requeue_orphaned(run.id)
         run.refresh_from_db()
         audit = cls.ensure_audit_log(run, requested_by=requested_by)
@@ -285,8 +291,8 @@ class EmailIngestionService:
         return '\n\n'.join(sections)
 
     @staticmethod
-    def enqueue(email, *, dispatch=True):
-        run = Evidence.snapshot(email)
+    def enqueue(email, *, dispatch=True, force_new=False):
+        run = Evidence.snapshot(email, force_new=force_new)
         if dispatch and run.status in ('pending', 'waiting_service', 'failed'):
             transaction.on_commit(lambda: EmailIngestionService.dispatch(run.id))
         return run
@@ -356,9 +362,52 @@ class EmailIngestionService:
             return run
 
     @classmethod
+    def recover_not_claimed(cls, run_id, *, task_id=None):
+        """Make a silently discarded delivery observable and retryable."""
+        with transaction.atomic():
+            try:
+                run = EmailIngestionRun.objects.select_for_update().get(pk=run_id)
+            except EmailIngestionRun.DoesNotExist:
+                logger.warning('Email ingestion delivery %s referenced a deleted run', run_id)
+                return False
+            if run.status in ('completed', 'needs_review', 'superseded', 'cancelled'):
+                return False
+            if run.status == 'running' and run.lease_until and run.lease_until > timezone.now():
+                # Another worker owns the valid lease; this was only a
+                # duplicate delivery and must not interrupt it.
+                return False
+            if EmailIngestionRun.objects.filter(
+                email_id=run.email_id, created_at__gt=run.created_at,
+            ).exists():
+                run.status = 'superseded'
+                run.error = 'Superseded by a newer email ingestion run.'
+                run.save(update_fields=['status', 'error', 'updated_at'])
+                cls._sync_audit_log(run, task_id=task_id)
+                return False
+            run.status = 'pending'
+            run.lease_token = None
+            run.lease_until = None
+            run.next_attempt_at = timezone.now()
+            run.error = 'The previous queue delivery did not claim this run; retrying.'
+            run.stages = {**(run.stages or {}), 'dispatch': 'pending'}
+            run.save(update_fields=[
+                'status', 'lease_token', 'lease_until', 'next_attempt_at',
+                'error', 'stages', 'updated_at',
+            ])
+        cls._sync_audit_log(run, task_id=task_id)
+        audit = cls._audit_log_for_run(run)
+        cls.dispatch(
+            run.id,
+            audit_log_id=str(audit.id) if audit else None,
+            countdown=5,
+        )
+        return True
+
+    @classmethod
     def process(cls, run_id, *, use_ai=None, task_id=None, stop_after_decision=False):
         run = cls.claim(run_id)
         if run is None:
+            logger.warning('Email ingestion delivery could not claim run %s', run_id)
             return {'status': 'not_claimed'}
         cls._sync_audit_log(run, task_id=task_id)
         try:

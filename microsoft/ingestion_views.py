@@ -254,7 +254,11 @@ class EmailIngestionActions:
             return Response({'error': str(exc)}, status=409)
         except (ValueError, TypeError, ValidationError) as exc:
             return Response({'error': str(exc)}, status=400)
-        return Response({**run_status(run, include_content=True), 'enabled': True})
+        return Response({
+            **run_status(run, include_content=True),
+            'audit_log_id': str(audit.id),
+            'enabled': True,
+        })
 
     @action(detail=True, methods=['get'], url_path='evidence-source')
     def evidence_source(self, request, pk=None):

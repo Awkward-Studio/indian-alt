@@ -37,6 +37,37 @@ class EmailRecoveryTests(TestCase):
         self.assertIsNone(Ingestion.claim(run.id))
 
     @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, 'dispatch')
+    def test_start_creates_fresh_run_after_terminal_snapshot(self, dispatch):
+        old_run = Evidence.snapshot(self.email)
+        old_run.status = 'cancelled'
+        old_run.save(update_fields=['status', 'updated_at'])
+        Ingestion.ensure_audit_log(old_run)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            run, audit = Ingestion.start(self.email)
+
+        self.assertNotEqual(run.id, old_run.id)
+        self.assertEqual(run.status, 'pending')
+        self.assertEqual(audit.source_metadata['run_id'], str(run.id))
+        dispatch.assert_called_once_with(run.id, audit_log_id=str(audit.id))
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, 'dispatch')
+    def test_not_claimed_delivery_is_requeued(self, dispatch):
+        run = Evidence.snapshot(self.email)
+        audit = Ingestion.ensure_audit_log(run)
+
+        self.assertTrue(Ingestion.recover_not_claimed(run.id, task_id='stale-task'))
+
+        run.refresh_from_db()
+        audit.refresh_from_db()
+        self.assertEqual(run.status, 'pending')
+        self.assertIn('did not claim', run.error)
+        self.assertEqual(audit.status, 'PENDING')
+        dispatch.assert_called_once_with(run.id, audit_log_id=str(audit.id), countdown=5)
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
     @patch.object(Ingestion, 'process', return_value={'status': 'completed'})
     def test_worker_runs_full_pipeline_without_review_pause(self, process):
         from microsoft.tasks import ingest_email_evidence

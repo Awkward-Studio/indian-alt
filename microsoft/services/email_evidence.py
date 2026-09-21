@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import uuid
 from pathlib import PurePath
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -55,7 +56,7 @@ class EmailEvidenceService:
         return name
 
     @staticmethod
-    def snapshot(email):
+    def snapshot(email, *, force_new=False):
         source = {field: getattr(email, field) for field in (
             'subject', 'body_html', 'body_text', 'body_preview', 'from_email',
             'to_emails', 'cc_emails', 'attachments', 'graph_id', 'internet_message_id', 'conversation_id')}
@@ -63,6 +64,8 @@ class EmailEvidenceService:
             value = getattr(email, field)
             source[field] = value.isoformat() if value else None
         version = digest(json.dumps(source, sort_keys=True, default=str))
+        if force_new:
+            version = digest(f'{version}:manual-rerun:{uuid.uuid4().hex}')
         run, _ = EmailIngestionRun.objects.get_or_create(email=email, input_version=version,
             defaults={'source': source, 'stages': {'classification': 'pending', 'match': 'pending', 'save': 'pending', 'index': 'pending'}})
         return run

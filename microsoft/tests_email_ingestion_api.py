@@ -64,12 +64,13 @@ class EmailIngestionAPITests(TestCase):
 
     @patch.object(Ingestion, 'dispatch')
     def test_confirmed_review_dispatches_evidence_worker(self, dispatch):
-        response = self.client.post(self.url + 'ingestion-confirm/', {
-            'run_id': str(self.run.id),
-            'expected_revision': self.run.revision,
-            'deal_id': str(self.deal.id),
-            'classification': 'NORMAL_EMAIL',
-        }, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(self.url + 'ingestion-confirm/', {
+                'run_id': str(self.run.id),
+                'expected_revision': self.run.revision,
+                'deal_id': str(self.deal.id),
+                'classification': 'NORMAL_EMAIL',
+            }, format='json')
 
         self.assertEqual(response.status_code, 200, response.data)
         dispatch.assert_called_once_with(self.run.id, audit_log_id=response.data['audit_log_id'])
