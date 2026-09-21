@@ -12,7 +12,7 @@ from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
-from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens
 from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
@@ -174,10 +174,67 @@ class DealFieldSynthesisService:
             ),
             item_key="candidates",
             transform=lambda candidate: {
-                key: value for key, value in candidate.items()
-                if key not in {"response", "thinking", "_raw_response"}
+                # Only these structured fields can affect the next merge. The
+                # transport response and model scratch work can be very large,
+                # and carrying them into another reduction round can overflow
+                # the provider context even when the evidence was batched.
+                key: candidate.get(key)
+                for key in ("deal_model_data", "source_relationships", "metadata")
+                if candidate.get(key) is not None
             },
         )
+
+    @classmethod
+    def _run_model_adaptive(
+        cls,
+        processor: AIProcessorService,
+        *,
+        deal: Deal,
+        content: str,
+        batch_key: str,
+        source_type: str,
+        phase: str,
+        phase_index: int,
+    ) -> list[dict]:
+        """Retry an oversized serialized request as smaller logical batches."""
+        try:
+            return [cls._run_model(
+                processor,
+                deal=deal,
+                content=content,
+                batch_key=batch_key,
+                source_type=source_type,
+                phase=phase,
+                phase_index=phase_index,
+            )]
+        except ContextBudgetExceeded:
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise
+
+            item_key = "evidence_fragments" if phase == "evidence_map" else "candidates"
+            items = payload.get(item_key) if isinstance(payload, dict) else None
+            if not isinstance(items, list) or len(items) < 2:
+                raise
+
+            midpoint = max(1, len(items) // 2)
+            child_payloads = (
+                {**payload, item_key: items[:midpoint]},
+                {**payload, item_key: items[midpoint:]},
+            )
+            results: list[dict] = []
+            for child_payload in child_payloads:
+                results.extend(cls._run_model_adaptive(
+                    processor,
+                    deal=deal,
+                    content=cls._serialize(child_payload),
+                    batch_key=batch_key,
+                    source_type=source_type,
+                    phase=phase,
+                    phase_index=phase_index,
+                ))
+            return results
 
     @classmethod
     def _run_model(
@@ -302,7 +359,9 @@ class DealFieldSynthesisService:
         processor = AIProcessorService()
         evidence_batches = cls._evidence_batches(documents)
         results = [
-            cls._run_model(
+            result
+            for index, content in enumerate(evidence_batches)
+            for result in cls._run_model_adaptive(
                 processor,
                 deal=deal,
                 content=content,
@@ -311,13 +370,14 @@ class DealFieldSynthesisService:
                 phase="evidence_map",
                 phase_index=index,
             )
-            for index, content in enumerate(evidence_batches)
         ]
         reduction_round = 0
         while len(results) > 1:
             candidate_batches = cls._candidate_batches(results)
             results = [
-                cls._run_model(
+                result
+                for index, content in enumerate(candidate_batches)
+                for result in cls._run_model_adaptive(
                     processor,
                     deal=deal,
                     content=content,
@@ -326,7 +386,6 @@ class DealFieldSynthesisService:
                     phase=f"candidate_reduce_{reduction_round}",
                     phase_index=index,
                 )
-                for index, content in enumerate(candidate_batches)
             ]
             reduction_round += 1
         result = dict(results[0])

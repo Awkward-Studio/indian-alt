@@ -130,6 +130,57 @@ class DealFieldSynthesisServiceTests(TestCase):
         }
         self.assertEqual(document_ids, {str(self.document.id), str(later_document.id)})
 
+    def test_candidate_batches_drop_transport_and_scratch_fields(self):
+        candidate = self._synthesis_result()
+        candidate.update({
+            "response": "transport" * 20_000,
+            "_raw_response": "raw" * 20_000,
+            "analyst_report": "scratch" * 20_000,
+            "thinking": "thinking" * 20_000,
+        })
+
+        batches = DealFieldSynthesisService._candidate_batches([candidate])
+
+        payload = json.loads(batches[0])
+        self.assertEqual(
+            set(payload["candidates"][0]),
+            {"deal_model_data", "source_relationships", "metadata"},
+        )
+
+    def test_oversized_request_is_split_into_logical_batches(self):
+        content = json.dumps({
+            "phase": "evidence_map",
+            "instructions": "Extract fields.",
+            "evidence_fragments": [{"fragment": index} for index in range(4)],
+        })
+        calls = []
+
+        def run_model(*_args, **kwargs):
+            calls.append(kwargs["content"])
+            if len(calls) == 1:
+                raise ContextBudgetExceeded(
+                    estimated_input_tokens=70_000,
+                    max_output_tokens=4_096,
+                    reserve_tokens=4_096,
+                    context_window_tokens=65_536,
+                )
+            return self._synthesis_result()
+
+        with patch.object(DealFieldSynthesisService, "_run_model", side_effect=run_model):
+            results = DealFieldSynthesisService._run_model_adaptive(
+                None,
+                deal=self.deal,
+                content=content,
+                batch_key="test:adaptive",
+                source_type="email",
+                phase="evidence_map",
+                phase_index=0,
+            )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(len(json.loads(item)["evidence_fragments"]) == 2 for item in calls[1:]))
+
     @patch("deals.services.deal_field_synthesis.EmbeddingService")
     @patch("deals.services.deal_field_synthesis.AIProcessorService")
     def test_multiple_evidence_batches_are_merged_before_persisting(self, ai_cls, _embedding_cls):
