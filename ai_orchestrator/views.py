@@ -443,7 +443,10 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             )
             failed_ingestion = EmailIngestionRun.objects.filter(
                 status__in=['pending', 'running', 'waiting_service'],
-            ).update(status='failed', error=message, lease_token=None, lease_until=None)
+            ).update(
+                status='cancelled', error=message, lease_token=None,
+                lease_until=None, next_attempt_at=None,
+            )
 
         return Response({
             'status': 'cleared', 'revoked_task_count': len(task_ids),

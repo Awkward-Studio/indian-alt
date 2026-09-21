@@ -215,7 +215,7 @@ class AuditTaskControlTests(TestCase):
         self.assertEqual(audit.status, 'FAILED')
         self.assertEqual(deal.processing_status, 'failed')
         self.assertEqual(email.processing_status, 'idle')
-        self.assertEqual(run.status, 'failed')
+        self.assertEqual(run.status, 'cancelled')
 
     @patch('ai_orchestrator.views.VMControlService')
     @patch('ai_orchestrator.views.requests.post')
