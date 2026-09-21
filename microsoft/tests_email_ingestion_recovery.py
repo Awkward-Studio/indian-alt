@@ -112,7 +112,10 @@ class EmailRecoveryTests(TestCase):
     def test_broker_outage_keeps_durable_pending_run(self, enqueue):
         with self.captureOnCommitCallbacks(execute=True):
             run = Ingestion.enqueue(self.email)
-        self.assertEqual(EmailIngestionRun.objects.get(pk=run.id).status, 'pending')
+        run.refresh_from_db()
+        self.assertEqual(run.status, 'pending')
+        self.assertEqual(run.stages['dispatch'], 'pending')
+        self.assertIn('automatic retry', run.error)
         enqueue.side_effect = None
         self.assertEqual(Ingestion.reconcile(), 1)
 

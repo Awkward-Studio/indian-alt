@@ -62,6 +62,18 @@ class EmailIngestionAPITests(TestCase):
         self.assertFalse(EmailEvidenceLink.objects.filter(deal=self.deal, active=True).exists())
         self.assertEqual(self.client.post(self.url + 'ingestion-confirm/', payload, format='json').status_code, 409)
 
+    @patch.object(Ingestion, 'dispatch')
+    def test_confirmed_review_dispatches_evidence_worker(self, dispatch):
+        response = self.client.post(self.url + 'ingestion-confirm/', {
+            'run_id': str(self.run.id),
+            'expected_revision': self.run.revision,
+            'deal_id': str(self.deal.id),
+            'classification': 'NORMAL_EMAIL',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        dispatch.assert_called_once_with(self.run.id, audit_log_id=response.data['audit_log_id'])
+
     def test_other_emails_run_cannot_be_confirmed(self):
         other_email = Email.objects.create(email_account=self.email.email_account, graph_id='another')
         other_run = Evidence.snapshot(other_email)

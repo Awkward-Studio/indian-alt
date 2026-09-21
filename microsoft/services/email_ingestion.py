@@ -303,8 +303,23 @@ class EmailIngestionService:
                 AIAuditLog.objects.filter(pk=audit_log_id).update(celery_task_id=str(result.id))
             return result
         except Exception:
-            # The run is the outbox. Reconciliation retries publication.
+            # The run is the outbox. Keep it eligible for the periodic
+            # reconciler and expose the reason to the audit/status APIs. A
+            # broker outage must not look like a completed manual review.
             logger.warning('Email ingestion dispatch pending for %s', run_id, exc_info=True)
+            with transaction.atomic():
+                run = EmailIngestionRun.objects.select_for_update().get(pk=run_id)
+                if run.status in ('pending', 'waiting_service', 'failed'):
+                    run.stages = {**(run.stages or {}), 'dispatch': 'pending'}
+                    run.error = 'Queue dispatch pending; automatic retry will continue.'
+                    # Leave this immediately eligible. The beat reconciler is
+                    # the rate limiter, and this also makes a failed publish
+                    # recover on the next reconciliation tick.
+                    run.next_attempt_at = timezone.now()
+                    run.save(update_fields=['stages', 'error', 'next_attempt_at', 'updated_at'])
+            run = EmailIngestionRun.objects.get(pk=run_id)
+            EmailIngestionService._sync_audit_log(run)
+            return None
 
     @staticmethod
     def text_available():

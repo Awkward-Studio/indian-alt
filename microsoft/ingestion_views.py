@@ -245,6 +245,11 @@ class EmailIngestionActions:
 
                 run = confirm_decision(run_id, email=email, deal=deal, expected_revision=revision,
                     kind=request.data.get('classification'), actor=request.user)
+                audit = EmailIngestionService.ensure_audit_log(run, requested_by=request.user)
+                transaction.on_commit(
+                    lambda run_id=run.id, audit_id=audit.id:
+                    EmailIngestionService.dispatch(run_id, audit_log_id=str(audit_id))
+                )
         except StaleEmailDecision as exc:
             return Response({'error': str(exc)}, status=409)
         except (ValueError, TypeError, ValidationError) as exc:
