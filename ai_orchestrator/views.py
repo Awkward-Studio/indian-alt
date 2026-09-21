@@ -442,7 +442,10 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 processing_status='idle', processing_error=message,
             )
             failed_ingestion = EmailIngestionRun.objects.filter(
-                status__in=['pending', 'running', 'waiting_service'],
+                # Failed runs with an expired/null retry time are also picked
+                # up by the reconciler; clear-active must cancel those queued
+                # retries as well as currently running deliveries.
+                status__in=['pending', 'running', 'failed', 'waiting_service'],
             ).update(
                 status='cancelled', error=message, lease_token=None,
                 lease_until=None, next_attempt_at=None,
