@@ -907,6 +907,14 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         from django.db.models.fields.json import KeyTextTransform
         history_rows = list(
             AIAuditLog.objects.filter(status__in=['COMPLETED', 'FAILED'])
+            # A traversal audit is the persisted OneDrive file-tree snapshot,
+            # not an AI job. Portfolio scans can create one per linked deal;
+            # keep those records for folder counts/browser access without
+            # flooding the deal-wise AI task history.
+            .exclude(
+                source_type='onedrive_folder',
+                source_metadata__workflow_stage='traversal_complete',
+            )
             .annotate(
                 metadata_deal_id=KeyTextTransform('deal_id', 'source_metadata'),
                 matched_deal_id=KeyTextTransform(

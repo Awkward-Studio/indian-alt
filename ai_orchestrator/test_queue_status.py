@@ -339,6 +339,47 @@ class QueueStatusEndpointTests(TestCase):
         inspect.assert_not_called()
         get_slots.assert_not_called()
 
+    def test_fast_queue_status_hides_folder_tree_snapshots_from_ai_history(self):
+        deal = Deal.objects.create(title="Folder Snapshot Deal")
+        traversal = AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-1",
+            context_label="OneDrive folder scan",
+            model_used="onedrive-folder-scan",
+            system_prompt="Immediate folder traversal for linking.",
+            user_prompt="Scan linked folder",
+            status="COMPLETED",
+            is_success=True,
+            source_metadata={
+                "deal_id": str(deal.id),
+                "workflow_stage": "traversal_complete",
+                "total_files": 12,
+            },
+        )
+        analysis = AIAuditLog.objects.create(
+            source_type="onedrive_folder",
+            source_id="folder-1",
+            context_label="Folder analysis",
+            model_used="model",
+            system_prompt="Analyze folder",
+            user_prompt="Analyze folder",
+            status="COMPLETED",
+            is_success=True,
+            source_metadata={
+                "deal_id": str(deal.id),
+                "workflow_stage": "analysis_complete",
+            },
+        )
+
+        response = self.client.get("/api/ai/history/queue-status/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        history_ids = {
+            item["audit_log_id"] for item in response.data["queue_history"]
+        }
+        self.assertNotIn(str(traversal.id), history_ids)
+        self.assertIn(str(analysis.id), history_ids)
+
 
 class QueueCancellationEndpointTests(TestCase):
     def setUp(self):

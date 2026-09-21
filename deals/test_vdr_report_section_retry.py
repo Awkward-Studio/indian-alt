@@ -4,6 +4,7 @@ from django.test import SimpleTestCase
 
 from ai_orchestrator.services.report_sections import (
     ReportSectionDegenerateOutputError,
+    ReportSectionTooShortError,
     ReportSectionValidationError,
 )
 from deals.tasks import process_vdr_report_section
@@ -81,3 +82,41 @@ class VDRReportSectionRetryTests(SimpleTestCase):
 
         self.assertEqual(result, {"status": "failed", "error": "Invalid citation marker."})
         retry.assert_not_called()
+
+    def test_under_length_draft_retries_model_request(self):
+        audit = Mock(source_metadata={})
+        with (
+            patch("deals.services.vdr_queue.delivery_is_current", return_value=True),
+            patch("deals.services.vdr_queue.heartbeat"),
+            patch("deals.services.vdr_queue.start_heartbeat"),
+            patch("ai_orchestrator.models.AIAuditLog.objects.get", return_value=audit),
+            patch("deals.tasks.Deal.objects.get", return_value=Mock()),
+            patch(
+                "deals.tasks._durable_report_foundation",
+                return_value=({"deal_model_data": {}}, [], None, None),
+            ),
+            patch(
+                "ai_orchestrator.services.report_section_evidence."
+                "ICReportSectionEvidenceService.retrieve",
+                return_value={"context": "Ranked evidence", "citations": {"1": {}}},
+            ),
+            patch(
+                "ai_orchestrator.services.report_sections."
+                "ICReportSectionService._generate_section",
+                side_effect=ReportSectionTooShortError("Draft too short."),
+            ),
+            patch.object(
+                process_vdr_report_section,
+                "retry",
+                side_effect=RuntimeError("retry scheduled"),
+            ) as retry,
+            self.assertRaisesRegex(RuntimeError, "retry scheduled"),
+        ):
+            process_vdr_report_section.run(
+                deal_id="deal-1",
+                audit_log_id="audit-1",
+                section_title="Transaction / Trading Multiples",
+                queue_generation=2,
+            )
+
+        retry.assert_called_once()

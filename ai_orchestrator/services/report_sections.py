@@ -25,8 +25,22 @@ class ReportSectionDegenerateOutputError(ReportSectionValidationError):
     """A transient repetition loop that warrants a fresh model request."""
 
 
+class ReportSectionTooShortError(ReportSectionValidationError):
+    """A usable but under-length draft that warrants a corrected model request."""
+
+
 class ICReportSectionService:
     CACHE_VERSION = "ic-report-sections-v7"
+    # Dense tabular sections need fewer prose words than narrative sections.
+    # The configured minimum remains the baseline for essay-style sections.
+    SECTION_MINIMUM_WORD_FACTORS = {
+        "Promoter and Management Details": 0.8,
+        "Transaction Details": 0.8,
+        "Key Financials": 0.75,
+        "Transaction / Trading Multiples": 0.65,
+        "Exit Considerations": 0.85,
+        "Next Steps": 0.75,
+    }
     INTERNAL_CITATION_PATTERN = re.compile(
         r"\[(?:Evidence\s+(?P<evidence>\d+)|R0*(?P<rank>\d+))"
         r"(?:@(?P<locator>[^\]\n]+))?\]"
@@ -94,6 +108,11 @@ class ICReportSectionService:
             default=str,
         )
         return "ic-report-section:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _minimum_words(cls, title: str) -> int:
+        baseline = max(0, int(getattr(settings, "VDR_REPORT_SECTION_MIN_WORDS", 900)))
+        return round(baseline * cls.SECTION_MINIMUM_WORD_FACTORS.get(title, 1.0))
 
     @classmethod
     def _resolve_prompt_stage(cls, title: str):
@@ -355,6 +374,47 @@ class ICReportSectionService:
         return "\n".join(output)
 
     @classmethod
+    def _normalize_financial_metric_labels(cls, text: str, title: str) -> str:
+        """Relabel amount metrics when every reported value is a percentage."""
+        if title != "Key Financials":
+            return text
+        replacements = {
+            "revenue": "Revenue Growth",
+            "gross profit": "Gross Margin",
+            "ebitda": "EBITDA Margin",
+            "pat": "PAT Margin",
+        }
+        output = []
+        for line in text.splitlines():
+            if "|" not in line or cls._is_table_separator(line):
+                output.append(line)
+                continue
+            cells = cls._table_cells(line)
+            label = cls._plain_table_label(cells[0]).casefold() if cells else ""
+            replacement = replacements.get(label)
+            if not replacement:
+                output.append(line)
+                continue
+            values = [
+                re.sub(r"\[(?:\d+(?:\s*[,;]\s*\d+)*)]", "", cell).strip()
+                for cell in cells[1:]
+            ]
+            numeric_values = [value for value in values if re.search(r"\d", value)]
+            if not numeric_values or not all("%" in value for value in numeric_values):
+                output.append(line)
+                continue
+            plain_label = cls._plain_table_label(cells[0])
+            cells[0] = re.sub(
+                rf"\b{re.escape(plain_label)}\b",
+                replacement,
+                cells[0],
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            output.append("| " + " | ".join(cells) + " |")
+        return "\n".join(output)
+
+    @classmethod
     def _append_references(cls, text: str, citations: dict | None, used: list[dict]) -> str:
         references = []
         for item in used:
@@ -403,6 +463,7 @@ class ICReportSectionService:
         text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
         text = cls._normalize_financial_table_axes(text, title)
+        text = cls._normalize_financial_metric_labels(text, title)
         if citations and not used_citations:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
@@ -428,7 +489,7 @@ class ICReportSectionService:
             )
         word_count = len(re.findall(r"\b\w+\b", body))
         if minimum_words and word_count < minimum_words:
-            raise ReportSectionValidationError(
+            raise ReportSectionTooShortError(
                 f"Report section '{title}' was too short: {word_count} words; "
                 f"minimum is {minimum_words}."
             )
@@ -474,10 +535,7 @@ class ICReportSectionService:
             return cached
 
         is_vdr_section = source_type == "vdr_report_section"
-        minimum_words = (
-            max(0, int(getattr(settings, "VDR_REPORT_SECTION_MIN_WORDS", 900)))
-            if is_vdr_section else 0
-        )
+        minimum_words = cls._minimum_words(title) if is_vdr_section else 0
         target_words = (
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
             if is_vdr_section else 1200

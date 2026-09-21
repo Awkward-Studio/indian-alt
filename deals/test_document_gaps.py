@@ -9,6 +9,7 @@ from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.services.document_processor import DocumentProcessorService
 from deals.models import Deal, DealDocument
 from deals.tasks import rescan_linked_deal_folder_async
+from microsoft.services.graph_service import DMS_USER_EMAIL
 
 
 class DocumentGapQueueTests(TestCase):
@@ -84,6 +85,15 @@ class DocumentGapQueueTests(TestCase):
                 format="json",
             )
         self.assertEqual(response.status_code, 200)
+        apply_async.assert_called_once_with(
+            kwargs={
+                "deal_id": str(deal.id),
+                "folder_id": "folder-new",
+                "drive_id": "drive-1",
+                "user_email": DMS_USER_EMAIL,
+            },
+            queue="folder_scan",
+        )
         deal.refresh_from_db()
         self.assertFalse(deal.folder_not_available)
 

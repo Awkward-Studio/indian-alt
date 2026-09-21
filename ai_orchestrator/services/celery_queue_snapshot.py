@@ -14,7 +14,10 @@ class CeleryQueueSnapshotService:
     # Counts-only folder refreshes are infrastructure work, not AI tasks. Their
     # parent batch audit carries the useful portfolio progress without flooding
     # the status page with one broker delivery per deal.
-    HIDDEN_DETAIL_TASKS = {"deals.tasks.rescan_linked_deal_folder_async"}
+    HIDDEN_DETAIL_TASKS = {
+        "deals.tasks.rescan_linked_deal_folder_async",
+        "deals.tasks.prepare_linked_folder_vdr_async",
+    }
 
     @classmethod
     def _decode_body(cls, envelope: dict) -> tuple[list, dict]:

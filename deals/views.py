@@ -2210,7 +2210,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 "drive_id": drive_id,
                 "user_email": user_email,
             },
-            queue="low_priority",
+            queue="folder_scan",
         )
         deal.processing_status = "processing"
         deal.processing_error = None

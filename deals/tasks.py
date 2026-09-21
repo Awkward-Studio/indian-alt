@@ -2074,6 +2074,7 @@ def process_vdr_report_section(
     from ai_orchestrator.services.report_sections import (
         ICReportSectionService,
         ReportSectionDegenerateOutputError,
+        ReportSectionTooShortError,
         ReportSectionValidationError,
     )
     from deals.services.vdr_queue import delivery_is_current, heartbeat, start_heartbeat
@@ -2106,6 +2107,15 @@ def process_vdr_report_section(
         citations = retrieved.get("citations") if isinstance(retrieved, dict) else None
         if not context.strip():
             raise ValueError(f"No evidence was retrieved for report section '{section_title}'.")
+        if self.request.retries:
+            minimum_words = ICReportSectionService._minimum_words(section_title)
+            context = (
+                f"{context}\n\n<retry_requirement>\n"
+                f"The previous draft failed validation because it was under length. "
+                f"Write a fresh, complete section of at least {minimum_words:,} words, "
+                "without padding, repetition, or unsupported claims.\n"
+                "</retry_requirement>"
+            )
         section = ICReportSectionService._generate_section(
             ai_service=AIProcessorService(), evidence=context, analysis=analysis, title=section_title,
             source_id=audit_log_id, evidence_metadata=evidence_metadata,
@@ -2118,6 +2128,10 @@ def process_vdr_report_section(
         )
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
     except ReportSectionDegenerateOutputError as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
+        return {"status": "failed", "error": str(exc)}
+    except ReportSectionTooShortError as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
         return {"status": "failed", "error": str(exc)}
@@ -2619,6 +2633,22 @@ def prepare_linked_folder_vdr_async(
     """Resolve a newly linked folder and queue its complete artifact pipeline."""
     from deals.services.folder_analysis import FolderAnalysisService
     from deals.services.vdr_sync import VDRSyncService
+
+    # Older deliveries may still be waiting on the shared low-priority queue.
+    # Move OneDrive discovery to the I/O worker before doing any Graph work.
+    delivery_info = getattr(self.request, "delivery_info", None) or {}
+    routing_key = delivery_info.get("routing_key")
+    if routing_key and routing_key != "folder_scan":
+        prepare_linked_folder_vdr_async.apply_async(
+            kwargs={
+                "deal_id": deal_id,
+                "folder_id": folder_id,
+                "drive_id": drive_id,
+                "user_email": user_email,
+            },
+            queue="folder_scan",
+        )
+        return {"status": "rerouted", "queue": "folder_scan", "deal_id": deal_id}
 
     try:
         deal = Deal.objects.get(id=deal_id)

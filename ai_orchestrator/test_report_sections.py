@@ -6,6 +6,7 @@ from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLE
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import (
     ICReportSectionService,
+    ReportSectionTooShortError,
     ReportSectionValidationError,
 )
 
@@ -129,6 +130,43 @@ class CitationNormalizationTests(SimpleTestCase):
         self.assertIn("| Revenue | 100 | 125 |", rendered)
         self.assertIn("| EBITDA | 10 | 15 |", rendered)
         self.assertNotIn("| Period | Revenue | EBITDA |", rendered)
+
+    def test_key_financials_relabels_percentage_metrics_as_margins_or_growth(self):
+        rendered = ICReportSectionService._normalize_section(
+            "Key Financials",
+            (
+                "## Key Financials\n\n"
+                "| Metric | FY24A | FY25A |\n"
+                "| --- | ---: | ---: |\n"
+                "| Revenue | 12.0% | 18.5% |\n"
+                "| EBITDA | -0.14% | 2.99% |\n"
+                "| PAT | INR (4.2) Cr | INR 1.1 Cr |"
+            ),
+        )
+
+        self.assertIn("| Revenue Growth | 12.0% | 18.5% |", rendered)
+        self.assertIn("| EBITDA Margin | -0.14% | 2.99% |", rendered)
+        self.assertIn("| PAT | INR (4.2) Cr | INR 1.1 Cr |", rendered)
+
+    @override_settings(VDR_REPORT_SECTION_MIN_WORDS=900)
+    def test_tabular_sections_use_a_lower_minimum_than_narrative_sections(self):
+        self.assertEqual(
+            ICReportSectionService._minimum_words("Transaction / Trading Multiples"),
+            585,
+        )
+        self.assertEqual(ICReportSectionService._minimum_words("Industry Overview"), 900)
+
+    def test_under_length_vdr_section_raises_retryable_validation_error(self):
+        with self.assertRaises(ReportSectionTooShortError):
+            ICReportSectionService._normalize_section(
+                "Transaction / Trading Multiples",
+                (
+                    "## Transaction / Trading Multiples\n\n"
+                    "A concise evidence-backed draft with a valid analytical conclusion "
+                    "but insufficient depth for the configured section requirement."
+                ),
+                minimum_words=585,
+            )
 
     def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
         with self.assertRaises(ReportSectionValidationError):
