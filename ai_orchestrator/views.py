@@ -3,6 +3,7 @@ import json
 import os
 import secrets
 import uuid
+from datetime import timedelta
 from urllib.parse import urlsplit
 import requests
 from typing import Dict, Any, Optional, List
@@ -573,6 +574,13 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             for message in redis_state['messages']
             if message.get('task_id')
         }
+        unacked_task_ids = {
+            str(message['task_id'])
+            for message in redis_state.get('unacked', {}).get('messages', [])
+            if message.get('task_id')
+        }
+        observed_delivery_ids = set(worker_state_by_id) | set(redis_message_by_id) | unacked_task_ids
+        stale_before = timezone.now() - timedelta(minutes=5)
 
         active_parents = list(
             AIAuditLog.objects.filter(
@@ -685,6 +693,14 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'has_delivery_conflict': len(delivery_ids) > 1,
                 'delivery_count': len(delivery_ids),
                 'stages': metadata.get('stages') or {},
+                'current_task_observed': bool(
+                    parent.celery_task_id and str(parent.celery_task_id) in observed_delivery_ids
+                ),
+                'stale': bool(
+                    parent.celery_task_id
+                    and str(parent.celery_task_id) not in observed_delivery_ids
+                    and parent.created_at < stale_before
+                ),
             })
 
         vdr_parent_id_set = {str(parent.id) for parent in active_parents}
