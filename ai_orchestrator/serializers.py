@@ -133,6 +133,8 @@ def token_usage(log, children=()):
 
 class AIAuditChildLogSerializer(serializers.ModelSerializer):
     token_usage = serializers.SerializerMethodField()
+    segment_index = serializers.SerializerMethodField()
+    segment_count = serializers.SerializerMethodField()
 
     class Meta:
         model = AIAuditLog
@@ -141,10 +143,17 @@ class AIAuditChildLogSerializer(serializers.ModelSerializer):
             'model_used', 'status', 'is_success', 'created_at', 'completed_at',
             'request_duration_ms', 'tokens_used', 'input_tokens', 'output_tokens',
             'token_count_is_estimate', 'token_usage', 'error_message', 'worker_logs',
+            'segment_index', 'segment_count',
         ]
 
     def get_token_usage(self, obj):
         return token_usage(obj)
+
+    def get_segment_index(self, obj):
+        return (obj.source_metadata or {}).get('segment_index')
+
+    def get_segment_count(self, obj):
+        return (obj.source_metadata or {}).get('segment_count')
 
 class AIAuditLogSerializer(serializers.ModelSerializer):
     personality_name = serializers.SerializerMethodField()

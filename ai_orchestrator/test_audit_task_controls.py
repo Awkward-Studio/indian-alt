@@ -55,6 +55,7 @@ class AuditTaskControlTests(TestCase):
             system_prompt='test', user_prompt='test', status='PROCESSING',
             celery_task_id='report-task', context_label='Email report section: Executive Summary',
             worker_logs=['Model request prepared; waiting for inference admission.'],
+            source_metadata={'segment_index': 2, 'segment_count': 5},
         )
 
         response = self.client.get(f'/api/ai/history/{parent.id}/')
@@ -67,6 +68,8 @@ class AuditTaskControlTests(TestCase):
             response.data['child_audits'][0]['worker_logs'],
             ['Model request prepared; waiting for inference admission.'],
         )
+        self.assertEqual(response.data['child_audits'][0]['segment_index'], 2)
+        self.assertEqual(response.data['child_audits'][0]['segment_count'], 5)
 
     def test_audit_list_keeps_child_logs_out_of_ledger_payload(self):
         AIAuditLog.objects.create(
