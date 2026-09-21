@@ -80,6 +80,30 @@ class AuditTaskControlTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertNotIn('child_audits', response.data['results'][0])
 
+    def test_audit_list_hides_folder_tree_snapshots_but_keeps_folder_analysis(self):
+        traversal = AIAuditLog.objects.create(
+            source_type='onedrive_folder', source_id='folder-1', model_used='scan',
+            system_prompt='scan', user_prompt='scan', status='COMPLETED',
+            is_success=True,
+            source_metadata={'workflow_stage': 'traversal_complete'},
+        )
+        analysis = AIAuditLog.objects.create(
+            source_type='onedrive_folder', source_id='folder-1', model_used='model',
+            system_prompt='analysis', user_prompt='analysis', status='COMPLETED',
+            is_success=True,
+            source_metadata={'workflow_stage': 'analysis_complete'},
+        )
+
+        response = self.client.get('/api/ai/history/')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        ids = {row['id'] for row in response.data['results']}
+        self.assertNotIn(str(traversal.id), ids)
+        self.assertIn(str(analysis.id), ids)
+        # The stored scan remains available for diagnostics by direct URL.
+        detail = self.client.get(f'/api/ai/history/{traversal.id}/')
+        self.assertEqual(detail.status_code, 200, detail.data)
+
     def test_audit_list_includes_deal_name_for_direct_and_report_section_tasks(self):
         deal = Deal.objects.create(title='Showroom B2B')
         document = DealDocument.objects.create(deal=deal, title='Financial model.xlsx')

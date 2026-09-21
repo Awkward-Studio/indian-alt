@@ -133,6 +133,11 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action == 'list':
+            queryset = queryset.exclude(
+                source_type='onedrive_folder',
+                source_metadata__workflow_stage='traversal_complete',
+            )
         category = (self.request.query_params.get('category') or 'all').strip().lower()
         if category == 'failed':
             return queryset.filter(status='FAILED')
