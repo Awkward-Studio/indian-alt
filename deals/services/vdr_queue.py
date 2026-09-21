@@ -136,8 +136,8 @@ def _next_unit(metadata: dict) -> tuple[str, str, dict] | None:
     return None
 
 
-def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
-    """Report whether interactive work is queued or currently running."""
+def _priority_queue_busy(queue_name: str, *, exclude_task_id: str | None = None) -> bool:
+    """Report whether a priority queue has live work waiting or running."""
     excluded = str(exclude_task_id or "")
 
     def is_other_task(task: dict, id_key: str) -> bool:
@@ -146,13 +146,13 @@ def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
     try:
         from config.celery import app as celery_app
         from ai_orchestrator.services.celery_queue_snapshot import CeleryQueueSnapshotService
-        snapshot = CeleryQueueSnapshotService.snapshot(celery_app, queues=("high_priority",))
+        snapshot = CeleryQueueSnapshotService.snapshot(celery_app, queues=(queue_name,))
         if sum(item["ready_count"] for item in snapshot["queues"]):
             return True
         unacked = [
             item
             for item in snapshot.get("unacked", {}).get("messages", [])
-            if item.get("queue") == "high_priority" and is_other_task(item, "task_id")
+            if item.get("queue") == queue_name and is_other_task(item, "task_id")
         ]
         stale_after = max(
             60,
@@ -185,7 +185,7 @@ def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
         inspector = celery_app.control.inspect(timeout=0.5)
         for tasks in (inspector.active() or {}).values():
             if any(
-                (task.get("delivery_info") or {}).get("routing_key") == "high_priority"
+                (task.get("delivery_info") or {}).get("routing_key") == queue_name
                 and is_other_task(task, "id")
                 for task in tasks or []
             ):
@@ -193,6 +193,16 @@ def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
     except Exception:
         pass
     return False
+
+
+def _high_priority_busy(*, exclude_task_id: str | None = None) -> bool:
+    """Report whether interactive work is queued or currently running."""
+    return _priority_queue_busy("high_priority", exclude_task_id=exclude_task_id)
+
+
+def _email_priority_busy(*, exclude_task_id: str | None = None) -> bool:
+    """Report whether email ingestion is queued or currently running."""
+    return _priority_queue_busy("email_priority", exclude_task_id=exclude_task_id)
 
 
 def interactive_work_waiting(*, exclude_task_id: str | None = None) -> bool:
@@ -226,8 +236,12 @@ def higher_priority_work_waiting(
     exclude_audit_log_id: str | None = None,
 ) -> bool:
     """Check work that should run before the next VDR document segment."""
-    return _high_priority_busy(exclude_task_id=exclude_task_id) or report_work_waiting(
-        exclude_audit_log_id=exclude_audit_log_id,
+    return (
+        _high_priority_busy(exclude_task_id=exclude_task_id)
+        or _email_priority_busy(exclude_task_id=exclude_task_id)
+        or report_work_waiting(
+            exclude_audit_log_id=exclude_audit_log_id,
+        )
     )
 
 
@@ -273,7 +287,7 @@ def dispatch() -> dict:
             if not audit:
                 return {"status": "idle"}
             metadata = dict(audit.source_metadata or {})
-            if _high_priority_busy():
+            if _high_priority_busy() or _email_priority_busy():
                 transaction.on_commit(lambda: kick(countdown=5))
                 return {"status": "deferred_for_interactive_work"}
             unit = _next_unit(metadata)

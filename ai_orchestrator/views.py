@@ -500,6 +500,8 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         waiting_states = {'queued', 'waiting_for_slot', 'waiting_for_service'}
         request_states = {'active', 'lease_acquired', 'submitted', 'processing', 'awaiting_response', 'response_received', 'slot_status_unavailable'}
         queued = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') in waiting_states]
+        for position, item in enumerate(queued, start=1):
+            item['inference_queue_position'] = position
         active = [audit_summary(log) for log in processing_logs if (log.source_metadata or {}).get('inference_state') in request_states]
 
         lease_owner = cache.get('ai:inference:lease:v1')

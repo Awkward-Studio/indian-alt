@@ -12,6 +12,23 @@ from deals.services import vdr_queue
 class HighPriorityBusyTests(SimpleTestCase):
     @patch("config.celery.app.control.inspect")
     @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    def test_email_priority_delivery_blocks_vdr(self, snapshot, inspect):
+        snapshot.return_value = {
+            "queues": [{"name": "email_priority", "ready_count": 1}],
+            "unacked": {"messages": []},
+        }
+
+        self.assertTrue(vdr_queue._email_priority_busy(exclude_task_id="current-vdr-task"))
+        snapshot.assert_called_once()
+        inspect.assert_not_called()
+
+    @patch("deals.services.vdr_queue._email_priority_busy", return_value=True)
+    @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
+    def test_higher_priority_work_includes_email(self, _high_busy, _email_busy):
+        self.assertTrue(vdr_queue.higher_priority_work_waiting())
+
+    @patch("config.celery.app.control.inspect")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
     def test_current_vdr_delivery_does_not_block_itself(self, snapshot, inspect):
         snapshot.return_value = {
             "queues": [{"name": "high_priority", "ready_count": 0}],
