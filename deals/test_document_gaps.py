@@ -103,7 +103,7 @@ class DocumentGapQueueTests(TestCase):
         self.assertEqual(batch.source_metadata["scan_mode"], "counts_only")
         apply_async.assert_called_once_with(
             kwargs={"deal_id": str(linked.id), "batch_audit_id": str(batch.id)},
-            queue="low_priority",
+            queue="folder_scan",
         )
 
     @patch("deals.tasks.rescan_linked_deal_folder_async.apply_async")
@@ -190,6 +190,23 @@ class DocumentGapQueueTests(TestCase):
         self.assertEqual(batch.source_metadata["completed_count"], 1)
         self.assertEqual(batch.source_metadata["files_found"], 7)
         self.assertEqual(batch.source_metadata["readable_files_found"], 5)
+
+    @patch("deals.tasks.rescan_linked_deal_folder_async.apply_async")
+    def test_legacy_folder_scan_delivery_moves_off_inference_worker(self, apply_async):
+        deal = Deal.objects.create(
+            title="Legacy queued scan",
+            source_onedrive_id="folder-1",
+            source_drive_id="drive-1",
+        )
+        task = rescan_linked_deal_folder_async
+        with patch.object(task.request, "delivery_info", {"routing_key": "low_priority"}):
+            result = task.run(str(deal.id), None)
+
+        self.assertEqual(result["status"], "rerouted")
+        apply_async.assert_called_once_with(
+            kwargs={"deal_id": str(deal.id), "batch_audit_id": None},
+            queue="folder_scan",
+        )
 
     def test_returns_every_missing_folder_with_dialog_metadata(self):
         Deal.objects.bulk_create([

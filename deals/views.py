@@ -1222,7 +1222,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                         'deal_id': str(item['id']),
                         'batch_audit_id': str(batch.id),
                     },
-                    queue='low_priority',
+                    queue='folder_scan',
                 )
 
         payload = _folder_scan_batch_payload(batch)

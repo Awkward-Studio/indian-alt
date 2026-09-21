@@ -2723,6 +2723,18 @@ def rescan_linked_deal_folder_async(
     from deals.services.folder_analysis import FolderAnalysisService
     from microsoft.services.graph_service import DMS_USER_EMAIL
 
+    # Runs queued before folder_scan isolation was deployed are still stored in
+    # Redis under low_priority. Move those deliveries to the dedicated worker
+    # instead of letting the inference worker perform the Graph traversal.
+    delivery_info = getattr(self.request, "delivery_info", None) or {}
+    routing_key = delivery_info.get("routing_key")
+    if routing_key and routing_key != "folder_scan":
+        rescan_linked_deal_folder_async.apply_async(
+            kwargs={"deal_id": deal_id, "batch_audit_id": batch_audit_id},
+            queue="folder_scan",
+        )
+        return {"status": "rerouted", "queue": "folder_scan", "deal_id": deal_id}
+
     try:
         deal = Deal.objects.get(id=deal_id)
         if not deal.source_onedrive_id or not deal.source_drive_id:

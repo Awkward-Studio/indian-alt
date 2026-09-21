@@ -280,6 +280,9 @@ CELERY_TASK_ROUTES = {
     'deals.tasks.reconcile_vdr_queue': {'queue': 'vdr_control'},
     'deals.tasks.process_vdr_report_section': {'queue': 'vdr_work'},
     'deals.tasks.vdr_unit_completed': {'queue': 'vdr_control'},
+    # OneDrive count refreshes are network and database work. Keep them off the
+    # single-slot inference worker so a full portfolio scan cannot delay AI.
+    'deals.tasks.rescan_linked_deal_folder_async': {'queue': 'folder_scan'},
     'microsoft.tasks.analyze_email_async': {'queue': 'low_priority'},
 }
 CELERY_TASK_DEFAULT_QUEUE = 'default'

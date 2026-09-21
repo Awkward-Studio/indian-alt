@@ -9,9 +9,11 @@ echo "Working directory: $(pwd)"
 RUN_AS_WORKER_NORMALIZED=$(printf '%s' "${RUN_AS_WORKER:-false}" | tr '[:upper:]' '[:lower:]')
 RUN_AS_COORDINATOR_NORMALIZED=$(printf '%s' "${RUN_AS_COORDINATOR:-false}" | tr '[:upper:]' '[:lower:]')
 RUN_VDR_COORDINATOR_NORMALIZED=$(printf '%s' "${RUN_VDR_COORDINATOR:-false}" | tr '[:upper:]' '[:lower:]')
+RUN_FOLDER_SCAN_WORKER_NORMALIZED=$(printf '%s' "${RUN_FOLDER_SCAN_WORKER:-true}" | tr '[:upper:]' '[:lower:]')
 echo "Run as worker: ${RUN_AS_WORKER_NORMALIZED}"
 echo "Run as coordinator: ${RUN_AS_COORDINATOR_NORMALIZED}"
 echo "Run embedded VDR coordinator: ${RUN_VDR_COORDINATOR_NORMALIZED}"
+echo "Run dedicated folder scan worker: ${RUN_FOLDER_SCAN_WORKER_NORMALIZED}"
 
 # Check database connection
 if [ -n "$DATABASE_URL" ]; then
@@ -58,6 +60,20 @@ elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     if [ "$CELERY_POOL_VALUE" = "threads" ] && [ "${CELERY_CONCURRENCY_VALUE}" -gt 32 ] 2>/dev/null; then
         echo "Capping thread-pool concurrency from ${CELERY_CONCURRENCY_VALUE} to 32 for memory safety."
         CELERY_CONCURRENCY_VALUE="32"
+    fi
+
+    if [ "$RUN_FOLDER_SCAN_WORKER_NORMALIZED" = "true" ]; then
+        FOLDER_SCAN_CONCURRENCY_VALUE="${FOLDER_SCAN_CONCURRENCY:-4}"
+        echo ""
+        echo "=== STARTING DEDICATED FOLDER SCAN WORKER ==="
+        echo "Folder scan concurrency: ${FOLDER_SCAN_CONCURRENCY_VALUE}"
+        celery -A config worker \
+            --loglevel="${CELERY_LOGLEVEL:-info}" \
+            --pool=threads \
+            -Q folder_scan \
+            --prefetch-multiplier=1 \
+            --concurrency="${FOLDER_SCAN_CONCURRENCY_VALUE}" \
+            --hostname="folder-scan@%h" &
     fi
 
     echo ""
