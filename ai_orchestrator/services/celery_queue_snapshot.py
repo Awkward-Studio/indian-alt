@@ -11,6 +11,10 @@ class CeleryQueueSnapshotService:
 
     DEFAULT_QUEUES = ("high_priority", "vdr_control", "vdr_work", "default", "low_priority")
     MAX_MESSAGES_PER_QUEUE = 500
+    # Counts-only folder refreshes are infrastructure work, not AI tasks. Their
+    # parent batch audit carries the useful portfolio progress without flooding
+    # the status page with one broker delivery per deal.
+    HIDDEN_DETAIL_TASKS = {"deals.tasks.rescan_linked_deal_folder_async"}
 
     @classmethod
     def _decode_body(cls, envelope: dict) -> tuple[list, dict]:
@@ -124,7 +128,9 @@ class CeleryQueueSnapshotService:
                     decoded = []
                     for index, raw in enumerate(queue_messages, start=1):
                         try:
-                            decoded.append(cls._decode_message(raw, queue=queue_name, position=index))
+                            message = cls._decode_message(raw, queue=queue_name, position=index)
+                            if message.get("task_name") not in cls.HIDDEN_DETAIL_TASKS:
+                                decoded.append(message)
                         except Exception as exc:
                             decoded.append({
                                 "queue": queue_name,
@@ -163,7 +169,8 @@ class CeleryQueueSnapshotService:
                                 or decoded.get("audit_log_id") or decoded.get("deal_id")
                             ) else "other",
                         })
-                        unacked_rows.append(decoded)
+                        if decoded.get("task_name") not in cls.HIDDEN_DETAIL_TASKS:
+                            unacked_rows.append(decoded)
                     except Exception as exc:
                         unacked_rows.append({"task_id": None, "task_name": "unreadable", "decode_error": str(exc)[:300]})
                 result["unacked"] = {

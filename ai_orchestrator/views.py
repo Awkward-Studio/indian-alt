@@ -546,6 +546,16 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             *celery_state['reserved'],
             *celery_state['scheduled'],
         ]
+        hidden_detail_tasks = CeleryQueueSnapshotService.HIDDEN_DETAIL_TASKS
+        for state in ('active', 'reserved', 'scheduled'):
+            celery_state[state] = [
+                task for task in celery_state[state]
+                if task.get('task_name') not in hidden_detail_tasks
+            ]
+        worker_tasks = [
+            task for task in worker_tasks
+            if task.get('task_name') not in hidden_detail_tasks
+        ]
         worker_state_by_id = {
             str(task['task_id']): task['state']
             for task in worker_tasks

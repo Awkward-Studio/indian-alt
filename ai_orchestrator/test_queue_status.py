@@ -57,6 +57,39 @@ class CeleryQueueSnapshotServiceTests(SimpleTestCase):
         self.assertEqual(result["messages"][0]["document_names"], ["First.pdf"])
         self.assertNotIn("user_email", result["messages"][0])
 
+    def test_snapshot_hides_individual_folder_scan_deliveries(self):
+        body = json.dumps([
+            [],
+            {"deal_id": "deal-1", "batch_audit_id": "batch-1"},
+            {},
+        ]).encode()
+        raw = json.dumps({
+            "body": base64.b64encode(body).decode(),
+            "content-encoding": "utf-8",
+            "headers": {
+                "id": "scan-1",
+                "task": "deals.tasks.rescan_linked_deal_folder_async",
+            },
+            "properties": {},
+        }).encode()
+        client = MagicMock()
+        client.llen.side_effect = lambda key: 1 if key == "folder_scan" else 0
+        client.lrange.return_value = [raw]
+        client.zrange.return_value = []
+        client.hlen.return_value = 0
+        channel = MagicMock(priority_steps=(0,), client=client)
+        channel._q_for_pri.side_effect = lambda queue, _priority: queue
+        connection = MagicMock()
+        connection.channel.return_value = channel
+        app = MagicMock()
+        app.connection_for_read.return_value.__enter__.return_value = connection
+
+        result = CeleryQueueSnapshotService.snapshot(app, queues=("folder_scan",))
+
+        self.assertEqual(result["queues"][0]["ready_count"], 1)
+        self.assertEqual(result["queues"][0]["shown_count"], 0)
+        self.assertEqual(result["messages"], [])
+
 
 @override_settings(VLLM_BASE_URL="http://inference.test:8080/v1")
 class QueueStatusEndpointTests(TestCase):
