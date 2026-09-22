@@ -430,22 +430,27 @@ class VentureIntelligenceService:
             or cin
         )
         error_text = str(fetch_error or "VI profile fetch failed after CIN resolution")
-        profile, _ = VentureIntelligenceCompanyProfile.objects.update_or_create(
+        profile_defaults = {
+            "name": entity_name,
+            "registered_name": (resolution or {}).get("entity_name") or None,
+            "data_source": "vi_cin_resolution",
+            "additional_info": json.dumps({
+                "cin_only": True,
+                "fetch_error": error_text,
+                "cin_errors": (getattr(fetch_error, "cin_errors", None) or []),
+                "resolution_source": (resolution or {}).get("source"),
+                "confidence": (resolution or {}).get("confidence"),
+            }),
+            "raw_profile_json": {"resolution": resolution or {}, "fetch_error": error_text},
+        }
+        profile, created = VentureIntelligenceCompanyProfile.objects.get_or_create(
             cin=cin,
-            defaults={
-                "name": entity_name,
-                "registered_name": (resolution or {}).get("entity_name") or None,
-                "data_source": "vi_cin_resolution",
-                "additional_info": json.dumps({
-                    "cin_only": True,
-                    "fetch_error": error_text,
-                    "cin_errors": (getattr(fetch_error, "cin_errors", None) or []),
-                    "resolution_source": (resolution or {}).get("source"),
-                    "confidence": (resolution or {}).get("confidence"),
-                }),
-                "raw_profile_json": {"resolution": resolution or {}, "fetch_error": error_text},
-            },
+            defaults=profile_defaults,
         )
+        if not created and profile.data_source == "vi_cin_resolution":
+            for field, value in profile_defaults.items():
+                setattr(profile, field, value)
+            profile.save(update_fields=[*profile_defaults, "updated_at"])
         VentureIntelligenceCompanyRelation.objects.update_or_create(
             deal=deal,
             company_profile=profile,

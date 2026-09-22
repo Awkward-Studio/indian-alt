@@ -3461,6 +3461,15 @@ class DealEnrichStatusView(APIView):
         audit_log_id = str(audit_log.id) if audit_log else None
         if result.status == 'SUCCESS':
             data = result.result or {}
+            if data.get("status") == "PARTIAL":
+                profile = VentureIntelligenceCompanyProfile.objects.filter(id=data.get("profile_id")).first()
+                return Response({
+                    "status": "PARTIAL",
+                    "resolved_cin": data.get("resolved_cin"),
+                    "profile": VentureIntelligenceCompanyProfileSerializer(profile).data if profile else None,
+                    "error": data.get("error"),
+                    "audit_log_id": data.get("audit_log_id") or audit_log_id,
+                })
             if data.get("status") == "FAILURE" or "error" in data:
                 return Response({
                     "status": "FAILURE",

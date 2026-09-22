@@ -2834,6 +2834,36 @@ class VentureIntelligenceServiceTests(TestCase):
             relation_type=VentureIntelligenceRelationType.TARGET,
         ).exists())
 
+    def test_persist_resolved_cin_does_not_overwrite_existing_vi_profile(self):
+        profile = VentureIntelligenceCompanyProfile.objects.create(
+            cin="U74999KA2012PTC066107",
+            name="Existing VI profile",
+            registered_name="Existing VI Private Limited",
+            industry="Retail",
+            data_source="venture_intelligence",
+            raw_profile_json={"results": {"profile": {"industry": "Retail"}}},
+        )
+
+        persisted = self.service.persist_resolved_cin(
+            self.deal.id,
+            {
+                "cin": profile.cin,
+                "entity_name": "Web result name",
+                "source": "ai_web_search",
+                "is_valid": True,
+            },
+            fetch_error=VentureIntelligenceFetchError("VI unavailable"),
+        )
+
+        persisted.refresh_from_db()
+        self.assertEqual(persisted.name, "Existing VI profile")
+        self.assertEqual(persisted.industry, "Retail")
+        self.assertEqual(persisted.data_source, "venture_intelligence")
+        self.assertEqual(
+            persisted.raw_profile_json,
+            {"results": {"profile": {"industry": "Retail"}}},
+        )
+
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
     def test_resolve_cin_via_ai(self, mock_process_content):
         mock_process_content.return_value = {
@@ -3545,6 +3575,33 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertTrue(VentureIntelligenceCompanyRelation.objects.filter(
             deal=self.deal, company_profile=profile,
         ).exists())
+
+    @patch("celery.result.AsyncResult")
+    def test_async_enrich_status_returns_partial_profile_with_resolved_cin(self, mock_async_result):
+        profile = VentureIntelligenceCompanyProfile.objects.create(
+            cin="U74999KA2012PTC066107",
+            name="Flipkart Private Limited",
+            data_source="vi_cin_resolution",
+        )
+        mock_async_result.return_value.status = "SUCCESS"
+        mock_async_result.return_value.result = {
+            "status": "PARTIAL",
+            "resolved_cin": profile.cin,
+            "profile_id": str(profile.id),
+            "error": "VI unavailable",
+            "audit_log_id": None,
+        }
+
+        response = self.client.get(reverse(
+            "deal-enrich-status",
+            kwargs={"pk": self.deal.id, "task_id": "celery-vi-partial"},
+        ))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "PARTIAL")
+        self.assertEqual(response.data["resolved_cin"], profile.cin)
+        self.assertEqual(response.data["profile"]["cin"], profile.cin)
+        self.assertEqual(response.data["error"], "VI unavailable")
 
     def test_enrich_view_unauthenticated(self):
         self.client.force_authenticate(user=None)
