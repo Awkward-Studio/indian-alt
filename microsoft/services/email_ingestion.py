@@ -38,6 +38,48 @@ class EmailIngestionService:
             raise EmailIngestionCancelled('Email ingestion cancelled from the live queue.')
 
     @staticmethod
+    def _interactive_work_waiting(*, task_id=None):
+        from deals.services.vdr_queue import interactive_work_waiting
+
+        return interactive_work_waiting(exclude_task_id=str(task_id or ''))
+
+    @classmethod
+    def _yield_to_interactive_work(cls, run, reason):
+        """Release an email run at a durable boundary and enqueue its resume."""
+        delay = max(
+            1,
+            int(getattr(settings, 'EMAIL_INTERACTIVE_YIELD_RETRY_SECONDS', 5)),
+        )
+        run.status = 'pending'
+        run.error = ''
+        run.lease_until = None
+        run.lease_token = None
+        run.next_attempt_at = timezone.now() + timedelta(seconds=delay)
+        run.stages = {**(run.stages or {}), 'index': 'pending'}
+        run.source = {
+            **(run.source or {}),
+            '_priority_yield_count': int((run.source or {}).get('_priority_yield_count') or 0) + 1,
+            '_priority_yielded_at': timezone.now().isoformat(),
+            '_priority_yield_reason': str(reason),
+        }
+        run.save()
+        cls._sync_audit_log(run)
+        audit = cls._audit_log_for_run(run)
+        cls.dispatch(
+            run.id,
+            audit_log_id=str(audit.id) if audit else None,
+            countdown=delay,
+        )
+        Email.objects.filter(pk=run.email_id).update(
+            processing_status='pending', processing_error=None,
+        )
+        return {
+            'run_id': str(run.id),
+            'status': 'yielded',
+            'reason': str(reason),
+        }
+
+    @staticmethod
     def decision_source_metadata_context(run):
         """Return cheap source metadata for the routing/name decision.
 
@@ -405,6 +447,8 @@ class EmailIngestionService:
 
     @classmethod
     def process(cls, run_id, *, use_ai=None, task_id=None, stop_after_decision=False):
+        from deals.services.document_artifacts import DocumentArtifactYielded
+
         run = cls.claim(run_id)
         if run is None:
             logger.warning('Email ingestion delivery could not claim run %s', run_id)
@@ -412,6 +456,11 @@ class EmailIngestionService:
         cls._sync_audit_log(run, task_id=task_id)
         try:
             cls._raise_if_cancelled(run)
+            if cls._interactive_work_waiting(task_id=task_id):
+                return cls._yield_to_interactive_work(
+                    run,
+                    'Interactive chat or research is waiting ahead of email ingestion.',
+                )
             available = cls.text_available() if use_ai is None else use_ai
             parts = Evidence.parts(run)
             if (
@@ -548,6 +597,10 @@ class EmailIngestionService:
                 run.status = 'waiting_service'
             run.save(update_fields=['match', 'stages', 'status', 'updated_at'])
             return cls.release(run)
+        except DocumentArtifactYielded as exc:
+            # Return the sole worker to queued interactive work and resume
+            # this email from its cached document-segment checkpoints.
+            return cls._yield_to_interactive_work(run, exc)
         except EmailIngestionCancelled as exc:
             run.error = str(exc)
             run.status = 'cancelled'
@@ -598,10 +651,25 @@ class EmailIngestionService:
     def index_outputs(run, *, allow_remote):
         from ai_orchestrator.models import DocumentChunk
         from ai_orchestrator.services.embedding_processor import EmbeddingService
-        from deals.services.document_artifacts import DocumentArtifactService
+        from deals.services.document_artifacts import (
+            DocumentArtifactService,
+            DocumentArtifactYielded,
+        )
         service = EmbeddingService()
         embedding_ready = service.is_embedding_available(timeout=1)
         ready = True
+        audit = EmailIngestionService._audit_log_for_run(run)
+        current_task_id = str(audit.celery_task_id or '') if audit else ''
+
+        def interactive_work_waiting():
+            return EmailIngestionService._interactive_work_waiting(
+                task_id=current_task_id,
+            )
+
+        def ingestion_cancelled():
+            EmailIngestionService._raise_if_cancelled(run)
+            return False
+
         links = EmailEvidenceLink.objects.filter(occurrences__run=run, active=True).select_related('document', 'meeting_note', 'blob').distinct()
         # Canonical outputs replace the legacy whole-email vector. Keeping both
         # would double-count the same body in global and deal chat.
@@ -631,7 +699,11 @@ class EmailIngestionService:
                     link.index_status = 'creating_artifact'
                     link.error = ''
                     link.save(update_fields=['index_status', 'error'])
-                    artifact = DocumentArtifactService.ensure_document_artifact(doc)
+                    artifact = DocumentArtifactService.ensure_document_artifact(
+                        doc,
+                        cancel_check=ingestion_cancelled,
+                        yield_check=interactive_work_waiting,
+                    )
                     if DocumentArtifactService.artifact_status(artifact) != DocumentArtifactService.STATUS_COMPLETE:
                         raise RuntimeError('Detailed document artifact is incomplete and will be retried.')
                 if not embedding_ready:
@@ -656,6 +728,8 @@ class EmailIngestionService:
                     'chunking_status': doc.chunking_status if doc else 'chunked',
                     'chunk_count': chunks.count(),
                 }
+            except DocumentArtifactYielded:
+                raise
             except Exception as exc:
                 link.index_status = 'waiting_service'
                 link.error = str(exc)[:1500]

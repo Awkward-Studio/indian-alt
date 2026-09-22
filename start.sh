@@ -50,8 +50,9 @@ if [ "$RUN_AS_COORDINATOR_NORMALIZED" = "true" ]; then
 elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
-    # Interactive chat and competitor research outrank email ingestion;
-    # email ingestion outranks VDR/report work.
+    # Interactive chat/search/research outrank email ingestion. Email then
+    # outranks reports, and the durable VDR coordinator runs reports before
+    # ordinary VDR document work.
     CELERY_QUEUES_VALUE="${CELERY_QUEUES:-high_priority,email_priority,vdr_control,vdr_work,low_priority,default}"
     CELERY_PREFETCH_MULTIPLIER_VALUE="${CELERY_PREFETCH_MULTIPLIER:-1}"
     CELERY_BEAT_ARGS=()

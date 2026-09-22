@@ -36,6 +36,51 @@ class EmailRecoveryTests(TestCase):
         self.assertIsNotNone(Ingestion.claim(run.id))
         self.assertIsNone(Ingestion.claim(run.id))
 
+    @override_settings(EMAIL_INTERACTIVE_YIELD_RETRY_SECONDS=7)
+    @patch.object(Ingestion, 'dispatch')
+    def test_email_run_yields_and_requeues_without_failure(self, dispatch):
+        run = Evidence.snapshot(self.email)
+        audit = Ingestion.ensure_audit_log(run)
+        claimed = Ingestion.claim(run.id)
+
+        result = Ingestion._yield_to_interactive_work(
+            claimed,
+            'Interactive chat is waiting.',
+        )
+
+        claimed.refresh_from_db()
+        audit.refresh_from_db()
+        self.email.refresh_from_db()
+        self.assertEqual(result['status'], 'yielded')
+        self.assertEqual(claimed.status, 'pending')
+        self.assertIsNone(claimed.lease_until)
+        self.assertEqual(claimed.source['_priority_yield_count'], 1)
+        self.assertEqual(audit.status, 'PENDING')
+        self.assertEqual(self.email.processing_status, 'pending')
+        dispatch.assert_called_once_with(
+            claimed.id,
+            audit_log_id=str(audit.id),
+            countdown=7,
+        )
+
+    @patch.object(Ingestion, '_yield_to_interactive_work')
+    @patch.object(Ingestion, '_interactive_work_waiting', return_value=True)
+    def test_email_checks_interactive_queue_before_pipeline_work(self, waiting, yield_run):
+        run = Evidence.snapshot(self.email)
+        claimed = Ingestion.claim(run.id)
+        # Re-open the run for process(), which owns the production claim step.
+        claimed.status = 'pending'
+        claimed.lease_until = None
+        claimed.lease_token = None
+        claimed.save()
+        yield_run.return_value = {'status': 'yielded'}
+
+        result = Ingestion.process(run.id, use_ai=False, task_id='email-task')
+
+        self.assertEqual(result['status'], 'yielded')
+        waiting.assert_called_once_with(task_id='email-task')
+        yield_run.assert_called_once()
+
     @override_settings(EMAIL_INGESTION_ENABLED=True)
     @patch.object(Ingestion, 'dispatch')
     def test_start_creates_fresh_run_after_terminal_snapshot(self, dispatch):

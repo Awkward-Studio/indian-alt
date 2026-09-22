@@ -1372,6 +1372,9 @@ class DocumentArtifactService:
         *,
         ai_service: Optional["AIProcessorService"] = None,
         force: bool = False,
+        cancel_check: Callable[[], bool] | None = None,
+        yield_check: Callable[[], bool] | None = None,
+        segment_progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         existing = cls.artifact_from_document(document)
         if not force and cls.artifact_status(existing) == cls.STATUS_COMPLETE:
@@ -1384,6 +1387,9 @@ class DocumentArtifactService:
             document_type=document.document_type,
             extraction_mode=document.extraction_mode,
             ai_service=ai_service,
+            cancel_check=cancel_check,
+            yield_check=yield_check,
+            segment_progress=segment_progress,
             extraction_manifest=getattr(document, "extraction_manifest", None),
             source_metadata={
                 "source_id": getattr(document, "id", None),

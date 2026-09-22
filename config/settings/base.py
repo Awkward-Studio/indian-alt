@@ -301,6 +301,9 @@ EMAIL_SYNTHESIS_MAX_TOKENS = config('EMAIL_SYNTHESIS_MAX_TOKENS', default=16384,
 EMAIL_REPORT_SECTION_MAX_TOKENS = config('EMAIL_REPORT_SECTION_MAX_TOKENS', default=8192, cast=int)
 EMAIL_REPORT_SECTION_TIMEOUT = config('EMAIL_REPORT_SECTION_TIMEOUT', default=1800, cast=int)
 EMAIL_REPORT_SECTION_CACHE_TTL = config('EMAIL_REPORT_SECTION_CACHE_TTL', default=604800, cast=int)
+EMAIL_INTERACTIVE_YIELD_RETRY_SECONDS = config(
+    'EMAIL_INTERACTIVE_YIELD_RETRY_SECONDS', default=5, cast=int,
+)
 # Leave room inside the 65K model window for JSON escaping and the serialized
 # chat envelope. Spreadsheet tabs and newlines can add thousands of estimated
 # tokens after the prompt-only budget check.
