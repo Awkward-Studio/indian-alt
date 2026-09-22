@@ -66,6 +66,13 @@ class CompetitorWebResearchService:
         tracking_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._tracking_context = dict(tracking_context or {})
+        self.search_service.set_audit_context(
+            source_type="competitor_research",
+            source_id=self._tracking_context.get("source_id"),
+            context_label=self._tracking_context.get("context_label") or f"Competitor research: {company_name}",
+            parent_audit_log_id=self._tracking_context.get("audit_log_id"),
+            celery_task_id=self._tracking_context.get("celery_task_id"),
+        )
         self._search_context = {
             "purpose": "competitors", "company": company_name,
             "sector": sector, "industry": industry, "geography": location,

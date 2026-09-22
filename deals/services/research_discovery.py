@@ -161,6 +161,11 @@ class ResearchDiscoveryService:
             raise ValueError(
                 "A company name, sector, industry, or CIN is required for research discovery."
             )
+        self.search_service.set_audit_context(
+            source_type="research_discovery",
+            source_id=str(getattr(deal, "id", "") or "") or None,
+            context_label=f"Research discovery: {title or sector or industry}",
+        )
 
         queries = self.build_queries(
             company_name=title,

@@ -1,6 +1,8 @@
 import logging
 import hashlib
+import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urlparse
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class SearXNGProviderService:
-    def __init__(self):
+    def __init__(self, *, audit_context: dict[str, Any] | None = None):
         self.base_url = getattr(settings, "SEARXNG_BASE_URL", "http://localhost:8081").rstrip("/")
         self.timeout = float(getattr(settings, "SEARXNG_TIMEOUT", 15) or 15)
         self.max_results = int(getattr(settings, "SEARXNG_MAX_RESULTS", 30) or 30)
@@ -26,6 +28,132 @@ class SearXNGProviderService:
         self.language = str(getattr(settings, "SEARXNG_LANGUAGE", "en-IN") or "en-IN").strip()
         self.cache_ttl = max(0, int(getattr(settings, "SEARXNG_CACHE_TTL", 300) or 0))
         self.last_status = "not_run"
+        self.audit_context = dict(audit_context or {})
+
+    def set_audit_context(self, **context: Any) -> None:
+        self.audit_context = {
+            **self.audit_context,
+            **{key: value for key, value in context.items() if value not in (None, "")},
+        }
+
+    @staticmethod
+    def _bounded_search_context(context: dict[str, Any] | None) -> dict[str, str]:
+        allowed = ("purpose", "company", "sector", "industry", "geography", "question")
+        return {
+            key: str((context or {}).get(key) or "")[:1000]
+            for key in allowed
+            if str((context or {}).get(key) or "").strip()
+        }
+
+    def _start_search_audit(
+        self,
+        *,
+        query: str,
+        engines: list[str | None],
+        time_range: str | None,
+        audit_context: dict[str, Any] | None,
+    ):
+        if not getattr(settings, "AI_WEB_SEARCH_AUDIT_ENABLED", True):
+            return None, time.monotonic()
+        try:
+            from celery import current_task
+            from ai_orchestrator.services.realtime import broadcast_audit_log_update
+            from ai_orchestrator.services.runtime import AIRuntimeService
+
+            context = {**self.audit_context, **(audit_context or {})}
+            task_id = context.get("celery_task_id")
+            if not task_id:
+                task_id = getattr(getattr(current_task, "request", None), "id", None)
+            parent_label = str(context.get("context_label") or "").strip()
+            label = f"{parent_label}: Web search" if parent_label else "Web search"
+            audit = AIRuntimeService.create_audit_log(
+                source_type="web_search",
+                source_id=str(context.get("source_id") or "") or None,
+                context_label=f"{label}: {query}"[:500],
+                status="PROCESSING",
+                is_success=False,
+                model_used="searxng",
+                system_prompt="Public web search through the configured SearXNG service.",
+                user_prompt=query,
+                celery_task_id=str(task_id) if task_id else None,
+                source_metadata={
+                    "search_provider": "searxng",
+                    "query": query,
+                    "engines": [engine for engine in engines if engine],
+                    "time_range": time_range,
+                    "parent_audit_log_id": str(context.get("parent_audit_log_id") or "") or None,
+                    "caller_source_type": context.get("source_type"),
+                    "search_context": self._bounded_search_context(context.get("search_context")),
+                },
+            )
+            audit.model_provider = "searxng"
+            audit.save(update_fields=["model_provider"])
+            broadcast_audit_log_update(audit, event_type="snapshot", done=False)
+            return audit, time.monotonic()
+        except Exception as exc:
+            logger.warning("Could not create SearXNG audit row for %r: %s", query, exc)
+            return None, time.monotonic()
+
+    @staticmethod
+    def _finish_search_audit(
+        audit,
+        started_at: float,
+        *,
+        query: str,
+        status: str,
+        results: list[dict[str, Any]],
+        attempts: list[dict[str, Any]],
+        cache_hit: bool = False,
+        error: str = "",
+    ) -> None:
+        if audit is None:
+            return
+        try:
+            from django.utils import timezone
+            from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+            public_results = [
+                {
+                    "title": str(item.get("title") or "")[:500],
+                    "url": str(item.get("url") or "")[:2000],
+                    "snippet": str(item.get("snippet") or "")[:4000],
+                    "engine": str(item.get("engine") or "")[:100],
+                    "engines": list(item.get("engines") or []),
+                    "published_date": str(item.get("published_date") or "")[:100],
+                    "query": str(item.get("query") or query)[:500],
+                }
+                for item in results
+            ]
+            payload = {
+                "provider": "searxng",
+                "query": query,
+                "status": status,
+                "cache_hit": cache_hit,
+                "result_count": len(public_results),
+                "attempts": attempts,
+                "results": public_results,
+            }
+            audit.status = "FAILED" if status == "failed" else "COMPLETED"
+            audit.is_success = status != "failed"
+            audit.completed_at = timezone.now()
+            audit.request_duration_ms = max(0, int((time.monotonic() - started_at) * 1000))
+            audit.error_message = error[:2000] if error else ""
+            audit.parsed_json = payload
+            audit.raw_response = json.dumps(payload, ensure_ascii=False)
+            audit.source_metadata = {
+                **(audit.source_metadata or {}),
+                "search_status": status,
+                "search_result_count": len(public_results),
+                "cache_hit": cache_hit,
+                "attempts": attempts,
+            }
+            audit.save(update_fields=[
+                "status", "is_success", "completed_at", "request_duration_ms",
+                "error_message", "parsed_json", "raw_response", "source_metadata",
+            ])
+            broadcast_audit_log_update(audit, event_type="terminal", done=True)
+        except Exception as exc:
+            logger.warning("Could not finish SearXNG audit row for %r: %s", query, exc)
 
     def search_results(
         self, query: str, num_results: int = 5, *,
@@ -54,6 +182,10 @@ class SearXNGProviderService:
                 aggregate_engines=aggregate_engines,
                 engine_subset=engine_subset,
                 time_range=time_range,
+                audit_context={
+                    **self.audit_context,
+                    "search_context": context or {},
+                },
             )
             return [
                 result for result in results
@@ -73,6 +205,7 @@ class SearXNGProviderService:
         aggregate_engines: bool = False,
         engine_subset: list[str] | None = None,
         time_range: str | None = None,
+        audit_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Return normalized SearXNG results, keeping source metadata for grounding."""
         query = self.sanitize_query(query)
@@ -88,6 +221,13 @@ class SearXNGProviderService:
             if aggregate_engines
             else self._engine_order(query)
         )
+        search_audit, audit_started_at = self._start_search_audit(
+            query=query,
+            engines=engine_order,
+            time_range=time_range,
+            audit_context=audit_context,
+        )
+        attempts: list[dict[str, Any]] = []
         cache_key = self._cache_key(query, num_results, engine_order) + f":{time_range or 'all'}"
         if self.cache_ttl:
             try:
@@ -97,6 +237,10 @@ class SearXNGProviderService:
             if isinstance(cached, list):
                 self.last_status = "cache_hit"
                 record_web_search_telemetry(query, selected_engines, len(cached), is_cache_hit=True)
+                self._finish_search_audit(
+                    search_audit, audit_started_at, query=query, status="cache_hit",
+                    results=cached, attempts=attempts, cache_hit=True,
+                )
                 return cached
         for engine in engine_order:
             params = {"q": query, "format": "json", "language": self.language}
@@ -118,6 +262,12 @@ class SearXNGProviderService:
                 response.raise_for_status()
                 payload = response.json() or {}
                 raw_results = payload.get("results", [])[: max(0, num_results)]
+                attempts.append({
+                    "engine": engine or "default",
+                    "status_code": response.status_code,
+                    "result_count": len(raw_results),
+                    "fallback_without_time_range": False,
+                })
                 if raw_results:
                     break
                 engine_errors = payload.get("unresponsive_engines") or []
@@ -129,6 +279,11 @@ class SearXNGProviderService:
                 )
             except Exception as exc:
                 had_error = True
+                attempts.append({
+                    "engine": engine or "default",
+                    "error": str(exc)[:500],
+                    "fallback_without_time_range": False,
+                })
                 logger.warning("SearXNG engine %s failed for %r: %s", engine or "default", query, exc)
 
         # Fallback: if time-bounded search yielded 0 results, retry without time constraint
@@ -152,10 +307,21 @@ class SearXNGProviderService:
                     response.raise_for_status()
                     payload = response.json() or {}
                     raw_results = payload.get("results", [])[: max(0, num_results)]
+                    attempts.append({
+                        "engine": engine or "default",
+                        "status_code": response.status_code,
+                        "result_count": len(raw_results),
+                        "fallback_without_time_range": True,
+                    })
                     if raw_results:
                         break
                 except Exception as exc:
                     had_error = True
+                    attempts.append({
+                        "engine": engine or "default",
+                        "error": str(exc)[:500],
+                        "fallback_without_time_range": True,
+                    })
                     logger.warning("SearXNG fallback engine %s failed for %r: %s", engine or "default", query, exc)
 
         results: list[dict[str, Any]] = []
@@ -177,13 +343,26 @@ class SearXNGProviderService:
                 "query": query,
                 "score": item.get("score"),
             })
-        self.last_status = "completed" if results else ("failed" if had_error else "no_results")
+        search_status = "completed" if results else ("failed" if had_error else "no_results")
+        self.last_status = search_status
         if results and self.cache_ttl:
             try:
                 cache.set(cache_key, results, timeout=self.cache_ttl)
             except Exception:
                 pass
         record_web_search_telemetry(query, selected_engines, len(results), is_cache_hit=False)
+        audit_error = "; ".join(
+            str(attempt.get("error") or "") for attempt in attempts if attempt.get("error")
+        )
+        self._finish_search_audit(
+            search_audit,
+            audit_started_at,
+            query=query,
+            status=search_status,
+            results=results,
+            attempts=attempts,
+            error=audit_error,
+        )
         return results
 
     def _cache_key(self, query: str, num_results: int, engine_order: list[str | None]) -> str:
@@ -293,6 +472,10 @@ class SearXNGProviderService:
                     aggregate_engines=True,
                     engine_subset=engine_subset if engine_subset is not None else self.engine_subset_for_query(query),
                     time_range=time_range or plan.get("time_range"),
+                    audit_context={
+                        **self.audit_context,
+                        "search_context": context or {},
+                    },
                 ): query
                 for query in unique_queries
             }

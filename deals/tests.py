@@ -8,12 +8,14 @@ from types import SimpleNamespace
 
 from django.core.management import call_command
 from django.core.cache import cache
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import transaction
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from django.urls import reverse
 
 from ai_orchestrator.models import AIAuditLog, DealRetrievalProfile, DocumentChunk
+from ai_orchestrator.serializers import AIAuditLogSerializer
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from deals.models import (
     AnalysisKind, Deal, DealAnalysis, DealDocument, InitialAnalysisStatus,
@@ -253,6 +255,7 @@ class AnalysisNextStepsInspectionTests(SimpleTestCase):
     SEARXNG_MAX_RESULTS=10,
     SEARXNG_SEARCH_WORKERS=2,
     SEARXNG_CACHE_TTL=0,
+    AI_WEB_SEARCH_AUDIT_ENABLED=False,
 )
 class SearXNGProviderTests(SimpleTestCase):
     def setUp(self):
@@ -405,6 +408,117 @@ class SearXNGProviderTests(SimpleTestCase):
         self.assertEqual(mock_get.call_args_list[0].kwargs["params"]["engines"], engine_order[0])
         self.assertEqual(mock_get.call_args_list[1].kwargs["params"]["engines"], engine_order[1])
         self.assertTrue(all(call.kwargs["params"]["language"] == "en-IN" for call in mock_get.call_args_list))
+
+
+@override_settings(
+    SEARXNG_BASE_URL="http://search.internal:8888",
+    SEARXNG_ENGINES=["brave", "duckduckgo web", "bing"],
+    SEARXNG_CACHE_TTL=0,
+)
+class SearXNGAuditLogTests(TestCase):
+    @patch("ai_orchestrator.services.search_provider.requests.get")
+    @patch("ai_orchestrator.services.realtime.broadcast_audit_log_update")
+    def test_each_search_records_query_attempts_and_results(self, _broadcast, mock_get):
+        parent = AIAuditLog.objects.create(
+            source_type="deal_enrichment",
+            source_id="deal-123",
+            context_label="Venture Intelligence: Acme",
+            model_used="test",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PROCESSING",
+        )
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "results": [{
+                "title": "Acme company profile",
+                "content": "Acme Private Limited has CIN U12345KA2020PTC123456.",
+                "url": "https://example.com/acme",
+                "engine": "brave",
+            }],
+        }
+        mock_get.return_value = response
+        service = SearXNGProviderService(audit_context={
+            "source_type": "deal_enrichment",
+            "source_id": "deal-123",
+            "context_label": "Venture Intelligence: Acme",
+            "parent_audit_log_id": str(parent.id),
+            "celery_task_id": "task-123",
+        })
+
+        results = service._search_results(
+            "Acme Private Limited CIN",
+            aggregate_engines=True,
+        )
+
+        self.assertEqual(len(results), 1)
+        audit = AIAuditLog.objects.get(source_type="web_search")
+        self.assertEqual(audit.status, "COMPLETED")
+        self.assertTrue(audit.is_success)
+        self.assertEqual(audit.model_provider, "searxng")
+        self.assertEqual(audit.model_used, "searxng")
+        self.assertEqual(audit.source_id, "deal-123")
+        self.assertEqual(audit.celery_task_id, "task-123")
+        self.assertEqual(audit.source_metadata["parent_audit_log_id"], str(parent.id))
+        self.assertEqual(audit.parsed_json["result_count"], 1)
+        self.assertEqual(audit.parsed_json["results"][0]["url"], "https://example.com/acme")
+        self.assertEqual(audit.parsed_json["attempts"][0]["status_code"], 200)
+        parent_payload = AIAuditLogSerializer(
+            parent,
+            context={"include_child_audits": True},
+        ).data
+        self.assertEqual(parent_payload["child_audits"][0]["parsed_json"]["result_count"], 1)
+
+
+@override_settings(
+    SEARXNG_BASE_URL="http://search.internal:8888",
+    SEARXNG_ENGINES=["brave"],
+    SEARXNG_CACHE_TTL=0,
+    SEARXNG_SEARCH_WORKERS=1,
+)
+class SearXNGAuditDurabilityTests(TransactionTestCase):
+    @patch("ai_orchestrator.services.search_query_planner.SearchQueryPlanner.plan")
+    @patch("ai_orchestrator.services.search_provider.requests.get")
+    @patch("ai_orchestrator.services.realtime.broadcast_audit_log_update")
+    def test_search_audit_survives_caller_transaction_rollback(
+        self,
+        _broadcast,
+        mock_get,
+        planner,
+    ):
+        planner.return_value = {
+            "source": "vm",
+            "queries": ["Acme Private Limited CIN"],
+            "time_range": None,
+        }
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "results": [{
+                "title": "Acme profile",
+                "content": "Registered company result.",
+                "url": "https://example.com/acme",
+                "engine": "brave",
+            }],
+        }
+        mock_get.return_value = response
+        service = SearXNGProviderService(audit_context={
+            "source_type": "deal_enrichment",
+            "source_id": "deal-rollback-test",
+        })
+
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                results = service.search_many(["Acme"])
+                self.assertEqual(len(results), 1)
+                raise RuntimeError("simulate failed VI enrichment")
+
+        audit = AIAuditLog.objects.get(
+            source_type="web_search",
+            source_id="deal-rollback-test",
+        )
+        self.assertEqual(audit.status, "COMPLETED")
+        self.assertEqual(audit.parsed_json["result_count"], 1)
 
 
 @override_settings(VLLM_TEXT_MODEL="configured-local-model")
@@ -3253,7 +3367,7 @@ class VentureIntelligenceViewTests(TestCase):
         response = self.client.post(
             reverse("deal-enrich", kwargs={"pk": self.deal.id}),
             {
-                "company_name": "Flipkart",
+                "company_name": "Project Stale Browser Value",
                 "relation_type": "target",
                 "async": True,
             },
@@ -3269,14 +3383,43 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(audit_log.status, "PENDING")
         self.assertEqual(audit_log.celery_task_id, "celery-vi-1")
         self.assertEqual(audit_log.source_metadata["relation_type"], "target")
+        self.assertEqual(audit_log.source_metadata["company_name"], "Flipkart")
+        self.assertEqual(
+            mock_apply_async.call_args.kwargs["kwargs"]["company_name"],
+            "Flipkart",
+        )
         self.assertEqual(
             mock_apply_async.call_args.kwargs["kwargs"]["audit_log_id"],
             str(audit_log.id),
         )
 
+    @patch("deals.tasks.enrich_deal_vi_async_task.apply_async")
+    def test_async_enrich_keeps_supplied_name_while_deal_title_is_placeholder(self, mock_apply_async):
+        mock_apply_async.return_value.id = "celery-vi-placeholder"
+        self.deal.title = "Project Acumen"
+        self.deal.save(update_fields=["title"])
+
+        response = self.client.post(
+            reverse("deal-enrich", kwargs={"pk": self.deal.id}),
+            {
+                "company_name": "Posidex Technologies Private Limited",
+                "relation_type": "target",
+                "async": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            mock_apply_async.call_args.kwargs["kwargs"]["company_name"],
+            "Posidex Technologies Private Limited",
+        )
+
     @patch("deals.tasks.broadcast_audit_log_update")
     @patch("deals.services.venture_intelligence.VentureIntelligenceService.enrich_deal")
     def test_async_enrich_worker_completes_ai_history_record(self, mock_enrich, _mock_broadcast):
+        self.deal.title = "Posidex Technologies Private Limited"
+        self.deal.save(update_fields=["title"])
         profile = VentureIntelligenceCompanyProfile.objects.create(
             cin="U74999KA2012PTC066107",
             name="Flipkart",
@@ -3296,7 +3439,7 @@ class VentureIntelligenceViewTests(TestCase):
 
         result = enrich_deal_vi_async_task.run(
             deal_id=str(self.deal.id),
-            company_name="Flipkart",
+            company_name="Project Acumen",
             relation_type="target",
             audit_log_id=str(audit_log.id),
         )
@@ -3306,7 +3449,16 @@ class VentureIntelligenceViewTests(TestCase):
         self.assertEqual(result["audit_log_id"], str(audit_log.id))
         self.assertEqual(audit_log.status, "COMPLETED")
         self.assertTrue(audit_log.is_success)
+        self.assertIsNotNone(audit_log.completed_at)
+        self.assertEqual(
+            audit_log.source_metadata["company_name"],
+            "Posidex Technologies Private Limited",
+        )
         self.assertEqual(audit_log.parsed_json["profile_id"], str(profile.id))
+        self.assertEqual(
+            mock_enrich.call_args.kwargs["company_name"],
+            "Posidex Technologies Private Limited",
+        )
 
     def test_enrich_view_unauthenticated(self):
         self.client.force_authenticate(user=None)

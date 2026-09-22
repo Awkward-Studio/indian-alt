@@ -3337,6 +3337,15 @@ class DealEnrichView(APIView):
         if relation_type not in ["target", "competitor"]:
             return Response({"error": "Invalid relation_type. Must be 'target' or 'competitor'"}, status=400)
 
+        if relation_type == "target" and deal.title:
+            from .services.deal_field_synthesis import DealFieldSynthesisService
+
+            # The database title may have changed after the browser loaded the
+            # deal. Prefer that current canonical title over stale request data,
+            # while still allowing a supplied legal name for placeholder deals.
+            if not DealFieldSynthesisService._is_placeholder_title(deal.title, set()):
+                company_name = deal.title
+
         if not company_name and not cin:
             company_name = deal.title  # Fallback to deal title if empty
 

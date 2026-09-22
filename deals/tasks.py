@@ -3903,6 +3903,13 @@ def fetch_company_news_async_task(deal_id: str, instruction: str = "", existing_
             source_metadata={"deal_id": str(deal.id), "query": search_query},
             celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
         )
+        search_service.set_audit_context(
+            source_type="company_news_research",
+            source_id=str(deal.id),
+            context_label=f"Company news: {deal.title}",
+            parent_audit_log_id=str(active_log.id) if active_log else None,
+            celery_task_id=getattr(getattr(current_task, "request", None), "id", None),
+        )
         search_context_data = {
             "purpose": "company news", "company": deal.title,
             "industry": deal.industry or deal.sector or "",
@@ -4390,11 +4397,22 @@ def enrich_deal_vi_async_task(
 
     audit_log = AIAuditLog.objects.filter(id=audit_log_id).first() if audit_log_id else None
     try:
+        if relation_type == "target":
+            from deals.services.deal_field_synthesis import DealFieldSynthesisService
+
+            current_deal = Deal.objects.only("title").get(id=deal_id)
+            if not DealFieldSynthesisService._is_placeholder_title(current_deal.title, set()):
+                company_name = current_deal.title
+
         from deals.services.venture_intelligence import VentureIntelligenceService
 
         if audit_log:
             audit_log.status = "PROCESSING"
-            audit_log.save(update_fields=["status"])
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "company_name": company_name,
+            }
+            audit_log.save(update_fields=["status", "source_metadata"])
             broadcast_audit_log_update(audit_log)
 
         profile = VentureIntelligenceService().enrich_deal(
@@ -4407,6 +4425,8 @@ def enrich_deal_vi_async_task(
         if audit_log:
             audit_log.status = "COMPLETED"
             audit_log.is_success = True
+            audit_log.completed_at = timezone.now()
+            audit_log.error_message = ""
             audit_log.raw_response = (
                 f"Linked {relation_type} Venture Intelligence profile "
                 f"{profile.name or profile.cin} to the deal."
@@ -4418,7 +4438,10 @@ def enrich_deal_vi_async_task(
                 "relation_type": relation_type,
             }
             audit_log.save(
-                update_fields=["status", "is_success", "raw_response", "parsed_json"]
+                update_fields=[
+                    "status", "is_success", "completed_at", "error_message",
+                    "raw_response", "parsed_json",
+                ]
             )
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
@@ -4431,8 +4454,11 @@ def enrich_deal_vi_async_task(
         if audit_log:
             audit_log.status = "FAILED"
             audit_log.is_success = False
+            audit_log.completed_at = timezone.now()
             audit_log.error_message = str(e)
-            audit_log.save(update_fields=["status", "is_success", "error_message"])
+            audit_log.save(update_fields=[
+                "status", "is_success", "completed_at", "error_message",
+            ])
             broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
         return {
             "status": "FAILURE",

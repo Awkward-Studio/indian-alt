@@ -35,6 +35,7 @@ def audit_deal_names(logs):
     source_ids = _uuid_strings(log.source_id for log in logs if log.source_id)
     parent_ids = _uuid_strings(
         (log.source_metadata or {}).get('vdr_parent_audit_id')
+        or (log.source_metadata or {}).get('parent_audit_log_id')
         for log in logs
     ) | source_ids
     parents = {
@@ -58,7 +59,11 @@ def audit_deal_names(logs):
         metadata = log.source_metadata or {}
         match = metadata.get('match') if isinstance(metadata.get('match'), dict) else {}
         source_id = str(log.source_id or '')
-        parent_id = str(metadata.get('vdr_parent_audit_id') or source_id)
+        parent_id = str(
+            metadata.get('vdr_parent_audit_id')
+            or metadata.get('parent_audit_log_id')
+            or source_id
+        )
         parent = parents.get(parent_id)
         parent_metadata = parent.source_metadata or {} if parent else {}
         parent_match = (
@@ -91,7 +96,10 @@ def audit_deal_names(logs):
 
 
 def related_audits(obj):
-    query = Q(source_metadata__vdr_parent_audit_id=str(obj.pk))
+    query = (
+        Q(source_metadata__vdr_parent_audit_id=str(obj.pk))
+        | Q(source_metadata__parent_audit_log_id=str(obj.pk))
+    )
     if obj.celery_task_id:
         query |= Q(celery_task_id=obj.celery_task_id)
     return AIAuditLog.objects.filter(query).exclude(pk=obj.pk).order_by('created_at')
@@ -143,7 +151,7 @@ class AIAuditChildLogSerializer(serializers.ModelSerializer):
             'model_used', 'status', 'is_success', 'created_at', 'completed_at',
             'request_duration_ms', 'tokens_used', 'input_tokens', 'output_tokens',
             'token_count_is_estimate', 'token_usage', 'error_message', 'worker_logs',
-            'segment_index', 'segment_count',
+            'parsed_json', 'source_metadata', 'segment_index', 'segment_count',
         ]
 
     def get_token_usage(self, obj):

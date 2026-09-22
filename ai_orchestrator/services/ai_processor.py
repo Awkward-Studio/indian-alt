@@ -126,6 +126,13 @@ class AIProcessorService:
             source_type, source_id, personality, skill, 
             "", "", metadata, resolved_model=resolved_text_model
         )
+        self.search_provider.set_audit_context(
+            source_type=source_type,
+            source_id=source_id,
+            context_label=(metadata or {}).get("context_label") or audit_log.context_label,
+            parent_audit_log_id=str(audit_log.id),
+            celery_task_id=(metadata or {}).get("celery_task_id") or audit_log.celery_task_id,
+        )
         if resolved_stage:
             audit_log.pipeline = resolved_stage.pipeline
             audit_log.pipeline_stage = resolved_stage.stage

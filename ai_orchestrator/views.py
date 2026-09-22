@@ -130,6 +130,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             | Q(source_type__icontains='competitor')
             | Q(source_type__icontains='vendor_intelligence')
         ),
+        'search': Q(source_type='web_search'),
     }
 
     def get_queryset(self):
