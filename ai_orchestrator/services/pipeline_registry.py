@@ -225,6 +225,25 @@ class PipelineRegistryService:
 
     @classmethod
     @transaction.atomic
+    def restore_prompt_revision(
+        cls,
+        source: AIPromptRevision,
+        *,
+        restored_by=None,
+    ) -> AIPromptRevision:
+        """Publish an immutable copy of a historical prompt revision."""
+        revision = cls.create_prompt_draft(
+            source.definition,
+            user_template=source.user_template,
+            system_template=source.system_template,
+            input_schema=source.input_schema,
+            output_schema=source.output_schema,
+            created_by=restored_by,
+        )
+        return cls.publish_prompt(revision, published_by=restored_by)
+
+    @classmethod
+    @transaction.atomic
     def snapshot_skill(cls, skill: AISkill, *, created_by=None, publish: bool = False) -> AISkillRevision:
         revision = AISkillRevision.objects.create(
             skill=skill,
@@ -280,6 +299,35 @@ class PipelineRegistryService:
         revision.published_at = timezone.now()
         revision.save(update_fields=["status", "published_by", "published_at", "updated_at"])
         return revision
+
+    @classmethod
+    @transaction.atomic
+    def restore_skill_revision(
+        cls,
+        source: AISkillRevision,
+        *,
+        restored_by=None,
+    ) -> AISkillRevision:
+        """Publish an immutable copy of a historical skill revision."""
+        if not source.prompt_template.strip():
+            raise RegistryValidationError("Skill prompt template cannot be empty.")
+        revision = AISkillRevision.objects.create(
+            skill=source.skill,
+            revision=cls._next_revision(source.skill.revisions),
+            status=AISkillRevision.Status.DRAFT,
+            system_template=source.system_template,
+            prompt_template=source.prompt_template,
+            input_schema=source.input_schema,
+            output_schema=source.output_schema,
+            skill_format=source.skill_format,
+            package_manifest=source.package_manifest,
+            package_files=source.package_files,
+            package_digest=source.package_digest,
+            validation_report=source.validation_report,
+            compatibility_status=source.compatibility_status,
+            created_by=restored_by,
+        )
+        return cls.publish_skill(revision, published_by=restored_by)
 
     @classmethod
     def resolve_stage(cls, pipeline_key: str, stage_key: str) -> ResolvedStage:

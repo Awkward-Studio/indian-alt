@@ -6,7 +6,9 @@ from ai_orchestrator.models import (
     AIPipelineDefinition,
     AIPipelineStage,
     AIPromptDefinition,
+    AISkillRevision,
     AISkill,
+    AIPromptRevision,
 )
 from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 from ai_orchestrator.services.bulk_prompt_contracts import (
@@ -87,6 +89,35 @@ class PromptRevisionLifecycleTests(TestCase):
         self.assertEqual(first.status, "archived")
         self.assertEqual(resolved.prompt_revision.pk, second.pk)
 
+    def test_restore_publishes_an_immutable_copy_of_historical_revision(self):
+        first = PipelineRegistryService.create_prompt_draft(
+            self.definition,
+            user_template="Original {{ content }}",
+            system_template="Original system",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        )
+        PipelineRegistryService.publish_prompt(first)
+        second = PipelineRegistryService.create_prompt_draft(
+            self.definition,
+            user_template="Replacement {{ content }}",
+        )
+        PipelineRegistryService.publish_prompt(second)
+
+        restored = PipelineRegistryService.restore_prompt_revision(first)
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertNotEqual(restored.pk, first.pk)
+        self.assertEqual(restored.revision, 3)
+        self.assertEqual(restored.status, AIPromptRevision.Status.PUBLISHED)
+        self.assertEqual(restored.user_template, first.user_template)
+        self.assertEqual(restored.system_template, first.system_template)
+        self.assertEqual(restored.input_schema, first.input_schema)
+        self.assertEqual(restored.output_schema, first.output_schema)
+        self.assertEqual(first.status, AIPromptRevision.Status.ARCHIVED)
+        self.assertEqual(second.status, AIPromptRevision.Status.ARCHIVED)
+
     def test_native_skill_revision_populates_package_compatibility_defaults(self):
         skill = AISkill.objects.create(
             name="native_revision_test",
@@ -100,6 +131,40 @@ class PromptRevisionLifecycleTests(TestCase):
         self.assertEqual(revision.package_digest, "")
         self.assertEqual(revision.validation_report, {})
         self.assertEqual(revision.compatibility_status, "not_applicable")
+
+    def test_restore_publishes_an_immutable_copy_of_historical_skill_revision(self):
+        skill = AISkill.objects.create(
+            name="restorable_skill",
+            prompt_template="Current {{ content }}",
+        )
+        first = PipelineRegistryService.create_skill_draft(
+            skill,
+            system_template="Original system",
+            prompt_template="Original {{ content }}",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+        )
+        PipelineRegistryService.publish_skill(first)
+        second = PipelineRegistryService.create_skill_draft(
+            skill,
+            system_template="Replacement system",
+            prompt_template="Replacement {{ content }}",
+        )
+        PipelineRegistryService.publish_skill(second)
+
+        restored = PipelineRegistryService.restore_skill_revision(first)
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertNotEqual(restored.pk, first.pk)
+        self.assertEqual(restored.revision, 3)
+        self.assertEqual(restored.status, AISkillRevision.Status.PUBLISHED)
+        self.assertEqual(restored.prompt_template, first.prompt_template)
+        self.assertEqual(restored.system_template, first.system_template)
+        self.assertEqual(restored.input_schema, first.input_schema)
+        self.assertEqual(restored.output_schema, first.output_schema)
+        self.assertEqual(first.status, AISkillRevision.Status.ARCHIVED)
+        self.assertEqual(second.status, AISkillRevision.Status.ARCHIVED)
 
     def test_seed_backfills_core_stages_with_published_revisions(self):
         call_command("seed_ai_prompts", verbosity=0)
