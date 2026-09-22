@@ -221,6 +221,17 @@ class EmailEvidenceService:
                 key = 'attachment:' + str(identifier or position)
                 occurrence, _ = EmailContributionOccurrence.objects.get_or_create(run=run, source_key=key,
                     defaults={'position': 100000 + position, 'metadata': dict(attachment)})
+                if attachment.get('isInline') is True:
+                    # Graph exposes email logos and signature artwork as file
+                    # attachments. They are body decoration, not durable deal
+                    # evidence, and unsupported images must not block indexing
+                    # or deal synthesis forever.
+                    occurrence.metadata = dict(attachment)
+                    occurrence.evidence = None
+                    occurrence.status = 'skipped'
+                    occurrence.error = ''
+                    occurrence.save(update_fields=['metadata', 'evidence', 'status', 'error'])
+                    continue
                 try:
                     if not identifier:
                         raise ValueError('Attachment has no Graph identity.')

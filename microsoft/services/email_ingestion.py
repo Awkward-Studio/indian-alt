@@ -94,6 +94,8 @@ class EmailIngestionService:
             'When it names a company or project, prefer it over a generic forwarded email subject.',
         ]
         for attachment in source.get('attachments') or []:
+            if attachment.get('isInline') is True:
+                continue
             name = PurePath(str(attachment.get('name') or '')).name
             if name:
                 sections.append(f'--- ATTACHMENT FILENAME: {name} ---')
@@ -120,6 +122,8 @@ class EmailIngestionService:
         """Extract a conservative company/project hint from a filename."""
         source = run.source if isinstance(run.source, dict) else {}
         for attachment in source.get('attachments') or []:
+            if attachment.get('isInline') is True:
+                continue
             stem = PurePath(str(attachment.get('name') or '')).stem.strip()
             if not stem:
                 continue
@@ -566,6 +570,7 @@ class EmailIngestionService:
                 document_ids = list(
                     EmailEvidenceLink.objects.filter(
                         occurrences__run=run,
+                        occurrences__status='saved',
                         active=True,
                         document__isnull=False,
                     ).values_list('document_id', flat=True).distinct()
@@ -670,7 +675,11 @@ class EmailIngestionService:
             EmailIngestionService._raise_if_cancelled(run)
             return False
 
-        links = EmailEvidenceLink.objects.filter(occurrences__run=run, active=True).select_related('document', 'meeting_note', 'blob').distinct()
+        links = EmailEvidenceLink.objects.filter(
+            occurrences__run=run,
+            occurrences__status='saved',
+            active=True,
+        ).select_related('document', 'meeting_note', 'blob').distinct()
         # Canonical outputs replace the legacy whole-email vector. Keeping both
         # would double-count the same body in global and deal chat.
         if links.exists():

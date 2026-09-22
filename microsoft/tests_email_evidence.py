@@ -162,6 +162,49 @@ class EmailEvidenceTests(TestCase):
                 )
                 storage.__dict__.pop('location', None)
 
+    @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content')
+    def test_inline_signature_image_is_skipped_before_capture(self, download):
+        download.return_value = {'contentBytes': base64.b64encode(b'financial schedule').decode()}
+        self.email.attachments = [
+            {'id': 'logo', 'name': 'image001.png', 'isInline': True},
+            {'id': 'model', 'name': 'Business Plan.xlsx', 'isInline': False},
+        ]
+        self.email.save(update_fields=['attachments'])
+        run = Evidence.snapshot(self.email)
+
+        self.assertEqual(Evidence.save_attachments(run, self.deal), [])
+
+        skipped = run.occurrences.get(source_key='attachment:logo')
+        saved = run.occurrences.get(source_key='attachment:model')
+        self.assertEqual(skipped.status, 'skipped')
+        self.assertIsNone(skipped.evidence_id)
+        self.assertEqual(saved.status, 'saved')
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(DealDocument.objects.count(), 1)
+        self.assertEqual(DealDocument.objects.get().title, 'Business Plan.xlsx')
+
+    @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content')
+    def test_retry_detaches_inline_image_captured_by_legacy_worker(self, download):
+        download.return_value = {'contentBytes': base64.b64encode(b'legacy logo').decode()}
+        self.email.attachments = [
+            {'id': 'logo', 'name': 'image001.png', 'isInline': False},
+        ]
+        self.email.save(update_fields=['attachments'])
+        run = Evidence.snapshot(self.email)
+        self.assertEqual(Evidence.save_attachments(run, self.deal), [])
+        occurrence = run.occurrences.get(source_key='attachment:logo')
+        self.assertEqual(occurrence.status, 'saved')
+        self.assertIsNotNone(occurrence.evidence_id)
+
+        run.source['attachments'][0]['isInline'] = True
+        run.save(update_fields=['source', 'updated_at'])
+        self.assertEqual(Evidence.save_attachments(run, self.deal), [])
+
+        occurrence.refresh_from_db()
+        self.assertEqual(occurrence.status, 'skipped')
+        self.assertIsNone(occurrence.evidence_id)
+        self.assertEqual(download.call_count, 1)
+
     @patch('microsoft.services.graph_service.GraphAPIService.get_attachment_content', side_effect=ValueError('unavailable'))
     def test_failed_attachment_does_not_rollback_body(self, download):
         self.email.attachments = [{'id': 'a', 'name': 'missing.pdf'}]
