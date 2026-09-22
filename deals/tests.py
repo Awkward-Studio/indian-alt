@@ -48,7 +48,10 @@ from deals.services.competitor_intelligence import competitor_names_from_payload
 from deals.services.competitor_web_research import CompetitorWebResearchService
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from deals.services.screener import ScreenerCompanyService, _normalize_screener_url
-from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.venture_intelligence import (
+    VentureIntelligenceFetchError,
+    VentureIntelligenceService,
+)
 from deals.services.analysis_next_steps import inspect_analysis_next_steps
 
 
@@ -2798,6 +2801,39 @@ class VentureIntelligenceServiceTests(TestCase):
         with self.assertRaises(ValueError):
             self.service.fetch_company_details(company_name="NonExistent")
 
+    @patch.object(VentureIntelligenceService, "fetch_company_details")
+    def test_resolved_cin_is_available_when_profile_fetch_fails(self, mock_fetch):
+        mock_fetch.side_effect = ValueError("VI unavailable")
+        resolution = {
+            "cin": "U74999KA2012PTC066107",
+            "entity_name": "Flipkart Private Limited",
+            "confidence": 0.98,
+            "source": "ai_web_search",
+            "is_valid": True,
+            "cin_candidates": [{
+                "cin": "U74999KA2012PTC066107",
+                "entity_name": "Flipkart Private Limited",
+                "confidence": 0.98,
+            }],
+        }
+
+        with self.assertRaises(VentureIntelligenceFetchError) as raised:
+            self.service.fetch_company_details_from_resolution(resolution, company_name="Flipkart")
+
+        self.assertEqual(raised.exception.resolved_cin, "U74999KA2012PTC066107")
+        profile = self.service.persist_resolved_cin(
+            self.deal.id,
+            raised.exception.resolution,
+            fetch_error=raised.exception,
+        )
+        self.assertEqual(profile.cin, "U74999KA2012PTC066107")
+        self.assertEqual(profile.data_source, "vi_cin_resolution")
+        self.assertTrue(VentureIntelligenceCompanyRelation.objects.filter(
+            deal=self.deal,
+            company_profile=profile,
+            relation_type=VentureIntelligenceRelationType.TARGET,
+        ).exists())
+
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
     def test_resolve_cin_via_ai(self, mock_process_content):
         mock_process_content.return_value = {
@@ -3466,6 +3502,49 @@ class VentureIntelligenceViewTests(TestCase):
             mock_enrich.call_args.kwargs["company_name"],
             "Posidex Technologies Private Limited",
         )
+
+    @patch("deals.tasks.broadcast_audit_log_update")
+    @patch("deals.services.venture_intelligence.VentureIntelligenceService.enrich_deal")
+    def test_async_enrich_persists_cin_when_profile_fetch_fails(self, mock_enrich, _mock_broadcast):
+        resolution = {
+            "cin": "U74999KA2012PTC066107",
+            "entity_name": "Flipkart Private Limited",
+            "confidence": 0.97,
+            "source": "ai_web_search",
+            "is_valid": True,
+            "cin_candidates": [{"cin": "U74999KA2012PTC066107", "confidence": 0.97}],
+        }
+        mock_enrich.side_effect = VentureIntelligenceFetchError(
+            "VI unavailable", resolution=resolution, cin_errors=["VI unavailable"]
+        )
+        audit_log = AIAuditLog.objects.create(
+            source_type="deal_enrichment",
+            source_id=str(self.deal.id),
+            context_label="Venture Intelligence: Flipkart",
+            model_used="test",
+            system_prompt="",
+            user_prompt="",
+            raw_response="",
+            status="PENDING",
+            is_success=False,
+        )
+
+        result = enrich_deal_vi_async_task.run(
+            deal_id=str(self.deal.id),
+            company_name="Flipkart",
+            relation_type="target",
+            audit_log_id=str(audit_log.id),
+        )
+
+        audit_log.refresh_from_db()
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["resolved_cin"], "U74999KA2012PTC066107")
+        self.assertEqual(audit_log.status, "FAILED")
+        self.assertEqual(audit_log.source_metadata["resolved_cin"], "U74999KA2012PTC066107")
+        profile = VentureIntelligenceCompanyProfile.objects.get(cin="U74999KA2012PTC066107")
+        self.assertTrue(VentureIntelligenceCompanyRelation.objects.filter(
+            deal=self.deal, company_profile=profile,
+        ).exists())
 
     def test_enrich_view_unauthenticated(self):
         self.client.force_authenticate(user=None)

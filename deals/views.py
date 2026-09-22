@@ -3261,7 +3261,10 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
 
 from rest_framework.views import APIView
-from deals.services.venture_intelligence import VentureIntelligenceService
+from deals.services.venture_intelligence import (
+    VentureIntelligenceFetchError,
+    VentureIntelligenceService,
+)
 from deals.serializers import VentureIntelligenceCompanyProfileSerializer
 from deals.models import VentureIntelligenceCompanyProfile
 
@@ -3314,6 +3317,23 @@ class VentureIntelligencePreviewView(APIView):
                 "used_cin": resolution.get("cin"),
             }
             return Response(data)
+        except VentureIntelligenceFetchError as e:
+            return Response({
+                "success": False,
+                "status": "partial",
+                "resolved_cin": e.resolved_cin,
+                "entity_name": e.resolution.get("entity_name"),
+                "resolution": {
+                    "cin": e.resolved_cin,
+                    "entity_name": e.resolution.get("entity_name"),
+                    "confidence": e.resolution.get("confidence"),
+                    "source": e.resolution.get("source"),
+                    "is_valid": True,
+                    "cin_candidates": serialize_vi_cin_candidates(e.resolution),
+                },
+                "message": str(e),
+                "error": str(e),
+            }, status=206)
         except ValueError as e:
             return Response({"success": False, "message": str(e), "error": str(e)}, status=404)
         except Exception as e:
@@ -3407,6 +3427,21 @@ class DealEnrichView(APIView):
                 "message": f"Successfully enriched deal with {relation_type} company profile.",
                 "profile": serializer.data
             })
+        except VentureIntelligenceFetchError as e:
+            profile = vi_service.persist_resolved_cin(
+                deal_id=deal.id,
+                resolution=e.resolution,
+                relation_type=relation_type,
+                fetch_error=e,
+            )
+            serializer = VentureIntelligenceCompanyProfileSerializer(profile)
+            return Response({
+                "status": "partial",
+                "message": "CIN resolved, but Venture Intelligence profile fetch failed.",
+                "resolved_cin": e.resolved_cin,
+                "profile": serializer.data,
+                "error": str(e),
+            }, status=206)
         except ValueError as e:
             logger.info(f"VI data unavailable for Deal {deal.id}: {e}")
             return Response({"error": str(e), "message": str(e)}, status=404)

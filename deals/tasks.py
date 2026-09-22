@@ -4404,7 +4404,10 @@ def enrich_deal_vi_async_task(
             if not DealFieldSynthesisService._is_placeholder_title(current_deal.title, set()):
                 company_name = current_deal.title
 
-        from deals.services.venture_intelligence import VentureIntelligenceService
+        from deals.services.venture_intelligence import (
+            VentureIntelligenceFetchError,
+            VentureIntelligenceService,
+        )
 
         if audit_log:
             audit_log.status = "PROCESSING"
@@ -4447,6 +4450,49 @@ def enrich_deal_vi_async_task(
         return {
             "status": "SUCCESS",
             "profile_id": str(profile.id),
+            "audit_log_id": str(audit_log.id) if audit_log else None,
+        }
+    except VentureIntelligenceFetchError as e:
+        logger.error(f"Async deal VI profile fetch failed after CIN resolution: {str(e)}")
+        partial_profile = None
+        if e.resolved_cin:
+            try:
+                partial_profile = VentureIntelligenceService().persist_resolved_cin(
+                    deal_id=deal_id,
+                    resolution=e.resolution,
+                    relation_type=relation_type,
+                    fetch_error=e,
+                )
+            except Exception as persist_error:
+                logger.error("Could not persist resolved CIN %s: %s", e.resolved_cin, persist_error, exc_info=True)
+        if audit_log:
+            audit_log.status = "FAILED"
+            audit_log.is_success = False
+            audit_log.completed_at = timezone.now()
+            audit_log.error_message = str(e)
+            audit_log.source_metadata = {
+                **(audit_log.source_metadata or {}),
+                "resolved_cin": e.resolved_cin,
+                "cin_resolution_status": "resolved_fetch_failed",
+            }
+            audit_log.parsed_json = {
+                "status": "PARTIAL",
+                "resolved_cin": e.resolved_cin,
+                "profile_id": str(partial_profile.id) if partial_profile else None,
+                "deal_id": deal_id,
+                "relation_type": relation_type,
+                "cin_errors": e.cin_errors,
+            }
+            audit_log.save(update_fields=[
+                "status", "is_success", "completed_at", "error_message",
+                "source_metadata", "parsed_json",
+            ])
+            broadcast_audit_log_update(audit_log, event_type="terminal", done=True)
+        return {
+            "status": "PARTIAL",
+            "resolved_cin": e.resolved_cin,
+            "profile_id": str(partial_profile.id) if partial_profile else None,
+            "error": str(e),
             "audit_log_id": str(audit_log.id) if audit_log else None,
         }
     except Exception as e:

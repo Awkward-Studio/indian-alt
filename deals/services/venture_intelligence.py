@@ -36,6 +36,19 @@ TRAILING_DEAL_WORDS_PATTERN = re.compile(
 )
 
 
+class VentureIntelligenceFetchError(ValueError):
+    """Raised when CIN resolution succeeded but the VI profile fetch failed."""
+
+    def __init__(self, message, *, resolution=None, cin_errors=None):
+        super().__init__(message)
+        self.resolution = resolution or {}
+        self.cin_errors = list(cin_errors or [])
+
+    @property
+    def resolved_cin(self):
+        return normalize_cin(self.resolution.get("cin")) or None
+
+
 def normalize_cin(value):
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
@@ -358,7 +371,11 @@ class VentureIntelligenceService:
                 cin_errors.append(f"{candidate_cin}: {exc}")
 
         if resolution.get("source") == "user_supplied_cin":
-            raise ValueError(f"VI lookup failed for supplied CIN: {resolution.get('cin')}")
+            raise VentureIntelligenceFetchError(
+                f"VI lookup failed for supplied CIN: {resolution.get('cin')}",
+                resolution=resolution,
+                cin_errors=cin_errors,
+            )
 
         try:
             fallback_names = [
@@ -386,9 +403,55 @@ class VentureIntelligenceService:
                     return data, resolution
                 except Exception:
                     continue
-            raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
+            raise VentureIntelligenceFetchError(
+                f"VI lookup failed for resolved CIN candidates: {cin_errors}",
+                resolution=resolution,
+                cin_errors=cin_errors,
+            )
         except Exception:
-            raise ValueError(f"VI lookup failed for resolved CIN candidates: {cin_errors}")
+            raise VentureIntelligenceFetchError(
+                f"VI lookup failed for resolved CIN candidates: {cin_errors}",
+                resolution=resolution,
+                cin_errors=cin_errors,
+            )
+
+    @transaction.atomic
+    def persist_resolved_cin(self, deal_id, resolution, relation_type="target", fetch_error=None):
+        """Persist identity evidence even when the full VI profile is unavailable."""
+        deal = Deal.objects.get(id=deal_id)
+        cin = normalize_cin((resolution or {}).get("cin"))
+        if not is_valid_cin(cin):
+            raise ValueError("Cannot persist an invalid resolved CIN.")
+
+        entity_name = (
+            (resolution or {}).get("entity_name")
+            or (resolution or {}).get("registered_name")
+            or deal.title
+            or cin
+        )
+        error_text = str(fetch_error or "VI profile fetch failed after CIN resolution")
+        profile, _ = VentureIntelligenceCompanyProfile.objects.update_or_create(
+            cin=cin,
+            defaults={
+                "name": entity_name,
+                "registered_name": (resolution or {}).get("entity_name") or None,
+                "data_source": "vi_cin_resolution",
+                "additional_info": json.dumps({
+                    "cin_only": True,
+                    "fetch_error": error_text,
+                    "cin_errors": (getattr(fetch_error, "cin_errors", None) or []),
+                    "resolution_source": (resolution or {}).get("source"),
+                    "confidence": (resolution or {}).get("confidence"),
+                }),
+                "raw_profile_json": {"resolution": resolution or {}, "fetch_error": error_text},
+            },
+        )
+        VentureIntelligenceCompanyRelation.objects.update_or_create(
+            deal=deal,
+            company_profile=profile,
+            defaults={"relation_type": relation_type},
+        )
+        return profile
 
     @transaction.atomic
     def enrich_deal(self, deal_id, company_name=None, cin=None, relation_type='target', index_for_rag=True, raw_data=None):
