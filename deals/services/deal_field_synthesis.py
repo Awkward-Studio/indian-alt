@@ -67,7 +67,17 @@ class DealFieldSynthesisService:
         latest_title_source = deal.field_provenance.filter(
             field_name="title",
         ).order_by("-created_at", "-id").first()
-        if latest_title_source and latest_title_source.source_type == DealFieldProvenance.SourceType.HUMAN:
+        initial_email_title = bool(
+            latest_title_source
+            and latest_title_source.source_type == DealFieldProvenance.SourceType.HUMAN
+            and latest_title_source.source_id.startswith("email-ingestion:")
+            and latest_title_source.previous_value in (None, "")
+        )
+        if (
+            latest_title_source
+            and latest_title_source.source_type == DealFieldProvenance.SourceType.HUMAN
+            and not initial_email_title
+        ):
             return None
 
         candidate = str(model_data.get("title") or "").strip()

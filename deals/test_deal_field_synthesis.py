@@ -129,6 +129,14 @@ class DealFieldSynthesisServiceTests(TestCase):
         self.deal.title = "Project Aurum"
         self.deal.source_email_id = "email-source-1"
         self.deal.save(update_fields=["title", "source_email_id"])
+        DealFieldProvenance.objects.create(
+            deal=self.deal,
+            field_name="title",
+            source_type=DealFieldProvenance.SourceType.HUMAN,
+            source_id="email-ingestion:run-1",
+            previous_value=None,
+            value=self.deal.title,
+        )
         ai_cls.return_value.process_content.return_value = self._strong_title_result()
 
         DealFieldSynthesisService.synthesize(
