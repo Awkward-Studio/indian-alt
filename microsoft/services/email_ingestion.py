@@ -419,9 +419,17 @@ class EmailIngestionService:
             if run.status in ('completed', 'needs_review', 'superseded', 'cancelled'):
                 return False
             if run.status == 'running' and run.lease_until and run.lease_until > timezone.now():
-                # Another worker owns the valid lease; this was only a
-                # duplicate delivery and must not interrupt it.
-                return False
+                owner_worker_id = str((run.source or {}).get('_worker_instance_id') or '')
+                current_worker_id = str(os.getenv('RAILWAY_DEPLOYMENT_ID') or '')
+                replaced_owner = bool(
+                    owner_worker_id
+                    and current_worker_id
+                    and owner_worker_id != current_worker_id
+                )
+                if not replaced_owner:
+                    # Another worker owns the valid lease; this was only a
+                    # duplicate delivery and must not interrupt it.
+                    return False
             if EmailIngestionRun.objects.filter(
                 email_id=run.email_id, created_at__gt=run.created_at,
             ).exists():

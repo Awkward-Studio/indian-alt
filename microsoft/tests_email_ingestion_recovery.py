@@ -113,6 +113,27 @@ class EmailRecoveryTests(TestCase):
         dispatch.assert_called_once_with(run.id, audit_log_id=str(audit.id), countdown=5)
 
     @override_settings(EMAIL_INGESTION_ENABLED=True)
+    @patch.object(Ingestion, 'dispatch')
+    @patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'new-deploy'})
+    def test_not_claimed_delivery_reclaims_lease_from_replaced_deployment(self, dispatch):
+        run = Evidence.snapshot(self.email)
+        audit = Ingestion.ensure_audit_log(run)
+        with patch.dict('os.environ', {'RAILWAY_DEPLOYMENT_ID': 'old-deploy'}):
+            claimed = Ingestion.claim(run.id)
+
+        self.assertTrue(Ingestion.recover_not_claimed(run.id, task_id='redelivered-task'))
+
+        claimed.refresh_from_db()
+        self.assertEqual(claimed.status, 'pending')
+        self.assertIsNone(claimed.lease_until)
+        self.assertIn('did not claim', claimed.error)
+        dispatch.assert_called_once_with(
+            claimed.id,
+            audit_log_id=str(audit.id),
+            countdown=5,
+        )
+
+    @override_settings(EMAIL_INGESTION_ENABLED=True)
     @patch.object(Ingestion, 'process', return_value={'status': 'completed'})
     def test_worker_runs_full_pipeline_without_review_pause(self, process):
         from microsoft.tasks import ingest_email_evidence
