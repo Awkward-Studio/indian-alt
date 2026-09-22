@@ -2806,6 +2806,13 @@ class VentureIntelligenceServiceTests(TestCase):
         res = self.service.resolve_cin_via_ai("Flipkart")
         self.assertEqual(res["cin"], "U74999KA2012PTC066107")
         self.assertEqual(res["entity_name"], "Flipkart Private Limited")
+        self.assertEqual(
+            mock_process_content.call_args.kwargs["metadata"]["model_provider"],
+            "vllm",
+        )
+        self.assertTrue(
+            mock_process_content.call_args.kwargs["metadata"]["web_search_enabled"]
+        )
 
     @patch("deals.services.venture_intelligence.AIProcessorService.process_content")
     def test_vi_demo_flag_does_not_mock_cin_web_search(self, mock_process_content):

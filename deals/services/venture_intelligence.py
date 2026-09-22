@@ -179,9 +179,6 @@ class VentureIntelligenceService:
         Uses SearXNG evidence and the configured AI model to resolve ranked MCA CIN candidates.
         """
         ai_service = AIProcessorService()
-        # Claude synthesizes evidence fetched through the shared SearXNG route.
-        ai_service.model_provider = "anthropic"
-        ai_service.current_provider = ai_service.anthropic_provider
         
         try:
             result = ai_service.process_content(
@@ -190,7 +187,7 @@ class VentureIntelligenceService:
                 source_type="deal_enrichment",
                 source_id="cin_resolution",
                 metadata={
-                    "model_provider": "anthropic",
+                    "model_provider": "vllm",
                     "temperature": 0.0,
                     "pipeline_key": "company_enrichment",
                     "stage_key": "cin_resolve",
