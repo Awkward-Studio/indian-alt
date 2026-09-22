@@ -3203,8 +3203,10 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
     from ai_orchestrator.models import AIAuditLog
     from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.services.chat_document_chunks import ChatDocumentChunkService
+    from ai_orchestrator.prompt_contracts import TITLE_EVIDENCE_SCHEMA
     from deals.models import Deal, DealAnalysis
     from deals.services.deal_creation import DealCreationService
+    from deals.services.deal_field_synthesis import DealFieldSynthesisService
 
     audit_log = AIAuditLog.objects.get(id=audit_log_id)
     deal = Deal.objects.filter(id=deal_id).first() if deal_id else None
@@ -3349,9 +3351,13 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
                     "ambiguous_points": {"type": "array", "items": {"type": "string"}},
                     "documents_analyzed": {"type": "array", "items": {"type": "string"}},
                     "cross_document_conflicts": {"type": "array", "items": {"type": "object"}},
-                    "missing_information_requests": {"type": "array", "items": {"type": "string"}}
+                    "missing_information_requests": {"type": "array", "items": {"type": "string"}},
+                    "title_evidence": TITLE_EVIDENCE_SCHEMA,
                 },
-                "required": ["ambiguous_points", "documents_analyzed", "cross_document_conflicts", "missing_information_requests"],
+                "required": [
+                    "ambiguous_points", "documents_analyzed", "cross_document_conflicts",
+                    "missing_information_requests", "title_evidence",
+                ],
                 "additionalProperties": False
             }
         },
@@ -3517,6 +3523,22 @@ def finalize_thread_analysis_async(self, results, deal_id: str | None, audit_log
                     overwrite=False,
                     overwrite_themes=False,
                 )
+                replacement_title = DealFieldSynthesisService.validated_title_replacement(
+                    deal,
+                    normalized_analysis.get("deal_model_data") or {},
+                    normalized_analysis.get("metadata") or {},
+                    {
+                        str(item.get("file_name") or "").strip()
+                        for item in passed_results
+                        if str(item.get("file_name") or "").strip()
+                    },
+                )
+                if replacement_title:
+                    DealFieldSynthesisService.apply_title_replacement(
+                        deal,
+                        replacement_title,
+                        source_id=f"email-synthesis:{deal_analysis.id}",
+                    )
 
                 for item in passed_results:
                     source_file_id = str(item.get("file_id") or "")

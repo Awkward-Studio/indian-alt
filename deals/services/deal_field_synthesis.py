@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from django.db import transaction
@@ -13,9 +15,10 @@ from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens
-from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument
+from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument, DealFieldProvenance
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
+from deals.services.field_provenance import record_deal_field_changes
 
 
 class DealFieldSynthesisService:
@@ -29,6 +32,83 @@ class DealFieldSynthesisService:
     STRING_FRAGMENT_CHARS = 6_000
     TEXT_PER_DOCUMENT = 16_000
     MAX_OUTPUT_TOKENS = 4_096
+    PLACEHOLDER_TITLES = {"", "deal", "new deal", "unknown", "untitled", "tbd"}
+    PROJECT_TITLE_RE = re.compile(r"^project(?:\s|[_-])+", re.IGNORECASE)
+    FILENAME_RE = re.compile(
+        r"\.(?:csv|doc|docx|eml|msg|pdf|ppt|pptx|xls|xlsb|xlsm|xlsx)$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_placeholder_title(cls, title: str | None, document_titles: set[str]) -> bool:
+        normalized = str(title or "").strip()
+        if normalized.casefold() in cls.PLACEHOLDER_TITLES:
+            return True
+        if cls.PROJECT_TITLE_RE.match(normalized) or cls.FILENAME_RE.search(normalized):
+            return True
+
+        normalized_folded = normalized.casefold()
+        return any(
+            normalized_folded in {document_title.casefold(), Path(document_title).stem.casefold()}
+            for document_title in document_titles
+        )
+
+    @classmethod
+    def validated_title_replacement(
+        cls,
+        deal: Deal,
+        model_data: dict,
+        metadata: dict,
+        document_titles: set[str],
+    ) -> str | None:
+        if not cls._is_placeholder_title(deal.title, document_titles):
+            return None
+
+        latest_title_source = deal.field_provenance.filter(
+            field_name="title",
+        ).order_by("-created_at", "-id").first()
+        if latest_title_source and latest_title_source.source_type == DealFieldProvenance.SourceType.HUMAN:
+            return None
+
+        candidate = str(model_data.get("title") or "").strip()
+        title_evidence = metadata.get("title_evidence")
+        if not candidate or not isinstance(title_evidence, dict):
+            return None
+        if title_evidence.get("confidence") != "High":
+            return None
+        if str(title_evidence.get("title") or "").strip().casefold() != candidate.casefold():
+            return None
+        if candidate.casefold() == str(deal.title or "").strip().casefold():
+            return None
+        if cls._is_placeholder_title(candidate, document_titles):
+            return None
+
+        source_documents = title_evidence.get("source_documents")
+        if not isinstance(source_documents, list):
+            return None
+        cited_documents = {
+            str(value).strip().casefold()
+            for value in source_documents
+            if str(value).strip()
+        }
+        known_documents = {title.casefold() for title in document_titles}
+        if not cited_documents or not cited_documents.issubset(known_documents):
+            return None
+        return candidate
+
+    @staticmethod
+    def apply_title_replacement(deal: Deal, title: str, *, source_id: str) -> None:
+        previous_title = deal.title
+        if previous_title == title:
+            return
+        deal.title = title
+        deal.save(update_fields=["title"])
+        record_deal_field_changes(
+            deal,
+            {"title": (previous_title, title)},
+            source_type=DealFieldProvenance.SourceType.AI,
+            source_id=source_id,
+        )
 
     @classmethod
     def _document_payload(cls, document: DealDocument) -> dict:
@@ -441,6 +521,18 @@ class DealFieldSynthesisService:
                 source_id=f"field-synthesis:{analysis.id}",
                 overwrite_ai_owned=True,
             )
+            replacement_title = cls.validated_title_replacement(
+                deal,
+                model_data,
+                result.get("metadata") or {},
+                {document.title for document in documents},
+            )
+            if replacement_title:
+                cls.apply_title_replacement(
+                    deal,
+                    replacement_title,
+                    source_id=f"field-synthesis:{analysis.id}",
+                )
             deal.documents.filter(id__in=[document.id for document in documents]).update(
                 is_ai_analyzed=True,
             )

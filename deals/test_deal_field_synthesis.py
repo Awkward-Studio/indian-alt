@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from deals.models import Deal, DealDocument
+from deals.models import Deal, DealDocument, DealFieldProvenance
 from deals.services.deal_field_synthesis import DealFieldSynthesisService
 from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.services.token_budget import estimate_tokens
@@ -58,8 +58,25 @@ class DealFieldSynthesisServiceTests(TestCase):
                 "ambiguous_points": [],
                 "documents_analyzed": ["Pitch Deck.pdf"],
                 "missing_information_requests": [],
+                "title_evidence": {
+                    "title": self.deal.title,
+                    "confidence": "Low",
+                    "source_documents": [],
+                    "reason": "No replacement name is supported.",
+                },
             },
         }
+
+    def _strong_title_result(self, title="Acme Logistics Private Limited"):
+        result = self._synthesis_result()
+        result["deal_model_data"]["title"] = title
+        result["metadata"]["title_evidence"] = {
+            "title": title,
+            "confidence": "High",
+            "source_documents": ["Pitch Deck.pdf"],
+            "reason": "The pitch deck names the subject company on its cover.",
+        }
+        return result
 
     @patch("deals.services.deal_field_synthesis.EmbeddingService")
     @patch("deals.services.deal_field_synthesis.AIProcessorService")
@@ -85,6 +102,105 @@ class DealFieldSynthesisServiceTests(TestCase):
         self.assertEqual(self.deal.funding_ask, "INR 75 Cr")
         self.assertEqual(self.deal.deal_summary, "Logistics growth-capital opportunity.")
         self.assertEqual(ai_cls.return_value.process_content.call_count, 1)
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_replaces_project_title_when_document_evidence_is_strong(self, ai_cls, _embedding_cls):
+        self.deal.title = "Project Aurum_Business Plan"
+        self.deal.save(update_fields=["title"])
+        ai_cls.return_value.process_content.return_value = self._strong_title_result()
+
+        DealFieldSynthesisService.synthesize(
+            self.deal,
+            batch_key="test:project-title",
+            source_type="manual_vdr",
+            required_document_ids=[str(self.document.id)],
+        )
+
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.title, "Acme Logistics Private Limited")
+        provenance = self.deal.field_provenance.filter(field_name="title").latest("created_at")
+        self.assertEqual(provenance.source_type, DealFieldProvenance.SourceType.AI)
+        self.assertEqual(provenance.previous_value, "Project Aurum_Business Plan")
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_replaces_placeholder_title_for_email_created_deal(self, ai_cls, _embedding_cls):
+        self.deal.title = "Project Aurum"
+        self.deal.source_email_id = "email-source-1"
+        self.deal.save(update_fields=["title", "source_email_id"])
+        ai_cls.return_value.process_content.return_value = self._strong_title_result()
+
+        DealFieldSynthesisService.synthesize(
+            self.deal,
+            batch_key="test:email-title",
+            source_type="email",
+            required_document_ids=[str(self.document.id)],
+        )
+
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.title, "Acme Logistics Private Limited")
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_preserves_non_placeholder_title(self, ai_cls, _embedding_cls):
+        ai_cls.return_value.process_content.return_value = self._strong_title_result()
+
+        DealFieldSynthesisService.synthesize(
+            self.deal,
+            batch_key="test:real-title",
+            source_type="manual_vdr",
+            required_document_ids=[str(self.document.id)],
+        )
+
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.title, "Field Synthesis Deal")
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_preserves_human_owned_project_title(self, ai_cls, _embedding_cls):
+        self.deal.title = "Project Aurum"
+        self.deal.save(update_fields=["title"])
+        DealFieldProvenance.objects.create(
+            deal=self.deal,
+            field_name="title",
+            source_type=DealFieldProvenance.SourceType.HUMAN,
+            source_id="api:update",
+            previous_value="Old title",
+            value=self.deal.title,
+        )
+        ai_cls.return_value.process_content.return_value = self._strong_title_result()
+
+        DealFieldSynthesisService.synthesize(
+            self.deal,
+            batch_key="test:human-title",
+            source_type="manual_vdr",
+            required_document_ids=[str(self.document.id)],
+        )
+
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.title, "Project Aurum")
+
+    @patch("deals.services.deal_field_synthesis.EmbeddingService")
+    @patch("deals.services.deal_field_synthesis.AIProcessorService")
+    def test_preserves_project_title_without_valid_high_confidence_citation(
+        self, ai_cls, _embedding_cls,
+    ):
+        self.deal.title = "Project Aurum"
+        self.deal.save(update_fields=["title"])
+        result = self._strong_title_result()
+        result["metadata"]["title_evidence"]["source_documents"] = ["Missing.pdf"]
+        ai_cls.return_value.process_content.return_value = result
+
+        DealFieldSynthesisService.synthesize(
+            self.deal,
+            batch_key="test:unsupported-title",
+            source_type="manual_vdr",
+            required_document_ids=[str(self.document.id)],
+        )
+
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.title, "Project Aurum")
 
     def test_evidence_batches_keep_every_document_and_structured_value(self):
         self.document.evidence_json = {

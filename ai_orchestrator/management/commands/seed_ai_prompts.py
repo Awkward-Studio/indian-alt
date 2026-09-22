@@ -11,6 +11,7 @@ from ai_orchestrator.prompt_contracts import (
     DOCUMENT_EVIDENCE_SYSTEM_TEMPLATE,
     DOCUMENT_NORMALIZATION_PROMPT_TEMPLATE,
     DOCUMENT_NORMALIZATION_SYSTEM_TEMPLATE,
+    EMAIL_TITLE_EVIDENCE_PROMPT_RULES,
     PHASE2_ARTIFACT_KEYS,
     REPORT_FORMAT_REQUIREMENTS,
     SOURCE_RELATIONSHIPS_SCHEMA,
@@ -160,7 +161,7 @@ class Command(BaseCommand):
                 "name": "email_thread_synthesis",
                 "description": "Synthesizes final institutional deal record from an email thread history.",
                 "system_template": DEAL_SYNTHESIS_SYSTEM_TEMPLATE,
-                "prompt_template": "[INSTITUTIONAL DIRECTIVE]\nAct as a Lead PE Analyst. You are performing final synthesis of a deal from a cleaned email thread and analyzed attachments.\n\n[CRITICAL: DEAL TITLE]\nIdentify the actual investee company name. Ignore phrases like Investment Opportunity, Project, Teaser, Forensic Audit, and email subject boilerplate unless they are the only evidence.\n\n[INTELLIGENCE CONTEXT]\n{{ content }}\n\nReturn exactly one valid JSON object using the Phase 3 internal IC deal synthesis contract. Include `deal_model_data`, `source_relationships`, `metadata`, and an `analyst_report` using the 11-section internal IC structure.\n\n" + REPORT_FORMAT_REQUIREMENTS + "\nRelationship rules:\n- Ignore @india-alt.com and @india-alternatives.com internal staff.\n- Capture the external source bank/advisory firm and primary banker/contact when identifiable.\n- Use `relationship_metadata.confidence` and `relationship_metadata.ambiguities` for uncertain routing.",
+                "prompt_template": "[INSTITUTIONAL DIRECTIVE]\nAct as a Lead PE Analyst. You are performing final synthesis of a deal from a cleaned email thread and analyzed attachments.\n\n[CRITICAL: DEAL TITLE]\nIdentify the actual investee company name. Ignore phrases like Investment Opportunity, Project, Teaser, Forensic Audit, and email subject boilerplate unless they are the only evidence.\n\n" + EMAIL_TITLE_EVIDENCE_PROMPT_RULES + "\n\n[INTELLIGENCE CONTEXT]\n{{ content }}\n\nReturn exactly one valid JSON object using the Phase 3 internal IC deal synthesis contract. Include `deal_model_data`, `source_relationships`, `metadata`, and an `analyst_report` using the 11-section internal IC structure.\n\n" + REPORT_FORMAT_REQUIREMENTS + "\nRelationship rules:\n- Ignore @india-alt.com and @india-alternatives.com internal staff.\n- Capture the external source bank/advisory firm and primary banker/contact when identifiable.\n- Use `relationship_metadata.confidence` and `relationship_metadata.ambiguities` for uncertain routing.",
                 "output_schema": DEAL_SYNTHESIS_JSON_SCHEMA
             },
             {
