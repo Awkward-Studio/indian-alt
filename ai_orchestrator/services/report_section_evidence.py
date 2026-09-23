@@ -81,6 +81,20 @@ def build_section_retrieval_template(title: str) -> str:
     )
 
 
+def build_industry_deal_comparison_template() -> str:
+    """Semantic query for the Industry Overview's internal peer-evidence step."""
+    return (
+        "{{ deal_title }}. {{ section_title }}. Compare our deal with competitor "
+        "and possible peer companies already recorded in our deal database. "
+        "Rank source passages about product use and differentiation, customer "
+        "segments, geography, pricing, distribution, capacity, market position, "
+        "growth, margins, funding and evidence of competitive wins or losses. "
+        "Prefer comparable periods, units and business models; include contrary "
+        "evidence and source locations. A same-sector deal is only a peer candidate, "
+        "not proof that it competes directly."
+    )
+
+
 class ICReportSectionEvidenceService:
     """Build a distinct, bounded evidence pack for each IC report section."""
 
@@ -254,7 +268,7 @@ class ICReportSectionEvidenceService:
         normalized = " ".join(str(chunk.content or "").split()).casefold()
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    def _select(self, candidates: list[DocumentChunk]) -> list[DocumentChunk]:
+    def _select(self, candidates: list[DocumentChunk], *, token_budget: int | None = None) -> list[DocumentChunk]:
         eligible = [
             chunk
             for chunk in candidates
@@ -270,6 +284,7 @@ class ICReportSectionEvidenceService:
         source_counts: Counter[str] = Counter()
         seen_content: set[str] = set()
         used_tokens = 0
+        budget = int(token_budget or self.max_tokens)
 
         def add(chunk: DocumentChunk) -> bool:
             nonlocal used_tokens
@@ -281,9 +296,9 @@ class ICReportSectionEvidenceService:
                 return False
             block = self._format_chunk(chunk, rank=len(selected) + 1)
             block_tokens = estimate_tokens(block) + 2
-            if selected and used_tokens + block_tokens > self.max_tokens:
+            if selected and used_tokens + block_tokens > budget:
                 return False
-            if not selected and block_tokens > self.max_tokens:
+            if not selected and block_tokens > budget:
                 return False
             selected.append(chunk)
             seen_content.add(identity)
@@ -364,7 +379,31 @@ class ICReportSectionEvidenceService:
             strategy = "ordered_index_fallback"
             candidates = self._fallback_chunks()
 
-        selected = self._select(candidates)
+        comparison = None
+        if title == "Industry Overview":
+            from ai_orchestrator.services.industry_deal_comparison import IndustryDealComparisonService
+
+            try:
+                _, comparison_query, _ = PipelineRegistryService.render_prompt_stage(
+                    "ic_report_generation",
+                    "industry_our_deal_comparison",
+                    deal_title=self.deal.title,
+                    section_title=title,
+                )
+            except ObjectDoesNotExist:
+                PipelineRegistryService.ensure_report_pipeline_defaults()
+                _, comparison_query, _ = PipelineRegistryService.render_prompt_stage(
+                    "ic_report_generation",
+                    "industry_our_deal_comparison",
+                    deal_title=self.deal.title,
+                    section_title=title,
+                )
+            comparison = IndustryDealComparisonService(
+                deal=self.deal, embedding_service=self.embedding_service
+            ).retrieve(comparison_query)
+
+        comparison_budget = min(8_000, self.max_tokens // 4) if comparison and comparison["chunks"] else 0
+        selected = self._select(candidates, token_budget=self.max_tokens - comparison_budget)
         if not selected:
             raise ValueError(f"No indexed document chunks were available for report section '{title}'.")
         context = "\n\n".join(
@@ -375,17 +414,77 @@ class ICReportSectionEvidenceService:
             str(index): self._citation(chunk, rank=index)
             for index, chunk in enumerate(selected, start=1)
         }
+        comparison_selected = []
+        if comparison_budget:
+            source_info = comparison["source_info"]
+            for source_id, info in source_info.items():
+                self.document_titles[source_id] = info["title"]
+                self.document_urls[source_id] = self._safe_http_url(info["url"])
+            remaining = self.max_tokens - estimate_tokens(context) - 50
+            company_counts: Counter[str] = Counter()
+            seen = {self._identity(chunk) for chunk in selected}
+            ranked = comparison["chunks"]
+            # First give distinct companies a chance, then add the next best
+            # passages. A single competitor dossier cannot fill the whole pack.
+            first_for_company = []
+            first_chunk_ids = set()
+            discovered_companies = set()
+            for chunk in ranked:
+                company = source_info[str(chunk.source_id)]["company"]
+                if company not in discovered_companies:
+                    first_for_company.append(chunk)
+                    first_chunk_ids.add(str(chunk.id))
+                    discovered_companies.add(company)
+            ordered = first_for_company + [
+                chunk for chunk in ranked if str(chunk.id) not in first_chunk_ids
+            ]
+            for chunk in ordered:
+                info = source_info[str(chunk.source_id)]
+                company = info["company"]
+                identity = self._identity(chunk)
+                if identity in seen or company_counts[company] >= 3 or len(comparison_selected) >= 24:
+                    continue
+                rank = len(selected) + len(comparison_selected) + 1
+                block = (
+                    f"Peer company: {company} | Database relationship: {info['relationship']}\n"
+                    + self._format_chunk(chunk, rank=rank)
+                )
+                cost = estimate_tokens(block) + 2
+                if cost > remaining:
+                    continue
+                comparison_selected.append((chunk, block))
+                citations[str(rank)] = self._citation(chunk, rank=rank)
+                company_counts[company] += 1
+                seen.add(identity)
+                remaining -= cost
+            if comparison_selected:
+                context += (
+                    "\n\nInternal database comparison evidence. A same-sector peer candidate "
+                    "is not a confirmed direct competitor. Keep its company and source separate "
+                    "from the target deal.\n\n"
+                    + "\n\n".join(block for _, block in comparison_selected)
+                )
         source_counts = Counter(str(chunk.source_id) for chunk in selected)
         stats = {
             "strategy": strategy,
             "candidate_count": len(candidates),
-            "selected_chunk_count": len(selected),
+            "selected_chunk_count": len(selected) + len(comparison_selected),
             "selected_document_count": len(source_counts),
             "selected_document_ids": list(source_counts),
             "supplemented_document_ids": supplemented_document_ids,
             "estimated_context_tokens": estimate_tokens(context),
             "context_budget_tokens": self.max_tokens,
         }
+        if comparison is not None:
+            stats["our_deal_comparison"] = {
+                "candidate_deal_count": comparison["candidate_deal_count"],
+                "ranked_chunk_count": len(comparison["chunks"]),
+                "selected_chunk_count": len(comparison_selected),
+                "selected_companies": sorted({
+                    comparison["source_info"][str(chunk.source_id)]["company"]
+                    for chunk, _ in comparison_selected
+                }),
+            }
         self.section_stats[title] = stats
         return {"context": context, "metadata": stats, "citations": citations}
 

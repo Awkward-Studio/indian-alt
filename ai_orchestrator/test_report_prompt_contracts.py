@@ -12,6 +12,7 @@ from ai_orchestrator.services.report_section_evidence import (
     SECTION_RETRIEVAL_TERMS,
     SECTION_RETRIEVAL_TESTS,
     SECTION_RETRIEVAL_DISPLAY_DATA,
+    build_industry_deal_comparison_template,
     build_section_retrieval_template,
 )
 
@@ -45,3 +46,12 @@ class ReportPromptContractsTests(SimpleTestCase):
         self.assertIn("periods in columns and metrics in rows", writing)
         self.assertIn("Cite each numeric row or cell", writing)
         self.assertIn("The performance table is also the data source", writing)
+
+    def test_industry_prompt_requires_grounded_internal_deal_comparison(self):
+        writing = build_ic_report_section_user_template("Industry Overview")
+        retrieval = build_industry_deal_comparison_template()
+        self.assertIn("### Our deal comparison", writing)
+        self.assertIn("same-sector peer candidate", writing)
+        self.assertIn("no source-backed internal peer comparison", writing)
+        self.assertIn("{{ deal_title }}", retrieval)
+        self.assertIn("comparable periods, units and business models", retrieval)

@@ -205,7 +205,13 @@ class PromptRevisionLifecycleTests(TestCase):
         pipeline = AIPipelineDefinition.objects.get(key="ic_report_generation")
         stages = list(pipeline.stages.order_by("position"))
 
-        self.assertEqual(len(stages), 22)
+        self.assertEqual(len(stages), 23)
+        comparison = PipelineRegistryService.resolve_stage(
+            "ic_report_generation", "industry_our_deal_comparison"
+        )
+        self.assertEqual(comparison.prompt_revision.status, "published")
+        self.assertEqual(comparison.stage.depends_on, ["retrieval_industry_overview"])
+        self.assertFalse(comparison.stage.is_required)
         for title in IC_SECTION_TITLES:
             retrieval = PipelineRegistryService.resolve_stage(
                 "ic_report_generation", f"retrieval_{IC_REPORT_SECTION_STAGE_KEYS[title]}"
@@ -216,7 +222,10 @@ class PromptRevisionLifecycleTests(TestCase):
             self.assertEqual(retrieval.prompt_revision.status, "published")
             self.assertEqual(retrieval.stage.required_variables, ["deal_title", "section_title"])
             self.assertIn("{{ deal_title }}", retrieval.prompt_revision.user_template)
-            self.assertEqual(resolved.stage.depends_on, [retrieval.stage.key])
+            expected_dependencies = [retrieval.stage.key]
+            if title == "Industry Overview":
+                expected_dependencies.append(comparison.stage.key)
+            self.assertEqual(resolved.stage.depends_on, expected_dependencies)
             self.assertEqual(resolved.prompt_revision.status, "published")
             self.assertEqual(
                 resolved.stage.required_variables,
