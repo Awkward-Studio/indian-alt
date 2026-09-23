@@ -47,16 +47,32 @@ SECTION_RETRIEVAL_TESTS = {
     "Next Steps": "unresolved contradiction missing primary record customer supplier reference request plant visit audit reconciliation legal opinion tax assessment decision gate test owner due date",
 }
 
+SECTION_RETRIEVAL_DISPLAY_DATA = {
+    "Executive Summary": "historical forecast KPI scorecard period unit actual budget management projection source table",
+    "Company Details": "product segment sales mix customer channel concentration facility capacity utilization supplier schedule period unit source table",
+    "Promoter and Management Details": "management roster ownership option grants executive tenure budget delivery board committee related party schedule source table",
+    "Industry Overview": "market size share estimate year geography methodology named competitor price capacity demand series source table",
+    "Transaction Details": "term sheet sources and uses cap table fully diluted share count security rights debt maturity valuation bridge source schedule",
+    "Key Financials": "audited multi-year income statement balance sheet cash flow statement actual budget forecast spreadsheet rows and cells revenue gross profit EBITDA PAT operating cash flow cash debt receivables inventory payables capex consistent currency scale period standalone consolidated basis",
+    "Transaction / Trading Multiples": "peer trading multiple transaction precedent dated valuation enterprise equity value net debt revenue EBITDA growth margin period source table",
+    "Risk Factors": "risk register loss history exposure magnitude covenant headroom insurance limit concentration sensitivity scenario source schedule",
+    "Investment Rationale": "thesis proof repeat customer economics segment margin cohort retention counterevidence forecast assumption source series",
+    "Exit Considerations": "entry and exit capitalization preference waterfall dilution proceeds multiple MOIC IRR timing sensitivity source model",
+    "Next Steps": "open diligence issue named missing record discrepancy test threshold owner priority dependency source evidence",
+}
+
 
 def build_section_retrieval_template(title: str) -> str:
     """Build an editable semantic query for the section's underwriting evidence."""
     guidance = BULK3_SECTION_INSTRUCTIONS[title]
     terms = SECTION_RETRIEVAL_TERMS[title]
     tests = SECTION_RETRIEVAL_TESTS[title]
+    display_data = SECTION_RETRIEVAL_DISPLAY_DATA[title]
     return (
         f"{{{{ deal_title }}}}. Internal investment committee report section: "
         f"{{{{ section_title }}}}. {guidance} Relevant evidence: {terms}. "
         f"Evidence that tests or challenges the investment case: {tests}. "
+        f"Source tables and comparable data for the report: {display_data}. "
         "Find primary records, historical comparisons, management assumptions, "
         "independent corroboration, contrary facts, missing inputs and source conflicts. "
         "Preserve exact values, periods, units, actual versus forecast status, "

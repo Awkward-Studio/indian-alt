@@ -41,6 +41,22 @@ class ICReportSectionService:
         "Exit Considerations": 0.85,
         "Next Steps": 0.75,
     }
+    # Rich VDR evidence needs more than the sparse-evidence floor above. This
+    # catches the short, table-free summaries seen with 30k+ token evidence packs
+    # without forcing unsupported prose when a deal has few usable records.
+    RICH_EVIDENCE_MINIMUM_WORD_FACTORS = {
+        "Executive Summary": 1.4,
+        "Company Details": 1.5,
+        "Promoter and Management Details": 1.3,
+        "Industry Overview": 1.3,
+        "Transaction Details": 1.3,
+        "Key Financials": 1.6,
+        "Transaction / Trading Multiples": 1.2,
+        "Risk Factors": 1.4,
+        "Investment Rationale": 1.4,
+        "Exit Considerations": 1.2,
+        "Next Steps": 1.1,
+    }
     INTERNAL_CITATION_PATTERN = re.compile(
         r"\[(?:Evidence\s+(?P<evidence>\d+)|R0*(?P<rank>\d+))"
         r"(?:@(?P<locator>[^\]\n]+))?\]"
@@ -110,9 +126,18 @@ class ICReportSectionService:
         return "ic-report-section:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
     @classmethod
-    def _minimum_words(cls, title: str) -> int:
+    def _minimum_words(cls, title: str, evidence_metadata: dict | None = None) -> int:
         baseline = max(0, int(getattr(settings, "VDR_REPORT_SECTION_MIN_WORDS", 900)))
-        return round(baseline * cls.SECTION_MINIMUM_WORD_FACTORS.get(title, 1.0))
+        metadata = evidence_metadata or {}
+        rich_evidence = (
+            int(metadata.get("selected_chunk_count") or 0) >= 40
+            or int(metadata.get("estimated_context_tokens") or 0) >= 12_000
+        )
+        factors = (
+            cls.RICH_EVIDENCE_MINIMUM_WORD_FACTORS
+            if rich_evidence else cls.SECTION_MINIMUM_WORD_FACTORS
+        )
+        return round(baseline * factors.get(title, 1.0))
 
     @classmethod
     def _resolve_prompt_stage(cls, title: str):
@@ -535,7 +560,7 @@ class ICReportSectionService:
             return cached
 
         is_vdr_section = source_type == "vdr_report_section"
-        minimum_words = cls._minimum_words(title) if is_vdr_section else 0
+        minimum_words = cls._minimum_words(title, evidence_metadata) if is_vdr_section else 0
         target_words = (
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
             if is_vdr_section else 1200

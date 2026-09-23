@@ -156,6 +156,13 @@ class CitationNormalizationTests(SimpleTestCase):
         )
         self.assertEqual(ICReportSectionService._minimum_words("Industry Overview"), 900)
 
+    @override_settings(VDR_REPORT_SECTION_MIN_WORDS=900)
+    def test_rich_evidence_requires_fuller_sections(self):
+        metadata = {"selected_chunk_count": 139, "estimated_context_tokens": 34928}
+        self.assertEqual(ICReportSectionService._minimum_words("Key Financials", metadata), 1440)
+        self.assertEqual(ICReportSectionService._minimum_words("Company Details", metadata), 1350)
+        self.assertEqual(ICReportSectionService._minimum_words("Key Financials", {"selected_chunk_count": 5}), 675)
+
     def test_under_length_vdr_section_raises_retryable_validation_error(self):
         with self.assertRaises(ReportSectionTooShortError):
             ICReportSectionService._normalize_section(

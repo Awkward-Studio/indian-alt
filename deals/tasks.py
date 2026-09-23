@@ -2108,7 +2108,7 @@ def process_vdr_report_section(
         if not context.strip():
             raise ValueError(f"No evidence was retrieved for report section '{section_title}'.")
         if self.request.retries:
-            minimum_words = ICReportSectionService._minimum_words(section_title)
+            minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
             context = (
                 f"{context}\n\n<retry_requirement>\n"
                 f"The previous draft failed validation because it was under length. "
