@@ -30,15 +30,38 @@ SECTION_RETRIEVAL_TERMS = {
 }
 
 
+# The semantic query must retrieve material that can challenge a thesis, not
+# merely passages that describe the company. Keep the original section terms
+# for continuity with indexed deal documents and add evidence of the tests.
+SECTION_RETRIEVAL_TESTS = {
+    "Executive Summary": "investment committee recommendation decision conditions contrary evidence failed fundraise delayed spending forecast miss liquidity shortfall source conflict",
+    "Company Details": "customer cohort retention lost accounts order cancellations product returns warranty claims gross margin by product factory utilization downtime scrap supplier alternatives inventory aging operating bottleneck",
+    "Promoter and Management Details": "management track record budget versus actual missed milestones leadership departures founder dependence related party transactions auditor findings board minutes succession references incentive terms",
+    "Industry Overview": "market size methodology comparable period geography company market share versus industry growth pricing pressure lost bids competitor wins imports substitutes excess capacity customer switching",
+    "Transaction Details": "signed term sheet shareholder agreement fully diluted cap table conversion waterfall liquidation preference debt maturity cash runway sources and uses prior failed raise consent rights",
+    "Key Financials": "audited versus management accounts P&L balance sheet cash flow reconciliation revenue recognition receivable aging inventory write downs EBITDA to CFO bridge forecast versus actual assumptions covenant headroom",
+    "Transaction / Trading Multiples": "enterprise value equity value net debt peer selection comparable rejection matching period margin growth transaction date cycle trading range DCF sensitivity management valuation gap",
+    "Risk Factors": "documented loss breach near miss leading indicator downside sensitivity mitigation effectiveness insurance exclusion owner unresolved diligence contradiction",
+    "Investment Rationale": "customer evidence repeat purchase market share gain pricing power contribution margin cash conversion moat durability failed hypothesis contrary evidence valuation support",
+    "Exit Considerations": "realized sector exits buyer appetite transaction multiples preference stack dilution future capital timing IPO eligibility strategic fit downside proceeds",
+    "Next Steps": "unresolved contradiction missing primary record customer supplier reference request plant visit audit reconciliation legal opinion tax assessment decision gate test owner due date",
+}
+
+
 def build_section_retrieval_template(title: str) -> str:
-    """Preserve the current section query as an editable published default."""
+    """Build an editable semantic query for the section's underwriting evidence."""
     guidance = BULK3_SECTION_INSTRUCTIONS[title]
     terms = SECTION_RETRIEVAL_TERMS[title]
+    tests = SECTION_RETRIEVAL_TESTS[title]
     return (
         f"{{{{ deal_title }}}}. Internal investment committee report section: "
         f"{{{{ section_title }}}}. {guidance} Relevant evidence: {terms}. "
-        "Preserve exact values, periods, units, assumptions, conflicts, risks, "
-        "source names, and missing information."
+        f"Evidence that tests or challenges the investment case: {tests}. "
+        "Find primary records, historical comparisons, management assumptions, "
+        "independent corroboration, contrary facts, missing inputs and source conflicts. "
+        "Preserve exact values, periods, units, actual versus forecast status, "
+        "source names and locations, and the evidence needed to explain why a "
+        "finding changes the investment decision."
     )
 
 
