@@ -1964,6 +1964,25 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
+        expected_hash = request.data.get('expected_report_sha256')
+        if expected_hash is not None:
+            import hashlib
+
+            if not isinstance(expected_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_hash):
+                return Response({"error": "expected_report_sha256 must be a SHA-256 hex digest"}, status=400)
+            analysis_json = analysis.analysis_json if analysis and isinstance(analysis.analysis_json, dict) else {}
+            snapshot = analysis_json.get('canonical_snapshot')
+            current_report = (
+                snapshot.get('analyst_report')
+                if isinstance(snapshot, dict) and isinstance(snapshot.get('analyst_report'), str)
+                else analysis_json.get('analyst_report')
+            ) or deal.deal_summary or ''
+            if hashlib.sha256(str(current_report).strip().encode('utf-8')).hexdigest() != expected_hash:
+                return Response(
+                    {"error": "The report changed while the rewrite was running. Refresh it before saving."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
         if analysis:
             analysis_json = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
             analysis_json['analyst_report'] = report
@@ -2077,36 +2096,101 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     "confirmation_required": False,
                 })
 
-            rewritten = rewrite_service.rewrite(
-                deal=deal,
-                section_title=section_title,
-                section_markdown=section_markdown,
-                instruction=instruction,
-                full_report=full_report,
-                version=version,
-                document_ids=document_ids,
-            )
-            token = signing.dumps(
-                {
+            from ai_orchestrator.services.bulk_prompt_contracts import IC_REPORT_SECTION_STAGE_KEYS
+            from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
+            from .tasks import rewrite_analysis_section_async
+
+            known_title = rewrite_service.published_section_title(section_title)
+            pipeline_key = "ic_report_generation" if known_title else "analysis_support"
+            stage_key = IC_REPORT_SECTION_STAGE_KEYS[known_title] if known_title else "section_rewrite"
+            if known_title:
+                from ai_orchestrator.services.report_sections import ICReportSectionService
+
+                stage = ICReportSectionService._resolve_prompt_stage(known_title)
+            else:
+                stage = PipelineRegistryService.resolve_stage(pipeline_key, stage_key)
+            task_id = str(uuid.uuid4())
+            audit = AIRuntimeService.create_audit_log(
+                source_type="analysis_section_rewrite",
+                source_id=str(deal.id),
+                context_label=f"IC section rewrite: {deal.title} / {section_title}",
+                requested_by=request.user,
+                celery_task_id=task_id,
+                pipeline=stage.pipeline,
+                pipeline_stage=stage.stage,
+                prompt_revision=stage.prompt_revision,
+                status="PENDING",
+                source_metadata={
                     "deal_id": str(deal.id),
-                    "version": str(version or ""),
                     "section_title": section_title,
-                    "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
-                    "section_markdown": rewritten,
+                    "analysis_version": version,
+                    "rewrite": True,
                 },
-                salt="analysis-section-rewrite",
-                compress=True,
             )
+            try:
+                rewrite_analysis_section_async.apply_async(
+                    kwargs={
+                        "deal_id": str(deal.id),
+                        "section_title": section_title,
+                        "section_markdown": section_markdown,
+                        "instruction": instruction,
+                        "full_report": full_report,
+                        "version": version,
+                        "document_ids": document_ids,
+                        "audit_log_id": str(audit.id),
+                    },
+                    queue="high_priority", task_id=task_id,
+                )
+            except Exception as exc:
+                audit.status = "FAILED"
+                audit.is_success = False
+                audit.error_message = str(exc)[:2000]
+                audit.completed_at = timezone.now()
+                audit.save(update_fields=["status", "is_success", "error_message", "completed_at"])
+                raise
             return Response({
-                "section_markdown": rewritten,
-                "full_report": full_report,
+                "status": "queued",
+                "task_id": task_id,
+                "audit_log_id": str(audit.id),
+                "section_title": section_title,
                 "persisted": False,
-                "confirmation_required": True,
-                "confirmation_token": token,
-            })
+            }, status=status.HTTP_202_ACCEPTED)
         except Exception as exc:
             logger.exception("Failed to rewrite analysis section for deal %s", deal.id)
             return Response({"error": str(exc)}, status=500)
+
+    @action(detail=True, methods=['get'], url_path=r'rewrite_analysis_section_status/(?P<task_id>[^/.]+)')
+    def rewrite_analysis_section_status(self, request, pk=None, task_id=None):
+        """Return only a rewrite preview queued for this deal."""
+        from celery.result import AsyncResult
+
+        deal = self.get_object()
+        audit = AIAuditLog.objects.filter(
+            source_type="analysis_section_rewrite",
+            source_id=str(deal.id),
+            celery_task_id=task_id,
+        ).first()
+        if not audit:
+            return Response({"error": "Section rewrite task not found."}, status=status.HTTP_404_NOT_FOUND)
+        result = AsyncResult(task_id)
+        if result.status == "SUCCESS" or audit.status == "COMPLETED":
+            preview = audit.parsed_json if isinstance(audit.parsed_json, dict) else {}
+            if not preview.get("section_markdown"):
+                return Response({
+                    "status": "FAILURE", "audit_log_id": str(audit.id),
+                    "error": "The rewrite finished without a saved preview.",
+                })
+            return Response({"status": "SUCCESS", "audit_log_id": str(audit.id), **preview})
+        if result.status == "FAILURE" or audit.status == "FAILED":
+            return Response({
+                "status": "FAILURE", "audit_log_id": str(audit.id),
+                "error": audit.error_message or "Section rewrite failed.",
+            })
+        return Response({
+            "status": result.status,
+            "audit_log_id": str(audit.id),
+            "message": "Section rewrite is running." if audit.status == "PROCESSING" else "Section rewrite is queued.",
+        })
     
     def create(self, request, *args, **kwargs):
         """

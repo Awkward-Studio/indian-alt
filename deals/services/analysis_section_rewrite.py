@@ -1,12 +1,30 @@
 from __future__ import annotations
 
+import json
 import re
 
+from django.conf import settings
+
+from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 from ai_orchestrator.services.ai_processor import AIProcessorService
 
 
 class AnalysisSectionRewriteService:
     HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+    SECTION_ALIASES = {
+        "company overview": "Company Details",
+        "promoters and their background": "Promoter and Management Details",
+        "strategic fit and market opportunity": "Industry Overview",
+        "key financial highlights": "Key Financials",
+        "financial deep dive": "Key Financials",
+        "financial deep dive include revenue ebitda margins": "Key Financials",
+        "key peers and valuation multiples": "Transaction / Trading Multiples",
+        "risk matrix top 5 risks": "Risk Factors",
+        "red flags and warning signs": "Risk Factors",
+        "key observations risks and open points": "Risk Factors",
+        "valuation and exit range": "Exit Considerations",
+        "next steps data requests": "Next Steps",
+    }
 
     def __init__(self, ai_service=None):
         self.ai_service = ai_service or AIProcessorService()
@@ -51,22 +69,47 @@ class AnalysisSectionRewriteService:
         full_report: str,
         version=None,
         document_ids: list[str] | None = None,
+        audit_log_id: str | None = None,
+        celery_task_id: str | None = None,
     ) -> str:
+        section_title = self.published_section_title(section_title) or section_title
+        published_section = section_title in IC_SECTION_TITLES
         evidence_scope = self._requested_evidence_scope(instruction)
-        meeting_context = self._meeting_context(
-            deal=deal,
-            query=f"{section_title}\n{instruction}",
-        ) if evidence_scope in {"all", "meetings", "meetings_and_news"} else ""
-        news_context = self._news_context(
-            deal=deal,
-            query=f"{section_title}\n{instruction}",
-        ) if evidence_scope in {"all", "news", "meetings_and_news"} else ""
-        document_context = self._document_context(
-            deal=deal,
-            document_ids=document_ids,
-            query=f"{section_title}\n{instruction}",
-        )
         prompt_parts = []
+        citations = {}
+        evidence_metadata = None
+        if published_section:
+            from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
+
+            indexed_documents = list(deal.documents.filter(is_indexed=True).order_by("title", "id"))
+            if indexed_documents:
+                try:
+                    retrieved = ICReportSectionEvidenceService(
+                        deal=deal, documents=indexed_documents,
+                    ).retrieve(section_title)
+                except ValueError as exc:
+                    if "No indexed document chunks were available" not in str(exc):
+                        raise
+                    retrieved = {}
+                if retrieved.get("context"):
+                    prompt_parts.append(retrieved["context"])
+                    citations = dict(retrieved.get("citations") or {})
+                    evidence_metadata = retrieved.get("metadata")
+
+        evidence_query = f"{section_title}\n{instruction}"
+        document_context, document_citations = self._document_context(
+            deal=deal, document_ids=document_ids, query=evidence_query,
+            start_rank=len(citations) + 1,
+        )
+        citations.update(document_citations)
+        meeting_context, meeting_citations = self._meeting_context(
+            deal=deal, query=evidence_query, start_rank=len(citations) + 1,
+        ) if evidence_scope in {"all", "meetings", "meetings_and_news"} else ("", {})
+        citations.update(meeting_citations)
+        news_context, news_citations = self._news_context(
+            deal=deal, query=evidence_query, start_rank=len(citations) + 1,
+        ) if evidence_scope in {"all", "news", "meetings_and_news"} else ("", {})
+        citations.update(news_citations)
         if document_context:
             prompt_parts.append(f"[ATTACHED DEAL DOCUMENTS CONTEXT]\n{document_context}")
         if meeting_context:
@@ -74,6 +117,27 @@ class AnalysisSectionRewriteService:
         if news_context:
             prompt_parts.append(f"[RELEVANT INDEXED COMPANY NEWS EVIDENCE]\n{news_context}")
         content = "\n\n".join(prompt_parts)
+
+        analysis = (
+            deal.analyses.filter(version=int(version)).order_by("-created_at").first()
+            if version not in (None, "") else deal.latest_analysis
+        )
+        analysis_payload = analysis.analysis_json if analysis and isinstance(analysis.analysis_json, dict) else {}
+        snapshot = analysis_payload.get("canonical_snapshot")
+        model_data = analysis_payload.get("deal_model_data")
+        if not isinstance(model_data, dict) and isinstance(snapshot, dict):
+            model_data = snapshot.get("deal_model_data")
+        if not isinstance(model_data, dict):
+            model_data = {}
+        stage_key = None
+        minimum_words = 600
+        if published_section:
+            from ai_orchestrator.services.bulk_prompt_contracts import IC_REPORT_SECTION_STAGE_KEYS
+            from ai_orchestrator.services.report_sections import ICReportSectionService
+
+            stage_key = IC_REPORT_SECTION_STAGE_KEYS[section_title]
+            ICReportSectionService._resolve_prompt_stage(section_title)
+            minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
 
         result = self.ai_service.process_content(
             content=content,
@@ -87,17 +151,36 @@ class AnalysisSectionRewriteService:
                 "deal_id": str(deal.id),
                 "section_title": section_title,
                 "analysis_version": version,
-                "max_tokens": 4096,
-                "max_input_tokens": 14000,
-                "pipeline_key": "analysis_support",
-                "stage_key": "section_rewrite",
+                "max_tokens": int(getattr(settings, "VDR_REPORT_SECTION_MAX_TOKENS", 16_384)),
+                "max_input_tokens": int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
+                "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
+                "enforce_context_budget": True,
+                "temperature": 0.0,
+                "repetition_penalty": float(getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)),
+                **({"personality_only_system": True, "response_mode": "markdown"} if published_section else {}),
+                "pipeline_key": "ic_report_generation" if published_section else "analysis_support",
+                "stage_key": stage_key or "section_rewrite",
                 "deal_title": deal.title,
                 "instruction": instruction,
+                "rewrite_instruction": instruction if published_section else None,
                 "section_markdown": section_markdown,
                 "full_report": self._report_context(full_report, section_title),
+                "minimum_words": f"{minimum_words:,}",
+                "target_words": f"{max(minimum_words, int(getattr(settings, 'VDR_REPORT_SECTION_TARGET_WORDS', 2500))):,}",
+                "model_data_json": json.dumps(model_data, ensure_ascii=False, default=str),
                 "document_context": document_context or "No specific deal documents attached for this rewrite.",
                 "meeting_context": meeting_context or "No indexed meeting evidence matched this rewrite.",
                 "news_context": news_context or "No indexed company-news evidence matched this rewrite.",
+                "audit_log_id": audit_log_id,
+                "celery_task_id": celery_task_id,
+                "context_label": f"IC section rewrite: {deal.title} / {section_title}",
+                "_source_metadata": {
+                    "deal_id": str(deal.id),
+                    "section_title": section_title,
+                    "analysis_version": version,
+                    "evidence_retrieval": evidence_metadata or {},
+                    "rewrite": True,
+                },
             },
         )
         if isinstance(result, dict):
@@ -107,6 +190,12 @@ class AnalysisSectionRewriteService:
         rewritten = rewritten.strip()
         if not rewritten:
             raise ValueError("AI did not return a rewritten section.")
+        if citations:
+            from ai_orchestrator.services.report_sections import ICReportSectionService
+
+            rewritten = ICReportSectionService._normalize_section(
+                section_title, rewritten, citations=citations,
+            )
         return rewritten
 
     @staticmethod
@@ -139,14 +228,21 @@ class AnalysisSectionRewriteService:
         )
 
     @staticmethod
-    def _meeting_context(*, deal, query: str, limit: int = 10) -> str:
+    def _extra_citation(*, rank: int, source_id: str, title: str, url: str = "", location: str = "") -> dict:
+        return {
+            "rank": rank, "document_id": source_id, "title": title,
+            "url": url, "location": location, "locator": {},
+        }
+
+    @staticmethod
+    def _meeting_context(*, deal, query: str, limit: int = 10, start_rank: int = 1) -> tuple[str, dict]:
         from ai_orchestrator.models import DocumentChunk
 
         meeting_ids = list(
             deal.meeting_notes.filter(is_indexed=True).values_list("id", flat=True)
         )
         if not meeting_ids:
-            return ""
+            return "", {}
         source_ids = [str(value) for value in meeting_ids]
         chunks = []
         try:
@@ -171,22 +267,30 @@ class AnalysisSectionRewriteService:
                 ).order_by("-created_at")[:limit]
             )
         blocks = []
+        citations = {}
         for chunk in chunks[:limit]:
             metadata = chunk.metadata or {}
+            rank = start_rank + len(blocks)
+            title = str(metadata.get('title') or chunk.source_id)
             blocks.append(
                 "\n".join(
                     [
-                        f"### Meeting: {metadata.get('title') or chunk.source_id}",
+                        f"Citation marker: [R{rank:03d}]",
+                        f"### Meeting: {title}",
                         f"Meeting note ID: {chunk.source_id}",
                         f"Meeting date: {metadata.get('meeting_at') or 'Not recorded'}",
                         str(chunk.content or "").strip(),
                     ]
                 )
             )
-        return "\n\n".join(blocks)
+            citations[str(rank)] = AnalysisSectionRewriteService._extra_citation(
+                rank=rank, source_id=str(chunk.source_id), title=f"Meeting: {title}",
+                location=str(metadata.get("meeting_at") or ""),
+            )
+        return "\n\n".join(blocks), citations
 
     @staticmethod
-    def _news_context(*, deal, query: str, limit: int = 10) -> str:
+    def _news_context(*, deal, query: str, limit: int = 10, start_rank: int = 1) -> tuple[str, dict]:
         from ai_orchestrator.models import DocumentChunk
 
         news_document_ids = list(
@@ -196,7 +300,7 @@ class AnalysisSectionRewriteService:
             ).values_list("id", flat=True)
         )
         if not news_document_ids:
-            return ""
+            return "", {}
         source_ids = [str(value) for value in news_document_ids]
         try:
             from ai_orchestrator.services.embedding_processor import EmbeddingService
@@ -220,35 +324,46 @@ class AnalysisSectionRewriteService:
                 ).order_by("-created_at")[:limit]
             )
         blocks = []
+        citations = {}
         for chunk in chunks[:limit]:
             metadata = chunk.metadata or {}
+            rank = start_rank + len(blocks)
+            title = str(metadata.get('title') or chunk.source_id)
             blocks.append(
                 "\n".join(
                     [
-                        f"### News memo: {metadata.get('title') or chunk.source_id}",
+                        f"Citation marker: [R{rank:03d}]",
+                        f"### News memo: {title}",
                         f"News document ID: {chunk.source_id}",
                         str(chunk.content or "").strip(),
                     ]
                 )
             )
-        return "\n\n".join(blocks)
+            citations[str(rank)] = AnalysisSectionRewriteService._extra_citation(
+                rank=rank, source_id=str(chunk.source_id), title=title,
+            )
+        return "\n\n".join(blocks), citations
 
     @staticmethod
-    def _document_context(*, deal, document_ids: list[str] | None = None, query: str = "", limit: int = 10) -> str:
+    def _document_context(
+        *, deal, document_ids: list[str] | None = None, query: str = "",
+        limit: int = 10, start_rank: int = 1,
+    ) -> tuple[str, dict]:
         if not document_ids:
-            return ""
+            return "", {}
         from ai_orchestrator.models import DocumentChunk
-        from deals.models import DealDocument
+        from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
 
         clean_ids = [str(did).strip() for did in document_ids if str(did).strip()]
         if not clean_ids:
-            return ""
+            return "", {}
 
         documents = list(deal.documents.filter(id__in=clean_ids))
         if not documents:
-            return ""
+            return "", {}
 
         blocks = []
+        citations = {}
         for doc in documents:
             title = doc.title or f"Document {doc.id}"
             doc_type = doc.document_type or "Document"
@@ -284,14 +399,21 @@ class AnalysisSectionRewriteService:
             if body:
                 if len(body) > 12_000:
                     body = body[:12_000] + "\n...[Content truncated for context budget]..."
+                rank = start_rank + len(blocks)
                 blocks.append(
+                    f"Citation marker: [R{rank:03d}]\n"
                     f"### Document: {title}\n"
                     f"Document ID: {doc.id}\n"
                     f"Type: {doc_type}\n"
                     f"{body}"
                 )
+                citations[str(rank)] = AnalysisSectionRewriteService._extra_citation(
+                    rank=rank, source_id=source_id, title=title,
+                    url=ICReportSectionEvidenceService._document_source_url(doc),
+                    location="selected document",
+                )
 
-        return "\n\n".join(blocks)
+        return "\n\n".join(blocks), citations
 
     @staticmethod
     def persist(*, deal, full_report: str, version=None):
@@ -316,3 +438,13 @@ class AnalysisSectionRewriteService:
     @staticmethod
     def _normalize_title(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+    @classmethod
+    def published_section_title(cls, value: str) -> str | None:
+        normalized = cls._normalize_title(
+            re.sub(r"^\s*(?:\d+|[IVX]+)[.)-]\s*", "", str(value or ""), flags=re.I)
+        )
+        for title in IC_SECTION_TITLES:
+            if cls._normalize_title(title) == normalized:
+                return title
+        return cls.SECTION_ALIASES.get(normalized)

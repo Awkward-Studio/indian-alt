@@ -40,6 +40,66 @@ from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 logger = logging.getLogger(__name__)
 
 
+@shared_task(bind=True, queue="high_priority")
+def rewrite_analysis_section_async(
+    self, *, deal_id: str, section_title: str, section_markdown: str,
+    instruction: str, full_report: str, version, document_ids: list[str],
+    audit_log_id: str,
+):
+    """Generate a reviewable section draft using its published IC prompt."""
+    from django.core import signing
+    from ai_orchestrator.models import AIAuditLog
+    from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
+
+    audit = AIAuditLog.objects.get(id=audit_log_id)
+    log_worker_event(audit, f"Retrieving evidence for {section_title} rewrite.", status="PROCESSING")
+    try:
+        deal = Deal.objects.get(id=deal_id)
+        rewritten = AnalysisSectionRewriteService().rewrite(
+            deal=deal,
+            section_title=section_title,
+            section_markdown=section_markdown,
+            instruction=instruction,
+            full_report=full_report,
+            version=version,
+            document_ids=document_ids,
+            audit_log_id=audit_log_id,
+            celery_task_id=str(self.request.id),
+        )
+        confirmation_token = signing.dumps(
+            {
+                "deal_id": str(deal.id),
+                "version": str(version or ""),
+                "section_title": section_title,
+                "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+                "section_markdown": rewritten,
+            },
+            salt="analysis-section-rewrite",
+            compress=True,
+        )
+        audit.refresh_from_db()
+        audit.parsed_json = {
+            "section_title": section_title,
+            "section_markdown": rewritten,
+            "confirmation_token": confirmation_token,
+            "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
+        }
+        audit.is_success = True
+        audit.completed_at = timezone.now()
+        audit.save(update_fields=["parsed_json", "is_success", "completed_at"])
+        log_worker_event(audit, "Section rewrite preview is ready for review.", status="COMPLETED", event_type="terminal", done=True)
+        return {"audit_log_id": str(audit.id)}
+    except Exception as exc:
+        audit.refresh_from_db()
+        audit.status = "FAILED"
+        audit.is_success = False
+        audit.error_message = str(exc)[:2000]
+        audit.completed_at = timezone.now()
+        audit.save(update_fields=["status", "is_success", "error_message", "completed_at"])
+        log_worker_event(audit, "Section rewrite failed.", event_type="terminal", done=True)
+        raise
+
+
 def _record_document_extraction_audit(doc, extraction: dict, *, parent_audit_id: str, celery_task_id: str) -> None:
     """Persist one extraction result per Celery delivery without storing document text."""
     from ai_orchestrator.models import AIAuditLog

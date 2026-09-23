@@ -64,6 +64,21 @@ class AIProcessorService:
     def available_models(self) -> list[str]:
         return self.vllm_provider.get_available_models()
 
+    @staticmethod
+    def _append_section_rewrite_request(user_prompt: str, metadata: dict) -> str:
+        return user_prompt + (
+            "\n\n[ANALYST SECTION REWRITE REQUEST]\n"
+            "Revise only the selected section under the section requirements above. "
+            "Keep its heading and return the complete revised section. Use the "
+            "retrieved evidence and its citation markers for material facts. "
+            "The existing draft and surrounding report are context, not verified "
+            "evidence; do not copy an unsupported claim or reuse an old numbered "
+            "citation from them. Cite the supporting retrieval blocks afresh.\n\n"
+            f"Analyst instruction:\n{metadata['rewrite_instruction']}\n\n"
+            f"Current section draft:\n{metadata.get('section_markdown') or ''}\n\n"
+            f"Surrounding report context:\n{metadata.get('full_report') or ''}"
+        )
+
     def process_content(
         self,
         content: str,
@@ -195,6 +210,15 @@ class AIProcessorService:
         system_instructions = apply_deal_visual_contract(system_instructions, pipeline_key, stage_key)
 
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
+        if (
+            source_type == "analysis_section_rewrite"
+            and pipeline_key == "ic_report_generation"
+            and (metadata or {}).get("rewrite_instruction")
+        ):
+            # Keep the published section prompt and its system instructions intact.
+            # The analyst's edit request is an instruction, while the old report is
+            # draft context and the retrieved blocks above remain the fact source.
+            user_prompt = self._append_section_rewrite_request(user_prompt, metadata)
         search_results = []
         if web_search_enabled:
             raw_search_queries = (metadata or {}).get("web_search_queries") or []
