@@ -812,6 +812,8 @@ class EmbeddingService:
         source_ids: Optional[List[str]] = None,
         *,
         rerank: bool = True,
+        source_types: Optional[List[str]] = None,
+        exclude_deal_ids: Optional[List[str]] = None,
     ) -> List[DocumentChunk]:
         """Global hybrid search, with optional cross-encoder reranking."""
         normalized_query = self._normalize_query_text(query)
@@ -822,6 +824,8 @@ class EmbeddingService:
             limit=limit,
             deal_ids=deal_ids,
             source_ids=source_ids,
+            source_types=source_types,
+            exclude_deal_ids=exclude_deal_ids,
             fetch_limit_override=limit if not rerank else None,
         )
         if not rerank:
@@ -835,6 +839,8 @@ class EmbeddingService:
         limit: int,
         deal_ids: Optional[List[str]] = None,
         source_ids: Optional[List[str]] = None,
+        source_types: Optional[List[str]] = None,
+        exclude_deal_ids: Optional[List[str]] = None,
         fetch_limit_override: int | None = None,
     ) -> List[DocumentChunk]:
         from pgvector.django import CosineDistance
@@ -849,6 +855,10 @@ class EmbeddingService:
             queryset = queryset.filter(deal_id__in=deal_ids)
         if source_ids:
             queryset = queryset.filter(source_id__in=source_ids)
+        if source_types:
+            queryset = queryset.filter(source_type__in=source_types)
+        if exclude_deal_ids:
+            queryset = queryset.exclude(deal_id__in=exclude_deal_ids)
 
         dense_candidates: list[DocumentChunk] = []
         query_embedding = self._get_embedding(normalized_query)

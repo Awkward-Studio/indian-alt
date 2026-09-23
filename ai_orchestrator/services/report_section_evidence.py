@@ -84,14 +84,14 @@ def build_section_retrieval_template(title: str) -> str:
 def build_industry_deal_comparison_template() -> str:
     """Semantic query for the Industry Overview's internal peer-evidence step."""
     return (
-        "{{ deal_title }}. {{ section_title }}. Compare our deal with competitor "
-        "and possible peer companies already recorded in our deal database. "
-        "Rank source passages about product use and differentiation, customer "
-        "segments, geography, pricing, distribution, capacity, market position, "
-        "growth, margins, funding and evidence of competitive wins or losses. "
-        "Prefer comparable periods, units and business models; include contrary "
-        "evidence and source locations. A same-sector deal is only a peer candidate, "
-        "not proof that it competes directly."
+        "{{ deal_title }}. {{ section_title }}. Find source-backed companies in our deal "
+        "database with similar products, buyers, use cases, distribution or business "
+        "models. Rank substantive passages about those overlaps and differences, "
+        "pricing, capacity, customer retention, growth, margins, market position and "
+        "competitive wins or losses. Search across indexed deal documents without "
+        "an industry filter. Prefer comparable periods, units and accounting bases; "
+        "include contrary evidence and precise source locations. Semantic similarity "
+        "alone makes a company a peer candidate, not a confirmed competitor."
     )
 
 
@@ -402,7 +402,7 @@ class ICReportSectionEvidenceService:
                 deal=self.deal, embedding_service=self.embedding_service
             ).retrieve(comparison_query)
 
-        comparison_budget = min(8_000, self.max_tokens // 4) if comparison and comparison["chunks"] else 0
+        comparison_budget = min(16_000, int(self.max_tokens * 0.45)) if comparison and comparison["chunks"] else 0
         selected = self._select(candidates, token_budget=self.max_tokens - comparison_budget)
         if not selected:
             raise ValueError(f"No indexed document chunks were available for report section '{title}'.")
@@ -424,25 +424,12 @@ class ICReportSectionEvidenceService:
             company_counts: Counter[str] = Counter()
             seen = {self._identity(chunk) for chunk in selected}
             ranked = comparison["chunks"]
-            # First give distinct companies a chance, then add the next best
-            # passages. A single competitor dossier cannot fill the whole pack.
-            first_for_company = []
-            first_chunk_ids = set()
-            discovered_companies = set()
+            # Preserve semantic rank and cap any one company's share of the pack.
             for chunk in ranked:
-                company = source_info[str(chunk.source_id)]["company"]
-                if company not in discovered_companies:
-                    first_for_company.append(chunk)
-                    first_chunk_ids.add(str(chunk.id))
-                    discovered_companies.add(company)
-            ordered = first_for_company + [
-                chunk for chunk in ranked if str(chunk.id) not in first_chunk_ids
-            ]
-            for chunk in ordered:
                 info = source_info[str(chunk.source_id)]
                 company = info["company"]
                 identity = self._identity(chunk)
-                if identity in seen or company_counts[company] >= 3 or len(comparison_selected) >= 24:
+                if identity in seen or company_counts[company] >= 6 or len(comparison_selected) >= 48:
                     continue
                 rank = len(selected) + len(comparison_selected) + 1
                 block = (
@@ -459,7 +446,7 @@ class ICReportSectionEvidenceService:
                 remaining -= cost
             if comparison_selected:
                 context += (
-                    "\n\nInternal database comparison evidence. A same-sector peer candidate "
+                    "\n\nInternal database comparison evidence. A semantic peer candidate "
                     "is not a confirmed direct competitor. Keep its company and source separate "
                     "from the target deal.\n\n"
                     + "\n\n".join(block for _, block in comparison_selected)
@@ -477,9 +464,14 @@ class ICReportSectionEvidenceService:
         }
         if comparison is not None:
             stats["our_deal_comparison"] = {
+                "retrieval_scope": "global_indexed_deal_documents",
                 "candidate_deal_count": comparison["candidate_deal_count"],
                 "ranked_chunk_count": len(comparison["chunks"]),
                 "selected_chunk_count": len(comparison_selected),
+                "context_budget_tokens": comparison_budget,
+                "estimated_context_tokens": sum(
+                    estimate_tokens(block) + 2 for _, block in comparison_selected
+                ),
                 "selected_companies": sorted({
                     comparison["source_info"][str(chunk.source_id)]["company"]
                     for chunk, _ in comparison_selected
