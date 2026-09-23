@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections import OrderedDict
 from uuid import UUID
 
+from django.db import connection
 from django.db.models import Q
 
 from deals.models import Deal, DealDocument, DealRelationshipContext, VentureIntelligenceCompanyRelation
+
+logger = logging.getLogger(__name__)
 
 
 class IndustryDealComparisonService:
@@ -16,6 +21,8 @@ class IndustryDealComparisonService:
 
     MAX_RANKED_CHUNKS_PER_QUERY = 160
     MAX_PROFILE_CHUNKS = 48
+    MAX_RERANK_CHUNKS = 96
+    RERANK_BATCH_SIZE = 32
     _BOILERPLATE_TITLE = re.compile(r"\b(?:nda|non.disclosure|confidentiality agreement)\b", re.I)
     _BOILERPLATE_CONTENT = re.compile(
         r"\b(?:permitted uses include|keep secret and confidential|"
@@ -93,13 +100,77 @@ class IndustryDealComparisonService:
         return " ".join(" ".join(value.split()) for value in fields if value).strip()[:1_500]
 
     def _search(self, query: str, *, limit: int, **filters) -> list:
+        started = time.monotonic()
+        prior_ef_search = None
         try:
-            return self.embedding_service.search_global_chunks(query, limit=limit, rerank=True, **filters)
-        except Exception:
-            try:
-                return self.embedding_service.search_global_chunks(query, limit=limit, rerank=False, **filters)
-            except Exception:
-                return []
+            # Gather candidates first. Rerank the merged pool once, in VM-sized
+            # batches, instead of reranking every global search independently.
+            with connection.cursor() as cursor:
+                # Loading a vector operator registers pgvector's HNSW GUCs on
+                # this connection before current_setting() reads them.
+                cursor.execute("SELECT '[1,2]'::vector <=> '[1,2]'::vector")
+                cursor.execute("SELECT current_setting('hnsw.ef_search')")
+                prior_ef_search = cursor.fetchone()[0]
+                cursor.execute(
+                    "SELECT set_config('hnsw.ef_search', %s, false)",
+                    [str(max(200, int(limit)))],
+                )
+            chunks = self.embedding_service.search_global_chunks(query, limit=limit, rerank=False, **filters)
+            logger.info(
+                "Industry peer search retrieved %s chunks in %.1fs (deal=%s, scoped=%s)",
+                len(chunks), time.monotonic() - started, self.deal.id, bool(filters.get("deal_ids")),
+            )
+            return chunks
+        except Exception as exc:
+            logger.warning("Industry peer search failed after %.1fs: %s", time.monotonic() - started, exc)
+            return []
+        finally:
+            if prior_ef_search is not None:
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT set_config('hnsw.ef_search', %s, false)",
+                            [str(prior_ef_search)],
+                        )
+                except Exception as exc:
+                    logger.warning("Could not restore hnsw.ef_search after Industry search: %s", exc)
+
+    def _rerank(self, items: list[dict], query: str) -> list[dict]:
+        model = getattr(self.embedding_service, "reranker_model", "")
+        reranker = getattr(self.embedding_service, "reranker", None)
+        if not isinstance(model, str) or not model or reranker is None:
+            return items
+
+        shortlist = items[:self.MAX_RERANK_CHUNKS]
+        scores: dict[str, float] = {}
+        started = time.monotonic()
+        try:
+            for start in range(0, len(shortlist), self.RERANK_BATCH_SIZE):
+                batch = shortlist[start:start + self.RERANK_BATCH_SIZE]
+                results = reranker.rerank(
+                    model=model,
+                    query=query[:700],
+                    documents=[str(item["chunk"].content or "")[:2_500] for item in batch],
+                )
+                for result in results or []:
+                    index = int(result["index"])
+                    if 0 <= index < len(batch):
+                        scores[str(batch[index]["chunk"].id)] = float(result["score"])
+        except Exception as exc:
+            logger.warning("Industry peer rerank failed after %.1fs: %s", time.monotonic() - started, exc)
+            return items
+        if not scores:
+            return items
+        logger.info(
+            "Industry peer reranked %s chunks in %.1fs (deal=%s)",
+            len(scores), time.monotonic() - started, self.deal.id,
+        )
+        # Keep the source-ranked tail available for broad company coverage.
+        shortlist.sort(
+            key=lambda item: (scores.get(str(item["chunk"].id), float("-inf")), item["score"]),
+            reverse=True,
+        )
+        return shortlist + items[self.MAX_RERANK_CHUNKS:]
 
     @classmethod
     def _substantive(cls, chunk, title: str) -> bool:
@@ -118,6 +189,12 @@ class IndustryDealComparisonService:
             f"{profile}. Comparable companies with overlapping products, buyers, business model, "
             "distribution and geography. Source evidence on pricing, revenue, growth, "
             "gross margin, capacity, customer retention and competitive wins or losses.",
+            f"{profile}. Comparable-company source evidence for operating scale and financial "
+            "performance: revenue and sales, gross profit and margins, EBITDA and PAT, "
+            "customers, pricing, capacity and retention. Prefer primary source tables and "
+            "preserve exact values, currency, units, periods, actuals versus forecasts, "
+            "and page or source locations. Include relevant evidence even when the company "
+            "is only a semantic peer candidate.",
         ]
         ranked: dict[str, dict] = {}
         for search_query in queries:
@@ -153,7 +230,15 @@ class IndustryDealComparisonService:
         }
         source_info: dict[str, dict] = {}
         eligible = []
-        for item in sorted(ranked.values(), key=lambda row: row["score"], reverse=True):
+        ordered = self._rerank(
+            sorted(ranked.values(), key=lambda row: row["score"], reverse=True),
+            (
+                "Find comparable companies with overlapping products, buyers, business model "
+                "and geography. Prioritize source-backed operating and financial evidence. "
+                f"Target company: {profile[:500]}"
+            ),
+        )
+        for item in ordered:
             chunk = item["chunk"]
             document = documents.get(str(chunk.source_id))
             if not document or str(document.deal_id) != str(chunk.deal_id):

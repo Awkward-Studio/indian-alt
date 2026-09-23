@@ -27,10 +27,16 @@ class Command(BaseCommand):
         parser.add_argument("--m", type=int, default=16)
         parser.add_argument("--ef-construction", type=int, default=64)
         parser.add_argument("--maintenance-work-mem", default="32MB")
+        parser.add_argument(
+            "--max-parallel-maintenance-workers", type=int, default=0,
+            help="Build workers. Defaults to one process to avoid Docker /dev/shm limits.",
+        )
 
     def handle(self, *args, **options):
         if options["m"] < 2 or options["ef_construction"] < 4:
             raise CommandError("HNSW m must be at least 2 and ef-construction at least 4.")
+        if options["max_parallel_maintenance_workers"] < 0:
+            raise CommandError("The number of parallel maintenance workers cannot be negative.")
 
         connection = connections["default"]
         names = INDEXES if options["index"] == "all" else {options["index"]: INDEXES[options["index"]]}
@@ -42,7 +48,21 @@ class Command(BaseCommand):
                     "SELECT set_config('maintenance_work_mem', %s, false)",
                     [options["maintenance_work_mem"]],
                 )
+                cursor.execute(
+                    "SELECT set_config('max_parallel_maintenance_workers', %s, false)",
+                    [str(options["max_parallel_maintenance_workers"])],
+                )
                 for label, (index_name, table_name) in names.items():
+                    cursor.execute(
+                        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)",
+                        [index_name],
+                    )
+                    existing = cursor.fetchone()
+                    if existing and not existing[0]:
+                        raise CommandError(
+                            f"{index_name} exists but is invalid. Drop that specific index "
+                            "concurrently before retrying the build."
+                        )
                     self.stdout.write(f"Building {label} index {index_name} on {table_name}...")
                     cursor.execute(
                         f'CREATE INDEX CONCURRENTLY IF NOT EXISTS "{index_name}" '

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from django.test import TestCase
 
@@ -66,7 +67,7 @@ class IndustryDealComparisonTests(TestCase):
             "semantic peer candidate",
         )
         search = embedding.search_global_chunks.call_args_list[0]
-        self.assertTrue(search.kwargs["rerank"])
+        self.assertFalse(search.kwargs["rerank"])
         self.assertEqual(search.kwargs["source_types"], ["document"])
         self.assertEqual(search.kwargs["exclude_deal_ids"], [str(self.target.id)])
         self.assertNotIn("deal_ids", search.kwargs)
@@ -89,6 +90,78 @@ class IndustryDealComparisonTests(TestCase):
         self.assertEqual(result["citations"]["1"]["title"], "Target deck")
         self.assertEqual(result["citations"]["2"]["title"], "Rival Foods: Rival deck")
         self.assertEqual(result["metadata"]["our_deal_comparison"]["selected_chunk_count"], 2)
+
+    def test_comparison_reranks_merged_pool_in_vm_sized_batches(self):
+        embedding = MagicMock()
+        embedding.reranker_model = "bge-reranker"
+        embedding.search_global_chunks.side_effect = [
+            [self.competitor_chunk, self.peer_chunk],
+            [self.peer_chunk],
+            [self.competitor_chunk],
+        ]
+        embedding.reranker.rerank.return_value = [
+            {"index": 0, "score": 0.2}, {"index": 1, "score": 0.9},
+        ]
+
+        result = IndustryDealComparisonService(
+            deal=self.target, embedding_service=embedding,
+        ).retrieve("market rivals")
+
+        self.assertEqual(result["chunks"], [self.peer_chunk, self.competitor_chunk])
+        self.assertEqual(embedding.reranker.rerank.call_count, 1)
+        self.assertEqual(len(embedding.reranker.rerank.call_args.kwargs["documents"]), 2)
+        self.assertTrue(all(
+            call.kwargs["rerank"] is False
+            for call in embedding.search_global_chunks.call_args_list
+        ))
+
+    def test_comparison_never_exceeds_vm_batch_size(self):
+        embedding = MagicMock()
+        embedding.reranker_model = "bge-reranker"
+        embedding.reranker.rerank.side_effect = [
+            [{"index": index, "score": float(index)} for index in range(32)],
+            [{"index": 0, "score": 100.0}],
+        ]
+        items = [
+            {"chunk": SimpleNamespace(id=uuid4(), content=f"Evidence {index}"), "score": 1 / (index + 1)}
+            for index in range(33)
+        ]
+        last_item = items[-1]
+
+        ranked = IndustryDealComparisonService(
+            deal=self.target, embedding_service=embedding,
+        )._rerank(items, "compare companies")
+
+        self.assertEqual([len(call.kwargs["documents"]) for call in embedding.reranker.rerank.call_args_list], [32, 1])
+        self.assertEqual(ranked[0], last_item)
+
+    def test_financial_evidence_is_retrieved_globally_without_peer_scoping(self):
+        financial_chunk = DocumentChunk.objects.create(
+            deal=self.competitor, source_type="document", source_id=str(self.competitor_doc.id),
+            content=("Financial model historic actuals and projections. FY21 revenue was INR 12 crore, "
+                     "EBITDA was INR 1.1 crore and PAT was INR 0.66 crore, per page 30."),
+            metadata={"chunk_kind": "normalized_text", "chunk_index": 900},
+        )
+        embedding = MagicMock()
+        calls = {"global": 0}
+
+        def search(query, *, limit, rerank, **filters):
+            self.assertFalse(rerank)
+            if filters.get("deal_ids"):
+                return [self.competitor_chunk]
+            calls["global"] += 1
+            if "source tables" in query:
+                return [financial_chunk]
+            return [self.competitor_chunk, self.peer_chunk]
+
+        embedding.search_global_chunks.side_effect = search
+        result = IndustryDealComparisonService(
+            deal=self.target, embedding_service=embedding,
+        ).retrieve("market rivals")
+
+        self.assertIn(financial_chunk, result["chunks"])
+        self.assertEqual(result["source_info"][str(self.competitor_doc.id)]["relationship"], "linked competitor")
+        self.assertEqual(calls["global"], 3)
 
     def test_no_peer_evidence_keeps_industry_section_available(self):
         embedding = MagicMock()

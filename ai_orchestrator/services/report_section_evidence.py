@@ -88,10 +88,14 @@ def build_industry_deal_comparison_template() -> str:
         "database with similar products, buyers, use cases, distribution or business "
         "models. Rank substantive passages about those overlaps and differences, "
         "pricing, capacity, customer retention, growth, margins, market position and "
-        "competitive wins or losses. Search across indexed deal documents without "
-        "an industry filter. Prefer comparable periods, units and accounting bases; "
-        "include contrary evidence and precise source locations. Semantic similarity "
-        "alone makes a company a peer candidate, not a confirmed competitor."
+        "competitive wins or losses. Also retrieve company-level financial and operating "
+        "evidence, especially source tables for revenue, sales, gross profit and margin, "
+        "EBITDA, PAT, customer counts and scale. Search all indexed deal documents "
+        "semantically without an industry filter or limiting retrieval to named peers. "
+        "Preserve exact values, currency, units, periods, actual versus forecast status, "
+        "contrary evidence and precise source locations. Rank by business comparability "
+        "and evidentiary value. Semantic similarity alone makes a company a peer "
+        "candidate, not a confirmed competitor."
     )
 
 
