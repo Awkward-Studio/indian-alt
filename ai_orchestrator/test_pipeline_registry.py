@@ -199,18 +199,24 @@ class PromptRevisionLifecycleTests(TestCase):
         self.assertEqual(private_search.stage.depends_on, ["query_planner"])
         self.assertEqual(screener.stage.depends_on, ["grounding"])
 
-    def test_seed_registers_all_eleven_live_report_section_prompts(self):
+    def test_seed_registers_retrieval_and_writing_prompts_for_each_section(self):
         call_command("seed_ai_prompts", verbosity=0)
 
         pipeline = AIPipelineDefinition.objects.get(key="ic_report_generation")
         stages = list(pipeline.stages.order_by("position"))
 
-        self.assertEqual([stage.name for stage in stages], list(IC_SECTION_TITLES))
-        self.assertEqual(len(stages), 11)
+        self.assertEqual(len(stages), 22)
         for title in IC_SECTION_TITLES:
+            retrieval = PipelineRegistryService.resolve_stage(
+                "ic_report_generation", f"retrieval_{IC_REPORT_SECTION_STAGE_KEYS[title]}"
+            )
             resolved = PipelineRegistryService.resolve_stage(
                 "ic_report_generation", IC_REPORT_SECTION_STAGE_KEYS[title]
             )
+            self.assertEqual(retrieval.prompt_revision.status, "published")
+            self.assertEqual(retrieval.stage.required_variables, ["deal_title", "section_title"])
+            self.assertIn("{{ deal_title }}", retrieval.prompt_revision.user_template)
+            self.assertEqual(resolved.stage.depends_on, [retrieval.stage.key])
             self.assertEqual(resolved.prompt_revision.status, "published")
             self.assertEqual(
                 resolved.stage.required_variables,

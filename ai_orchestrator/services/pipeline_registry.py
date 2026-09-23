@@ -671,25 +671,26 @@ Include only companies explicitly supported as competitors by supplied evidence.
     @classmethod
     @transaction.atomic
     def ensure_report_pipeline_defaults(cls) -> None:
-        """Register one independently editable live prompt for every IC section."""
+        """Register independently editable retrieval and writing prompts per section."""
         from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
         from ai_orchestrator.services.bulk_prompt_contracts import (
             IC_REPORT_SECTION_STAGE_KEYS,
             IC_REPORT_SECTION_SYSTEM_PROMPT,
             build_ic_report_section_user_template,
         )
+        from ai_orchestrator.services.report_section_evidence import build_section_retrieval_template
 
         pipeline, _ = AIPipelineDefinition.objects.get_or_create(
             key="ic_report_generation",
             defaults={
                 "name": "11-section IC report",
-                "description": "Live prompts used to generate each section of the investment committee report.",
+                "description": "Published retrieval queries and writing prompts for each investment committee report section.",
             },
         )
         pipeline_updates = []
         for field, value in {
             "name": "11-section IC report",
-            "description": "Live prompts used to generate each section of the investment committee report.",
+            "description": "Published retrieval queries and writing prompts for each investment committee report section.",
             "is_active": True,
         }.items():
             if getattr(pipeline, field) != value:
@@ -701,6 +702,66 @@ Include only companies explicitly supported as competitors by supplied evidence.
         variables = ["section_title", "minimum_words", "target_words", "model_data_json", "content"]
         for position, title in enumerate(IC_SECTION_TITLES):
             stage_key = IC_REPORT_SECTION_STAGE_KEYS[title]
+            retrieval_key = f"retrieval_{stage_key}"
+            retrieval_variables = ["deal_title", "section_title"]
+            retrieval_definition, _ = AIPromptDefinition.objects.get_or_create(
+                key=f"ic_report_retrieval_{stage_key}",
+                defaults={
+                    "name": f"{title} retrieval query",
+                    "category": "11-section IC report",
+                    "description": f"Semantic search query for evidence used in the {title} section.",
+                    "variables": retrieval_variables,
+                },
+            )
+            retrieval_definition_updates = []
+            for field, value in {
+                "name": f"{title} retrieval query",
+                "category": "11-section IC report",
+                "description": f"Semantic search query for evidence used in the {title} section.",
+                "variables": retrieval_variables,
+            }.items():
+                if getattr(retrieval_definition, field) != value:
+                    setattr(retrieval_definition, field, value)
+                    retrieval_definition_updates.append(field)
+            if retrieval_definition_updates:
+                retrieval_definition.save(update_fields=[*retrieval_definition_updates, "updated_at"])
+            if not retrieval_definition.revisions.exists():
+                retrieval_revision = AIPromptRevision.objects.create(
+                    definition=retrieval_definition,
+                    revision=1,
+                    status=AIPromptRevision.Status.DRAFT,
+                    user_template=build_section_retrieval_template(title),
+                )
+                cls.publish_prompt(retrieval_revision)
+            retrieval_stage, _ = AIPipelineStage.objects.get_or_create(
+                pipeline=pipeline,
+                key=retrieval_key,
+                defaults={
+                    "name": f"{title} retrieval",
+                    "description": f"Finds section-specific evidence for {title}.",
+                    "position": position * 2,
+                    "kind": AIPipelineStage.Kind.PROMPT,
+                    "prompt_definition": retrieval_definition,
+                    "required_variables": retrieval_variables,
+                    "depends_on": [],
+                },
+            )
+            retrieval_stage_updates = []
+            for field, value in {
+                "name": f"{title} retrieval",
+                "description": f"Finds section-specific evidence for {title}.",
+                "position": position * 2,
+                "kind": AIPipelineStage.Kind.PROMPT,
+                "prompt_definition": retrieval_definition,
+                "required_variables": retrieval_variables,
+                "depends_on": [],
+                "is_required": True,
+            }.items():
+                if getattr(retrieval_stage, field) != value:
+                    setattr(retrieval_stage, field, value)
+                    retrieval_stage_updates.append(field)
+            if retrieval_stage_updates:
+                retrieval_stage.save(update_fields=[*retrieval_stage_updates, "updated_at"])
             definition_key = f"ic_report_section_{stage_key}"
             definition, _ = AIPromptDefinition.objects.get_or_create(
                 key=definition_key,
@@ -739,22 +800,22 @@ Include only companies explicitly supported as competitors by supplied evidence.
                 defaults={
                     "name": title,
                     "description": f"Generates the {title} section from section-ranked deal evidence.",
-                    "position": position,
+                    "position": position * 2 + 1,
                     "kind": AIPipelineStage.Kind.PROMPT,
                     "prompt_definition": definition,
                     "required_variables": variables,
-                    "depends_on": [],
+                    "depends_on": [retrieval_key],
                 },
             )
             stage_updates = []
             for field, value in {
                 "name": title,
                 "description": f"Generates the {title} section from section-ranked deal evidence.",
-                "position": position,
+                "position": position * 2 + 1,
                 "kind": AIPipelineStage.Kind.PROMPT,
                 "prompt_definition": definition,
                 "required_variables": variables,
-                "depends_on": [],
+                "depends_on": [retrieval_key],
                 "is_required": True,
             }.items():
                 if getattr(stage, field) != value:

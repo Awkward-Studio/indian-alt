@@ -1,13 +1,43 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from django.test import SimpleTestCase
+from django.test import TestCase
 
+from ai_orchestrator.models import AIPromptRevision
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
 from ai_orchestrator.services.token_budget import estimate_tokens
 
 
-class ICReportSectionEvidenceServiceTests(SimpleTestCase):
+class ICReportSectionEvidenceServiceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        PipelineRegistryService.ensure_report_pipeline_defaults()
+
+    def test_retrieval_uses_only_published_query_revision(self):
+        service = ICReportSectionEvidenceService(
+            deal=SimpleNamespace(id="deal-1", title="Example Foods"),
+            documents=[],
+            embedding_service=MagicMock(),
+        )
+        stage = PipelineRegistryService.resolve_stage(
+            "ic_report_generation", "retrieval_key_financials"
+        )
+        draft = PipelineRegistryService.create_prompt_draft(
+            stage.stage.prompt_definition,
+            user_template="Find audited cash flow for {{ deal_title }} in {{ section_title }}",
+        )
+
+        self.assertIn("historical projected P&L", service._query("Key Financials"))
+        self.assertEqual(draft.status, AIPromptRevision.Status.DRAFT)
+
+        PipelineRegistryService.publish_prompt(draft)
+
+        self.assertEqual(
+            service._query("Key Financials"),
+            "Find audited cash flow for Example Foods in Key Financials",
+        )
+
     def test_retrieval_uses_section_prompt_and_fills_token_budget(self):
         deal = SimpleNamespace(id="deal-1", title="Example Foods")
         documents = [

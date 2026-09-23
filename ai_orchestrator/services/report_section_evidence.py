@@ -6,26 +6,40 @@ from collections import Counter
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 
 from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.bulk_prompt_contracts import BULK3_SECTION_INSTRUCTIONS
 from ai_orchestrator.services.embedding_processor import EmbeddingService
+from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.token_budget import estimate_tokens
 
 
 SECTION_RETRIEVAL_TERMS = {
-    "Executive Summary": "investment verdict strongest facts key metrics principal risks diligence priorities",
-    "Company Details": "company products services business model revenue sources customers investors highlights concerns",
-    "Promoter and Management Details": "founder promoter management leadership experience designation education ownership red flags",
-    "Industry Overview": "industry demand market size TAM growth competition competitors moat value chain supply constraints",
-    "Transaction Details": "fund raise investment amount instrument valuation ownership round leader follow-on funds raised sourcing",
-    "Key Financials": "historical projected P&L revenue sales margins gross margin contribution margin EBITDA expenses balance sheet working capital receivables payables inventory cash debt ROCE ROIC ROE",
-    "Transaction / Trading Multiples": "transaction comparable trading comparable valuation revenue multiple EBITDA multiple market cap CAGR margins debt cash acquirer investor deal date",
-    "Risk Factors": "risk downside concern dependency concentration churn margin pressure cash burn debt regulation execution mitigant diligence",
-    "Investment Rationale": "investment thesis rationale growth unit economics moat returns quality scalability evidence concern",
-    "Exit Considerations": "exit valuation entry valuation multiple dilution stake return IRR MOIC buyer IPO strategic acquisition assumptions",
-    "Next Steps": "diligence gap open question verify validation action owner task next step missing evidence",
+    "Executive Summary": "investment verdict company business model products geography raise use of funds revenue EBITDA cash burn valuation management market share funding history competitive position key risks accounting quality diligence gates",
+    "Company Details": "company incorporation legal entities subsidiaries products customers sales contracts pricing discounts channels backlog returns complaints suppliers factories machinery capacity utilization production lead times scrap downtime inventory workforce intellectual property patents trademarks",
+    "Promoter and Management Details": "founder promoter directors senior management roles tenure ownership ESOP compensation past ventures board independence attrition succession management references internal controls delegation audit qualifications related party transactions budget variance reporting",
+    "Industry Overview": "industry demand market size TAM SAM SOM market share growth competitors substitutes price quality service innovation seasonality cyclicality imports exports supply capacity regulation entry barriers distribution customer bargaining supplier bargaining",
+    "Transaction Details": "fund raise rationale prior rounds failed processes investment amount term sheet CCPS OCPS ESOP warrants convertibles cap table share classes pre-money post-money dilution use of funds debt covenants guarantees collateral investor rights",
+    "Key Financials": "historical projected P&L audited statements revenue sales margins gross margin contribution margin EBITDA PAT operating cash flow free cash flow balance sheet working capital receivables aging payables inventory cash debt ROCE ROIC ROE DuPont provisions exceptional items capex forecasts budget variance tax",
+    "Transaction / Trading Multiples": "transaction comparable trading comparable valuation revenue multiple EBITDA multiple market cap CAGR margins debt cash acquirer investor deal date India global peers DCF WACC terminal growth premium discount",
+    "Risk Factors": "risk downside concentration customer supplier distributor promoter key person product obsolescence IP capacity downtime labor safety cash conversion earnings quality debt covenant tax litigation regulatory environmental insurance mitigant diligence",
+    "Investment Rationale": "investment thesis rationale customer retention market share product reputation moat IP unit economics operating efficiency management execution cash conversion capital efficiency valuation counterevidence durability diligence condition",
+    "Exit Considerations": "exit valuation entry valuation multiple dilution stake proceeds return IRR MOIC buyer IPO strategic acquisition secondary sale preference stack future capital DCF WACC exit timing sensitivity",
+    "Next Steps": "diligence gap open question customer supplier management references plant inspection audited accounts cash flow reconciliation receivables aging cap table debt covenant tax litigation environmental permit insurance valuation comparable DCF action owner priority",
 }
+
+
+def build_section_retrieval_template(title: str) -> str:
+    """Preserve the current section query as an editable published default."""
+    guidance = BULK3_SECTION_INSTRUCTIONS[title]
+    terms = SECTION_RETRIEVAL_TERMS[title]
+    return (
+        f"{{{{ deal_title }}}}. Internal investment committee report section: "
+        f"{{{{ section_title }}}}. {guidance} Relevant evidence: {terms}. "
+        "Preserve exact values, periods, units, assumptions, conflicts, risks, "
+        "source names, and missing information."
+    )
 
 
 class ICReportSectionEvidenceService:
@@ -163,13 +177,25 @@ class ICReportSectionEvidenceService:
         }
 
     def _query(self, title: str) -> str:
-        guidance = BULK3_SECTION_INSTRUCTIONS.get(title, "")
-        terms = SECTION_RETRIEVAL_TERMS.get(title, "")
-        return (
-            f"{self.deal.title}. Internal investment committee report section: {title}. "
-            f"{guidance} Relevant evidence: {terms}. Preserve exact values, periods, units, "
-            "assumptions, conflicts, risks, source names, and missing information."
-        )
+        from ai_orchestrator.services.bulk_prompt_contracts import IC_REPORT_SECTION_STAGE_KEYS
+
+        stage_key = f"retrieval_{IC_REPORT_SECTION_STAGE_KEYS[title]}"
+        try:
+            _, query, _ = PipelineRegistryService.render_prompt_stage(
+                "ic_report_generation",
+                stage_key,
+                deal_title=self.deal.title,
+                section_title=title,
+            )
+        except ObjectDoesNotExist:
+            PipelineRegistryService.ensure_report_pipeline_defaults()
+            _, query, _ = PipelineRegistryService.render_prompt_stage(
+                "ic_report_generation",
+                stage_key,
+                deal_title=self.deal.title,
+                section_title=title,
+            )
+        return query
 
     def _fallback_chunks(self) -> list[DocumentChunk]:
         if not self.source_ids:
