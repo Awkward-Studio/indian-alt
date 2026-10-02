@@ -5,6 +5,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from deals.models import AnalysisKind, Deal, DealDocument, DealFieldProvenance, DocumentType
 from deals.services.field_provenance import record_deal_field_changes
+from deals.services.report_assembly import clean_report_text, merge_report_text
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +83,7 @@ class DealCreationService:
 
     @staticmethod
     def _merge_reports(previous_report: str | None, next_report: str | None, analysis_kind: str) -> str:
-        previous = (previous_report or "").strip()
-        current = (next_report or "").strip()
-        if not previous:
-            return current
-        if not current or current in previous:
-            return previous
-        if analysis_kind == AnalysisKind.INITIAL:
-            return current
-        return f"{previous}\n\n--- Supplemental Update ---\n\n{current}"
+        return merge_report_text(previous_report, next_report, initial=analysis_kind == AnalysisKind.INITIAL)
 
     @staticmethod
     def build_canonical_snapshot(
@@ -146,6 +139,7 @@ class DealCreationService:
         normalized.setdefault("deal_model_data", {})
         normalized.setdefault("metadata", {})
         normalized.setdefault("analyst_report", "")
+        normalized["analyst_report"] = clean_report_text(normalized["analyst_report"])
         normalized.setdefault("document_evidence", [])
         normalized.setdefault("cross_document_conflicts", [])
         normalized.setdefault("missing_information_requests", [])

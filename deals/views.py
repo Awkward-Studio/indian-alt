@@ -1966,7 +1966,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
         expected_hash = request.data.get('expected_report_sha256')
         if expected_hash is not None:
-            import hashlib
+            from deals.services.report_assembly import report_text_fingerprints
 
             if not isinstance(expected_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_hash):
                 return Response({"error": "expected_report_sha256 must be a SHA-256 hex digest"}, status=400)
@@ -1977,7 +1977,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 if isinstance(snapshot, dict) and isinstance(snapshot.get('analyst_report'), str)
                 else analysis_json.get('analyst_report')
             ) or deal.deal_summary or ''
-            if hashlib.sha256(str(current_report).strip().encode('utf-8')).hexdigest() != expected_hash:
+            if expected_hash not in report_text_fingerprints(current_report):
                 return Response(
                     {"error": "The report changed while the rewrite was running. Refresh it before saving."},
                     status=status.HTTP_409_CONFLICT,

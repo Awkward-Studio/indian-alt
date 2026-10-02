@@ -374,6 +374,24 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         self.analysis.refresh_from_db()
         self.assertEqual(self.analysis.analysis_json["analyst_report"], changed)
 
+    def test_save_accepts_clean_snapshot_hash_after_legacy_report_cleanup(self):
+        from deals.services.report_assembly import clean_report_text
+
+        legacy = REPORT + '\n\n--- Supplemental Update ---\n\n{"deal_model_data": {"title": "Fixture"}}'
+        self.analysis.analysis_json['analyst_report'] = legacy
+        self.analysis.analysis_json['canonical_snapshot']['analyst_report'] = legacy
+        self.analysis.save(update_fields=['analysis_json'])
+        cleaned = clean_report_text(legacy)
+        updated = cleaned.replace('8%', '14%')
+        response = self.client.patch(
+            f'/api/deals/{self.deal.id}/update_analysis_report/',
+            {'report': updated, 'version': 1, 'expected_report_sha256': hashlib.sha256(cleaned.encode()).hexdigest()},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.analysis.refresh_from_db()
+        self.assertEqual(self.analysis.analysis_json['canonical_snapshot']['analyst_report'], updated)
+
     @patch("ai_orchestrator.services.report_section_evidence.ICReportSectionEvidenceService")
     def test_known_section_uses_published_writing_stage_and_section_evidence(self, evidence_class):
         DealDocument.objects.create(deal=self.deal, title="Financial statements", is_indexed=True)
