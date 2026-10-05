@@ -419,6 +419,41 @@ class DealContradictionApiTests(TestCase):
         self.url = reverse("deal-contradictions", kwargs={"pk": self.deal.id})
         self.client = APIClient()
 
+    def test_status_distinguishes_unchecked_from_successful_empty_check(self):
+        self.client.force_authenticate(self.user)
+        self.record.delete()
+        url = reverse("deal-contradiction-status", kwargs={"pk": self.deal.id})
+        self.assertEqual(self.client.get(url).data["state"], "not_checked")
+        from ai_orchestrator.models import AIAuditLog
+        AIAuditLog.objects.create(source_type="deal_contradiction_detection", source_id=str(self.deal.id), status="COMPLETED", is_success=True, completed_at=datetime.now(timezone.utc))
+        result = self.client.get(url).data
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["active_count"], 0)
+        self.assertIsNotNone(result["last_checked_at"])
+
+    def test_status_counts_open_findings_and_excludes_dismissed_history(self):
+        self.client.force_authenticate(self.user)
+        url = reverse("deal-contradiction-status", kwargs={"pk": self.deal.id})
+        self.assertEqual(self.client.get(url).data["active_count"], 1)
+        self.record.review_status = "DISMISSED"
+        self.record.save(update_fields=["review_status"])
+        self.assertEqual(self.client.get(url).data["active_count"], 0)
+
+    def test_status_latest_failed_run_does_not_look_completed(self):
+        self.client.force_authenticate(self.user)
+        from ai_orchestrator.models import AIAuditLog
+        AIAuditLog.objects.create(source_type="deal_contradiction_detection", source_id=str(self.deal.id), status="COMPLETED", is_success=True)
+        latest = AIAuditLog.objects.create(source_type="deal_contradiction_detection", source_id=str(self.deal.id), status="FAILED", is_success=False)
+        url = reverse("deal-contradiction-status", kwargs={"pk": self.deal.id})
+        self.assertEqual(self.client.get(url).data["state"], "failed")
+        latest.status = "PROCESSING"
+        latest.save(update_fields=["status"])
+        self.assertEqual(self.client.get(url).data["state"], "running")
+
+    def test_status_requires_authentication(self):
+        url = reverse("deal-contradiction-status", kwargs={"pk": self.deal.id})
+        self.assertIn(self.client.get(url).status_code, (401, 403))
+
     def test_authenticated_user_can_list_evidence_linked_records(self):
         self.client.force_authenticate(self.other_user)
 

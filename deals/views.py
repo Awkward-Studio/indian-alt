@@ -1865,6 +1865,27 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 acquisition.save(update_fields=["status", "completed_at", "updated_at"])
         return Response(SectorResearchAcquisitionSerializer(acquisition).data)
 
+    @action(detail=True, methods=["get"], url_path="contradiction-status")
+    def contradiction_status(self, request, pk=None):
+        deal = self.get_object()
+        latest = AIAuditLog.objects.filter(
+            source_type="deal_contradiction_detection", source_id=str(deal.id),
+        ).order_by("-created_at", "-id").first()
+        active_count = deal.contradictions.exclude(review_status="DISMISSED").count()
+        state = "not_checked"
+        if latest:
+            if latest.status == "COMPLETED" and latest.is_success:
+                state = "completed"
+            elif latest.status in {"PENDING", "PROCESSING"}:
+                state = "running"
+            else:
+                state = "failed"
+        return Response({
+            "state": state,
+            "active_count": active_count,
+            "last_checked_at": latest.completed_at if latest and state == "completed" else None,
+        })
+
     @action(detail=True, methods=["get", "patch"])
     def contradictions(self, request, pk=None):
         deal = self.get_object()
