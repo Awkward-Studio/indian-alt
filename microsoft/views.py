@@ -2,6 +2,10 @@
 Views for Microsoft Graph API endpoints — email management and OneDrive.
 """
 import base64
+import hashlib
+import json
+
+from django.core.cache import cache
 import logging
 from datetime import datetime, timedelta
 
@@ -803,6 +807,19 @@ class OneDriveListView(APIView):
             serializer = OneDriveListResponseSerializer(response_data)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
+        # Cache only successful listings, scoped to the authenticated user and
+        # every parameter that changes the listing. Refresh always asks Graph.
+        cache_identity = [getattr(request.user, 'pk', None), user_email, folder_id,
+                          request.query_params.get('drive_id'), scope, top,
+                          request.query_params.get('include_shared_with_me', '')]
+        cache_key = 'onedrive:list:v1:' + hashlib.sha256(
+            json.dumps(cache_identity).encode()).hexdigest()
+        refresh = request.query_params.get('refresh', '').lower() in ('true', '1', 'yes')
+        if not refresh:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return Response(cached, status=status.HTTP_200_OK)
+
         # ---- call Graph API ----
         try:
             graph = GraphAPIService()
@@ -871,6 +888,7 @@ class OneDriveListView(APIView):
             }
 
             serializer = OneDriveListResponseSerializer(response_data)
+            cache.set(cache_key, serializer.data, timeout=30)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         except ValueError as e:

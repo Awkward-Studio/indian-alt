@@ -1,7 +1,8 @@
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
+from django.core.cache import cache
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from microsoft.services.graph_service import GraphAPIService
@@ -9,10 +10,14 @@ from microsoft.views import OneDriveDownloadView, OneDriveListView
 from ai_orchestrator.vm_status_view import VMStatusView
 
 
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
 class DMSBrowserTests(SimpleTestCase):
-    def request(self, view, params=None, method="get"):
+    def setUp(self):
+        cache.clear()
+
+    def request(self, view, params=None, method="get", user_id=1):
         request = getattr(APIRequestFactory(), method)("/", params or {})
-        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True, pk=user_id))
         return view.as_view()(request)
 
     def test_root_listing_consumes_all_pages(self):
@@ -70,3 +75,30 @@ class DMSBrowserTests(SimpleTestCase):
     def test_vm_status_requires_authentication(self):
         response = VMStatusView.as_view()(APIRequestFactory().get("/"))
         self.assertIn(response.status_code, [401, 403])
+
+    @patch("microsoft.views.GraphAPIService")
+    def test_repeat_listing_avoids_graph_and_refresh_bypasses_cache(self, service):
+        service.return_value.get_drive_root_children.return_value = {"value": []}
+        self.assertEqual(self.request(OneDriveListView).status_code, 200)
+        self.assertEqual(self.request(OneDriveListView).status_code, 200)
+        self.assertEqual(service.call_count, 1)
+        self.assertEqual(self.request(OneDriveListView, {"refresh": "true"}).status_code, 200)
+        self.assertEqual(service.call_count, 2)
+
+    @patch("microsoft.views.GraphAPIService")
+    def test_listing_cache_isolates_users_drives_and_scopes(self, service):
+        service.return_value.get_drive_folder_children.return_value = {"value": []}
+        service.return_value.get_drive_root_children.return_value = {"value": []}
+        service.return_value.get_deal_folder_root_children.return_value = {"value": []}
+        for params, user in [({}, 1), ({}, 2), ({"scope": "deal_folders"}, 1),
+                             ({"folder_id": "same", "drive_id": "a"}, 1),
+                             ({"folder_id": "same", "drive_id": "b"}, 1)]:
+            self.assertEqual(self.request(OneDriveListView, params, user_id=user).status_code, 200)
+        self.assertEqual(service.call_count, 5)
+
+    @patch("microsoft.views.GraphAPIService")
+    def test_failed_listing_is_not_cached(self, service):
+        service.return_value.get_drive_root_children.side_effect = [ValueError("Expired"), {"value": []}]
+        self.assertEqual(self.request(OneDriveListView).status_code, 401)
+        self.assertEqual(self.request(OneDriveListView).status_code, 200)
+        self.assertEqual(service.call_count, 2)
