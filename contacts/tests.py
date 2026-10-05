@@ -314,6 +314,8 @@ class ContactDirectoryAPITests(TestCase):
 
 class WorkplaceVerificationAPITests(TestCase):
     def setUp(self):
+        from django.core.management import call_command
+        call_command("seed_ai_prompts", verbosity=0)
         self.reviewer = User.objects.create_user(
             username='verification-admin',
             password='test-password',

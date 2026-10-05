@@ -96,6 +96,9 @@ class ResearchAcquisitionSecurityTests(SimpleTestCase):
 class ResearchDiscoveryServiceTests(SimpleTestCase):
     def setUp(self):
         self.search = MagicMock()
+        preferences = patch("industry_knowledge.models.Industry.objects.filter")
+        preferences.start().return_value.first.return_value = None
+        self.addCleanup(preferences.stop)
         self.service = ResearchDiscoveryService(search_service=self.search)
 
     @patch.object(

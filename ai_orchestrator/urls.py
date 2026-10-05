@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .vm_status_view import VMStatusView
 from rest_framework.routers import DefaultRouter
 from .views import (
     AISettingsView, AIConnectionStatusView, ForexRateView, DealChatView, UniversalChatView,
@@ -22,6 +23,7 @@ urlpatterns = [
     path('skills/deals/<uuid:deal_id>/', DealIndustrySkillsView.as_view(), name='deal-industry-skills'),
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/', DealIndustrySkillAssignmentView.as_view(), name='deal-industry-skill-assignment'),
     path('skills/deals/<uuid:deal_id>/<uuid:skill_id>/run/', DealIndustrySkillRunView.as_view(), name='deal-industry-skill-run'),
+    path('vm/status/', VMStatusView.as_view(), name='ai-vm-status'),
     path('vm/control/', VMControlView.as_view(), name='ai-vm-control'),
     path('websocket-ticket/', WebSocketTicketView.as_view(), name='ai-websocket-ticket'),
     path('document-capabilities/', DocumentCapabilitiesView.as_view(), name='ai-document-capabilities'),

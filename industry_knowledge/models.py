@@ -105,6 +105,8 @@ class Industry(models.Model):
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="sub_industries")
     overview = models.TextField(blank=True, default="", help_text="Industry overview and sector dynamics")
     context = models.TextField(blank=True, default="", help_text="Analyst notes, thesis, and investment context")
+    research_instructions = models.TextField(blank=True, default="")
+    preferred_domains = models.JSONField(default=list, blank=True)
     market_size = models.CharField(max_length=255, blank=True, default="")
     growth_rate = models.CharField(max_length=255, blank=True, default="")
     classification_status = models.CharField(max_length=30, default="AUTO_CHECKED")

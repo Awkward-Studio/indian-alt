@@ -350,6 +350,20 @@ class GraphAPIService:
 
     # ── Folder listing ──
 
+    def _all_children(self, endpoint, token, params=None):
+        """Finish Graph pagination before publishing a folder listing or count."""
+        values = []
+        seen_links = set()
+        while endpoint:
+            if endpoint in seen_links:
+                raise ValueError("Microsoft returned a repeated pagination link")
+            seen_links.add(endpoint)
+            data = self._make_request('GET', endpoint, token, params)
+            values.extend(data.get('value', []))
+            endpoint = data.get('@odata.nextLink')
+            params = None
+        return {'value': values}
+
     def list_folder_by_drive_path(self, drive_id: str = DMS_DRIVE_ID,
                                   folder_path: str = DMS_FOLDER_PATH,
                                   user_email: str = DMS_USER_EMAIL,
@@ -357,7 +371,7 @@ class GraphAPIService:
         """List children of a folder by drive ID and path."""
         token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
-        return self._make_request('GET', f"/drives/{drive_id}/root:/{folder_path}:/children", token, params)
+        return self._all_children(f"/drives/{drive_id}/root:/{folder_path}:/children", token, params)
 
     def list_drive_root_children(self, drive_id: str = DMS_DRIVE_ID,
                                  user_email: str = DMS_USER_EMAIL,
@@ -365,7 +379,7 @@ class GraphAPIService:
         """List children directly from the drive root."""
         token = self.get_access_token(user_email, require_delegated=True)
         params = {'$top': top}
-        return self._make_request('GET', f"/drives/{drive_id}/root/children", token, params)
+        return self._all_children(f"/drives/{drive_id}/root/children", token, params)
 
     def get_drive_item_children(self, drive_id: str, item_id: str,
                                 user_email: str = DMS_USER_EMAIL,
@@ -603,7 +617,7 @@ class GraphAPIService:
         """Access a shared folder directly via its sharing URL."""
         token = self.get_access_token(user_email, require_delegated=True)
         encoded = self._encode_sharing_url(sharing_url)
-        return self._make_request('GET', f"/shares/{encoded}/driveItem/children", token)
+        return self._all_children(f"/shares/{encoded}/driveItem/children", token)
 
     def get_shared_folder_info(self, sharing_url: str, user_email: str = DMS_USER_EMAIL) -> Dict[str, Any]:
         """Get metadata about a shared folder via its sharing URL."""

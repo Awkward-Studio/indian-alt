@@ -252,6 +252,7 @@ class DriveItemSerializer(serializers.Serializer):
 class OneDriveListResponseSerializer(serializers.Serializer):
     """Top-level response for the list OneDrive files/folders endpoint."""
     count = serializers.IntegerField(help_text='Number of items returned')
+    folder_count = serializers.IntegerField(required=False, help_text='Total direct child folders across all pages; excludes nested folders')
     items = DriveItemSerializer(many=True, help_text='List of drive items')
     next_skip = serializers.IntegerField(
         help_text='Value to pass as skip parameter for the next page (null if no more pages)',

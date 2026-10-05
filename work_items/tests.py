@@ -154,6 +154,24 @@ class WorkItemAPITests(TestCase):
         comment = self.client.post(reverse("task-comment-list"), {"task": str(task.id), "body": "Ready for review"}, format="json")
         self.assertEqual(comment.status_code, 201)
         self.assertEqual(TaskComment.objects.get().body, "Ready for review")
+        self.client.force_authenticate(allocator_user)
+        approved = self.client.patch(reverse("task-detail", kwargs={"pk": task.id}), {"status": "done"}, format="json")
+        self.assertEqual(approved.json()["status"], TaskStatus.DONE)
+        self.assertIsNotNone(approved.json()["completed_at"])
+        self.assertIsNone(approved.json()["review_requested_at"])
+
+    def test_assignment_date_changes_only_when_assignment_changes(self):
+        task = Task.objects.create(deal=self.deal, title="Assignment", created_by=self.profile)
+        self.assertIsNone(task.assigned_at)
+        url = reverse("task-detail", kwargs={"pk": task.id})
+        response = self.client.patch(url, {"assignee_id": str(self.profile.id)}, format="json")
+        self.assertEqual(response.status_code, 200)
+        assigned_at = response.json()["assigned_at"]
+        self.assertIsNotNone(assigned_at)
+        updated = self.client.patch(url, {"description": "Additional details"}, format="json")
+        self.assertEqual(updated.json()["assigned_at"], assigned_at)
+        removed = self.client.patch(url, {"assignee_id": None}, format="json")
+        self.assertIsNone(removed.json()["assigned_at"])
 
     def test_move_swaps_saved_positions(self):
         first = Task.objects.create(deal=self.deal, title="First", created_by=self.profile, position=1)

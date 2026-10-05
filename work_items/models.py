@@ -37,6 +37,7 @@ class Task(models.Model):
     )
     origin = models.CharField(max_length=20, choices=Origin.choices, default=Origin.MANUAL)
     fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    assigned_at = models.DateTimeField(null=True, blank=True, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     position = models.PositiveIntegerField(default=0, db_index=True)
     review_requested_at = models.DateTimeField(null=True, blank=True)
@@ -51,6 +52,17 @@ class Task(models.Model):
             models.Index(fields=["assignee", "status"], name="task_assignee_status_idx"),
             models.Index(fields=["status", "due_date"], name="task_status_due_idx"),
         ]
+
+    def save(self, *args, **kwargs):
+        from django.utils import timezone
+        previous_assignee = None
+        if not self._state.adding:
+            previous_assignee = type(self).objects.filter(pk=self.pk).values_list("assignee_id", flat=True).first()
+        if self._state.adding or previous_assignee != self.assignee_id:
+            self.assigned_at = timezone.now() if self.assignee_id else None
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = set(kwargs["update_fields"]) | {"assigned_at"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.deal}: {self.title[:80]}"

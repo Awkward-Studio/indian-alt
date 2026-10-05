@@ -38,9 +38,17 @@ class MeetingSignalAnalysisAuditTests(SimpleTestCase):
             body="Management discussed revenue growth and customer concentration.",
         )
 
+    def test_unsupported_proposed_findings_are_reported_to_user(self):
+        service = MeetingSignalAnalysisService()
+        result = service._normalize_result({"red_signals": [{"title": "Unverified", "detail": "Needs evidence", "evidence": ["Invented quote"]}], "green_signals": [], "open_questions": [], "executive_summary": "Analysis complete."})
+        checked = service._verify_result_evidence(result, [self.note])
+        self.assertEqual(checked["red_signals"], [])
+        self.assertIn("1 proposed finding(s) were withheld", checked["executive_summary"])
+        self.assertIn("quoted evidence could not be found", checked["open_questions"][-1])
+
     @patch("meetings.services.meeting_signal_analysis.AIAuditLog.objects.create")
     @patch("meetings.services.meeting_signal_analysis.MeetingSignalAnalysisService.persist_signals", return_value=[])
-    @patch("meetings.services.meeting_signal_analysis.PromptCatalogService.get", return_value="system")
+    @patch("meetings.services.meeting_signal_analysis.PipelineRegistryService.render_prompt_stage", return_value=("system", "prompt", SimpleNamespace(pipeline=None, stage=None, prompt_revision=SimpleNamespace(user_template="system"))))
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService.execute_standard")
     def test_success_persists_completed_ai_history_entry(self, vm_execute, _prompt, _persist, create_audit_log):
         audit_log = MagicMock(
@@ -60,6 +68,12 @@ class MeetingSignalAnalysisAuditTests(SimpleTestCase):
 
         result = service.analyze_deal(self.deal, [self.note])
 
+        extraction_call = _prompt.call_args_list[-1]
+        self.assertEqual(extraction_call.args, ("meeting_analysis", "extract"))
+        source_packet = extraction_call.kwargs["meeting_notes"]
+        self.assertIn(self.note.body, source_packet)
+        self.assertIn(self.note.summary, source_packet)
+        self.assertIn(str(self.note.id), source_packet)
         self.assertEqual(result["audit_log_id"], str(audit_log.id))
         self.assertEqual(audit_log.status, "COMPLETED")
         self.assertTrue(audit_log.is_success)
@@ -82,7 +96,7 @@ class PersistentMeetingSignalTests(TestCase):
         )
         self.deal = Deal.objects.create(title='Signal Deal')
         self.deal.responsibility.add(self.profile)
-        self.note = MeetingNote.objects.create(title='Management meeting', body='Customer concentration increased.')
+        self.note = MeetingNote.objects.create(title='Management meeting', body='Customer concentration increased. Customer A is 45% of revenue.')
         self.note.deals.add(self.deal)
         self.audit = AIAuditLog.objects.create(
             source_type='meeting_signal_analysis',
@@ -138,6 +152,8 @@ class PersistentMeetingSignalTests(TestCase):
 
     def test_materially_changed_evidence_creates_new_unreviewed_revision(self):
         original = self._persist()[0]
+        self.note.body = 'Customer A is now 62% of revenue.'
+        self.note.save(update_fields=['body'])
         changed = self._persist(self._result('Customer A is now 62% of revenue.'))[0]
 
         self.assertNotEqual(original['id'], changed['id'])
@@ -150,6 +166,16 @@ class PersistentMeetingSignalTests(TestCase):
         self.assertEqual(persisted['source_note_ids'], [str(self.note.id)])
         self.assertEqual(persisted['evidence'][0]['source_note_ids'], [str(self.note.id)])
         self.assertEqual(persisted['first_audit_log_id'], str(self.audit.id))
+
+    def test_invented_evidence_is_not_persisted(self):
+        self.assertEqual(self._persist(self._result('Invented statement not in any transcript.')), [])
+        self.assertFalse(MeetingSignalFlag.objects.filter(deal=self.deal).exists())
+
+    def test_quote_references_only_the_matching_note(self):
+        other = MeetingNote.objects.create(title='Other call', body='Discussed market growth.')
+        other.deals.add(self.deal)
+        flags = MeetingSignalAnalysisService.persist_signals(deal=self.deal, notes=[self.note, other], audit_log=self.audit, result=self._result())
+        self.assertEqual(flags[0]['evidence'][0]['source_note_ids'], [str(self.note.id)])
 
     def test_review_api_is_attributable_filterable_and_terminal(self):
         signal = self._persist()[0]
@@ -197,7 +223,7 @@ class PersistentMeetingSignalTests(TestCase):
         self.assertEqual(unauthorized.status_code, 403)
 
     @patch("meetings.services.meeting_signal_analysis.AIAuditLog.objects.create")
-    @patch("meetings.services.meeting_signal_analysis.PromptCatalogService.get", return_value="system")
+    @patch("meetings.services.meeting_signal_analysis.PipelineRegistryService.render_prompt_stage", return_value=("system", "prompt", SimpleNamespace(pipeline=None, stage=None, prompt_revision=SimpleNamespace(user_template="system"))))
     @patch("ai_orchestrator.services.llm_providers.VLLMProviderService.execute_standard", side_effect=RuntimeError("vm offline"))
     def test_failure_persists_failed_ai_history_entry(self, _vm, _prompt, create_audit_log):
         audit_log = MagicMock(

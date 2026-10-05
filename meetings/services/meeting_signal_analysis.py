@@ -76,6 +76,7 @@ class MeetingSignalAnalysisService:
 
         def complete(content: str, *, provider: str, base_url: str, model: str) -> dict[str, Any]:
             parsed = self._normalize_result(self._parse_json(content))
+            parsed = self._verify_result_evidence(parsed, notes)
             result = {
                 "deal_id": str(deal.id),
                 "deal_title": deal.title,
@@ -179,11 +180,17 @@ class MeetingSignalAnalysisService:
         ):
             for item in result.get(key) or []:
                 passages = [str(value).strip() for value in item.get("evidence", []) if str(value).strip()]
-                evidence = [
-                    {"passage": passage, "source_note_ids": source_note_ids}
-                    for passage in passages
-                ]
-                candidates.append((kind, item["title"], item["detail"], item.get("confidence") or "medium", evidence))
+                evidence = []
+                for passage in passages:
+                    matching_ids = sorted(
+                        str(note.id) for note in notes
+                        if passage in (note.body or "") or passage in (note.summary or "")
+                    )
+                    if matching_ids:
+                        evidence.append({"passage": passage, "source_note_ids": matching_ids})
+                # A source-supported flag must quote the actual saved material.
+                if evidence:
+                    candidates.append((kind, item["title"], item["detail"], item.get("confidence") or "medium", evidence))
         for question in result.get("open_questions") or []:
             text = str(question).strip()
             if text:
@@ -322,6 +329,28 @@ class MeetingSignalAnalysisService:
         while stack:
             text += stack.pop()
         return text
+
+    @staticmethod
+    def _verify_result_evidence(parsed: dict[str, Any], notes: list[MeetingNote]) -> dict[str, Any]:
+        withheld = 0
+        for signal_key in ("red_signals", "green_signals"):
+            supported = []
+            for signal in parsed[signal_key]:
+                signal["evidence"] = [
+                    passage for passage in signal["evidence"]
+                    if isinstance(passage, str) and passage.strip()
+                    and any(passage in (note.body or "") or passage in (note.summary or "") for note in notes)
+                ]
+                if signal["evidence"]:
+                    supported.append(signal)
+                else:
+                    withheld += 1
+            parsed[signal_key] = supported
+        if withheld:
+            notice = f"{withheld} proposed finding(s) were withheld because their quoted evidence could not be found in the saved meeting notes or transcripts. Review the source material before relying on this analysis."
+            parsed["open_questions"] = [*parsed["open_questions"][:9], notice]
+            parsed["executive_summary"] = f"{parsed['executive_summary']}\n\n{notice}".strip()
+        return parsed
 
     def _normalize_result(self, parsed: dict[str, Any]) -> dict[str, Any]:
         def normalize_signal(item: Any) -> dict[str, Any]:

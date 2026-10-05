@@ -116,9 +116,13 @@ class IndustryDocumentSerializer(serializers.ModelSerializer):
 
 
 class IndustryNewsArticleSerializer(serializers.ModelSerializer):
+    url = serializers.URLField(max_length=1000)
+
     class Meta:
         model = IndustryNewsArticle
         fields = ["id", "industry_id", "title", "url", "source_name", "summary", "category", "published_at", "created_at"]
+        read_only_fields = ["id", "industry_id", "created_at"]
+        validators = []
 
 
 class DealSummaryForIndustrySerializer(serializers.ModelSerializer):
@@ -140,7 +144,7 @@ class IndustryListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Industry
         fields = [
-            "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
+            "id", "name", "parent", "parent_name", "overview", "context", "research_instructions", "preferred_domains", "market_size", "growth_rate",
             "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
             "summary_status", "summary_error", "summary_sources", "last_summarized_at",
             "deals_count", "documents_count", "news_count", "created_at", "updated_at",
@@ -148,6 +152,26 @@ class IndustryListSerializer(serializers.ModelSerializer):
 
 
 class IndustryDetailSerializer(serializers.ModelSerializer):
+    def validate_preferred_domains(self, values):
+        from urllib.parse import urlparse
+        import re
+        if not isinstance(values, list) or len(values) > 20:
+            raise serializers.ValidationError("Provide up to 20 publisher domains.")
+        domains = []
+        for value in values:
+            value = str(value).strip().lower()
+            domain = urlparse(value if "://" in value else f"https://{value}").hostname or ""
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}", domain):
+                raise serializers.ValidationError("Use a public publisher domain such as o3capital.com.")
+            if domain not in domains:
+                domains.append(domain)
+        return domains
+
+    def validate_research_instructions(self, value):
+        if len(value) > 2000:
+            raise serializers.ValidationError("Keep research instructions within 2,000 characters.")
+        return value
+
     deals_count = serializers.SerializerMethodField()
     documents = serializers.SerializerMethodField()
     news_articles = serializers.SerializerMethodField()
@@ -158,7 +182,7 @@ class IndustryDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Industry
         fields = [
-            "id", "name", "parent", "parent_name", "overview", "context", "market_size", "growth_rate",
+            "id", "name", "parent", "parent_name", "overview", "context", "research_instructions", "preferred_domains", "market_size", "growth_rate",
             "classification_status", "classification_basis", "research_status", "last_researched_at", "research_error",
             "summary_status", "summary_error", "summary_sources", "last_summarized_at",
             "documents", "news_articles", "deals", "sub_industries", "deals_count", "created_at", "updated_at",

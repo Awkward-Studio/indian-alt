@@ -288,6 +288,10 @@ def pull_industry_news(industry, limit: int = 15):
         (IndustryNewsArticle.Category.TRANSACTION, f'"{industry.name}" India acquisition investment funding transaction'),
         (IndustryNewsArticle.Category.REPORT, f'"{industry.name}" India market report TAM growth filetype:pdf'),
     ]
+    for domain in industry.preferred_domains or []:
+        searches.append((IndustryNewsArticle.Category.REPORT, f'site:{domain} "{industry.name}" India research report'))
+    if industry.research_instructions.strip():
+        searches.append((IndustryNewsArticle.Category.REPORT, f'"{industry.name}" {industry.research_instructions[:500]}'))
     for category, search_query in searches:
         results = provider.search_results(
             search_query,

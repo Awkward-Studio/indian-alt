@@ -32,7 +32,7 @@ class ContactSerializer(serializers.ModelSerializer):
                 "bank": str(deal.bank_id) if deal.bank_id else None,
                 "bank_name": deal.bank.name if deal.bank else None,
                 "is_primary": deal.primary_contact_id == obj.id,
-                "activity_date": deal.received_at or deal.created_at.date(),
+                "activity_date": (deal.received_at or deal.created_at.date()).isoformat(),
             }
             for deal in combined
         ]

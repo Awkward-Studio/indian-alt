@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import json
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
@@ -212,6 +212,11 @@ class DealClaimCollectionTests(TestCase):
 
 
 class DiscrepancyClassifierTests(SimpleTestCase):
+    def setUp(self):
+        self.prompt_patch = patch("deals.services.contradiction_detection.PipelineRegistryService.render_prompt_stage", return_value=("Classify sourced claims", "Claim pair", None))
+        self.prompt_patch.start()
+        self.addCleanup(self.prompt_patch.stop)
+
     def _claim(
         self,
         *,
@@ -531,6 +536,10 @@ class DealContradictionApiTests(TestCase):
 
 
 class DealContradictionPersistenceTests(TestCase):
+    def setUp(self):
+        from django.core.management import call_command
+        call_command("seed_ai_prompts", verbosity=0)
+
     def test_pipeline_persistence_is_idempotent_and_preserves_review(self):
         deal = Deal.objects.create(title="Acme")
         left = StructuredClaim(

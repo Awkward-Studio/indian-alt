@@ -221,8 +221,6 @@ class IndustryViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="generate-summary")
     def generate_summary(self, request, pk=None):
         industry = self.get_object()
-        if industry.parent_id:
-            return Response({"error": "AI summaries can only be generated for umbrella industries."}, status=400)
         if industry.summary_status not in {Industry.ResearchStatus.QUEUED, Industry.ResearchStatus.RUNNING}:
             industry.summary_status = Industry.ResearchStatus.QUEUED
             industry.summary_error = ""
@@ -247,6 +245,27 @@ class IndustryViewSet(viewsets.ModelViewSet):
         article.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=["post"], url_path="transactions")
+    def add_transactions(self, request, pk=None):
+        industry = self.get_object()
+        records = request.data.get("records", [])
+        if not isinstance(records, list) or not 1 <= len(records) <= 200:
+            return Response({"error": "Provide between 1 and 200 transaction records."}, status=400)
+        # Validate the whole import before writing any records.
+        serializer = IndustryNewsArticleSerializer(data=records, many=True)
+        serializer.is_valid(raise_exception=True)
+        from django.db import transaction
+        rows = []
+        with transaction.atomic():
+            for data in serializer.validated_data:
+                data.pop("category", None)
+                row, _ = IndustryNewsArticle.objects.update_or_create(
+                    industry=industry, url=data.pop("url"),
+                    defaults={**data, "category": IndustryNewsArticle.Category.TRANSACTION},
+                )
+                rows.append(row)
+        return Response(IndustryNewsArticleSerializer(rows, many=True).data, status=201)
+
     @action(detail=True, methods=["post"], url_path="upload-document")
     def upload_document(self, request, pk=None):
         industry = self.get_object()
@@ -256,6 +275,12 @@ class IndustryViewSet(viewsets.ModelViewSet):
         if file_obj.size > 25 * 1024 * 1024:
             return Response({"error": "File size exceeds 25 MB limit."}, status=400)
 
+        from pathlib import Path
+        from ai_orchestrator.services.document_processor import DocumentProcessorService
+        if not file_obj.size:
+            return Response({"error": "The file is empty."}, status=400)
+        if Path(file_obj.name).suffix.lower() not in DocumentProcessorService.SUPPORTED_EXTENSIONS:
+            return Response({"error": "Use a supported document format such as PDF, Word, Excel or plain text."}, status=400)
         file_content = file_obj.read()
         file_name = file_obj.name
 

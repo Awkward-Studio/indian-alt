@@ -2,7 +2,7 @@ from celery import shared_task
 
 from django.utils import timezone
 
-from .models import Industry, IndustryDocument, IndustryNewsArticle, NewsSource
+from .models import Industry, IndustryDocument, IndustryNewsArticle, NewsSource, KnowledgeDocument
 from .services import ingest_source, pull_industry_news
 
 
@@ -79,9 +79,23 @@ def generate_industry_summary(industry_id):
             query = f"{industry.name} India market size TAM growth segments investment trends"
             try:
                 semantic_chunks = EmbeddingService().search_global_chunks(query, limit=10, deal_ids=deal_ids)
+                restricted_note_ids = {str(value) for value in KnowledgeDocument.objects.filter(
+                    visibility=KnowledgeDocument.Visibility.RESTRICTED,
+                    meeting_note__isnull=False,
+                ).values_list("meeting_note_id", flat=True)}
+                semantic_chunks = [chunk for chunk in semantic_chunks if str(chunk.source_id) not in restricted_note_ids]
             except Exception:
                 semantic_chunks = []
 
+        transcripts = list(KnowledgeDocument.objects.filter(
+            kind=KnowledgeDocument.Kind.TRANSCRIPT, visibility=KnowledgeDocument.Visibility.INTERNAL,
+            sector__in=industry_names, meeting_note__is_indexed=True,
+        ).select_related("meeting_note")[:10])
+        transcript_evidence = "\n\n".join(
+            f"[INDUSTRY CALL; title={publication.title}; confidentiality={publication.confidentiality}]\n"
+            f"{_bounded(publication.meeting_note.body, 2500)}"
+            for publication in transcripts
+        )
         internal_reports = "\n\n".join(
             f"[IA REPORT {index}; industry={doc.industry.name}; title={doc.title}]\n{_bounded(doc.extracted_text, 2500)}"
             for index, doc in enumerate(documents, 1)
@@ -113,6 +127,9 @@ Included industries: {', '.join(industry_names)}
 
 IA REPORTS:
 {internal_reports or 'None'}
+
+SHARED INDUSTRY CALLS:
+{transcript_evidence or 'None'}
 
 WEB REPORTS AND TRANSACTIONS:
 {web_evidence or 'None'}
@@ -146,6 +163,7 @@ Return exactly this JSON shape:
             "umbrella": industry.name,
             "included_industries": industry_names,
             "ia_reports": len(documents),
+            "industry_calls": len(transcripts),
             "web_reports": sum(article.category == IndustryNewsArticle.Category.REPORT for article in articles),
             "transactions": sum(article.category == IndustryNewsArticle.Category.TRANSACTION for article in articles),
             "ia_deals": len(deals),

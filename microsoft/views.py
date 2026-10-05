@@ -796,6 +796,7 @@ class OneDriveListView(APIView):
             items = ONEDRIVE_MOCK_DATA[:top]
             response_data = {
                 'count': len(items),
+                'folder_count': sum('folder' in item for item in items),
                 'items': items,
                 'next_skip': None,
             }
@@ -864,6 +865,7 @@ class OneDriveListView(APIView):
 
             response_data = {
                 'count': len(items),
+                'folder_count': sum('folder' in item for item in items),
                 'items': items,
                 'next_skip': top if next_link else None,
             }
@@ -983,7 +985,8 @@ class OneDriveDownloadView(APIView):
         try:
             graph = GraphAPIService()
             download_url = graph.get_drive_item_download_url(drive_id, item_id)
-            if not download_url:
+            metadata = graph.get_drive_item(drive_id, item_id) if request.query_params.get('intent') == 'open' else {}
+            if not download_url and not metadata.get('webUrl'):
                 return Response(
                     {
                         'error': 'Resource not found',
@@ -992,7 +995,7 @@ class OneDriveDownloadView(APIView):
                     },
                     status=status.HTTP_404_NOT_FOUND,
                 )
-            return Response({'download_url': download_url}, status=status.HTTP_200_OK)
+            return Response({'download_url': download_url, 'open_url': metadata.get('webUrl') or download_url}, status=status.HTTP_200_OK)
         except ValueError as e:
             # Authentication/permission errors
             logger.error(f"OneDrive authentication error: {e}", exc_info=True)

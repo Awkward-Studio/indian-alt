@@ -164,7 +164,7 @@ class IndustryViewSetTests(TestCase):
         row = next(item for item in refreshed.data if item["name"] == "Cold Chain")
 
         self.assertEqual(updated.status_code, 200)
-        self.assertEqual(row["parent"], healthcare["id"])
+        self.assertEqual(str(row["parent"]), str(healthcare["id"]))
         self.assertEqual(row["classification_status"], "HUMAN_REVIEWED")
 
     def test_retrieve_industry_returns_historic_deals(self):
@@ -261,3 +261,84 @@ class IndustryViewSetTests(TestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertFalse(IndustryNewsArticle.objects.filter(id=article.id).exists())
+
+
+class IndustryFeedbackWorkflowsTests(TestCase):
+    def setUp(self):
+        from .models import Industry
+        self.user = User.objects.create_user(username="feedback-analyst")
+        self.profile = Profile.objects.create(user=self.user, name="Feedback analyst", email="feedback-analyst@example.com")
+        self.industry = Industry.objects.create(name="Healthcare")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_transaction_import_upserts_and_rejects_invalid_batch_atomically(self):
+        from .models import IndustryNewsArticle
+        endpoint = f"/api/industry-knowledge/industries/{self.industry.id}/transactions/"
+        records = [{"title": "Hospital acquisition", "url": "https://example.com/acquisition", "summary": "Acquired in 2020"}]
+        self.assertEqual(self.client.post(endpoint, {"records": records}, format="json").status_code, 201)
+        records[0]["summary"] = "Updated transaction amount"
+        self.assertEqual(self.client.post(endpoint, {"records": records}, format="json").status_code, 201)
+        self.assertEqual(IndustryNewsArticle.objects.count(), 1)
+        self.assertEqual(IndustryNewsArticle.objects.get().category, "TRANSACTION")
+        self.assertEqual(IndustryNewsArticle.objects.get().summary, "Updated transaction amount")
+        records += [{"title": "Invalid source", "url": "javascript:alert(1)"}]
+        self.assertEqual(self.client.post(endpoint, {"records": records}, format="json").status_code, 400)
+        self.assertEqual(IndustryNewsArticle.objects.count(), 1)
+
+    def test_analyst_can_save_persistent_source_preferences(self):
+        endpoint = f"/api/industry-knowledge/industries/{self.industry.id}/"
+        response = self.client.patch(endpoint, {"preferred_domains": ["https://O3Capital.com/research"], "research_instructions": "Prefer recent Indian sector reports"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.industry.refresh_from_db()
+        self.assertEqual(self.industry.preferred_domains, ["o3capital.com"])
+        self.assertEqual(self.industry.research_instructions, "Prefer recent Indian sector reports")
+        self.assertEqual(self.client.patch(endpoint, {"preferred_domains": ["localhost"]}, format="json").status_code, 400)
+
+    @patch("industry_knowledge.tasks.generate_industry_summary.delay")
+    def test_subindustry_has_own_summary_action(self, enqueue):
+        from .models import Industry
+        child = Industry.objects.create(name="Hospitals", parent=self.industry)
+        response = self.client.post(f"/api/industry-knowledge/industries/{child.id}/generate-summary/")
+        self.assertEqual(response.status_code, 202)
+        enqueue.assert_called_once_with(str(child.id))
+
+    def test_report_upload_rejects_empty_and_unsupported_files(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        endpoint = f"/api/industry-knowledge/industries/{self.industry.id}/upload-document/"
+        self.assertEqual(self.client.post(endpoint, {"file": SimpleUploadedFile("empty.pdf", b"")}).status_code, 400)
+        self.assertEqual(self.client.post(endpoint, {"file": SimpleUploadedFile("unknown.exe", b"binary")}).status_code, 400)
+
+    def test_saved_preferences_guide_deal_report_search(self):
+        from deals.services.research_discovery import ResearchDiscoveryService
+        self.industry.preferred_domains = ["o3capital.com"]
+        self.industry.research_instructions = "Prefer Indian filings"
+        self.industry.save()
+        search = Mock()
+        search.search_many.return_value = []
+        deal = Deal.objects.create(title="Hospital", industry="Healthcare")
+        service = ResearchDiscoveryService(search_service=search)
+        service.discover(deal=deal)
+        queries = search.search_many.call_args.args[0]
+        self.assertTrue(any("site:o3capital.com" in query for query in queries))
+        self.assertTrue(any("Prefer Indian filings" in query for query in queries))
+
+    @patch("ai_orchestrator.services.runtime.AIRuntimeService.get_text_model", return_value="test-model")
+    @patch("ai_orchestrator.services.embedding_processor.EmbeddingService")
+    @patch("ai_orchestrator.services.llm_providers.VLLMProviderService")
+    def test_shared_summary_uses_shared_calls_and_excludes_restricted_calls(self, provider, embeddings, _model):
+        import json
+        from .tasks import generate_industry_summary
+        deal = Deal.objects.create(title="Hospital", industry="Healthcare")
+        for visibility, body in [("INTERNAL", "PUBLIC INDUSTRY INSIGHT"), ("RESTRICTED", "SECRET CALL INSIGHT")]:
+            note = MeetingNote.objects.create(title=visibility, body=body, is_indexed=True, created_by=self.profile)
+            KnowledgeDocument.objects.create(kind="TRANSCRIPT", title=visibility, meeting_note=note, sector="Healthcare", visibility=visibility, confidentiality="Internal", published_by=self.profile)
+            if visibility == "RESTRICTED":
+                embeddings.return_value.search_global_chunks.return_value = [Mock(source_id=str(note.id), source_type="meeting_note", content=body, deal=deal)]
+        provider.return_value.execute_standard.return_value = {"response": json.dumps({"market_size": "Not established", "growth_rate": "Not established", "overview": "Evidence summary", "context": "IA considerations"})}
+        result = generate_industry_summary(str(self.industry.id))
+        prompt = provider.return_value.execute_standard.call_args.args[0]["prompt"]
+        self.assertIn("PUBLIC INDUSTRY INSIGHT", prompt)
+        self.assertNotIn("SECRET CALL INSIGHT", prompt)
+        self.assertEqual(result["industry_calls"], 1)
+        self.assertEqual(result["semantic_matches"], 0)

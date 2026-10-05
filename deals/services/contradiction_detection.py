@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 from typing import Any, Iterable
 
@@ -230,6 +230,13 @@ class ContradictionDetectionService:
             if claim:
                 claims.append(claim)
 
+        claims.extend(cls.extract_qualitative_claims(
+            artifact.get("normalized_text") or artifact.get("extracted_text") or "",
+            subject=subject,
+            evidence=ClaimEvidence(source_type="deal_document", source_id=source_id,
+                source_label=source_label, passage="", location=cls._source_location(artifact), url=source_url),
+        ))
+
         for raw_claim in artifact.get("claims") or []:
             if not isinstance(raw_claim, str):
                 continue
@@ -263,6 +270,7 @@ class ContradictionDetectionService:
         }
         claims: list[StructuredClaim] = []
         for text in (getattr(note, "summary", ""), getattr(note, "body", "")):
+            claims.extend(cls.extract_qualitative_claims(text, subject=subject, evidence=ClaimEvidence(passage="", **evidence_base)))
             for passage in cls._evidence_lines(text):
                 claims.extend(
                     cls.extract_text_claims(
@@ -289,6 +297,13 @@ class ContradictionDetectionService:
             or ""
         )
         claims: list[StructuredClaim] = []
+
+        for field in ("business_description", "additional_info"):
+            claims.extend(cls.extract_qualitative_claims(
+                getattr(profile, field, "") or "", subject=subject,
+                evidence=ClaimEvidence(source_type="public_profile", source_id=source_id,
+                    source_label=source_label, passage="", location=field, url=source_url),
+            ))
 
         shareholding_fields = (
             ("Promoter shareholding", getattr(profile, "shp_promoter", None)),
@@ -356,6 +371,20 @@ class ContradictionDetectionService:
             if claim:
                 claims.append(claim)
         return cls._deduplicate(claims)
+
+    @classmethod
+    def extract_qualitative_claims(cls, text: str, *, subject: str, evidence: ClaimEvidence) -> list[StructuredClaim]:
+        from deals.services.qualitative_claims import extract_assertions
+        return [
+            StructuredClaim(
+                subject=subject, metric=metric, value=1.0 if affirmative else 0.0,
+                value_text="affirmed" if affirmative else "denied", unit="factual_assertion",
+                period=cls._period_from_text(passage), confidence="high",
+                evidence=replace(evidence, passage=passage),
+            )
+            for metric, affirmative, passage in extract_assertions(text)
+            if passage in str(text or "")
+        ]
 
     @classmethod
     def extract_text_claims(
@@ -1055,6 +1084,9 @@ class DiscrepancyClassifier:
         left: StructuredClaim,
         right: StructuredClaim,
     ) -> dict[str, Any]:
+        if left.unit == "factual_assertion":
+            return {"left_claim": left.as_dict(), "right_claim": right.as_dict(),
+                    "claim_kind": "qualitative", "instruction": "The values encode affirmed versus denied, not numeric amounts. Judge the quoted factual assertions, period and context."}
         return {
             "left_claim": left.as_dict(),
             "right_claim": right.as_dict(),

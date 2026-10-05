@@ -185,6 +185,15 @@ class ResearchDiscoveryService:
                     continue
                 if query:
                     queries.append(f"site:{rule.domain} {query}")
+        from industry_knowledge.models import Industry
+        preference = Industry.objects.filter(name__iexact=industry).first() if industry else None
+        if preference:
+            domains = preference.preferred_domains or []
+            self.preferred_publishers.update(domains)
+            for domain in domains:
+                queries.insert(0, f"site:{domain} {template_context['market']} research report annual report equity research")
+            if preference.research_instructions.strip():
+                queries.append(f"{template_context['market']} {preference.research_instructions.strip()[:500]}")
         queries = list(dict.fromkeys(queries))
         results = self.search_service.search_many(
             queries,

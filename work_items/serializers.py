@@ -25,9 +25,9 @@ class TaskSerializer(serializers.ModelSerializer):
         fields = (
             "id", "deal", "deal_title", "title", "description", "status", "priority", "due_date",
             "assignee", "assignee_id", "created_by", "origin", "fingerprint", "source_sections",
-            "position", "review_requested_at", "completed_at", "created_at", "updated_at",
+            "position", "assigned_at", "review_requested_at", "completed_at", "created_at", "updated_at",
         )
-        read_only_fields = ("id", "created_by", "origin", "fingerprint", "review_requested_at", "completed_at", "created_at", "updated_at")
+        read_only_fields = ("id", "assigned_at", "created_by", "origin", "fingerprint", "review_requested_at", "completed_at", "created_at", "updated_at")
 
     def get_source_sections(self, obj):
         return list(obj.source_suggestions.values_list("source_section", flat=True).distinct())
