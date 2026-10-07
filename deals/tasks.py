@@ -2177,10 +2177,19 @@ def process_vdr_report_section(
             context += "\n\n" + prior_context
         if self.request.retries:
             minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
+            previous_attempt = AIAuditLog.objects.filter(
+                source_type="vdr_report_section", source_id=audit_log_id,
+                context_label=f"VDR report section: {section_title}", status="FAILED",
+            ).order_by("-created_at").first()
+            validation_feedback = (previous_attempt.error_message or "")[:1000] if previous_attempt else ""
             context = (
                 f"{context}\n\n<retry_requirement>\n"
-                "The previous draft failed output validation. "
+                f"Retry attempt {self.request.retries}. The previous draft failed output validation: {validation_feedback}. "
                 f"Write a fresh, complete section of at least {minimum_words:,} words, "
+                "and aim for 2,500 words when the evidence supports it. Do not resubmit "
+                "the same draft. Review every analytical theme in the original section "
+                "instructions and expand supported mechanisms, counterevidence and "
+                "investment implications; explain the consequence of each material gap, "
                 "excluding source labels and references, without padding, repetition, "
                 "or unsupported claims. Cite every factual claim and supported table "
                 "row with exact supplied [Rnnn] markers, never filename-only "

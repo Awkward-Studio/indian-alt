@@ -522,7 +522,7 @@ class ICReportSectionService:
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
         if strict_financial_table and title == "Key Financials":
-            cls._validate_financial_table(text)
+            cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations})
         if citations and not used_citations:
             raise ReportSectionCitationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
@@ -562,7 +562,7 @@ class ICReportSectionService:
         return cls._append_references(text, citations, used_citations).strip()
 
     @classmethod
-    def _validate_financial_table(cls, text: str) -> None:
+    def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None) -> None:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
         tables, pending = [], []
         for line in [*text.splitlines(), ""]:
@@ -582,6 +582,13 @@ class ICReportSectionService:
         width = len(cls._table_cells(table[0]))
         if width < 2 or any(len(cls._table_cells(row)) != width for row in table):
             raise ReportSectionStructureError("Key Financials table must have consistent period columns and one metric per row.")
+        if verified_citation_numbers is not None:
+            for label, row in zip(labels, table[2:]):
+                values = cls._table_cells(row)[1:]
+                has_numbers = any(re.search(r"\d", re.sub(r"\[\d+\]", "", cell)) for cell in values)
+                cited = {int(number) for number in re.findall(r"\[(\d+)\]", row)}
+                if has_numbers and not cited.intersection(verified_citation_numbers):
+                    raise ReportSectionCitationError(f"Key Financials table row '{label}' must include a verified evidence citation inside the table.")
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:

@@ -9,6 +9,16 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_financial_numeric_rows_require_verified_citations_inside_table(self):
+        table = "| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n"
+        table += "\n".join(f"| {row} | 100 |" for row in FINANCIAL_ROWS)
+        with self.assertRaises(ReportSectionCitationError):
+            ICReportSectionService._validate_financial_table(table + "\n\nSource [1]", verified_citation_numbers={1})
+        cited = table.replace("| 100 |", "| 100 [1] |")
+        ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={1})
+        with self.assertRaises(ReportSectionCitationError):
+            ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={2})
+
     def test_authored_variable_heading_gets_financial_contract_by_stage(self):
         updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
         self.assertIn("Key Financials table format:", updated[1])

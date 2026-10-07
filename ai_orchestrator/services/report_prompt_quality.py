@@ -120,4 +120,13 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     )
     if "- Final output check:" not in user:
         user = user.rstrip() + FINAL_CHECK + "\n"
+    if is_financials and "Financial table citation rule:" not in user:
+        user += "\nFinancial table citation rule: Every row containing reported or calculated numbers "
+        user += "must include the exact supplied [Rnnn] markers INSIDE that table row, in its metric "
+        user += "label or value cells. A citation in a paragraph below the table does not cite the row. "
+        user += "For example, | Revenue [R001] | 100 | 120 |. Use your actual evidence markers and "
+        user += "values, not this example's numbers. If periods use different sources, cite the relevant "
+        user += "cells separately. Cite all source inputs for calculated rows. Rows entirely marked Not "
+        user += "provided need no citation. Final check: exactly one table, exactly the 13 specified "
+        user += "rows from Revenue to PAT, and verified markers inside every numeric row.\n"
     return system, user
