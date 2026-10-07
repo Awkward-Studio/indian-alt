@@ -64,7 +64,7 @@ FINAL_CHECK = (
 )
 
 
-def upgrade_report_prompt(system: str, user: str) -> tuple[str, str]:
+def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") -> tuple[str, str]:
     """Preserve all business instructions and template variables; replace contradictions."""
     system = system.replace(
         "Be skeptical, commercially practical and concise.",
@@ -96,7 +96,8 @@ def upgrade_report_prompt(system: str, user: str) -> tuple[str, str]:
         "- State section-specific unresolved issues in concise prose or bullets. "
         "Next Steps owns the consolidated action table in its specified twelve-column schema. "
         "The Executive Summary states the material approval gates.", system, flags=re.MULTILINE)
-    if "## Key Financials" in user and "Key Financials table format:" not in user:
+    is_financials = section_title == "Key Financials" or "## Key Financials" in user
+    if is_financials and "Key Financials table format:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
         user = user.replace(
             "- Begin with period-by-period financial tables, metrics in rows and periods in columns,",
@@ -104,7 +105,7 @@ def upgrade_report_prompt(system: str, user: str) -> tuple[str, str]:
         )
         user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash findings in prose where supported")
         user = FINANCIAL_TABLE_INSTRUCTION.lstrip() + "\n\n" + user
-    if "## Key Financials" in user and "Key Financials table format:" not in system:
+    if is_financials and "Key Financials table format:" not in system:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
         system += FINANCIAL_TABLE_INSTRUCTION
     user = re.sub(

@@ -9,6 +9,12 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_authored_variable_heading_gets_financial_contract_by_stage(self):
+        updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
+        self.assertIn("Key Financials table format:", updated[1])
+        self.assertIn("exactly ONE Markdown table", updated[0])
+        self.assertEqual(upgrade_report_prompt(*updated, section_title="Key Financials"), updated)
+
     def test_single_income_statement_has_exact_revenue_to_pat_order(self):
         table = "| Metric (INR Cr) | FY25 Actual | FY26 Forecast |\n| --- | ---: | ---: |\n"
         table += "\n".join(f"| {row} | Not provided | Not provided |" for row in FINANCIAL_ROWS)

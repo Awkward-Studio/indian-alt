@@ -26,7 +26,7 @@ class Command(BaseCommand):
             old = resolved.prompt_revision
             if not old:
                 raise CommandError(f"No published prompt for {title}.")
-            system, user = upgrade_report_prompt(old.system_template, old.user_template)
+            system, user = upgrade_report_prompt(old.system_template, old.user_template, section_title=title)
             PipelineRegistryService.validate_template(user, old.definition.variables)
             if (system, user) == (old.system_template, old.user_template):
                 self.stdout.write(f"{title}: already current (r{old.revision})")
