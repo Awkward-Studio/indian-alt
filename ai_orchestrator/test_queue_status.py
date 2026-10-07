@@ -99,6 +99,20 @@ class QueueStatusEndpointTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
+    @override_settings(AI_SLOT_TRANSPORT_ENABLED=False)
+    @patch('ai_orchestrator.views.requests.get')
+    @patch('ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot')
+    @patch('config.celery.app.control.inspect')
+    def test_vllm_diagnostics_do_not_probe_llama_slots(self,inspect,snapshot,get_slots):
+        inspect.return_value.active.return_value={}
+        inspect.return_value.reserved.return_value={}
+        inspect.return_value.scheduled.return_value={}
+        snapshot.return_value={'queues':[],'messages':[],'unacked':{'count':0,'messages':[]},'warning':None}
+        response=self.client.get('/api/ai/history/queue-status/?diagnostics=1')
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.data['inference']['slots'],[])
+        get_slots.assert_not_called()
+
     @patch("ai_orchestrator.views.requests.get")
     @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
     @patch("config.celery.app.control.inspect")
@@ -376,7 +390,7 @@ class QueueStatusEndpointTests(TestCase):
             if item["title"] == "Intermediate reduction"
         )
         self.assertTrue(failed_attempt["retry_resolved"])
-        self.assertEqual(failed_attempt["status"], "completed")
+        self.assertEqual(failed_attempt["status"], "retried")
         history_card_items = [
             item for item in response.data["queue_history"]
             if item["deal_id"] == str(deal.id)
@@ -385,6 +399,43 @@ class QueueStatusEndpointTests(TestCase):
             item["audit_status"] == "FAILED" and not item["retry_resolved"]
             for item in history_card_items
         ), 0)
+        self.assertEqual(sum(item["status"] == "completed" for item in history_card_items), 1)
+
+    @patch("ai_orchestrator.views.requests.get")
+    @patch("ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot")
+    @patch("config.celery.app.control.inspect")
+    def test_legacy_completed_section_attempt_is_displayed_as_retried(
+        self, inspect, snapshot, get_slots,
+    ):
+        inspect.return_value.active.return_value = {}
+        inspect.return_value.reserved.return_value = {}
+        inspect.return_value.scheduled.return_value = {}
+        snapshot.return_value = {"queues": [], "messages": [], "unacked": {"count": 0, "messages": []}, "warning": None}
+        get_slots.return_value.json.return_value = []
+        get_slots.return_value.raise_for_status.return_value = None
+        deal = Deal.objects.create(title="Section retry deal")
+        parent = AIAuditLog.objects.create(
+            source_type="vdr_report", source_id=str(deal.id), model_used="model",
+            system_prompt="prompt", user_prompt="prompt", status="PROCESSING",
+        )
+        for _ in range(2):
+            AIAuditLog.objects.create(
+                source_type="vdr_report_section", source_id=str(parent.id),
+                context_label="VDR report section: Next Steps", model_used="model",
+                system_prompt="prompt", user_prompt="prompt", status="COMPLETED",
+                is_success=True, celery_task_id="same-section-delivery",
+                completed_at=timezone.now(),
+                source_metadata={"vdr_parent_audit_id": str(parent.id)},
+            )
+
+        response = self.client.get("/api/ai/history/queue-status/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        attempts = [
+            item for item in response.data["queue_history"]
+            if item["source_type"] == "vdr_report_section"
+        ]
+        self.assertEqual(sorted(item["status"] for item in attempts), ["completed", "retried"])
 
     def test_fast_queue_status_hides_folder_tree_snapshots_from_ai_history(self):
         deal = Deal.objects.create(title="Folder Snapshot Deal")

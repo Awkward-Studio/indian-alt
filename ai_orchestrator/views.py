@@ -386,9 +386,11 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
             api_key = getattr(settings, 'VLLM_API_KEY', '')
             headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
-            slots_response = requests.get(slot_url, headers=headers, timeout=10)
-            slots_response.raise_for_status()
-            slots = slots_response.json()
+            slots = []
+            if getattr(settings, 'AI_SLOT_TRANSPORT_ENABLED', True):
+                slots_response = requests.get(slot_url, headers=headers, timeout=10)
+                slots_response.raise_for_status()
+                slots = slots_response.json()
             for slot in slots if isinstance(slots, list) else []:
                 slot_id = slot.get('id')
                 if slot_id is None:
@@ -517,7 +519,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             lease_owner = {key: value for key, value in lease_owner.items() if key != 'lease_token'}
         slots = []
         slot_warning = None
-        if include_diagnostics:
+        if include_diagnostics and getattr(settings, 'AI_SLOT_TRANSPORT_ENABLED', True):
             try:
                 parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
                 slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
@@ -956,13 +958,16 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 financial_synthesis_warning=KeyTextTransform(
                     'financial_synthesis_warning', 'source_metadata',
                 ),
+                report_section_outcome=KeyTextTransform(
+                    'report_section_outcome', 'source_metadata',
+                ),
             )
             .values(
                 'id', 'source_id', 'source_type', 'context_label', 'status',
                 'is_success', 'error_message', 'created_at', 'completed_at',
                 'celery_task_id', 'metadata_deal_id', 'matched_deal_id',
                 'vdr_parent_id', 'queue_kind', 'queue_state',
-                'financial_synthesis_warning',
+                'financial_synthesis_warning', 'report_section_outcome',
             ).order_by('-created_at')[:250]
         )
         history_source_ids = {
@@ -1024,7 +1029,7 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
                 'title': row.get('context_label') or row['source_type'].replace('_', ' ').title(),
                 'job_kind': job_kind,
                 'source_type': row['source_type'],
-                'status': row.get('queue_state') or row['status'].lower(),
+                'status': row.get('report_section_outcome') or row.get('queue_state') or row['status'].lower(),
                 'audit_status': row['status'],
                 'queued_at': row['created_at'],
                 'completed_at': row.get('completed_at'),
@@ -1033,23 +1038,33 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         # A Celery retry keeps the same task id. The failed inference audit is
-        # useful history, but it should not make a completed workflow look
-        # failed in the deal queue.
+        # useful history, but it must not appear as a second completed run.
         completed_deliveries = {
             (str(item.get('celery_task_id') or ''), str(item.get('deal_id') or ''))
             for item in queue_history
             if item.get('audit_status') == 'COMPLETED'
             and item.get('celery_task_id')
         }
+        # Older deployments saved model responses as COMPLETED before the
+        # section validator rejected them. Within one section delivery, only
+        # the newest successful attempt can be the accepted completion.
+        accepted_report_attempts = set()
         for item in queue_history:
             delivery_key = (
                 str(item.get('celery_task_id') or ''),
                 str(item.get('deal_id') or ''),
             )
             resolved = item.get('audit_status') == 'FAILED' and delivery_key in completed_deliveries
+            if item.get('source_type') in {'vdr_report_section', 'email_report_section'} and delivery_key[0]:
+                section_key = (*delivery_key, item.get('source_type'), item.get('title'))
+                if item.get('audit_status') == 'COMPLETED':
+                    if section_key in accepted_report_attempts:
+                        resolved = True
+                    else:
+                        accepted_report_attempts.add(section_key)
             item['retry_resolved'] = resolved
             if resolved:
-                item['status'] = 'completed'
+                item['status'] = 'retried'
 
         deal_title_by_id = {
             str(run.get('deal_id')): run.get('deal_title') for run in vdr_runs if run.get('deal_id')

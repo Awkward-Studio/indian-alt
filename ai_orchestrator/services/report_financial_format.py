@@ -73,6 +73,11 @@ FINANCIAL_SOURCE_RULE = (
     "actually perform and disclose missing, stale or truncated dependencies. "
     "Check narrative figures as carefully as the table, including crore/lakh/"
     "million/thousand conversions and negative values.\n"
+    "If the workbook does not declare currency or scale, label its table as native "
+    "model units with currency/scale Not provided and preserve the saved values. "
+    "Do not silently assign INR, crore or million to an unspecified scale; explain "
+    "the unit gap before interpreting absolute amounts. Dimensionless ratios from "
+    "compatible native-unit values can still be calculated and cited.\n"
 )
 
 
@@ -122,7 +127,7 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
         "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
         "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
         "Gross Profit": {"grossprofit"},
-        "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "opex"},
+        "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "operatingexpenditure", "totaloperatingexpenditure", "opex"},
         "EBITDA": {"ebitda", "operatingebitda"},
         "Depreciation and Amortization": {"depreciationandamortization", "depreciationamortization", "depreciation", "da"},
         "EBIT": {"ebit", "operatingprofit"},
@@ -135,6 +140,8 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
     }
     by_number = {int(c["citation_number"]): c for c in citations}
     table_scale = scale(rows[0][0])
+    native_units = bool(re.search(r"native\s+(?:model\s+)?units",rows[0][0],re.I))
+    if native_units: table_scale=Decimal(1)
     if table_scale is None:
         return []
     errors = []
@@ -147,8 +154,11 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
             candidates = []
             wrong_precise_rows = []
             wrong_precise_periods = []
+            source_ledgers = {}
+            workbook_references = False
             for number in references:
                 citation = by_number.get(int(number), {})
+                workbook_references |= bool(re.search(r"\.(?:xlsx|xlsm|xlsb|xls)$", str(citation.get("title") or ""), re.I))
                 facts = citation.get("financial_cells") or {}
                 location = citation.get("used_location") or citation.get("location") or ""
                 exact = re.search(r"!([A-Z]{1,3}\d+)(?::([A-Z]{1,3}\d+))?$", location)
@@ -156,6 +166,17 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
                     facts = {exact[1]: facts[exact[1]]} if exact[1] in facts else {}
                 for address, fact in facts.items():
                     label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
+                    source_scale = next((value for text in fact.get("unit_labels") or []
+                        if (value := scale(text)) is not None and value != 1), None)
+                    if source_scale is None:
+                        source_scale = scale(" ".join(fact.get("unit_labels") or []))
+                    if native_units: source_scale=Decimal(1)
+                    if source_scale is not None and fact.get("period") and period(fact["period"]) == period(rows[0][column]) and "%" not in fact.get("number_format", ""):
+                        source_value = Decimal(str(fact["value"])) * source_scale / table_scale
+                        source_metric = next((name for name,names in aliases.items() if label in names),None)
+                        if source_metric:
+                            key=(citation.get("document_id"), (citation.get("locator") or {}).get("sheet_name"))
+                            source_ledgers.setdefault(key,{}).setdefault(source_metric,set()).add(source_value)
                     if label not in aliases[metric]:
                         if exact and (exact[2] is None or exact[2] == exact[1]) and label:
                             wrong_precise_rows.append(f"{address} is labelled {fact['row_label']!r}")
@@ -166,12 +187,25 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
                         continue
                     if "%" in fact.get("number_format", ""):
                         continue
-                    source_scale = scale(" ".join(fact.get("unit_labels") or []))
                     if source_scale is not None:
                         value = Decimal(str(fact["value"])) * source_scale / table_scale
-                        if metric in {"Cost of Goods Sold", "Operating Expenses", "Depreciation and Amortization", "Income Tax Expense"}:
+                        if metric in {"Cost of Goods Sold", "Operating Expenses", "Depreciation and Amortization"}:
                             value = abs(value)
                         candidates.append((value, address))
+            equations={
+                'Gross Profit':[('Revenue',1),('Cost of Goods Sold',-1)],
+                'Operating Expenses':[('Gross Profit',1),('EBITDA',-1)],
+                'EBITDA':[('Gross Profit',1),('Operating Expenses',-1)],
+                'EBIT':[('EBITDA',1),('Depreciation and Amortization',-1)],
+                'PAT':[('PBT',1),('Income Tax Expense',-1)],
+                'Income Tax Expense':[('PBT',1),('PAT',-1)],
+            }
+            for ledger in source_ledgers.values():
+                inputs=equations.get(metric)
+                if inputs and all(len(ledger.get(name,set()))==1 for name,_ in inputs):
+                    candidates.append((sum(next(iter(ledger[name]))*sign for name,sign in inputs),'cited source-input calculation'))
+                if metric=='EBITDA' and len(ledger.get('EBITDA',set()))==1 and len(ledger.get('Other Non-operating Income / Expenses',set()))==1:
+                    candidates.append((next(iter(ledger['EBITDA']))-next(iter(ledger['Other Non-operating Income / Expenses'])),'reported-to-operating EBITDA bridge'))
             if candidates and all(abs(amount[0] - value) > amount[1] + Decimal("0.0000001") for value, _ in candidates):
                 values = ", ".join(f"{address}={value}" for value, address in candidates[:4])
                 errors.append(f"{metric} in {rows[0][column]}: displayed {amount[0]}, cited saved workbook values {values}")
@@ -179,4 +213,6 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
                 errors.append(f"{metric} in {rows[0][column]} cites a different source metric: {wrong_precise_rows[0]}")
             elif not candidates and len(references) == 1 and wrong_precise_periods:
                 errors.append(f"{metric} in {rows[0][column]} cites a different source period: {wrong_precise_periods[0]}")
+            elif not candidates and workbook_references:
+                errors.append(f"{metric} in {rows[0][column]} has no matching cited workbook value or supported source-input calculation. Cite its metric, year and units; otherwise mark Not provided.")
     return errors

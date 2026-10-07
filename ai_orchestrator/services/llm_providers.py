@@ -183,6 +183,8 @@ class VLLMProviderService:
                 self, body, active_timeout=float(effective_timeout or 1800), progress=slot_progress,
             )
             return self._standard_data(data)
+        if payload.get("_report_calculator"):
+            return self._execute_report_calculator(body, payload, effective_timeout)
         response = requests.post(
             self._get_completions_url(payload),
             headers=self._headers(),
@@ -201,6 +203,43 @@ class VLLMProviderService:
         finally:
             response.close()
         return self._standard_data(data)
+
+    def _execute_report_calculator(self, body, payload, timeout):
+        from .report_calculator import calculation_request
+        trace,thinking,usage=[],[],{}
+        for round_index in range(4):
+            response=requests.post(self._get_completions_url(payload),headers=self._headers(),
+                json=body,timeout=(self.connect_timeout,timeout))
+            try:
+                response.raise_for_status()
+                data=response.json()
+            finally: response.close()
+            result=self._standard_data(data)
+            thinking.append(result.get('thinking') or '')
+            for key,value in (result.get('usage') or {}).items():
+                if isinstance(value,(int,float)): usage[key]=usage.get(key,0)+value
+            try:
+                calculations=calculation_request(result['response'])
+            except (ValueError,TypeError) as error:
+                if '<report_calculations>' not in result['response']: raise
+                calculations=[{'error':str(error)[:200]}]
+            if calculations is None:
+                result.update(thinking='\n'.join(thinking),usage=usage,_report_calculation_trace=trace)
+                return result
+            if round_index==3: raise ValueError('Report calculator round limit reached without a final report.')
+            trace.extend(calculations)
+            body['messages'].extend([
+                {'role':'assistant','content':result['response']},
+                {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section.'},
+            ])
+            if payload.get('_enforce_context_budget'):
+                window=int(getattr(settings,'CHAT_MODEL_CONTEXT_TOKENS',65536))
+                input_tokens=estimate_tokens(json.dumps(body,ensure_ascii=False))
+                output_tokens=int(body.get('max_tokens') or 8192)
+                if input_tokens+output_tokens+4096>window:
+                    raise ContextBudgetExceeded(estimated_input_tokens=input_tokens,max_output_tokens=output_tokens,
+                        reserve_tokens=4096,context_window_tokens=window)
+        raise ValueError('Report calculator did not return a final report.')
 
     def _standard_data(self, data):
         choice = (data.get("choices") or [{}])[0]

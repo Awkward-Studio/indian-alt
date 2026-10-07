@@ -9,6 +9,22 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_calculated_labels_and_supported_input_citations_do_not_force_a_retry(self):
+        text='## Key Financials\n\n| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n'
+        values={name:'Not provided' for name in FINANCIAL_ROWS}
+        values.update({'Revenue':'100 [1]','Cost of Goods Sold':'60 [2]','Gross Profit':'40',
+            'Operating Expenses':'30 [3]','EBITDA':'10 [4]','Depreciation and Amortization':'2 [5]','EBIT':'8'})
+        text+='\n'.join(f"| {name+' *(Calculated)*¹' if name in ['Gross Profit','EBIT'] else name} | {values[name]} |" for name in FINANCIAL_ROWS)
+        normalized=ICReportSectionService._normalize_financial_metric_labels(text,'Key Financials')
+        normalized=ICReportSectionService._cite_supported_financial_calculations(normalized,{1,2,3,4,5})
+        self.assertIn('| Gross Profit [1] [2] | 40 |',normalized)
+        self.assertIn('| EBIT [4] [5] | 8 |',normalized)
+        ICReportSectionService._validate_financial_table(normalized,verified_citation_numbers={1,2,3,4,5})
+
+    def test_unreconciled_derived_row_does_not_receive_borrowed_citations(self):
+        text='| Revenue [1] | 100 |\n| Cost of Goods Sold [2] | 60 |\n| Gross Profit | 55 |'
+        self.assertEqual(ICReportSectionService._cite_supported_financial_calculations(text,{1,2}),text)
+
     def test_source_values_use_saved_results_year_units_and_signed_profit(self):
         from ai_orchestrator.services.report_financial_format import financial_source_errors
         rows = [["Metric (INR Cr)", "FY27 Forecast"], ["---", "---"],

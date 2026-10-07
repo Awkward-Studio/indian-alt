@@ -18,6 +18,17 @@ class AuditTaskControlTests(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
+    @override_settings(AI_SLOT_TRANSPORT_ENABLED=False)
+    @patch('ai_orchestrator.views.requests.get')
+    @patch('ai_orchestrator.views.requests.post')
+    @patch('ai_orchestrator.views.AIAuditLogViewSet._revoke',return_value=[])
+    def test_clear_active_with_vllm_does_not_use_slot_endpoints(self,revoke,post,get):
+        response=self.client.post('/api/ai/history/clear-active/',{},format='json')
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.data['erased_slot_count'],0)
+        get.assert_not_called()
+        post.assert_not_called()
+
     def test_websocket_ticket_is_scoped_and_single_use(self):
         response = self.client.post('/api/ai/websocket-ticket/', {'scope': 'ledger'}, format='json')
         self.assertEqual(response.status_code, 200, response.data)

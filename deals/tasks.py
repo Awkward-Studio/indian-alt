@@ -3,6 +3,7 @@ import json
 import hashlib
 import time
 import os
+import re
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery import shared_task, chord, current_task
@@ -2163,10 +2164,23 @@ def process_vdr_report_section(
         from ai_orchestrator.services.report_section_context import prior_section_context
         from ai_orchestrator.services.token_budget import estimate_tokens
         prior_context = prior_section_context(audit.source_metadata or {}, section_title)
+        previous_attempt = None
+        retry_draft = ""
+        if self.request.retries:
+            previous_attempt = AIAuditLog.objects.filter(
+                source_type="vdr_report_section", source_id=audit_log_id,
+                context_label=f"VDR report section: {section_title}", status="FAILED",
+            ).order_by("-created_at").first()
+            if previous_attempt and "was too short:" in (previous_attempt.error_message or ""):
+                draft = re.split(r"^###\s+Citations\s*$", previous_attempt.raw_response or "", maxsplit=1, flags=re.M)[0]
+                draft = re.sub(r"\[(?:R\d+(?:@[^]\n]+)?|\d+)\]", "", draft)
+                while estimate_tokens(draft) > 4000:
+                    draft = draft[:max(0,len(draft)-1000)]
+                retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis rejected draft is a structural starting point, not verified evidence. Re-check every claim against the current retrieval blocks and replace its citations. Expand supported analysis and material consequences instead of making a shorter summary."
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
         ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs,
-            max_tokens=max(4_000, int(getattr(settings, "VDR_REPORT_SECTION_EVIDENCE_TOKENS", 36_000)) - estimate_tokens(prior_context)))
+            max_tokens=max(4_000, int(getattr(settings, "VDR_REPORT_SECTION_EVIDENCE_TOKENS", 36_000)) - estimate_tokens(prior_context) - estimate_tokens(retry_draft)))
         retrieved = evidence_service.retrieve(section_title)
         context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
         evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None
@@ -2177,11 +2191,7 @@ def process_vdr_report_section(
             context += "\n\n" + prior_context
         if self.request.retries:
             minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
-            previous_attempt = AIAuditLog.objects.filter(
-                source_type="vdr_report_section", source_id=audit_log_id,
-                context_label=f"VDR report section: {section_title}", status="FAILED",
-            ).order_by("-created_at").first()
-            validation_feedback = (previous_attempt.error_message or "")[:1000] if previous_attempt else ""
+            validation_feedback = (previous_attempt.error_message or "")[:4000] if previous_attempt else ""
             context = (
                 f"{context}\n\n<retry_requirement>\n"
                 f"Retry attempt {self.request.retries}. The previous draft failed output validation: {validation_feedback}. "
@@ -2197,6 +2207,8 @@ def process_vdr_report_section(
                 "state exact gaps when records are absent.\n"
                 "</retry_requirement>"
             )
+            if retry_draft:
+                context += retry_draft
         section = ICReportSectionService._generate_section(
             ai_service=AIProcessorService(), evidence=context, analysis=analysis, title=section_title,
             source_id=audit_log_id, evidence_metadata=evidence_metadata,

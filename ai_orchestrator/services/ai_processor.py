@@ -207,6 +207,9 @@ class AIProcessorService:
                 system_instructions,
             )
         
+        if (metadata or {}).get("report_calculator") and model_provider != "anthropic":
+            from .report_calculator import CALCULATOR_INSTRUCTIONS
+            system_instructions += "\n\n" + CALCULATOR_INSTRUCTIONS
         system_instructions = apply_deal_visual_contract(system_instructions, pipeline_key, stage_key)
 
         user_prompt, cleaned_text = PromptBuilderService.build_user_prompt(prompt_template, content, metadata)
@@ -319,6 +322,8 @@ class AIProcessorService:
 
         # Support for Phase 3 style strict JSON and thinking control
         if metadata:
+            if metadata.get("report_calculator"):
+                payload["_report_calculator"] = True
             if metadata.get("enforce_context_budget"):
                 payload["_enforce_context_budget"] = True
             if "response_format" in metadata:
@@ -607,6 +612,10 @@ class AIProcessorService:
             else:
                 data = execute_request()
             
+            if data.get("_report_calculation_trace"):
+                audit_log.source_metadata = {**(audit_log.source_metadata or {}),
+                    "report_calculation_trace": data["_report_calculation_trace"]}
+                audit_log.save(update_fields=["source_metadata"])
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
             self._record_token_usage(audit_log, data.get("usage"), raw_response, thinking)

@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v8"
+    CACHE_VERSION = "ic-report-sections-v9"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -440,6 +440,14 @@ class ICReportSectionService:
             "ebitda": "EBITDA Margin",
             "pat": "PAT Margin",
         }
+        canonical_aliases = {
+            "ebitdaoperating": "EBITDA", "operatingebitda": "EBITDA",
+            "cogs": "Cost of Goods Sold", "depreciationamortization": "Depreciation and Amortization",
+            "depreciationandamortisation": "Depreciation and Amortization",
+            "depreciationamortisation": "Depreciation and Amortization", "da": "Depreciation and Amortization",
+            "profitbeforetax": "PBT", "profitbeforetaxpbt": "PBT",
+            "profitaftertax": "PAT", "profitaftertaxpat": "PAT",
+        }
         output = []
         for line in text.splitlines():
             if "|" not in line or cls._is_table_separator(line):
@@ -447,6 +455,16 @@ class ICReportSectionService:
                 continue
             cells = cls._table_cells(line)
             label = cls._plain_table_label(cells[0]).casefold() if cells else ""
+            from .report_financial_format import FINANCIAL_ROWS
+            cleaned_label = re.sub(r"\s*\((?:calculated|derived)\)\s*[¹²³⁴⁵⁶⁷⁸⁹⁰]*", "", label).strip()
+            canonical = canonical_aliases.get(re.sub(r"[^a-z0-9]", "", cleaned_label))
+            if cleaned_label != label:
+                canonical = canonical or next((name for name in FINANCIAL_ROWS if name.casefold() == cleaned_label),None)
+            if canonical:
+                markers = re.findall(r"\[\d+\]",cells[0])
+                cells[0] = canonical + (" " + " ".join(markers) if markers else "")
+                output.append("| " + " | ".join(cells) + " |")
+                continue
             replacement = replacements.get(label)
             if not replacement:
                 output.append(line)
@@ -498,6 +516,8 @@ class ICReportSectionService:
         strict_financial_table: bool = False,
     ) -> str:
         text = str(response or "").strip()
+        if "<report_calculations>" in text or "</report_calculations>" in text:
+            raise ReportSectionStructureError("Return only the final Markdown report after completing calculator requests.")
         citation_tokens = [
             token.casefold() for token in cls.CITATION_TOKEN_PATTERN.findall(text)
         ]
@@ -521,6 +541,8 @@ class ICReportSectionService:
         text, used_citations = cls._replace_internal_citations(text, citations)
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
+        if title == "Key Financials":
+            text = cls._cite_supported_financial_calculations(text, {int(item['citation_number']) for item in used_citations})
         from ai_orchestrator.services.report_calculations import report_calculation_errors
         calculation_errors = report_calculation_errors(text)
         if calculation_errors:
@@ -566,6 +588,50 @@ class ICReportSectionService:
         return cls._append_references(text, citations, used_citations).strip()
 
     @classmethod
+    def _cite_supported_financial_calculations(cls, text: str, verified: set[int]) -> str:
+        """Attach input-row sources to an uncited derived row only when its arithmetic matches."""
+        from .report_financial_format import FINANCIAL_ROWS,displayed_amount
+        lines=text.splitlines()
+        rows={}
+        for index,line in enumerate(lines):
+            if not line.strip().startswith('|') or cls._is_table_separator(line): continue
+            cells=cls._table_cells(line)
+            label=cls._plain_table_label(cells[0])
+            if label in FINANCIAL_ROWS: rows[label]=(index,cells)
+        equations={
+            'Gross Profit':[('Revenue',1),('Cost of Goods Sold',-1)],
+            'Operating Expenses':[('Gross Profit',1),('EBITDA',-1)],
+            'EBITDA':[('Gross Profit',1),('Operating Expenses',-1)],
+            'EBIT':[('EBITDA',1),('Depreciation and Amortization',-1)],
+            'Income Tax Expense':[('PBT',1),('PAT',-1)],
+            'PAT':[('PBT',1),('Income Tax Expense',-1)],
+        }
+        for name,inputs in equations.items():
+            if name not in rows or not all(key in rows for key,_ in inputs): continue
+            index,cells=rows[name]
+            if any(int(n) in verified for n in re.findall(r'\[(\d+)\]',lines[index])): continue
+            references=set()
+            for key,_ in inputs:
+                input_line=lines[rows[key][0]]
+                cited={int(n) for n in re.findall(r'\[(\d+)\]',input_line)} & verified
+                if not cited: break
+                references.update(cited)
+            else:
+                matched=True;has_values=False
+                for column,cell in enumerate(cells[1:],1):
+                    actual=displayed_amount(cell)
+                    if actual is None: continue
+                    has_values=True
+                    operands=[displayed_amount(rows[key][1][column]) if column<len(rows[key][1]) else None for key,_ in inputs]
+                    if any(value is None for value in operands): matched=False;break
+                    expected=sum(value[0]*sign for value,(_,sign) in zip(operands,inputs))
+                    if abs(actual[0]-expected)>actual[1]+sum(value[1] for value in operands): matched=False;break
+                if matched and has_values:
+                    cells[0]+=' '+' '.join(f'[{n}]' for n in sorted(references))
+                    lines[index]='| '+' | '.join(cells)+' |'
+        return '\n'.join(lines)
+
+    @classmethod
     def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None, source_citations: list[dict] | None = None) -> None:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
         tables, pending = [], []
@@ -582,7 +648,7 @@ class ICReportSectionService:
         labels = [re.sub(r"\[[^]]+\]", "", cls._plain_table_label(cls._table_cells(row)[0])).strip() for row in table[2:]]
         normalize = lambda value: re.sub(r"[^a-z0-9]+", "", value.casefold())
         if [normalize(v) for v in labels] != [normalize(v) for v in FINANCIAL_ROWS]:
-            raise ReportSectionStructureError("Key Financials table rows must use the standard order from Revenue to PAT, with missing inputs marked Not provided.")
+            raise ReportSectionStructureError("Key Financials row layout is invalid. Expected exactly: " + "; ".join(FINANCIAL_ROWS) + ". Received: " + "; ".join(labels) + ". Keep the source values and citations; repair only labels/order and mark missing inputs Not provided.")
         width = len(cls._table_cells(table[0]))
         if width < 2 or any(len(cls._table_cells(row)) != width for row in table):
             raise ReportSectionStructureError("Key Financials table must have consistent period columns and one metric per row.")
@@ -688,6 +754,10 @@ class ICReportSectionService:
             return cached
 
         is_vdr_section = source_type == "vdr_report_section"
+        use_report_calculator = is_vdr_section and getattr(settings, "AI_INFERENCE_TARGET", "") == "h100"
+        output_budget = int(max_tokens or getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192))
+        if use_report_calculator:
+            output_budget = max(output_budget, 24_576)
         minimum_words = cls._minimum_words(title, evidence_metadata) if is_vdr_section else 0
         target_words = (
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
@@ -710,14 +780,18 @@ class ICReportSectionService:
                 "model_data_json": json.dumps(model_data, ensure_ascii=False, default=str),
                 "personality_only_system": True,
                 "response_mode": "markdown",
+                "report_calculator": use_report_calculator,
+                **({"chat_template_kwargs": {"enable_thinking": True}} if use_report_calculator else {}),
                 "temperature": 0.0,
                 "repetition_penalty": float(
                     getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)
                 ),
-                "max_tokens": int(max_tokens or getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192)),
+                "max_tokens": output_budget,
                 **({"max_input_tokens": int(max_input_tokens)} if max_input_tokens else {}),
                 "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
+                "lossless_input": True,
+                "max_input_chars": max(180_000, len(evidence) + 1024),
                 "include_audit_log_id": True,
                 "context_label": f"{context_label_prefix}: {title}",
                 "_source_metadata": {
@@ -737,9 +811,37 @@ class ICReportSectionService:
                 title,
                 result.get("response") if isinstance(result, dict) else result,
                 citations=citations,
-                minimum_words=minimum_words,
+                minimum_words=0 if use_report_calculator else minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
             )
+            if use_report_calculator:
+                from .report_source_review import review_section
+                try:
+                    review = review_section(ai_service=ai_service,title=title,
+                        draft=str(result.get('response') or ''),evidence=evidence,source_id=source_id,
+                        requirements=revision.user_template)
+                except ValueError as error:
+                    raise ReportSectionStructureError(f"Source review for '{title}' could not complete: {error}") from error
+                findings=review['findings']
+                errors=[finding for finding in findings if finding['severity']=='error']
+                if errors:
+                    feedback='; '.join(f"{finding.get('claim','')[:160]}: {finding['issue']} Correction: {finding.get('correction','')}" for finding in errors[:5])
+                    raise ReportSectionStructureError(f"Source review rejected '{title}': {feedback}")
+                if review['coverage_gaps']:
+                    raise ReportSectionStructureError(f"Source review found missing coverage in '{title}': " + "; ".join(review['coverage_gaps'][:8]))
+                analysis_body=re.split(r"^###\s+Citations\s*$",section,maxsplit=1,flags=re.M)[0]
+                words=len(re.findall(r"\b\w+\b",re.sub(r"\[\d+\]","",analysis_body)))
+                # A verified, complete section may finish slightly below the
+                # requested length; brief incomplete summaries still fail.
+                quality_floor=round(minimum_words*.85)
+                if words<quality_floor:
+                    raise ReportSectionTooShortError(f"Report section '{title}' was too short after source and coverage review: {words} words; quality floor is {quality_floor}, requested minimum is {minimum_words}.")
+                from ai_orchestrator.models import AIAuditLog
+                if result.get('_audit_log_id'):
+                    generation=AIAuditLog.objects.filter(id=result['_audit_log_id']).first()
+                    if generation:
+                        generation.source_metadata={**(generation.source_metadata or {}),'report_source_review':{'findings':findings,'coverage_gaps':[],'word_count':words,'requested_minimum_words':minimum_words,'quality_floor':quality_floor,'status':'no_material_error_found'}}
+                        generation.save(update_fields=['source_metadata'])
         except ReportSectionValidationError as exc:
             cls._mark_rejected_section_audit(
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,

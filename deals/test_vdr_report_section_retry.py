@@ -11,6 +11,32 @@ from deals.tasks import process_vdr_report_section
 
 
 class VDRReportSectionRetryTests(SimpleTestCase):
+    def test_under_length_retry_receives_the_rejected_draft_and_fresh_citation_instruction(self):
+        from types import SimpleNamespace
+        previous=SimpleNamespace(error_message="Report section 'Executive Summary' was too short: 900 words; minimum is 1260.",
+            raw_response="## Executive Summary\n\nA supported finding [R001] and its investment implication.")
+        query=Mock();query.order_by.return_value.first.return_value=previous
+        audit=Mock(source_metadata={})
+        with (
+            patch.object(process_vdr_report_section.request,'retries',1),
+            patch('deals.services.vdr_queue.delivery_is_current',return_value=True),
+            patch('deals.services.vdr_queue.heartbeat'),patch('deals.services.vdr_queue.start_heartbeat'),
+            patch('ai_orchestrator.models.AIAuditLog.objects.get',return_value=audit),
+            patch('ai_orchestrator.models.AIAuditLog.objects.filter',return_value=query),
+            patch('deals.tasks.Deal.objects.get',return_value=Mock()),
+            patch('deals.tasks._durable_report_foundation',return_value=({'deal_model_data':{}},[],None,None)),
+            patch('ai_orchestrator.services.report_section_evidence.ICReportSectionEvidenceService.retrieve',
+                return_value={'context':'Fresh primary evidence [R010]','citations':{'10':{}}}),
+            patch('ai_orchestrator.services.report_sections.ICReportSectionService._generate_section',return_value='Completed section') as generate,
+        ):
+            result=process_vdr_report_section.run(deal_id='deal-1',audit_log_id='audit-1',section_title='Executive Summary',queue_generation=2)
+        self.assertEqual(result['status'],'completed')
+        evidence=generate.call_args.kwargs['evidence']
+        self.assertIn('<draft_to_expand>',evidence)
+        self.assertIn('A supported finding',evidence)
+        self.assertIn('replace its citations',evidence)
+        self.assertNotIn('[R001]',evidence.split('<draft_to_expand>')[1])
+
     def test_degenerate_repetition_retries_model_request(self):
         audit = Mock(source_metadata={})
         with (
