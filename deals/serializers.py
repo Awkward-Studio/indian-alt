@@ -745,6 +745,12 @@ class DealHeavyFieldsSerializer(serializers.ModelSerializer):
 
 
 class DealListSerializer(serializers.ModelSerializer):
+    ledger_financials = serializers.SerializerMethodField()
+
+    def get_ledger_financials(self, obj):
+        from .services.ledger_financials import for_deal
+        return for_deal(obj)
+
     banker_names = serializers.SerializerMethodField()
     competitor_names = serializers.SerializerMethodField()
     analysis_risks = serializers.SerializerMethodField()
@@ -905,7 +911,7 @@ class DealListSerializer(serializers.ModelSerializer):
             'fund_classification_reviewed_at',
             'deal_summary', 'company_details', 'priority_rationale', 'comments', 'ambiguities',
             'state', 'country', 'competitor_names', 'analysis_risks', 'pipeline_insights',
-            'pending_task_count', 'pending_task_suggestion_count', 'field_provenance',
+            'pending_task_count', 'pending_task_suggestion_count', 'field_provenance', 'ledger_financials',
         )
         read_only_fields = ('id', 'created_at', 'updated_at', 'days_since_sourcing')
 

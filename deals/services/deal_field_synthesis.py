@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from django.db import transaction
+from django.conf import settings
 
 from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
@@ -22,8 +23,8 @@ from deals.services.field_provenance import record_deal_field_changes
 
 
 class DealFieldSynthesisService:
-    # The provider enforces a 65,536-token context window across the complete
-    # request. Dense artifact JSON consumes materially more tokens than a
+    # Baseline batch limits fit a 65,536-token context window. H100 scales
+    # these limits to its configured window. Dense artifact JSON uses more tokens than a
     # simple chars/4 estimate, so leave ample room for the skill prompt,
     # response schema, output, and provider reserve.
     MAX_CONTEXT_CHARS = 72_000
@@ -38,6 +39,14 @@ class DealFieldSynthesisService:
         r"\.(?:csv|doc|docx|eml|msg|pdf|ppt|pptx|xls|xlsb|xlsm|xlsx)$",
         re.IGNORECASE,
     )
+
+    @classmethod
+    def _context_limits(cls) -> tuple[int, int]:
+        # Scale map/merge batches for the selected larger window, while
+        # retaining room for the skill, existing deal, schema and response.
+        window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65536))
+        scale = min(2.0, max(1.0, window / 65536)) if getattr(settings, "AI_INFERENCE_TARGET", "") == "h100" else 1.0
+        return int(cls.MAX_CONTEXT_CHARS * scale), int(cls.MAX_CONTEXT_TOKENS * scale)
 
     @classmethod
     def _is_placeholder_title(cls, title: str | None, document_titles: set[str]) -> bool:
@@ -210,6 +219,7 @@ class DealFieldSynthesisService:
         base_tokens = estimate_tokens(cls._serialize(base_context))
         current_chars = base_chars
         current_tokens = base_tokens
+        max_chars, max_tokens = cls._context_limits()
 
         for source_item in items:
             item = transform(source_item) if transform else source_item
@@ -219,8 +229,8 @@ class DealFieldSynthesisService:
             separator_chars = 1 if current else 0
             separator_tokens = 1 if current else 0
             if current and (
-                current_chars + separator_chars + item_chars > cls.MAX_CONTEXT_CHARS
-                or current_tokens + separator_tokens + item_tokens > cls.MAX_CONTEXT_TOKENS
+                current_chars + separator_chars + item_chars > max_chars
+                or current_tokens + separator_tokens + item_tokens > max_tokens
             ):
                 batches.append(cls._serialize({**base_context, item_key: current}))
                 current = [item]
@@ -340,6 +350,7 @@ class DealFieldSynthesisService:
     ) -> dict:
         existing_deal_json = cls._serialize(cls._existing_deal_payload(deal))
         request_sha = hashlib.sha256(cls._serialize({
+            "contract_version": "ledger-fields-v2",
             "batch_key": batch_key,
             "phase": phase,
             "phase_index": phase_index,
@@ -366,6 +377,7 @@ class DealFieldSynthesisService:
                 "batch_key": batch_key,
                 "ingestion_source_type": source_type,
                 "temperature": 0.0,
+                "response_mode": "json",
                 "max_tokens": cls.MAX_OUTPUT_TOKENS,
                 "lossless_input": True,
                 "enforce_context_budget": True,
@@ -480,7 +492,7 @@ class DealFieldSynthesisService:
             reduction_round += 1
         result = dict(results[0])
         model_data = dict(result.get("deal_model_data") or {})
-        if not deal.deal_summary and str(model_data.get("deal_summary") or "").strip():
+        if str(model_data.get("deal_summary") or "").strip():
             result["analyst_report"] = str(model_data["deal_summary"]).strip()
         result.setdefault("metadata", {}).update({
             "field_synthesis_key": batch_key,
@@ -527,7 +539,7 @@ class DealFieldSynthesisService:
                 deal,
                 normalized,
                 overwrite=False,
-                overwrite_themes=True,
+                overwrite_themes=False,
                 source_id=f"field-synthesis:{analysis.id}",
                 overwrite_ai_owned=True,
             )

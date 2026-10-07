@@ -588,6 +588,12 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             ).select_related('company_profile'),
             to_attr='selected_competitor_relations',
         ),
+        Prefetch(
+            'vi_relations',
+            queryset=VentureIntelligenceCompanyRelation.objects.filter(relation_type='target')
+            .select_related('company_profile').prefetch_related('company_profile__financial_statements'),
+            to_attr='ledger_target_relations',
+        ),
     ).annotate(
         latest_news_source_map=Subquery(
             DealDocument.objects.filter(

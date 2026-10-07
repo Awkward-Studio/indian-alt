@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from django.db import transaction
+from django.conf import settings
 
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
@@ -56,7 +57,7 @@ STATEMENT_TYPES = {"profit_loss", "balance_sheet", "cash_flow"}
 METRIC_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
 FINANCIAL_FIELDS_BY_STATEMENT = {
     "profit_loss": {
-        "revenue", "expenses", "gross_profit", "gross_margin", "ebitda",
+        "revenue", "revenue_growth", "expenses", "gross_profit", "gross_margin", "ebitda",
         "ebitda_margin", "other_income", "interest", "depreciation",
         "profit_before_tax", "tax", "tax_rate", "pat", "pat_margin", "eps",
         "dividend_payout", "employee_cost", "material_cost", "cogs",
@@ -210,7 +211,7 @@ INDEXED INTERNAL EVIDENCE:
             documents=documents,
             candidate_limit=320,
             max_chunks=240,
-            max_tokens=36_000,
+            max_tokens=min(60_000, int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 65536)) - 20000) if getattr(settings, 'AI_INFERENCE_TARGET', '') == 'h100' else 36_000,
             min_chunks_per_document=4,
         ).retrieve("Key Financials")
         citations = {
@@ -225,6 +226,9 @@ INDEXED INTERNAL EVIDENCE:
             source_id=str(deal.id),
             metadata={
                 "response_mode": "json",
+                "response_format": {"type": "json_object"},
+                "chat_template_kwargs": {"enable_thinking": False},
+                "lossless_input": True,
                 "temperature": 0.0,
                 "max_input_tokens": 48_000,
                 "max_tokens": 12_000,

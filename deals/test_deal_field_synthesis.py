@@ -2,7 +2,7 @@ import json
 from copy import deepcopy
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from deals.models import Deal, DealDocument, DealFieldProvenance
 from deals.services.deal_field_synthesis import DealFieldSynthesisService
@@ -12,6 +12,39 @@ from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 
 class DealFieldSynthesisServiceTests(TestCase):
+    @patch('deals.services.deal_field_synthesis.EmbeddingService')
+    @patch('deals.services.deal_field_synthesis.AIProcessorService')
+    def test_refreshes_ai_summary_and_keeps_human_themes(self, ai_cls, _embedder):
+        from deals.services.field_provenance import record_deal_field_changes
+        self.deal.deal_summary = 'Old report-like summary'
+        self.deal.themes = ['Analyst-selected theme']
+        self.deal.save(update_fields=['deal_summary', 'themes'])
+        record_deal_field_changes(self.deal, {'deal_summary': ('', self.deal.deal_summary)},
+            source_type=DealFieldProvenance.SourceType.AI, source_id='old-synthesis')
+        record_deal_field_changes(self.deal, {'themes': ([], self.deal.themes)},
+            source_type=DealFieldProvenance.SourceType.HUMAN, source_id='analyst')
+        result = self._synthesis_result()
+        result['deal_model_data']['deal_summary'] = 'Concise source-supported description.'
+        result['deal_model_data']['themes'] = ['New AI theme']
+        result['source_relationships']['additional_contacts'] = [{'name': 'External advisor', 'email': 'advisor@example.com'}]
+        ai_cls.return_value.process_content.return_value = result
+        DealFieldSynthesisService.synthesize(self.deal, batch_key='test:summary-refresh', source_type='manual_vdr')
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.deal_summary, 'Concise source-supported description.')
+        self.assertEqual(self.deal.themes, ['Analyst-selected theme'])
+        self.assertTrue(self.deal.additional_contacts.filter(email='advisor@example.com').exists())
+        self.assertEqual(len(self.deal.other_contacts), 1)
+
+    def test_report_completion_preserves_the_ledger_description(self):
+        from deals.services.deal_creation import DealCreationService
+        self.deal.deal_summary = 'Short ledger description.'
+        self.deal.save(update_fields=['deal_summary'])
+        DealCreationService.apply_analysis_to_deal(self.deal,
+            {'deal_model_data': {}, 'analyst_report': '## Executive Summary\nFull report body.'},
+            overwrite=True, report_only=True)
+        self.deal.refresh_from_db()
+        self.assertEqual(self.deal.deal_summary, 'Short ledger description.')
+
     def setUp(self):
         self.deal = Deal.objects.create(title="Field Synthesis Deal")
         self.document = DealDocument.objects.create(
@@ -210,6 +243,7 @@ class DealFieldSynthesisServiceTests(TestCase):
         self.deal.refresh_from_db()
         self.assertEqual(self.deal.title, "Project Aurum")
 
+    @override_settings(AI_INFERENCE_TARGET='t4')
     def test_evidence_batches_keep_every_document_and_structured_value(self):
         self.document.evidence_json = {
             "document_name": "Pitch Deck.pdf",
@@ -253,6 +287,16 @@ class DealFieldSynthesisServiceTests(TestCase):
             for fragment in json.loads(batch)["evidence_fragments"]
         }
         self.assertEqual(document_ids, {str(self.document.id), str(later_document.id)})
+
+    @override_settings(AI_INFERENCE_TARGET='h100', CHAT_MODEL_CONTEXT_TOKENS=131072)
+    def test_h100_batches_combine_more_evidence_without_losing_items(self):
+        items = [{'value': 'source evidence ' * 1600, 'id': i} for i in range(8)]
+        h100 = DealFieldSynthesisService._pack_contexts(items, phase='map', instructions='', item_key='items')
+        with override_settings(AI_INFERENCE_TARGET='t4'):
+            t4 = DealFieldSynthesisService._pack_contexts(items, phase='map', instructions='', item_key='items')
+        self.assertLess(len(h100), len(t4))
+        self.assertEqual([item['id'] for batch in h100 for item in json.loads(batch)['items']], list(range(8)))
+        self.assertTrue(all(len(batch) <= 144000 and estimate_tokens(batch) <= 60000 for batch in h100))
 
     def test_candidate_batches_drop_transport_and_scratch_fields(self):
         candidate = self._synthesis_result()

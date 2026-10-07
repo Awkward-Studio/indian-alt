@@ -1936,6 +1936,7 @@ def synthesize_complete_deal_analysis(
         overwrite=False,
         source_id=f"analysis:{analysis.id}",
         overwrite_ai_owned=True,
+        report_only=True,
     )
     deal.documents.filter(id__in=[doc.id for doc in docs]).update(is_ai_analyzed=True)
     return analysis
@@ -2289,6 +2290,7 @@ def assemble_vdr_report(audit_log_id: str) -> DealAnalysis:
         )
         DealCreationService.apply_analysis_to_deal(
             deal, normalized, overwrite=False, source_id=f"analysis:{analysis.id}", overwrite_ai_owned=True,
+            report_only=True,
         )
         deal.documents.filter(id__in=[doc.id for doc in docs]).update(is_ai_analyzed=True)
         audit.status = "COMPLETED"

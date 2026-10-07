@@ -188,6 +188,28 @@ Rules:
   company in a substantive source document, or appears consistently in at least two separate documents.
   Cite only documents that explicitly support the name. Otherwise return the current title unchanged.
 - Write a short evidence-only deal_summary, not an 11-section report.
+- This is structured field extraction only. Do not generate an IC note, report sections,
+  report word-count targets, Markdown headings, or analyst_report. Populate every supported
+  schema field separately. Never put the full analysis into any one ledger field.
+- deal_summary: 2-4 concise sentences describing what the company sells, its customers,
+  business model and scale. Exclude diligence checklists and investment recommendations.
+- deal_details: proposed round, instrument, primary/secondary split, valuation, stake,
+  existing investors and transaction timing, only as stated in the supplied evidence.
+- company_details: concise industry context, market, competition, differentiation and
+  business footprint supported by sources. Avoid repeating deal_summary or transaction terms.
+- industry is the broad industry; sector is the specific sub-sector. city/state/country
+  refer to the subject company's headquarters, not a banker or customer location.
+- funding_ask is the requested round amount with explicit currency and units. It is not
+  revenue or enterprise value. funding_ask_for describes the stated uses of that capital.
+- themes must be source-supported investment themes. is_female_led requires evidence
+  of a female founder or executive leadership, never inference from a name.
+- priority_rationale explains only an evidence-supported priority. Use null for both when
+  no priority is justified. Do not invent analyst decisions, fund assignments or owners.
+- Preserve all identified external banker/advisor contacts in source_relationships,
+  with designation, firm, email, telephone and location when available.
+- In candidate reduction, merge complementary supported fields across all candidates;
+  do not discard a populated field merely because a different candidate has null.
+  Reconcile contradictory fields explicitly, rather than choosing a value arbitrarily.
 - Identify the external source bank and primary external contact only when a source names them.
 - Ignore India Alternatives employees and addresses at @india-alt.com or @india-alternatives.com as external contacts.
 - Do not infer priority unless the evidence explicitly supports urgency or strategic fit. Return null otherwise.

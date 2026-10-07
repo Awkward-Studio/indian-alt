@@ -200,6 +200,10 @@ class AIProcessorService:
         else:
             prompt_template = (metadata or {}).get("prompt_template_override") or (skill.prompt_template if skill else "{{ content }}")
         response_mode = (metadata or {}).get("response_mode")
+        json_request = response_mode == "json" or bool((metadata or {}).get("response_format")) or (
+            not stream and response_mode != "markdown"
+            and (metadata or {}).get("output_mode") != "markdown_document"
+        )
         if response_mode == "markdown":
             system_instructions = re.sub(
                 r"\n\nIMPORTANT: Return ONLY a valid JSON object\. Do not include any thinking text in the final response\.",
@@ -354,7 +358,10 @@ class AIProcessorService:
         # the answer. Callers can explicitly opt back in for a task that needs it.
         if model_provider != "anthropic":
             template_kwargs = dict(payload.get("chat_template_kwargs") or {})
-            template_kwargs.setdefault("enable_thinking", False)
+            if json_request:
+                template_kwargs["enable_thinking"] = False
+            else:
+                template_kwargs.setdefault("enable_thinking", False)
             payload["chat_template_kwargs"] = template_kwargs
 
         # PHASE 3: EXECUTION (Delegated to Provider + Parser)
@@ -618,9 +625,14 @@ class AIProcessorService:
                 audit_log.save(update_fields=["source_metadata"])
             raw_response = data.get("response") or data.get("thinking", "")
             thinking = data.get("thinking", "")
+            # Retain incomplete output for diagnosis instead of losing the
+            # draft when the finish-reason guard raises below.
+            audit_log.raw_response = data.get("response") or ""
+            audit_log.raw_thinking = thinking
             self._record_token_usage(audit_log, data.get("usage"), raw_response, thinking)
             if audit_log.source_type in {
                 "document_evidence_segment", "vdr_report_section", "email_report_section",
+                "report_section_quality_review",
             }:
                 finish = ((data.get("raw") or {}).get("choices") or [{}])[0].get("finish_reason")
                 if finish in {"length", "content_filter"}:
@@ -668,7 +680,7 @@ class AIProcessorService:
                 candidate_json = ResponseParserService.escape_invalid_backslashes(candidate[start:])
                 parsed_json, _ = json.JSONDecoder().raw_decode(candidate_json)
                 success = isinstance(parsed_json, dict)
-            elif response_mode == "json" and not is_extraction:
+            elif response_mode == "json" and (not is_extraction or audit_log.source_type == "deal_field_synthesis"):
                 _, _, clean_resp, clean_think = ResponseParserService.parse_standard_response(
                     raw_response, thinking, is_extraction_skill=False
                 )

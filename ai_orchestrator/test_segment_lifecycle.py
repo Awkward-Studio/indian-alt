@@ -332,6 +332,20 @@ class SegmentPersistenceTests(TestCase):
         self.audit.refresh_from_db()
         self.assertEqual(self.audit.status, "FAILED")
         self.assertEqual(self.audit.source_metadata["finish_reason"], "length")
+        self.assertIn('Partial repeated output', self.audit.raw_response)
+
+    def test_truncated_source_review_is_rejected_and_keeps_reasoning(self):
+        from ai_orchestrator.models import AIAuditLog
+        self.audit = AIAuditLog.objects.create(source_type='report_section_quality_review', status='PROCESSING')
+        self.service.current_provider.execute_standard.return_value = {
+            'response': '', 'thinking': 'Unfinished source analysis',
+            'raw': {'choices': [{'finish_reason': 'length'}]},
+        }
+        with self.assertRaises(ModelOutputTruncated):
+            self.service._standard_response({'model': 'test'}, self.audit, 'json')
+        self.audit.refresh_from_db()
+        self.assertEqual(self.audit.status, 'FAILED')
+        self.assertEqual(self.audit.raw_thinking, 'Unfinished source analysis')
 
     def test_incomplete_json_cannot_be_repaired_into_completed_checkpoint(self):
         self.service.current_provider.execute_standard.return_value["response"] = '{"document_summary":"Partial evidence"'

@@ -232,6 +232,9 @@ class VLLMProviderService:
                 {'role':'assistant','content':result['response']},
                 {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section.'},
             ])
+            # Calculator continuations are new user turns. Keep Qwen's explicit
+            # thinking control on that turn as well as on the initial request.
+            self._apply_no_think_marker(body['messages'][-1:], payload)
             if payload.get('_enforce_context_budget'):
                 window=int(getattr(settings,'CHAT_MODEL_CONTEXT_TOKENS',65536))
                 input_tokens=estimate_tokens(json.dumps(body,ensure_ascii=False))

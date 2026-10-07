@@ -84,13 +84,16 @@ class PromptBuilderService:
                 user_prompt = user_prompt.replace('{{ ' + key.lower() + ' }}', val_str)
         
         # 2. Replace primary content
-        cleaned_content = PromptBuilderService.clean_html(content)
+        # Extracted evidence and structured review packets are already text.
+        # HTML parsing can remove comparison operators and protocol tags.
+        lossless = bool((metadata or {}).get("lossless_input"))
+        cleaned_content = content if lossless else PromptBuilderService.clean_html(content)
         # 180k chars keeps recall-oriented universal chat contexts intact while still
         # fitting within the configured large-context inference budget.
-        max_chars = 180000
-        if len(cleaned_content) > max_chars:
-            head_chars = 100000
-            tail_chars = 60000
+        max_chars = int((metadata or {}).get("max_input_chars") or 180000)
+        if not lossless and len(cleaned_content) > max_chars:
+            head_chars = min(100000, max_chars * 5 // 8)
+            tail_chars = min(60000, max_chars * 3 // 8)
             cleaned_content = (
                 cleaned_content[:head_chars]
                 + "\n\n[... TRUNCATED DUE TO CONTEXT LIMITS ...]\n\n"

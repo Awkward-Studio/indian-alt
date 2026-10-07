@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v9"
+    CACHE_VERSION = "ic-report-sections-v10"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -756,8 +756,6 @@ class ICReportSectionService:
         is_vdr_section = source_type == "vdr_report_section"
         use_report_calculator = is_vdr_section and getattr(settings, "AI_INFERENCE_TARGET", "") == "h100"
         output_budget = int(max_tokens or getattr(settings, "EMAIL_REPORT_SECTION_MAX_TOKENS", 8192))
-        if use_report_calculator:
-            output_budget = max(output_budget, 24_576)
         minimum_words = cls._minimum_words(title, evidence_metadata) if is_vdr_section else 0
         target_words = (
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
@@ -781,7 +779,9 @@ class ICReportSectionService:
                 "personality_only_system": True,
                 "response_mode": "markdown",
                 "report_calculator": use_report_calculator,
-                **({"chat_template_kwargs": {"enable_thinking": True}} if use_report_calculator else {}),
+                # Keep output tokens for the report. Arithmetic still uses the
+                # bounded calculator and every draft receives a source review.
+                **({"chat_template_kwargs": {"enable_thinking": False}} if use_report_calculator else {}),
                 "temperature": 0.0,
                 "repetition_penalty": float(
                     getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)

@@ -26,9 +26,10 @@ class ReportCalculatorTests(SimpleTestCase):
         first=Mock();first.json.return_value={'choices':[{'message':{'content':'<report_calculations>[{"expression":"180/60","label":"MOIC","source_markers":["R001"]}]</report_calculations>'},'finish_reason':'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':10}}
         last=Mock();last.json.return_value={'choices':[{'message':{'content':'## Exit Considerations\n\nThe calculated MOIC is 3.0x [R001].'},'finish_reason':'stop'}],'usage':{'prompt_tokens':20,'completion_tokens':20}}
         with patch('ai_orchestrator.services.llm_providers.requests.post',side_effect=[first,last]) as post:
-            result=VLLMProviderService().execute_standard({'model':'test-model','prompt':'Write the report.','_report_calculator':True})
+            result=VLLMProviderService().execute_standard({'model':'Qwen/test-model','prompt':'Write the report.','_report_calculator':True,'chat_template_kwargs':{'enable_thinking':False}})
         self.assertEqual(result['response'],'## Exit Considerations\n\nThe calculated MOIC is 3.0x [R001].')
         self.assertEqual(result['_report_calculation_trace'][0]['result'],'3')
         self.assertEqual(result['usage']['prompt_tokens'],30)
         self.assertEqual(post.call_count,2)
         self.assertIn('report_calculation_results',post.call_args.kwargs['json']['messages'][-1]['content'])
+        self.assertTrue(post.call_args.kwargs['json']['messages'][-1]['content'].endswith('/no_think'))

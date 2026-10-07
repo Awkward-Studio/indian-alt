@@ -47,7 +47,9 @@ class SourceReviewedGenerationTests(TestCase):
         generation=service.process_content.call_args_list[0].kwargs['metadata']
         self.assertTrue(generation['report_calculator'])
         self.assertTrue(generation['lossless_input'])
-        self.assertTrue(generation['chat_template_kwargs']['enable_thinking'])
+        self.assertFalse(generation['chat_template_kwargs']['enable_thinking'])
+        review=service.process_content.call_args_list[1].kwargs['metadata']
+        self.assertFalse(review['chat_template_kwargs']['enable_thinking'])
 
     @patch('ai_orchestrator.services.report_sections.cache')
     def test_source_error_cannot_pass_even_when_the_section_is_long(self,cache):

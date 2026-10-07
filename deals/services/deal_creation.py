@@ -172,12 +172,17 @@ class DealCreationService:
         overwrite_themes: bool = False,
         source_id: str = 'analysis:deal-model-data',
         overwrite_ai_owned: bool = False,
+        report_only: bool = False,
     ):
         if not isinstance(analysis_json, dict):
             return
 
         model_data = DealCreationService._get_analysis_model_data(analysis_json)
-        analyst_report = analysis_json.get('analyst_report')
+        # The ledger description is a field, not the report body or JSON
+        # envelope. Report completion may refresh other supported fields.
+        analyst_report = model_data.get('deal_summary')
+        if not isinstance(analyst_report, str) or not analyst_report.strip():
+            analyst_report = None if report_only else analysis_json.get('analyst_report')
         changed_fields = []
         previous_values = {}
 
@@ -217,7 +222,7 @@ class DealCreationService:
                 continue
             
             normalized_value = str(value).strip()
-            if not normalized_value:
+            if not normalized_value or normalized_value.casefold() in {'n/a', 'na', 'unknown', 'not provided', 'not available', '[verify]'}:
                 continue
 
             current_value = getattr(deal, deal_field)
@@ -309,12 +314,41 @@ class DealCreationService:
                         email=email,
                         bank=deal.bank,
                         designation=contact_data.get("designation"),
-                        linkedin_url=contact_data.get("linkedin_url")
+                        linkedin_url=contact_data.get("linkedin_url"),
+                        phone=contact_data.get("phone"),
+                        location=contact_data.get("location"),
                     )
                 if deal.primary_contact != contact:
                     previous_values['primary_contact'] = deal.primary_contact
                     deal.primary_contact = contact
                     changed_fields.append('primary_contact')
+
+            # Synthesis can identify more than one external banker. Preserve
+            # existing links and add supported contacts without deleting any.
+            if analysis_json.get('metadata', {}).get('field_synthesis_key'):
+                from contacts.models import Contact
+                from .contact_linking import sync_deal_contact_links
+                prior_ids = list(deal.additional_contacts.values_list('id', flat=True))
+                for item in source_relationships.get('additional_contacts') or []:
+                    if not isinstance(item, dict) or not (item.get('name') or item.get('email')):
+                        continue
+                    email = str(item.get('email') or '').strip()
+                    if email.lower().endswith(('@india-alt.com', '@india-alternatives.com')):
+                        continue
+                    contact = Contact.objects.filter(email__iexact=email).first() if email else None
+                    if contact is None and item.get('name'):
+                        contact = Contact.objects.filter(name__iexact=item['name'], bank=deal.bank).first()
+                    if contact is None:
+                        contact = Contact.objects.create(name=item.get('name') or email, email=email or None,
+                            bank=deal.bank, designation=item.get('designation'), linkedin_url=item.get('linkedin_url'),
+                            phone=item.get('phone'), location=item.get('location'))
+                    if contact.id != deal.primary_contact_id:
+                        deal.additional_contacts.add(contact)
+                sync_deal_contact_links(deal)
+                current_ids = list(deal.additional_contacts.values_list('id', flat=True))
+                if set(prior_ids) != set(current_ids):
+                    record_deal_field_changes(deal, {'additional_contacts': (prior_ids, current_ids)},
+                        source_type=DealFieldProvenance.SourceType.AI, source_id=source_id)
 
         themes = DealCreationService._normalize_string_list(model_data.get('themes'))
         if themes and (overwrite_themes or can_write('themes', deal.themes)):

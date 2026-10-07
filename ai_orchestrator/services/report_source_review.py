@@ -73,11 +73,14 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
     result=ai_service.process_content(content=content,skill_name=None,
         source_type='report_section_quality_review',source_id=str(source_id),metadata={
             'response_mode':'json','response_format':{'type':'json_object'},
-            'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':True},
-            'max_tokens':12_288,'max_input_tokens':90_112,'max_input_chars':len(content)+1024,
+            'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
+            'temperature':0.0,
+            'max_tokens':8192,'max_input_tokens':90_112,'max_input_chars':len(content)+1024,
             'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
             'context_label':f'Source review: {title}',
             '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id)},
         })
+    if isinstance(result,dict) and result.get('error'):
+        raise ValueError('Source review inference failed: '+str(result['error']))
     findings=validate_review(result,set(packet['source_ranks']),require_coverage=True)
     return {'findings':findings,'coverage_gaps':result['coverage_gaps']}
