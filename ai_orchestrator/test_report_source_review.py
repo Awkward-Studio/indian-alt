@@ -47,6 +47,22 @@ class ReportSourceReviewTests(SimpleTestCase):
         ]}, {1})
         self.assertEqual([finding['severity'] for finding in findings], ['warning', 'error'])
 
+    def test_live_correct_conversion_finding_is_not_reused_as_an_error(self):
+        from ai_orchestrator.services.report_source_review import material_review_errors
+        correct = {'severity': 'error', 'issue': 'Ensure unit consistency', 'sources': ['R001'],
+            'correction': 'The value is ₹15.82 Mn (15,823,816.77 INR). The draft is numerically correct. No error here, moving to next.'}
+        incorrect = {'severity': 'error', 'issue': 'Wrong conversion', 'sources': ['R001'],
+            'correction': 'No error here in the revenue. However, EBITDA is overstated; use 1.36 Cr.'}
+        self.assertEqual(material_review_errors([correct, incorrect]), [incorrect])
+        findings = validate_review({'findings': [correct, incorrect]}, {1})
+        self.assertEqual([f['severity'] for f in findings], ['warning', 'error'])
+
+    def test_review_checks_conversion_basis_and_does_not_invent_missing_inputs(self):
+        from ai_orchestrator.services.report_source_review import REVIEW_INSTRUCTIONS
+        self.assertIn('dividing by 10,000', REVIEW_INSTRUCTIONS)
+        self.assertIn('A funding ask is not enterprise value', REVIEW_INSTRUCTIONS)
+        self.assertIn('explicitly disclosed missing input addresses coverage', REVIEW_INSTRUCTIONS)
+
 
 @override_settings(AI_INFERENCE_TARGET='h100',VDR_REPORT_SECTION_MIN_WORDS=900)
 class SourceReviewedGenerationTests(TestCase):

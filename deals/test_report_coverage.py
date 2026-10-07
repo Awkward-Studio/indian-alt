@@ -82,6 +82,19 @@ class ReportCoverageTests(TestCase):
         self.assertEqual(feedback['source_errors'], [])
         self.assertEqual(feedback['coverage_gaps'], [])
 
+    def test_newer_calculation_failure_keeps_both_review_feedbacks(self):
+        self.review_with_both_feedbacks()
+        generation = AIAuditLog.objects.create(source_id=str(self.parent.id), source_type='vdr_report_section',
+            status='FAILED', error_message='EBIT bridge does not reconcile',
+            source_metadata={'report_section': 'Transaction Details'})
+        feedback = latest_review_feedback(self.deal)['Transaction Details']
+        self.assertEqual(feedback['coverage_gaps'], ['Explain dilution'])
+        self.assertEqual(feedback['source_errors'][0]['issue'], 'Incorrect period')
+        self.assertEqual(feedback['validation_error'], 'EBIT bridge does not reconcile')
+        generation.status = 'COMPLETED'
+        generation.save(update_fields=['status'])
+        self.assertNotIn('validation_error', latest_review_feedback(self.deal)['Transaction Details'])
+
     @patch('deals.services.analysis_section_rewrite.AnalysisSectionRewriteService._meeting_context', return_value=('', {}))
     @patch('deals.services.analysis_section_rewrite.AnalysisSectionRewriteService._news_context', return_value=('', {}))
     @patch('deals.services.analysis_section_rewrite.AnalysisSectionRewriteService._document_context', return_value=('', {}))

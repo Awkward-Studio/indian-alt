@@ -81,7 +81,8 @@ class AnalysisSectionRewriteService:
         feedback_text = format_review_feedback(review_feedback)
         if feedback_text:
             instruction += '\n\n'+feedback_text
-        prompt_parts = []
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_BASIS_RULE
+        prompt_parts = [FINANCIAL_BASIS_RULE]
         citations = {}
         evidence_metadata = None
         if published_section:
@@ -98,7 +99,7 @@ class AnalysisSectionRewriteService:
                             input_budget=int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 40960)),
                             output_budget=int(getattr(settings, 'VDR_REPORT_SECTION_MAX_TOKENS', 16384)),
                             evidence_budget=int(getattr(settings, 'VDR_REPORT_SECTION_EVIDENCE_TOKENS', 36000)),
-                            extra_context=instruction+section_markdown+self._report_context(full_report, section_title)),
+                            extra_context=FINANCIAL_BASIS_RULE+instruction+section_markdown+self._report_context(full_report, section_title)),
                     ).retrieve(section_title)
                 except ValueError as exc:
                     if "No indexed document chunks were available" not in str(exc):

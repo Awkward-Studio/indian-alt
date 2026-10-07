@@ -732,6 +732,8 @@ class ICReportSectionService:
         vdr_dispatch_generation: int | None = None,
         force_regenerate: bool = False,
     ) -> str:
+        from .report_financial_format import FINANCIAL_BASIS_RULE
+        evidence = FINANCIAL_BASIS_RULE + '\n\n' + evidence
         model_data = analysis.get("deal_model_data") if isinstance(analysis.get("deal_model_data"), dict) else {}
         resolved_stage = cls._resolve_prompt_stage(title)
         revision = resolved_stage.prompt_revision

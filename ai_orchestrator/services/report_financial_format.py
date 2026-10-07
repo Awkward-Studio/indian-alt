@@ -2,6 +2,22 @@
 import re
 from decimal import Decimal
 
+FINANCIAL_BASIS_RULE = (
+    "Financial arithmetic and reporting basis: 1 crore = 10,000,000 currency units; "
+    "1 lakh = 100,000; 1 million = 1,000,000; 1 thousand = 1,000. "
+    "Convert amounts reported in thousands (Rs '000) to crore by dividing by 10,000, "
+    "lakhs by 100, millions by 10, and rupees by 10,000,000. "
+    "For example, 100,000 in Rs '000 is INR 10.00 Cr, not 1.00 Cr or 100.00 Cr. "
+    "A currency conversion needs an explicitly sourced or clearly labeled assumed FX rate. "
+    "A funding ask is not enterprise value. Post-money equity = primary investment / "
+    "post-money ownership; enterprise value additionally requires a same-period debt/cash "
+    "bridge. Do not invent that bridge or treat missing debt/cash as zero. "
+    "An illustrative midpoint stake is an assumption, not an agreed term. "
+    "For each formula, use matching source periods, currency/scale and reporting basis; "
+    "do not mix actual and forecast, adjusted and unadjusted EBITDA, or worksheet years. "
+    "Do not replace unknown units with guessed units."
+)
+
 
 def displayed_amount(cell):
     value = re.sub(r"\[\d+\]", "", cell).replace(",", "").replace("*", "").strip()

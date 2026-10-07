@@ -12,20 +12,26 @@ def latest_review_feedback(deal):
     if not parent:
         return {}
     result = dict((parent.source_metadata or {}).get('regeneration_feedback') or {})
+    reviewed_at = {}
     for review in AIAuditLog.objects.filter(source_type='report_section_quality_review',
             source_id=str(parent.id), status='COMPLETED').order_by('created_at'):
         payload = review.parsed_json or {}
         title = (review.source_metadata or {}).get('report_section')
         if title and isinstance(payload.get('coverage_gaps'), list):
+            reviewed_at[title] = review.created_at
             result[title] = {'report_audit_id': str(parent.id), 'review_audit_id': str(review.id),
                 'coverage_gaps': [gap for gap in payload['coverage_gaps'] if isinstance(gap, str)],
                 'source_errors': material_review_errors(payload.get('findings') or [])}
-    for generation in AIAuditLog.objects.filter(source_type='vdr_report_section', source_id=str(parent.id),
-            status='FAILED').order_by('created_at'):
+    latest_generations = {}
+    for generation in AIAuditLog.objects.filter(source_type='vdr_report_section', source_id=str(parent.id)).order_by('created_at'):
         title = (generation.source_metadata or {}).get('report_section')
-        if title and generation.error_message and title not in result:
-            result[title] = {'report_audit_id': str(parent.id), 'coverage_gaps': [], 'source_errors': [],
-                             'validation_error': generation.error_message}
+        if title:
+            latest_generations[title] = generation
+    for title, generation in latest_generations.items():
+        if generation.status == 'FAILED' and generation.error_message and (
+                title not in reviewed_at or generation.created_at > reviewed_at[title]):
+            result.setdefault(title, {'report_audit_id': str(parent.id), 'coverage_gaps': [], 'source_errors': []})
+            result[title]['validation_error'] = generation.error_message
     return result
 
 
@@ -33,7 +39,9 @@ def format_review_feedback(feedback):
     if not feedback:
         return ''
     lines = ['Prior review feedback for this section. Re-check each correction against the current primary evidence; '
-             'review findings are guidance, not primary facts. Resolve coverage with supported analysis or an explicit evidence gap.']
+             'review findings are guidance, not primary facts. Resolve coverage with supported analysis or an explicit evidence gap. '
+             'Prior R-number citation markers belong to the previous evidence pack. Find and cite the matching current '
+             'primary source; never reuse an old rank as proof.']
     gaps = feedback.get('coverage_gaps') or []
     errors = feedback.get('source_errors') or []
     if gaps:
