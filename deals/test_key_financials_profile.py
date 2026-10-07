@@ -9,6 +9,21 @@ def section():
         f'| {name} | {amount:.2f} [1] | Not provided |' for name, amount in zip(FINANCIAL_ROWS, values))
 
 class KeyFinancialsProfileTests(TestCase):
+    def test_supplemental_tables_do_not_replace_main_statement_or_block_saving(self):
+        extra = '| Metric | FY26 |\n| --- | --- |\n| Revenue | 999.00 |'
+        payload, _, _ = section_payload(extra + '\n\n' + section() + '\n\n' + extra, 'report')
+        self.assertEqual(payload['financial_statements'][0]['metrics']['revenue']['value'], '459.00 INR Cr')
+        with self.assertRaises(ValueError):
+            section_payload(extra, 'report')
+        with self.assertRaises(ValueError):
+            section_payload(section() + '\n\n' + section(), 'report')
+
+    def test_bound_columns_do_not_overwrite_actual_profile_with_an_endpoint(self):
+        bounded = section().replace('FY27E Forecast', 'FY27E Forecast (Lower bound)').replace('| Not provided |', '| 100.00 [1] |')
+        payload, _, _ = section_payload(bounded, 'report')
+        self.assertEqual(len(payload['financial_statements']), 1)
+        self.assertEqual(payload['financial_statements'][0]['fy'], 'FY26')
+
     def test_accepted_table_drives_profile_without_another_model_request(self):
         deal = Deal.objects.create(title='Reviewed target')
         summary = sync_section(deal, section(), 'accepted-report')

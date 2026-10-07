@@ -9,9 +9,11 @@ ROW_KEYS = ['revenue', 'cogs', 'gross_profit', 'expenses', 'ebitda', 'depreciati
 
 def section_payload(section, source_id):
     blocks = re.findall(r'(?:^|\n)(\|[^\n]+\|(?:\n\|[^\n]+\|)+)', section)
-    if len(blocks) != 1:
-        raise ValueError('Accepted Key Financials must contain one financial table.')
-    rows = [[cell.strip() for cell in line.strip().strip('|').split('|')] for line in blocks[0].splitlines()]
+    tables = [[[cell.strip() for cell in line.strip().strip('|').split('|')] for line in block.splitlines()] for block in blocks]
+    tables = [table for table in tables if [re.sub(r'\[\d+\]|[*_]', '', row[0]).strip() for row in table[2:]] == list(FINANCIAL_ROWS)]
+    if len(tables) != 1:
+        raise ValueError('Accepted Key Financials must contain one main Revenue-to-PAT statement; supplemental tables are allowed.')
+    rows = tables[0]
     labels = [re.sub(r'\[\d+\]|[*_]', '', row[0]).strip() for row in rows[2:]]
     if labels != list(FINANCIAL_ROWS) or any(len(row) != len(rows[0]) for row in rows):
         raise ValueError('Key Financials table does not match the Revenue-to-PAT contract.')
@@ -22,6 +24,10 @@ def section_payload(section, source_id):
     evidence = {}
     statements = []
     for column, period in enumerate(rows[0][1:], 1):
+        # The profile stores one amount per fiscal period, not scenario bounds.
+        # Keep ranges in the report rather than silently selecting an endpoint.
+        if re.search(r'\b(?:lower|upper) bound\b', period, re.I):
+            continue
         match = re.search(r'\bFY\s*(20\d{2}|\d{2})(?:[-/](20\d{2}|\d{2}))?\s*([AEFP])?\b', period, re.I)
         if not match:
             continue
@@ -68,11 +74,14 @@ def sync_section(deal, section, source_id):
 
 def latest_accepted_section(deal):
     from ai_orchestrator.models import AIAuditLog
+    from django.db.models import Q
     parents = AIAuditLog.objects.filter(source_id=str(deal.id), source_metadata__queue_kind='report').exclude(source_metadata__queue_state='cancelled').order_by('-created_at')[:10]
     for parent in parents:
         item = next((item for item in (parent.source_metadata or {}).get('report_section_queue', [])
                      if item.get('title') == 'Key Financials' and item.get('status') == 'completed' and item.get('content')), None)
         if item and AIAuditLog.objects.filter(source_id=str(parent.id), source_type='vdr_report_section', status='COMPLETED',
-                source_metadata__report_section='Key Financials', source_metadata__report_source_review__status='no_material_error_found').exists():
+                source_metadata__report_section='Key Financials').filter(
+                Q(source_metadata__generation_mode='grounded_single_pass') |
+                Q(source_metadata__report_source_review__status='no_material_error_found')).exists():
             return item['content'], str(parent.id)
     return None
