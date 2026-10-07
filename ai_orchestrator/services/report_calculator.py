@@ -8,6 +8,10 @@ CALCULATOR_INSTRUCTIONS = '''
 Report calculator capability:
 Use the calculator for material numerical derivations, unit conversions, growth,
 variances, valuation bridges and returns before writing the final report. To request
+new arithmetic, first check the supplied primary saved cell facts: reuse their
+derived_display_values for the same value, currency, period and scale. These exact
+application-computed conversions do not need another calculator request. Batch only
+material calculations whose results are not already supplied. To request
 calculations, reply ONLY with <report_calculations> followed by a JSON array and
 </report_calculations>. Each object has expression, label and source_markers.
 For example, expression "(180 / 60) ** (1 / 5) - 1" computes a single-entry/exit

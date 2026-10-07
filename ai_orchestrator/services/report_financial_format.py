@@ -1,6 +1,6 @@
 """A single, consistent income statement for the Key Financials section."""
 import re
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 FINANCIAL_BASIS_RULE = (
     "Financial arithmetic and reporting basis: 1 crore = 10,000,000 currency units; "
@@ -84,6 +84,54 @@ FINANCIAL_ROWS = (
     "Other Non-operating Income / Expenses", "Exceptional Items", "PBT",
     "Income Tax Expense", "PAT",
 )
+FINANCIAL_SOURCE_ALIASES = {
+    "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
+    "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
+    "Gross Profit": {"grossprofit"},
+    "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "operatingexpenditure", "totaloperatingexpenditure", "opex"},
+    "EBITDA": {"ebitda", "operatingebitda"},
+    "Depreciation and Amortization": {"depreciationandamortization", "depreciationamortization", "depreciation", "da"},
+    "EBIT": {"ebit", "operatingprofit"},
+    "Net Finance Costs": {"netfinancecosts", "financecosts", "netinterest", "netinterestexpense", "interestexp", "interestexpense", "interestexpenses", "interestcost"},
+    "Other Non-operating Income / Expenses": {"otherincome", "othernonoperatingincomeexpenses", "nonoperatingincome"},
+    "Exceptional Items": {"exceptionalitems", "exceptionalitem"},
+    "PBT": {"pbt", "profitbeforetax", "profitbeforetaxpbt", "profitbeforetaxation"},
+    "Income Tax Expense": {"incometaxexpense", "taxexpense", "tax", "taxes", "incometax"},
+    "PAT": {"pat", "profitaftertax", "profitaftertaxpat", "profitaftertaxation", "netprofit"},
+}
+
+
+def prepared_display_values(fact: dict) -> dict:
+    """Exact conversions of supported statement amounts; no inferred units."""
+    label = re.sub(r'[^a-z0-9]', '', str(fact.get('row_label') or '').casefold())
+    if not any(label in names for names in FINANCIAL_SOURCE_ALIASES.values()) or '%' in fact.get('number_format', ''):
+        return {}
+    currencies, scales = set(), set()
+    for unit in fact.get('unit_labels') or []:
+        for currency, pattern in [('INR', r'₹|\b(?:INR|rupees?)\b'), ('USD', r'\bUSD\b'),
+                                  ('EUR', r'\bEUR\b|€'), ('GBP', r'\bGBP\b|£')]:
+            if re.search(pattern, unit, re.I): currencies.add(currency)
+        matched = False
+        for pattern, scale in [(r'\b(?:crores?|cr)\b', 10000000), (r'\b(?:lakhs?|lacs?)\b', 100000),
+                               (r'\b(?:millions?|mn|mln)\b', 1000000), (r'\b(?:thousands?|000)\b', 1000)]:
+            if re.search(pattern, unit, re.I): scales.add(scale); matched = True
+        if not matched and re.search(r'₹|€|£|\b(?:INR|USD|EUR|GBP|rupees?)\b', unit, re.I): scales.add(1)
+    if len(currencies) != 1 or len(scales) != 1 or isinstance(fact.get('value'), bool):
+        return {}
+    try:
+        value = Decimal(str(fact['value']))
+        if not value.is_finite() or abs(value) > Decimal('1e30'):
+            return {}
+        with localcontext() as context:
+            context.prec = 64
+            native = value * next(iter(scales))
+            currency = next(iter(currencies))
+            return {currency + ' ' + name: {'exact': format(native / scale, 'f'),
+                    'display_2dp': format((native / scale).quantize(Decimal('.01')), 'f')}
+                    for name, scale in [('Cr', Decimal(10000000)), ('million', Decimal(1000000))]}
+    except (ValueError, ArithmeticError, KeyError):
+        return {}
+
 FINANCIAL_TABLE_INSTRUCTION = (
     "\n\nKey Financials table format:\n"
     "- Include one main standardized Markdown table in this section: a consolidated P&L / "
@@ -187,9 +235,9 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
     functions. Unknown source periods or units are not claimed as verified.
     """
     def scale(text):
-        for pattern, value in [(r"\b(?:crores?|cr)\b", 10_000_000), (r"\blakhs?\b", 100_000),
+        for pattern, value in [(r"\b(?:crores?|cr)\b", 10_000_000), (r"\b(?:lakhs?|lacs?)\b", 100_000),
                                (r"\b(?:millions?|mn)\b", 1_000_000), (r"\b(?:thousands?|000)\b", 1000),
-                               (r"\b(?:rupees?|INR|USD)\b", 1)]:
+                               (r"₹|\b(?:rupees?|INR|USD)\b", 1)]:
             if re.search(pattern, text, re.I):
                 return Decimal(value)
         return None
@@ -198,21 +246,7 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
         match = re.search(r"\b(FY|CY)?\s*(20\d{2}|\d{2})(?:[AEF])?\b", re.sub(r"\[\d+\]", "", text), re.I)
         return ((match[1] or "FY").upper(), match[2][-2:]) if match else None
 
-    aliases = {
-        "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
-        "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
-        "Gross Profit": {"grossprofit"},
-        "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "operatingexpenditure", "totaloperatingexpenditure", "opex"},
-        "EBITDA": {"ebitda", "operatingebitda"},
-        "Depreciation and Amortization": {"depreciationandamortization", "depreciationamortization", "depreciation", "da"},
-        "EBIT": {"ebit", "operatingprofit"},
-        "Net Finance Costs": {"netfinancecosts", "financecosts", "interestexpense", "interestexpenses", "interestcost"},
-        "Other Non-operating Income / Expenses": {"otherincome", "othernonoperatingincomeexpenses", "nonoperatingincome"},
-        "Exceptional Items": {"exceptionalitems", "exceptionalitem"},
-        "PBT": {"pbt", "profitbeforetax", "profitbeforetaxpbt", "profitbeforetaxation"},
-        "Income Tax Expense": {"incometaxexpense", "taxexpense", "tax", "taxes", "incometax"},
-        "PAT": {"pat", "profitaftertax", "profitaftertaxpat", "profitaftertaxation", "netprofit"},
-    }
+    aliases = FINANCIAL_SOURCE_ALIASES
     by_number = {int(c["citation_number"]): c for c in citations}
     table_scale = scale(rows[0][0])
     native_units = bool(re.search(r"native\s+(?:model\s+)?units",rows[0][0],re.I))

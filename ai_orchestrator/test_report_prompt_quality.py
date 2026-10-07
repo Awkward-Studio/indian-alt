@@ -9,6 +9,17 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_prepared_conversions_preserve_sign_precision_and_declared_units(self):
+        from ai_orchestrator.services.report_financial_format import prepared_display_values
+        fact = {'value': '-122746186', 'row_label': 'Total Revenue', 'unit_labels': ['Revenue (₹)'], 'number_format': '0.00'}
+        values = prepared_display_values(fact)
+        self.assertEqual(values['INR Cr'], {'exact': '-12.2746186', 'display_2dp': '-12.27'})
+        self.assertEqual(values['INR million']['exact'], '-122.746186')
+        for changed in [{'unit_labels': []}, {'unit_labels': ['INR Cr', 'USD million']},
+                        {'unit_labels': ['INR', 'INR Cr']}, {'number_format': '0.00%'},
+                        {'row_label': 'Customer count'}, {'value': 'NaN'}]:
+            self.assertEqual(prepared_display_values({**fact, **changed}), {})
+
     def test_forecast_ranges_keep_both_bounds_and_qualifiers_without_changing_amounts(self):
         table = '| Metric | FY25 Actual | FY26 Forecast [2] |\n| --- | --- | --- |\n' + '\n'.join(f'| {name} | Not provided | Not provided |' for name in FINANCIAL_ROWS)
         table = table.replace('| Revenue | Not provided | Not provided |', '| Revenue [1] | 115.00 | 132.25 – 138.00 [2] |').replace('| EBITDA | Not provided | Not provided |', '| EBITDA [1] | 16.79 (BU) | 26.45 – 28.98 (Target) [2] |')

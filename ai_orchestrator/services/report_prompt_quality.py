@@ -80,6 +80,9 @@ CALCULATION_GUIDANCE = (
     "people costs, fees, valuations, margins, sensitivities and returns. Where "
     "a value cannot be calculated from supported inputs, state Not provided and "
     "identify the missing input instead of fabricating a result."
+    " Reuse exact application-computed derived_display_values supplied with primary "
+    "saved cells for unit conversions; do not request the calculator to recompute them. "
+    "Use the calculator for material derivations whose results are not already supplied."
 )
 GENERATION_GUIDANCE = (
     "Before drafting, organize the section's required analytical themes against "

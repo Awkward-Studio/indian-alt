@@ -25,6 +25,36 @@ def financial_model():
 
 
 class WorkbookFormulaTests(SimpleTestCase):
+    def test_numeric_saved_strings_and_explicit_workbook_rupees_remain_verifiable(self):
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS, financial_source_errors
+        manifest = {'sheets': [
+            {'name': 'Inputs', 'cells': [{'coordinate': 'B7', 'value': 'Revenue (₹)'}]},
+            {'name': 'IS', 'cells': [{'coordinate': 'C3', 'value': '2023-24'},
+                {'coordinate': 'D3', 'value': '2024-25'},
+                {'coordinate': 'B4', 'value': 'Total Revenue'},
+                {'coordinate': 'C4', 'value': '=Inputs!C7', 'cached_value': '122746186'},
+                {'coordinate': 'D4', 'value': '=Inputs!D7', 'cached_value': '465805011'},
+                {'coordinate': 'C5', 'value': 'Not provided'}, {'coordinate': 'C6', 'value': 'NaN'}]}]}
+        doc = SimpleNamespace(id='model', title='Model.xlsx', extraction_manifest=manifest)
+        service = ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal', title='Example'), documents=[doc], embedding_service=Mock())
+        chunk = SimpleNamespace(source_id='model', content='C4=122746186\nD4=465805011\nC5=Not provided\nC6=NaN', metadata={'sheet_name':'IS'})
+        citation = service._citation(chunk, rank=1)
+        self.assertEqual(citation['financial_cells']['C4']['value'], '122746186')
+        self.assertEqual(citation['financial_cells']['D4']['row_label'], 'Total Revenue')
+        self.assertNotIn('C5', citation['financial_cells'])
+        self.assertNotIn('C6', citation['financial_cells'])
+        citation['citation_number'] = 1
+        rows = [['Metric (INR Cr)', 'FY 2023-24 Actual'], ['---', '---'], *[[name, '12.27 [1]' if name == 'Revenue' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        self.assertEqual(financial_source_errors(rows, [citation]), [])
+        rows[0][1] = 'FY 2024-25 Actual'
+        rows[2][1] = '46.58 [1]'
+        self.assertEqual(financial_source_errors(rows, [citation]), [])
+        rows[2][1] = '13.27 [1]'
+        self.assertTrue(financial_source_errors(rows, [citation]))
+        manifest['sheets'][0]['cells'].append({'coordinate': 'B8', 'value': 'USD millions'})
+        service = ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal', title='Example'), documents=[doc], embedding_service=Mock())
+        self.assertEqual(service._citation(chunk, rank=1)['financial_cells']['C4']['unit_labels'], [])
+
     def test_distant_period_header_is_preserved_for_income_statement_cells(self):
         manifest = {"sheets": [{"name": "IS", "cells": [
             {"coordinate": "G4", "value": "FY27E"},

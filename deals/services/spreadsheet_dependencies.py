@@ -36,7 +36,10 @@ class WorkbookFormulaGraph:
                 label = cell.get("cached_value") if self.formula(cell) else cell.get("value")
                 if isinstance(label, str) and not label.startswith("="):
                     row, column = coordinate_to_tuple(address)
-                    self.row_labels.setdefault((name, row), []).append((column, address, label))
+                    # Native extractors may serialize saved numbers as strings.
+                    # A prior period's amount is not the next cell's metric label.
+                    if not re.fullmatch(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', label.strip()):
+                        self.row_labels.setdefault((name, row), []).append((column, address, label))
                     self.column_labels.setdefault((name, column), []).append((row, address, label))
             for table in sheet.get("tables", []):
                 self.tables[str(table.get("name", "")).casefold()] = (name, table)

@@ -24,11 +24,15 @@ Numeric forecast ranges in the main statement expand into lower- and upper-bound
 
 Deterministic validation checks the numerical and citation rules it implements. It is not an independent verification of every qualitative claim. Unavailable primary evidence must be identified as a gap.
 
+Native extractor manifests can store saved numeric values as strings. The citation builder accepts finite numeric strings without changing their precision, and preceding numeric strings are not treated as metric labels. Explicit `₹` labels identify rupees. An unlabelled statement may inherit an explicit, unscaled workbook currency only when no mixed currencies or scaled schedules are present. It never inherits fiscal columns from another worksheet.
+
+Primary saved cell facts can include exact application-computed currency display conversions. Only recognized statement amounts with a single explicit currency and scale receive them; missing or mixed units, quantity rows and percentage formats do not. Writers reuse these results and reserve calculator requests for material derivations not already supplied. Final citation, saved-value and arithmetic checks remain active.
+
 ## Evidence integrity and inference
 
 Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v12 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. The writer must not transfer column-year mappings between worksheets.
 
-Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Four report sections start together, and each free worker receives the next section without waiting for the other three. Key Financials and Transaction Details retain scheduling priority.
+Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Report sections share the configured concurrency, now three on H100, and each free worker receives the next section without waiting for the others. Key Financials and Transaction Details retain scheduling priority.
 
 Report capacity is shared across deals. The coordinator counts processing and retrying sections across active reports and fills free capacity from the oldest eligible report, including the next queued deal when an earlier deal has no sections ready to start. The shared limit is the smaller of report concurrency and inference concurrency, capped at four. Document indexing continues to yield at document boundaries. Each section retains its own delivery owner and generation.
 

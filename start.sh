@@ -55,7 +55,7 @@ elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
     case "${AI_INFERENCE_TARGET:-}" in
         h100|H100)
-            CELERY_CONCURRENCY_VALUE="${H100_CELERY_CONCURRENCY:-4}"
+            CELERY_CONCURRENCY_VALUE="${H100_CELERY_CONCURRENCY:-3}"
             CELERY_POOL_VALUE="${H100_CELERY_POOL:-prefork}"
             ;;
         t4|T4)

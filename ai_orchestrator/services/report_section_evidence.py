@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -239,14 +240,46 @@ class ICReportSectionEvidenceService:
                 unit_labels = []
                 for _, cell in graph.by_sheet[sheet]:
                     value = cell.get("cached_value") if graph.formula(cell) else cell.get("value")
-                    if isinstance(value, str) and len(value) <= 100 and re.search(r"\b(?:crores?|lakhs?|millions?|thousands?|INR|USD|rupees?)\b", value, re.I):
+                    if isinstance(value, str) and len(value) <= 100 and re.search(r"₹|\b(?:crores?|lakhs?|lacs?|millions?|thousands?|INR|USD|rupees?)\b", value, re.I):
                         unit_labels.append(value)
+                # Some native workbooks declare unscaled currency on their
+                # input/revenue schedules, with no repeated statement heading.
+                # Only inherit a single explicit base currency; mixed currencies
+                # or any scaled schedule keep their own worksheet context.
+                if not unit_labels:
+                    workbook_labels = []
+                    for cells in graph.by_sheet.values():
+                        for _, cell in cells:
+                            value = cell.get('cached_value') if graph.formula(cell) else cell.get('value')
+                            if isinstance(value, str) and len(value) <= 100 and re.search(r'₹|\$|€|£|\b(?:INR|USD|EUR|GBP|JPY|CAD|AUD|rupees?|crores?|lakhs?|lacs?|millions?|thousands?)\b', value, re.I):
+                                workbook_labels.append(value)
+                    currencies = set()
+                    for label in workbook_labels:
+                        if re.search(r'₹|\b(?:INR|rupees?)\b', label, re.I): currencies.add('INR')
+                        if re.search(r'\bUSD\b', label, re.I): currencies.add('USD')
+                        if re.search(r'€|£|\b(?:EUR|GBP|JPY|CAD|AUD)\b', label, re.I): currencies.add('other_currency')
+                        if '$' in label and not re.search(r'\bUSD\b', label, re.I): currencies.add('ambiguous_dollar')
+                    if len(currencies) == 1 and currencies <= {'INR', 'USD'} and not any(re.search(r'\b(?:crores?|cr|lakhs?|lacs?|millions?|mn|mln|thousands?|000)\b', label, re.I) for label in workbook_labels):
+                        unit_labels = workbook_labels
                 self._financial_unit_cache[unit_key] = unit_labels
             unit_labels = self._financial_unit_cache[unit_key]
             for address in visible_cells:
                 cell = graph.cells.get((sheet, address)) or {}
                 value = cell.get("cached_value") if graph.formula(cell) else cell.get("value")
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                if isinstance(value, str):
+                    literal = value.strip()
+                    if not re.fullmatch(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?', literal):
+                        continue
+                    try:
+                        numeric_value = Decimal(literal)
+                    except InvalidOperation:
+                        continue
+                    if not numeric_value.is_finite():
+                        continue
+                    value = format(numeric_value, 'f')
+                if not isinstance(value, (int, float, str)) or isinstance(value, bool):
+                    continue
+                if not Decimal(str(value)).is_finite():
                     continue
                 row, column = coordinate_to_tuple(address)
                 labels = [(c, label) for c, _, label in graph.row_labels.get((sheet, row), []) if c < column]
@@ -255,6 +288,10 @@ class ICReportSectionEvidenceService:
                 financial_cells[address] = {"value": value, "row_label": max(labels)[1] if labels else "",
                     "period": max(periods)[1] if periods else "", "unit_labels": unit_labels,
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
+                from .report_financial_format import prepared_display_values
+                prepared = prepared_display_values(financial_cells[address])
+                if prepared:
+                    financial_cells[address]['derived_display_values'] = prepared
         return {
             "rank": rank,
             "document_id": source_id,
@@ -379,7 +416,8 @@ class ICReportSectionEvidenceService:
                 f"{citation['locator']['cell_range']}]"
             )
         primary = citation.get('financial_cells') or {}
-        facts = '\nPrimary saved cell facts (this worksheet only):\n' + json.dumps(primary, ensure_ascii=False) if primary else ''
+        facts = ('\nPrimary saved cell facts (this worksheet only; derived_display_values are exact application-computed '
+                 'unit conversions of the saved values, not new source facts):\n' + json.dumps(primary, ensure_ascii=False)) if primary else ''
         from .report_financial_format import source_unit_conversion_notes
         content = str(chunk.content or "").strip()
         conversions = source_unit_conversion_notes(content, metadata.get('chunk_kind') or 'document_text')
