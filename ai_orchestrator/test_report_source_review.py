@@ -1,9 +1,22 @@
 from unittest.mock import Mock,patch
 from django.test import SimpleTestCase,TestCase,override_settings
-from ai_orchestrator.services.report_source_review import review_packet,validate_review
+from ai_orchestrator.services.report_source_review import review_packet,validate_review,review_section
 
 
 class ReportSourceReviewTests(SimpleTestCase):
+    def test_saved_cell_json_and_all_blocks_are_preserved_without_nested_escaping(self):
+        service = Mock()
+        service.process_content.return_value = {'findings': [], 'coverage_gaps': []}
+        cells = '{"period": "FY26E", "value": 90, "formula": "=SUM(A1:A3)"}'
+        evidence = 'Retrieval block R001\n'+cells+'\n\nRetrieval block R002\nUncited coverage fact'
+        review_section(ai_service=service, title='Transaction Details', draft='Equity [R001]',
+                       evidence=evidence, source_id='test', requirements='Check funding')
+        content = service.process_content.call_args.kwargs['content']
+        self.assertIn(cells, content)
+        self.assertIn('Uncited coverage fact', content)
+        self.assertNotIn('\\"period\\"', content)
+        self.assertEqual(service.process_content.call_args.kwargs['metadata']['_source_metadata']['review_source_ranks'], [1, 2])
+
     def test_all_primary_blocks_are_supplied_for_coverage_and_prior_drafts_are_excluded(self):
         evidence="Retrieval block R001\nRevenue source\n\nRetrieval block R002\nOther source\n\nCompleted sections from this report\nUnsupported draft"
         packet=review_packet('Key Financials','Revenue [R001@\'PL\'!R50].',evidence)

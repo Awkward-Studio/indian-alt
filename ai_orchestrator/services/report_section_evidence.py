@@ -14,7 +14,7 @@ from ai_orchestrator.models import DocumentChunk
 from ai_orchestrator.services.bulk_prompt_contracts import BULK3_SECTION_INSTRUCTIONS
 from ai_orchestrator.services.embedding_processor import EmbeddingService
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
-from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import estimate_message_tokens as estimate_tokens
 
 
 SECTION_RETRIEVAL_TERMS = {
@@ -642,6 +642,7 @@ class ICReportSectionEvidenceService:
             "supplemented_document_ids": supplemented_document_ids,
             "estimated_context_tokens": estimate_tokens(context),
             "context_budget_tokens": self.max_tokens,
+            "context_budget_basis": "serialized_message",
             "formula_dependency_chunk_count": len(dependency_chunks),
             "formula_dependency_warnings": dependency_notes,
         }

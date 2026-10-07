@@ -1,5 +1,4 @@
 """A separate source review for each generated section, using its actual cited evidence."""
-import json
 import re
 
 REVIEW_INSTRUCTIONS = '''Review the draft section against the primary retrieval blocks below.
@@ -76,7 +75,12 @@ def validate_review(result: dict, ranks: set[int], *, require_coverage=False) ->
 
 def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
     packet=review_packet(title,draft,evidence,requirements)
-    content=REVIEW_INSTRUCTIONS+'\n\n'+json.dumps(packet,ensure_ascii=False)
+    # Keep every selected source block, but do not wrap the evidence (which
+    # already contains saved-cell JSON) in another escaped JSON string.
+    content='\n\n'.join([REVIEW_INSTRUCTIONS, 'Section: '+title,
+        '<section_requirements>\n'+requirements+'\n</section_requirements>',
+        '<draft_section>\n'+draft+'\n</draft_section>',
+        '<primary_evidence>\n'+'\n\n'.join(packet['primary_evidence'])+'\n</primary_evidence>'])
     result=ai_service.process_content(content=content,skill_name=None,
         source_type='report_section_quality_review',source_id=str(source_id),metadata={
             'response_mode':'json','response_format':{'type':'json_object'},
@@ -85,7 +89,8 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
             'max_tokens':8192,'max_input_tokens':90_112,'max_input_chars':len(content)+1024,
             'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
             'context_label':f'Source review: {title}',
-            '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id)},
+            '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
+                                'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2'},
         })
     if isinstance(result,dict) and result.get('error'):
         raise ValueError('Source review inference failed: '+str(result['error']))

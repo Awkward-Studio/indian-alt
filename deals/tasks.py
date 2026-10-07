@@ -2163,7 +2163,7 @@ def process_vdr_report_section(
             deal, audit, allow_gaps=bool((audit.source_metadata or {}).get("allow_gaps")),
         )
         from ai_orchestrator.services.report_section_context import prior_section_context
-        from ai_orchestrator.services.token_budget import estimate_tokens
+        from ai_orchestrator.services.token_budget import estimate_tokens, report_evidence_budget
         prior_context = prior_section_context(audit.source_metadata or {}, section_title)
         previous_attempt = None
         retry_draft = ""
@@ -2181,7 +2181,12 @@ def process_vdr_report_section(
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
         ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs,
-            max_tokens=max(4_000, int(getattr(settings, "VDR_REPORT_SECTION_EVIDENCE_TOKENS", 36_000)) - estimate_tokens(prior_context) - estimate_tokens(retry_draft)))
+            max_tokens=report_evidence_budget(
+                context_window=int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 65_536)),
+                input_budget=int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 40_960)),
+                output_budget=int(getattr(settings, 'VDR_REPORT_SECTION_MAX_TOKENS', 16_384)),
+                evidence_budget=int(getattr(settings, 'VDR_REPORT_SECTION_EVIDENCE_TOKENS', 36_000)),
+                extra_context=prior_context+'\n\n'+retry_draft))
         retrieved = evidence_service.retrieve(section_title)
         context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
         evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None

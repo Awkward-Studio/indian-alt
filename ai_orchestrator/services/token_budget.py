@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 
 
 class ContextBudgetExceeded(ValueError):
@@ -45,3 +46,18 @@ def estimate_tokens(value: str) -> int:
     text = str(value or "")
     lexical = len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
     return max((len(text) + 2) // 3, int(lexical * 1.2))
+
+
+def estimate_message_tokens(value: str) -> int:
+    """Include string escaping used by the complete-request safety check."""
+    return estimate_tokens(json.dumps(str(value or ''), ensure_ascii=False))
+
+
+def report_evidence_budget(*, context_window: int, input_budget: int, output_budget: int,
+                           evidence_budget: int, extra_context: str = '') -> int:
+    # Instructions, rendered deal data, calculator turns and request framing
+    # need space beyond the retrieved source blocks. The provider still checks
+    # the complete request, including every calculator continuation.
+    available = min(evidence_budget, input_budget - 16_384,
+                    context_window - output_budget - 4096 - 24_576)
+    return max(4000, available - (estimate_message_tokens(extra_context) if extra_context else 0))

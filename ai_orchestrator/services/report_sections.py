@@ -807,6 +807,8 @@ class ICReportSectionService:
             },
         )
         try:
+            if isinstance(result, dict) and result.get('error'):
+                raise ReportSectionStructureError(f"Generation for '{title}' could not complete: {result['error']}")
             section = cls._normalize_section(
                 title,
                 result.get("response") if isinstance(result, dict) else result,

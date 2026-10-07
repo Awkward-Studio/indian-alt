@@ -6,7 +6,7 @@ from django.test import TestCase
 from ai_orchestrator.models import AIPromptRevision
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
-from ai_orchestrator.services.token_budget import estimate_tokens
+from ai_orchestrator.services.token_budget import estimate_tokens, estimate_message_tokens
 
 
 class ICReportSectionEvidenceServiceTests(TestCase):
@@ -74,6 +74,7 @@ class ICReportSectionEvidenceServiceTests(TestCase):
         # should still use most of this deliberately small test budget.
         self.assertGreaterEqual(result["metadata"]["selected_chunk_count"], 15)
         self.assertLessEqual(estimate_tokens(result["context"]), 4_000)
+        self.assertLessEqual(estimate_message_tokens(result["context"]), 4_000)
         self.assertEqual(result["metadata"]["selected_document_count"], 2)
 
     def test_duplicate_chunk_content_is_included_once(self):

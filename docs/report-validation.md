@@ -22,6 +22,8 @@ Arithmetic checks account for the precision of displayed operands and results. F
 
 H100 report requests use the configured output budget, currently 16,384 tokens. Source review reserves 8,192 tokens for JSON findings. JSON requests always disable thinking, including callers that explicitly enabled it. The calculator and reviewer add bounded inference work; generation can take longer than the previous single-pass workflow.
 
+Retrieval budgets include JSON string escaping used by the provider's complete-request check. The H100 source pack reserves room for section instructions, deal data, prior sections and calculator continuations, independently of worker concurrency. Source review sends the draft, requirements and every selected primary block as plain text rather than nesting saved-cell JSON inside another JSON packet. Reviews retain their exact source ranks in audit metadata. No selected block is truncated to make the final request fit.
+
 vLLM queue diagnostics and cleanup do not call llama.cpp `/slots` when `AI_SLOT_TRANSPORT_ENABLED` is false. The frontend counts live inference audits when native slots are unavailable. Historical rejected attempts that were retried are shown separately from accepted completions.
 
 ## Verification
