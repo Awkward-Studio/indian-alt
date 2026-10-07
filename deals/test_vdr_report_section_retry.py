@@ -11,14 +11,14 @@ from deals.tasks import process_vdr_report_section
 
 
 class VDRReportSectionRetryTests(SimpleTestCase):
-    def test_under_length_retry_receives_the_rejected_draft_and_fresh_citation_instruction(self):
+    def assert_retry_receives_draft(self, error, retries=1, feedback=None):
         from types import SimpleNamespace
-        previous=SimpleNamespace(error_message="Report section 'Executive Summary' was too short: 900 words; minimum is 1260.",
+        previous=SimpleNamespace(error_message=error,
             raw_response="## Executive Summary\n\nA supported finding [R001] and its investment implication.")
-        query=Mock();query.order_by.return_value.first.return_value=previous
-        audit=Mock(source_metadata={})
+        query=Mock();query.exclude.return_value=query;query.order_by.return_value.first.return_value=previous
+        audit=Mock(source_metadata={'regeneration_feedback': {'Executive Summary': feedback}} if feedback else {})
         with (
-            patch.object(process_vdr_report_section.request,'retries',1),
+            patch.object(process_vdr_report_section.request,'retries',retries),
             patch('deals.services.vdr_queue.delivery_is_current',return_value=True),
             patch('deals.services.vdr_queue.heartbeat'),patch('deals.services.vdr_queue.start_heartbeat'),
             patch('ai_orchestrator.models.AIAuditLog.objects.get',return_value=audit),
@@ -36,6 +36,23 @@ class VDRReportSectionRetryTests(SimpleTestCase):
         self.assertIn('A supported finding',evidence)
         self.assertIn('replace its citations',evidence)
         self.assertNotIn('[R001]',evidence.split('<draft_to_expand>')[1])
+        return evidence
+
+    def test_under_length_retry_receives_the_rejected_draft_and_fresh_citation_instruction(self):
+        self.assert_retry_receives_draft("Report section 'Executive Summary' was too short: 900 words; minimum is 1260.")
+
+    def test_source_review_and_calculation_retries_receive_draft_with_feedback(self):
+        for error in ['Source review rejected: incorrect fiscal year', 'Inconsistent calculation: EBITDA margin']:
+            with self.subTest(error=error):
+                evidence = self.assert_retry_receives_draft(error)
+                self.assertIn(error, evidence)
+
+    def test_frontend_regeneration_receives_previous_run_draft_and_both_feedbacks(self):
+        evidence = self.assert_retry_receives_draft('Prior review rejection', retries=0, feedback={
+            'report_audit_id': 'previous-report', 'coverage_gaps': ['Explain dilution'],
+            'source_errors': [{'claim': 'FY27 infusion', 'issue': 'Wrong period', 'correction': 'Use FY26'}]})
+        self.assertIn('Explain dilution', evidence)
+        self.assertIn('Use FY26', evidence)
 
     def test_degenerate_repetition_retries_model_request(self):
         audit = Mock(source_metadata={})

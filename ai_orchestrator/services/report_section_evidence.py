@@ -380,7 +380,10 @@ class ICReportSectionEvidenceService:
             )
         primary = citation.get('financial_cells') or {}
         facts = '\nPrimary saved cell facts (this worksheet only):\n' + json.dumps(primary, ensure_ascii=False) if primary else ''
-        return " | ".join(header) + "\n" + str(chunk.content or "").strip() + facts
+        from .report_financial_format import source_unit_conversion_notes
+        content = str(chunk.content or "").strip()
+        conversions = source_unit_conversion_notes(content, metadata.get('chunk_kind') or 'document_text')
+        return " | ".join(header) + "\n" + content + facts + conversions
 
     def _formula_graph(self, source_id: str):
         if source_id not in self._formula_graphs:

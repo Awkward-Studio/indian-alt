@@ -19,6 +19,56 @@ FINANCIAL_BASIS_RULE = (
 )
 
 
+def source_unit_conversion_notes(content, kind):
+    """Exact arithmetic aid for explicitly scaled primary statement text.
+
+    Keep the source unchanged. This does not assign periods, classify rows or
+    reconcile statements, and never infers units from a generated summary.
+    """
+    if kind not in {'normalized_text', 'document_text'}:
+        return ''
+    headings = re.findall(r"^\s*\(?((?:Rs\.?|INR|Rupees)\s+(?:in\s+)?(?:['’‘]?000|thousands?|lakhs?|lacs?|millions?|crores?))\)?\s*$",
+                          content, re.I | re.M)
+    if not headings:
+        return ''
+    scales = set()
+    for heading in headings:
+        if re.search(r"000|thousand", heading, re.I): scales.add(Decimal('1000'))
+        elif re.search(r"lakh|lac", heading, re.I): scales.add(Decimal('100000'))
+        elif re.search(r"million", heading, re.I): scales.add(Decimal('1000000'))
+        elif re.search(r"crore", heading, re.I): scales.add(Decimal('10000000'))
+    if len(scales) != 1:
+        return ''
+    multiplier = scales.pop()
+    notes = []
+    seen = set()
+    for line in content.splitlines():
+        # Per-share figures can have a different scale from the statement.
+        if re.search(r'earnings? per share|earning per share|\bEPS\b', line, re.I):
+            break
+        for literal in line.strip().strip('|').split('|'):
+            literal = literal.strip()
+            if not re.fullmatch(r'\(?[-+]?\d[\d,]*\.\d+\)?', literal):
+                continue
+            if literal in seen:
+                continue
+            parsed = displayed_amount(literal)
+            if parsed is None:
+                continue
+            seen.add(literal)
+            value = parsed[0]
+            crore = format(value * multiplier / Decimal('10000000'), 'f')
+            million = format(value * multiplier / Decimal('1000000'), 'f')
+            notes.append(f'{literal} source units = INR {crore} Cr = INR {million} million')
+            if len(notes) >= 48:
+                break
+        if len(notes) >= 48:
+            break
+    return ('\nExact unit-conversion arithmetic for the explicit heading '+headings[0]+
+            ' (derived arithmetic, not new source facts; retain original row, period and scope):\n'+
+            '\n'.join(notes)) if notes else ''
+
+
 def displayed_amount(cell):
     value = re.sub(r"\[\d+\]", "", cell).replace(",", "").replace("*", "").strip()
     match = re.fullmatch(r"(\()?([-+]?\d+(?:\.\d+)?)(\))?", value)

@@ -2168,22 +2168,24 @@ def process_vdr_report_section(
         from ai_orchestrator.services.token_budget import estimate_tokens, report_evidence_budget
         prior_context = prior_section_context(audit.source_metadata or {}, section_title)
         from deals.services.report_coverage import format_review_feedback
-        saved_feedback = format_review_feedback(((audit.source_metadata or {}).get('regeneration_feedback') or {}).get(section_title))
+        section_feedback = ((audit.source_metadata or {}).get('regeneration_feedback') or {}).get(section_title) or {}
+        saved_feedback = format_review_feedback(section_feedback)
         if saved_feedback:
             prior_context += '\n\n<prior_review_feedback>\n'+saved_feedback+'\n</prior_review_feedback>'
         previous_attempt = None
         retry_draft = ""
-        if self.request.retries:
+        if self.request.retries or section_feedback.get('report_audit_id'):
+            draft_parent_ids = [str(audit_log_id)]
+            if section_feedback.get('report_audit_id'):
+                draft_parent_ids.append(str(section_feedback['report_audit_id']))
             previous_attempt = AIAuditLog.objects.filter(
-                source_type="vdr_report_section", source_id=audit_log_id,
-                context_label=f"VDR report section: {section_title}", status="FAILED",
-            ).order_by("-created_at").first()
-            if previous_attempt and "was too short:" in (previous_attempt.error_message or ""):
+                source_type="vdr_report_section", source_id__in=draft_parent_ids,
+                context_label=f"VDR report section: {section_title}", status__in=['FAILED', 'COMPLETED'],
+            ).exclude(raw_response='').order_by("-created_at").first()
+            if previous_attempt and previous_attempt.raw_response:
                 draft = re.split(r"^###\s+Citations\s*$", previous_attempt.raw_response or "", maxsplit=1, flags=re.M)[0]
                 draft = re.sub(r"\[(?:R\d+(?:@[^]\n]+)?|\d+)\]", "", draft)
-                while estimate_tokens(draft) > 4000:
-                    draft = draft[:max(0,len(draft)-1000)]
-                retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis rejected draft is a structural starting point, not verified evidence. Re-check every claim against the current retrieval blocks and replace its citations. Expand supported analysis and material consequences instead of making a shorter summary."
+                retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis previous draft is a starting point, not verified evidence. Correct it using the review feedback and current primary evidence. Re-check every claim against the current retrieval blocks and replace its citations. Preserve supported analysis, correct errors, address coverage gaps and expand only where necessary."
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
         ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs,
@@ -2219,8 +2221,8 @@ def process_vdr_report_section(
                 "state exact gaps when records are absent.\n"
                 "</retry_requirement>"
             )
-            if retry_draft:
-                context += retry_draft
+        if retry_draft:
+            context += retry_draft
         section = ICReportSectionService._generate_section(
             ai_service=AIProcessorService(), evidence=context, analysis=analysis, title=section_title,
             source_id=audit_log_id, evidence_metadata=evidence_metadata,

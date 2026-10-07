@@ -63,6 +63,32 @@ class ReportSourceReviewTests(SimpleTestCase):
         self.assertIn('A funding ask is not enterprise value', REVIEW_INSTRUCTIONS)
         self.assertIn('explicitly disclosed missing input addresses coverage', REVIEW_INSTRUCTIONS)
 
+    def test_false_rejection_is_verified_before_rewriting_the_report(self):
+        service = Mock()
+        service.process_content.side_effect = [
+            {'findings': [{'severity': 'error', 'claim': 'Revenue INR 40.53 Cr', 'issue': 'Wrong conversion',
+                'correction': 'Use INR 4.05 Cr', 'sources': ['R001']}], 'coverage_gaps': ['Tax history absent']},
+            {'findings': [], 'coverage_gaps': []},
+        ]
+        review = review_section(ai_service=service, title='Key Financials',
+            draft='Revenue INR 40.53 Cr [R001]. Tax history is not provided.',
+            evidence="Retrieval block R001\nRs in '000\nRevenue 405330.42", source_id='test')
+        self.assertEqual(review, {'findings': [], 'coverage_gaps': []})
+        self.assertEqual(service.process_content.call_count, 2)
+        self.assertIn('Verify the proposed review', service.process_content.call_args.kwargs['content'])
+
+    def test_verified_error_requires_actual_claim_and_cited_evidence_quotes(self):
+        from ai_orchestrator.services.report_source_review import validate_verified_findings
+        finding = {'severity': 'error', 'claim': 'Revenue INR 4.05 Cr', 'issue': 'Wrong conversion',
+            'error_type': 'contradiction', 'source_quote': 'Revenue 405330.42', 'sources': ['R001']}
+        evidence = ['Retrieval block R001\nRevenue 405330.42', 'Retrieval block R002\nUnrelated quote']
+        validate_verified_findings([finding], 'Revenue INR 4.05 Cr [R001]', evidence)
+        with self.assertRaises(ValueError):
+            validate_verified_findings([finding], 'Revenue INR 40.53 Cr [R001]', evidence)
+        finding['source_quote'] = 'Unrelated quote'
+        with self.assertRaises(ValueError):
+            validate_verified_findings([finding], 'Revenue INR 4.05 Cr [R001]', evidence)
+
 
 @override_settings(AI_INFERENCE_TARGET='h100',VDR_REPORT_SECTION_MIN_WORDS=900)
 class SourceReviewedGenerationTests(TestCase):
@@ -99,6 +125,8 @@ class SourceReviewedGenerationTests(TestCase):
         service=Mock();service.process_content.side_effect=[
             {'response':'## Executive Summary\n\n'+('Lengthy analysis '*800)+'[R001].'},
             {'findings':[{'severity':'error','claim':'A claim','issue':'Not supported','sources':['R001'],'correction':'Mark a gap'}],'coverage_gaps':['Explain the investment approval gates']},
+            {'findings':[{'severity':'error','claim':'Lengthy analysis','issue':'Not supported','sources':['R001'],
+                'correction':'Mark a gap','error_type':'unsupported'}],'coverage_gaps':['Explain the investment approval gates']},
         ]
         with self.assertRaisesRegex(ReportSectionStructureError,'Source review rejected.*Explain the investment approval gates'):
             ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',

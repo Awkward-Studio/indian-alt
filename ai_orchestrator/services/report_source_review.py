@@ -1,5 +1,6 @@
 """A separate source review for each generated section, using its actual cited evidence."""
 import re
+import json
 from ai_orchestrator.services.report_financial_format import FINANCIAL_BASIS_RULE
 
 REVIEW_INSTRUCTIONS = '''Review the draft section against the primary retrieval blocks below.
@@ -94,6 +95,48 @@ def material_review_errors(findings):
             and not confirms_no_error(finding)]
 
 
+VERIFICATION_INSTRUCTIONS = '''
+Verify the proposed review, rather than assuming that its findings are correct.
+Re-read the ORIGINAL draft, exact section requirements and supplied primary sources.
+Return the same JSON findings/coverage_gaps schema, containing only independently
+confirmed problems. Remove false positives. Do not invent new source facts.
+For each retained error, copy a VERBATIM continuous excerpt of the draft into claim.
+Add error_type="contradiction" or "unsupported". For a contradiction, add source_quote
+as a VERBATIM continuous excerpt of a supplied primary block establishing the mismatch.
+For unsupported assertions, identify the exact asserted fact without demanding missing
+records that the draft already discloses. Use warning for disclosed uncertainty.
+Calculate the proposed correction yourself using the supplied exact unit-conversion
+arithmetic and displayed rounding precision. If your correction repeats the draft or
+creates a unit/year/basis mismatch, remove it. A funding amount is not enterprise value.
+Do not require a complete EBITDA adjustment bridge, tax history or forecast expense
+when its inputs are absent; an explicit limitation plus diligence action covers it.
+Every coverage_gaps entry must identify a material requirement actually omitted, not
+an unavailable fact already disclosed, an inapplicable manufacturing topic or a
+preference for moving covered content to another heading. Do not turn coverage
+omissions into factual contradictions. Return empty lists if no valid problem remains.
+'''
+
+
+def validate_verified_findings(findings, draft, evidence):
+    def plain(value):
+        return ' '.join(re.sub(r'[*_`]', '', str(value)).split())
+    for finding in material_review_errors(findings):
+        claim = plain(finding.get('claim') or '')
+        if not claim or claim not in plain(draft):
+            raise ValueError('Review verification did not quote the actual draft claim.')
+        if finding.get('error_type') not in {'contradiction', 'unsupported'}:
+            raise ValueError('Review verification did not classify the factual error.')
+        if finding['error_type'] == 'contradiction':
+            quote = plain(finding.get('source_quote') or '')
+            cited = []
+            for marker in finding.get('sources') or []:
+                rank = re.match(r'R0*(\d+)', marker)
+                if rank:
+                    cited.extend(block for block in evidence if re.search(r'(?:^|\n)Retrieval block R0*'+rank[1]+r'\b', block))
+            if not quote or not any(quote in plain(block) for block in cited):
+                raise ValueError('Review verification did not quote its cited primary evidence.')
+
+
 def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
     packet=review_packet(title,draft,evidence,requirements)
     # Keep every selected source block, but do not wrap the evidence (which
@@ -116,4 +159,24 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
     if isinstance(result,dict) and result.get('error'):
         raise ValueError('Source review inference failed: '+str(result['error']))
     findings=validate_review(result,set(packet['source_ranks']),require_coverage=True)
+    if material_review_errors(findings) or result['coverage_gaps']:
+        proposed = json.dumps({'findings': findings, 'coverage_gaps': result['coverage_gaps']}, ensure_ascii=False)
+        verification_content = content + '\n\n' + VERIFICATION_INSTRUCTIONS + '\n<proposed_review>\n' + proposed + '\n</proposed_review>'
+        verified = ai_service.process_content(content=verification_content, skill_name=None,
+            source_type='report_section_quality_review', source_id=str(source_id), metadata={
+                'response_mode':'json','response_format':{'type':'json_object'},
+                'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
+                'temperature':0.0,'max_tokens':8192,'max_input_tokens':110_592,
+                'max_input_chars':len(verification_content)+1024,'lossless_input':True,
+                'enforce_context_budget':True,'include_audit_log_id':True,
+                'context_label':f'Verify source review: {title}',
+                '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
+                    'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2',
+                    'review_phase':'verification','initial_review_audit_id':result.get('audit_log_id')},
+            })
+        if isinstance(verified, dict) and verified.get('error'):
+            raise ValueError('Source review verification inference failed: '+str(verified['error']))
+        findings = validate_review(verified, set(packet['source_ranks']), require_coverage=True)
+        validate_verified_findings(findings, draft, packet['primary_evidence'])
+        result = verified
     return {'findings':findings,'coverage_gaps':result['coverage_gaps']}
