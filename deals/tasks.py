@@ -46,6 +46,7 @@ def rewrite_analysis_section_async(
     self, *, deal_id: str, section_title: str, section_markdown: str,
     instruction: str, full_report: str, version, document_ids: list[str],
     audit_log_id: str,
+    use_review_feedback: bool = True,
 ):
     """Generate a reviewable section draft using its published IC prompt."""
     from django.core import signing
@@ -66,6 +67,7 @@ def rewrite_analysis_section_async(
             document_ids=document_ids,
             audit_log_id=audit_log_id,
             celery_task_id=str(self.request.id),
+            use_review_feedback=use_review_feedback,
         )
         confirmation_token = signing.dumps(
             {
@@ -2165,6 +2167,10 @@ def process_vdr_report_section(
         from ai_orchestrator.services.report_section_context import prior_section_context
         from ai_orchestrator.services.token_budget import estimate_tokens, report_evidence_budget
         prior_context = prior_section_context(audit.source_metadata or {}, section_title)
+        from deals.services.report_coverage import format_review_feedback
+        saved_feedback = format_review_feedback(((audit.source_metadata or {}).get('regeneration_feedback') or {}).get(section_title))
+        if saved_feedback:
+            prior_context += '\n\n<prior_review_feedback>\n'+saved_feedback+'\n</prior_review_feedback>'
         previous_attempt = None
         retry_draft = ""
         if self.request.retries:

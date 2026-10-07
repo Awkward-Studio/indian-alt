@@ -71,21 +71,34 @@ class AnalysisSectionRewriteService:
         document_ids: list[str] | None = None,
         audit_log_id: str | None = None,
         celery_task_id: str | None = None,
+        use_review_feedback: bool = True,
     ) -> str:
         section_title = self.published_section_title(section_title) or section_title
         published_section = section_title in IC_SECTION_TITLES
         evidence_scope = self._requested_evidence_scope(instruction)
+        from deals.services.report_coverage import latest_review_feedback, format_review_feedback
+        review_feedback = (latest_review_feedback(deal).get(section_title) or {}) if use_review_feedback else {}
+        feedback_text = format_review_feedback(review_feedback)
+        if feedback_text:
+            instruction += '\n\n'+feedback_text
         prompt_parts = []
         citations = {}
         evidence_metadata = None
         if published_section:
             from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
+            from ai_orchestrator.services.token_budget import report_evidence_budget
 
             indexed_documents = list(deal.documents.filter(is_indexed=True).order_by("title", "id"))
             if indexed_documents:
                 try:
                     retrieved = ICReportSectionEvidenceService(
                         deal=deal, documents=indexed_documents,
+                        max_tokens=report_evidence_budget(
+                            context_window=int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 65536)),
+                            input_budget=int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 40960)),
+                            output_budget=int(getattr(settings, 'VDR_REPORT_SECTION_MAX_TOKENS', 16384)),
+                            evidence_budget=int(getattr(settings, 'VDR_REPORT_SECTION_EVIDENCE_TOKENS', 36000)),
+                            extra_context=instruction+section_markdown+self._report_context(full_report, section_title)),
                     ).retrieve(section_title)
                 except ValueError as exc:
                     if "No indexed document chunks were available" not in str(exc):
@@ -155,6 +168,8 @@ class AnalysisSectionRewriteService:
                 "max_input_tokens": int(getattr(settings, "VDR_REPORT_SECTION_INPUT_TOKENS", 40_960)),
                 "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
+                "lossless_input": True,
+                "max_input_chars": max(180_000, len(content) + 1024),
                 "temperature": 0.0,
                 "repetition_penalty": float(getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)),
                 **({"personality_only_system": True, "response_mode": "markdown"} if published_section else {}),
@@ -180,6 +195,7 @@ class AnalysisSectionRewriteService:
                     "analysis_version": version,
                     "evidence_retrieval": evidence_metadata or {},
                     "rewrite": True,
+                    "review_feedback": review_feedback,
                 },
             },
         )

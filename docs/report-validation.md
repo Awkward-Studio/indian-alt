@@ -14,6 +14,8 @@ Each H100 section receives an independent JSON review against the original analy
 
 When a review reports both factual errors and coverage omissions, the same retry receives both sets of feedback. Review audits retain all original findings and coverage gaps. A section passes only after material errors and omitted coverage are resolved; explicitly disclosed missing source evidence is an acceptable treatment of a required topic.
 
+The deal's report tabs show coverage findings by section, distinguishing current open gaps, earlier wording and gaps addressed by a clean subsequent coverage review. Regenerate snapshots the latest source errors and coverage gaps per section into the new run; section AI Rewrite retrieves only that section's persisted feedback and appends it to the analyst's instruction. Review corrections are guidance to re-check against primary evidence, not replacement facts. Pending regeneration retains inherited coverage findings until a new review assesses them.
+
 The requested section-specific word count remains in the generation prompt. A section that passes source and coverage review may finish up to 15% below that target. A shorter section or one with missing coverage still fails. Rejected drafts receive the concrete correction feedback; an under-length retry receives its prior draft for expansion with old citation markers removed and an instruction to recheck claims against current evidence. Primary evidence is reserved within the context budget before draft feedback is appended.
 
 ## Evidence integrity and inference

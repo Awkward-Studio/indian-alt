@@ -89,11 +89,11 @@ class InferenceQueueLease:
                 (row for row in rows if int((row["source_metadata"] or {}).get("queue_version") or 0) == 2),
                 None,
             )
-            if (
-                parent_row is None
-                or int((parent_row["source_metadata"] or {}).get("dispatch_generation") or 0)
-                != int(expected_generation)
-            ):
+            parent_metadata = (parent_row['source_metadata'] or {}) if parent_row else {}
+            owners = parent_metadata.get('active_report_units') or {}
+            section = (self.audit_log.source_metadata or {}).get('report_section')
+            owner = owners.get(section) if owners else parent_metadata
+            if parent_row is None or not owner or int(owner.get('dispatch_generation') or 0) != int(expected_generation):
                 raise InferenceCancelled("Inference workflow was superseded by a recovered VDR delivery.")
 
     def record_slot_progress(self, **updates):

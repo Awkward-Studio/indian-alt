@@ -30,10 +30,22 @@ class ReportSourceReviewTests(SimpleTestCase):
         with self.assertRaisesRegex(ValueError,'absent'):
             review_packet('Company Details','A claim [R002].','Retrieval block R001\nSource')
 
+    def test_regeneration_feedback_is_not_treated_as_primary_evidence(self):
+        packet = review_packet('Transaction Details', 'Claim [R001]',
+            'Retrieval block R001\nPrimary source\n\n<prior_review_feedback>\nUnverified correction\n</prior_review_feedback>')
+        self.assertNotIn('Unverified correction', packet['primary_evidence'][0])
+
     def test_review_cannot_invent_a_new_source_or_silently_pass_malformed_json(self):
         self.assertEqual(validate_review({'findings':[]},{1}),[])
         with self.assertRaises(ValueError):validate_review({'findings':[{'severity':'error','issue':'Mismatch','sources':['R999']}]},{1})
         with self.assertRaises(ValueError):validate_review({'approved':True},{1})
+
+    def test_review_explicitly_confirming_no_error_cannot_block_the_section(self):
+        findings = validate_review({'findings': [
+            {'severity': 'error', 'issue': 'The claim is accurate', 'correction': 'No factual error. The analytical implication is valid.', 'sources': ['R001']},
+            {'severity': 'error', 'issue': 'Wrong conversion', 'correction': 'Divide by 10,000,000', 'sources': ['R001']},
+        ]}, {1})
+        self.assertEqual([finding['severity'] for finding in findings], ['warning', 'error'])
 
 
 @override_settings(AI_INFERENCE_TARGET='h100',VDR_REPORT_SECTION_MIN_WORDS=900)

@@ -48,7 +48,7 @@ def review_packet(title: str, draft: str, evidence: str, requirements: str = "")
     blocks={}
     for index,match in enumerate(matches):
         block=evidence[match.start():matches[index+1].start() if index+1<len(matches) else len(evidence)]
-        block=re.split(r'\n\n(?:Completed sections from this report|Retry attempt|<retry_requirement>|<draft_to_expand>)',block,maxsplit=1)[0]
+        block=re.split(r'\n\n(?:Completed sections from this report|Retry attempt|<retry_requirement>|<draft_to_expand>|<prior_review_feedback>)',block,maxsplit=1)[0]
         blocks[int(match[1])]=block.strip()
     ranks=cited_ranks(draft)
     missing=sorted(ranks-set(blocks))
@@ -70,7 +70,16 @@ def validate_review(result: dict, ranks: set[int], *, require_coverage=False) ->
             match=re.fullmatch(r'R0*(\d+)(?:@[^\n]+)?',str(source))
             if not match or int(match[1]) not in ranks:
                 raise ValueError('Source review referenced evidence outside its supplied packet.')
+        if finding['severity'] == 'error' and re.match(r'^(?:No factual error|No error|No correction (?:required|needed))\b',
+                str(finding.get('correction') or '').strip(), re.I):
+            finding['severity'] = 'warning'
     return findings
+
+
+def material_review_errors(findings):
+    return [finding for finding in findings if isinstance(finding, dict) and finding.get('severity') == 'error'
+            and not re.match(r'^(?:No factual error|No error|No correction (?:required|needed))\b',
+                             str(finding.get('correction') or '').strip(), re.I)]
 
 
 def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):

@@ -1150,6 +1150,7 @@ class FolderAnalysisService:
         *,
         allow_gaps: bool = False,
         force_regenerate: bool = False,
+        use_review_feedback: bool = True,
     ) -> dict:
         """Queue a report from all deal evidence after explicit user confirmation."""
         from ai_orchestrator.models import AIAuditLog, AIPersonality
@@ -1173,6 +1174,8 @@ class FolderAnalysisService:
             }
 
         personality = AIPersonality.objects.filter(is_default=True).first()
+        from deals.services.report_coverage import latest_review_feedback
+        regeneration_feedback = latest_review_feedback(deal) if use_review_feedback else {}
         if vdr_queue.enabled():
             section_queue = [
                 {"position": index, "title": title, "status": "queued", "celery_task_id": None}
@@ -1205,6 +1208,7 @@ class FolderAnalysisService:
                         force_regenerate=force_regenerate,
                         user_confirmation_received=True, readiness=readiness,
                         workflow_stage="analysis_queued",
+                        regeneration_feedback=regeneration_feedback,
                     ),
                 )
                 transaction.on_commit(vdr_queue.kick)
@@ -1244,6 +1248,7 @@ class FolderAnalysisService:
             "allow_gaps": allow_gaps,
             "force_regenerate": force_regenerate,
             "readiness": readiness,
+            "regeneration_feedback": regeneration_feedback,
         }
         audit_log.save(update_fields=["celery_task_id", "source_metadata"])
         return {

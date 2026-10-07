@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ai_orchestrator.services.report_sections import ICReportSectionService
+from django.db.models import Q
 
 
 REPORT_ACTIVE_STATUSES = ("PENDING", "PROCESSING")
@@ -19,9 +20,9 @@ def _latest_report_audit(deal, statuses=None):
     from ai_orchestrator.models import AIAuditLog
 
     queryset = AIAuditLog.objects.filter(
-        source_type="deal_full_synthesis",
         source_id=str(deal.id),
-    ).order_by("-created_at")
+    ).filter(Q(source_type='deal_full_synthesis') | Q(source_metadata__queue_kind='report')).exclude(
+        source_metadata__queue_state='cancelled').order_by("-created_at")
     if statuses:
         queryset = queryset.filter(status__in=statuses)
     return queryset.first()

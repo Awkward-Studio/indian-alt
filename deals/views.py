@@ -2165,6 +2165,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                         "version": version,
                         "document_ids": document_ids,
                         "audit_log_id": str(audit.id),
+                        "use_review_feedback": bool(request.data.get('use_review_feedback', True)),
                     },
                     queue="high_priority", task_id=task_id,
                 )
@@ -2873,6 +2874,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         result = FolderAnalysisService.trigger_vdr_analysis(
             deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
             force_regenerate=bool(request.data.get('force_regenerate', False)),
+            use_review_feedback=bool(request.data.get('use_review_feedback', True)),
         )
         if "error" in result:
             return Response(result, status=400)
@@ -2888,6 +2890,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         result = FolderAnalysisService.trigger_vdr_analysis(
             deal, allow_gaps=bool(request.data.get('allow_gaps', False)),
             force_regenerate=bool(request.data.get('force_regenerate', False)),
+            use_review_feedback=bool(request.data.get('use_review_feedback', True)),
         )
         if 'error' in result:
             return Response(result, status=status.HTTP_409_CONFLICT)
