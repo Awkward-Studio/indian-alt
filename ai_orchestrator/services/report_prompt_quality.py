@@ -109,6 +109,10 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         system += "\n\nSection ownership and cross-references:\n" + SECTION_OWNERSHIP
     if "Report reading hierarchy:" not in system:
         system += "\n\nReport reading hierarchy:\n" + EDITORIAL_GUIDANCE
+    # A pipeline's published skill may supply the system message. Keep the
+    # requested report formatting in the section user prompt as well.
+    if "Report reading hierarchy:" not in user:
+        user = user.rstrip() + "\n\nReport reading hierarchy:\n" + EDITORIAL_GUIDANCE + "\n"
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "
@@ -150,4 +154,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     if is_financials and "Financial bridge check:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_BRIDGE_RULE
         user += FINANCIAL_BRIDGE_RULE
+    if is_financials and "Financial source and period check:" not in user:
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_SOURCE_RULE
+        user += FINANCIAL_SOURCE_RULE
     return system, user

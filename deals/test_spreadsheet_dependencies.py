@@ -25,6 +25,17 @@ def financial_model():
 
 
 class WorkbookFormulaTests(SimpleTestCase):
+    def test_distant_period_header_is_preserved_for_income_statement_cells(self):
+        manifest = {"sheets": [{"name": "IS", "cells": [
+            {"coordinate": "G4", "value": "FY27E"},
+            {"coordinate": "B28", "value": "Depreciation & Amortization"},
+            {"coordinate": "G28", "value": "=Inputs!B1", "cached_value": .47549},
+        ]}]}
+        text = WorkbookFormulaGraph(manifest).render_cell(("IS", "G28"))
+        self.assertIn("B28=Depreciation & Amortization", text)
+        self.assertIn("G4=FY27E", text)
+        self.assertIn("0.47549", text)
+
     def test_cross_sheet_named_range_and_recursive_precedents(self):
         graph = WorkbookFormulaGraph(financial_model())
         traced = graph.precedents([("Revenue", "B3")])

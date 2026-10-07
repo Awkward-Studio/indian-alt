@@ -45,6 +45,26 @@ FINANCIAL_BRIDGE_RULE = (
     "growth rate and margin with the correct year, denominator and reporting basis.\n"
 )
 
+FINANCIAL_SOURCE_RULE = (
+    "\nFinancial source and period check: Before writing any financial value, verify "
+    "its source row label, worksheet, column period, units and saved Excel result. "
+    "Cite the exact supplied cell/range marker for workbook figures. A cash-flow "
+    "Capex row is NOT depreciation or amortization; use the income-statement D&A "
+    "row. Never assume that the same column letter represents the same year on "
+    "different worksheets. State the arithmetic and unit conversion explicitly "
+    "for every calculated figure. Use one consistent reporting basis for each "
+    "period's entire income-statement column: do not combine model EBITDA with "
+    "audited D&A, other income, finance costs or tax to fabricate a hybrid PAT. "
+    "Present source disagreements in prose instead. Missing or uncited forecast "
+    "costs, tax and adjustments are Not provided, never zero. If the source has "
+    "zero, cite that actual zero cell. Do not assert a line is included in EBITDA "
+    "or that a difference is caused by strategic spending without tracing its "
+    "source formula. Distinguish saved workbook outputs from calculations you "
+    "actually perform and disclose missing, stale or truncated dependencies. "
+    "Check narrative figures as carefully as the table, including crore/lakh/" 
+    "million/thousand conversions and negative values.\n"
+)
+
 
 def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
     """Check available displayed amounts, allowing their combined rounding error."""

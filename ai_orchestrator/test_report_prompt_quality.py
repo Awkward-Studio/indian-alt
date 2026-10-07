@@ -91,6 +91,8 @@ class ReportQualityTests(SimpleTestCase):
         self.assertIn("{{ content }}", upgraded[1])
         self.assertIn("{{ model_data_json }}", upgraded[1])
         self.assertIn("not abbreviated coverage", upgraded[0])
+        self.assertIn("Report reading hierarchy:", upgraded[1])
+        self.assertIn("Bold one or two short", upgraded[1])
         self.assertEqual(upgrade_report_prompt(*upgraded), upgraded)
 
 

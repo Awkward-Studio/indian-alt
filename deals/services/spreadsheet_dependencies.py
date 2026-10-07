@@ -29,7 +29,7 @@ class WorkbookFormulaGraph:
                     continue
                 self.cells[(name, address)] = cell
                 self.by_sheet[name].append((address, cell))
-                label = cell.get("value")
+                label = cell.get("cached_value") if self.formula(cell) else cell.get("value")
                 if isinstance(label, str) and not label.startswith("="):
                     row, column = coordinate_to_tuple(address)
                     self.row_labels.setdefault((name, row), []).append((column, address, label))
@@ -250,7 +250,15 @@ class WorkbookFormulaGraph:
         row, column = coordinate_to_tuple(key[1])
         labels = []
         labels.extend((a, v) for c, a, v in self.row_labels.get((key[0], row), []) if c < column)
-        labels.extend((a, v) for r, a, v in self.column_labels.get((key[0], column), []) if 0 < row - r <= 3)
+        column_labels = self.column_labels.get((key[0], column), [])
+        labels.extend((a, v) for r, a, v in column_labels if 0 < row - r <= 3)
+        # Financial periods usually sit at the top of a schedule, well beyond
+        # three rows from EBITDA, D&A, tax and cash-flow values.
+        periods = [(r, a, v) for r, a, v in column_labels if r < row and
+                   re.fullmatch(r"(?:FY|CY)\s*\d{2,4}[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?", v.strip(), re.I)]
+        if periods:
+            _, address, period = max(periods)
+            labels.append((address, period))
         if labels:
             result += " [labels: " + "; ".join(f"{a}={v}" for a, v in labels[-4:]) + "]"
         return result
