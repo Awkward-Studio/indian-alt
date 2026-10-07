@@ -1,6 +1,6 @@
 # Report validation and repair
 
-H100 VDR reports use the published section prompts and a separate source and coverage review. The business questions remain based on the October 5 revisions. Published formatting changes add short paragraphs, selective Markdown emphasis, gap and contradiction flags, source citation rules and financial accuracy instructions.
+H100 VDR reports use the published section prompts, primary document chunks and deterministic validation. Automatic model-based source review is removed from generation. The business questions remain based on the October 5 revisions. Published formatting changes add short paragraphs, selective Markdown emphasis, gap and contradiction flags, source citation rules and financial accuracy instructions.
 
 ## Acceptance
 
@@ -10,17 +10,15 @@ Calculated rows can inherit their input rows' verified citations only when every
 
 H100 generation disables internal thinking output and retains a bounded decimal calculator. The calculator accepts numeric arithmetic expressions with +, -, *, /, ** and parentheses. It does not evaluate Python code, access files or fetch data. Up to three request batches of at most 24 calculations are followed by a final report response. Calculator requests/results are recorded in the generation audit. Source authenticity remains a separate check.
 
-Each H100 section receives an independent JSON review against the original analytical requirements and the supplied primary retrieval blocks. Material source errors and omitted analytical coverage reject the draft. The reviewer must reference only supplied ranks and distinguish facts, disclosed assumptions, proposals and evidence gaps. An empty findings list is a review result, not a guarantee of universal accuracy.
+The writer organizes each required analytical theme against primary evidence, distinguishes facts from claims, projections and assumptions, uses the calculator for supported derivations, and checks its own output before returning Markdown. There is no second model-based reviewer, review verification or quote-repair call in the generation pipeline. Historical review findings remain available as correction context for Regenerate and AI Rewrite and must be reassessed against fresh evidence.
 
-When a review reports both factual errors and coverage omissions, the same retry receives both sets of feedback. Review audits retain all original findings and coverage gaps. A section passes only after material errors and omitted coverage are resolved; explicitly disclosed missing source evidence is an acceptable treatment of a required topic.
+The requested section-specific minimum word count is enforced alongside citation, structure, source-value and arithmetic checks. Rejected drafts receive the prior draft and concrete validation feedback. Retrying does not promote old drafts or review allegations to primary facts.
 
-The deal's report tabs show coverage findings by section, distinguishing current open gaps, earlier wording and gaps addressed by a clean subsequent coverage review. Regenerate snapshots the latest source errors and coverage gaps per section into the new run; section AI Rewrite retrieves only that section's persisted feedback and appends it to the analyst's instruction. Review corrections are guidance to re-check against primary evidence, not replacement facts. Pending regeneration retains inherited coverage findings until a new review assesses them.
-
-The requested section-specific word count remains in the generation prompt. A section that passes source and coverage review may finish up to 15% below that target. A shorter section or one with missing coverage still fails. Rejected drafts receive the concrete correction feedback; an under-length retry receives its prior draft for expansion with old citation markers removed and an instruction to recheck claims against current evidence. Primary evidence is reserved within the context budget before draft feedback is appended.
+Deterministic validation checks the numerical and citation rules it implements. It is not an independent verification of every qualitative claim. Unavailable primary evidence must be identified as a gap.
 
 ## Evidence integrity and inference
 
-Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v11 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. Reviewers must not transfer column-year mappings between worksheets.
+Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v12 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. Reviewers must not transfer column-year mappings between worksheets.
 
 Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Four report sections start together, and each free worker receives the next section without waiting for the other three. Key Financials and Transaction Details retain scheduling priority.
 

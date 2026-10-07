@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v11"
+    CACHE_VERSION = "ic-report-sections-v12"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -782,7 +782,7 @@ class ICReportSectionService:
                 "response_mode": "markdown",
                 "report_calculator": use_report_calculator,
                 # Keep output tokens for the report. Arithmetic still uses the
-                # bounded calculator and every draft receives a source review.
+                # bounded calculator; acceptance uses deterministic validation.
                 **({"chat_template_kwargs": {"enable_thinking": False}} if use_report_calculator else {}),
                 "temperature": 0.0,
                 "repetition_penalty": float(
@@ -800,6 +800,8 @@ class ICReportSectionService:
                     "report_section": title,
                     "prompt_revision": revision_key,
                     "force_regenerate": bool(force_regenerate),
+                    "generation_mode": "grounded_single_pass",
+                    "source_review_enabled": False,
                     "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
                     **({
                         "vdr_parent_audit_id": str(source_id),
@@ -815,39 +817,9 @@ class ICReportSectionService:
                 title,
                 result.get("response") if isinstance(result, dict) else result,
                 citations=citations,
-                minimum_words=0 if use_report_calculator else minimum_words,
+                minimum_words=minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
             )
-            if use_report_calculator:
-                from .report_source_review import review_section
-                try:
-                    review = review_section(ai_service=ai_service,title=title,
-                        draft=str(result.get('response') or ''),evidence=evidence,source_id=source_id,
-                        requirements=revision.user_template,vdr_dispatch_generation=vdr_dispatch_generation)
-                except ValueError as error:
-                    raise ReportSectionStructureError(f"Source review for '{title}' could not complete: {error}") from error
-                findings=review['findings']
-                errors=[finding for finding in findings if finding['severity']=='error']
-                if errors:
-                    feedback='; '.join(f"{finding.get('claim','')[:160]}: {finding['issue']} Correction: {finding.get('correction','')}" for finding in errors[:5])
-                    if review['coverage_gaps']:
-                        feedback = 'Coverage gaps to address in the same retry: ' + '; '.join(review['coverage_gaps'][:8]) + ' Source errors: ' + feedback
-                    raise ReportSectionStructureError(f"Source review rejected '{title}': {feedback}")
-                if review['coverage_gaps']:
-                    raise ReportSectionStructureError(f"Source review found missing coverage in '{title}': " + "; ".join(review['coverage_gaps'][:8]))
-                analysis_body=re.split(r"^###\s+Citations\s*$",section,maxsplit=1,flags=re.M)[0]
-                words=len(re.findall(r"\b\w+\b",re.sub(r"\[\d+\]","",analysis_body)))
-                # A verified, complete section may finish slightly below the
-                # requested length; brief incomplete summaries still fail.
-                quality_floor=round(minimum_words*.85)
-                if words<quality_floor:
-                    raise ReportSectionTooShortError(f"Report section '{title}' was too short after source and coverage review: {words} words; quality floor is {quality_floor}, requested minimum is {minimum_words}.")
-                from ai_orchestrator.models import AIAuditLog
-                if result.get('_audit_log_id'):
-                    generation=AIAuditLog.objects.filter(id=result['_audit_log_id']).first()
-                    if generation:
-                        generation.source_metadata={**(generation.source_metadata or {}),'report_source_review':{'findings':findings,'coverage_gaps':[],'word_count':words,'requested_minimum_words':minimum_words,'quality_floor':quality_floor,'status':'no_material_error_found'}}
-                        generation.save(update_fields=['source_metadata'])
         except ReportSectionValidationError as exc:
             cls._mark_rejected_section_audit(
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,

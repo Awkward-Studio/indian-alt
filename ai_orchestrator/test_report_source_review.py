@@ -123,44 +123,39 @@ class ReportSourceReviewTests(SimpleTestCase):
 
 
 @override_settings(AI_INFERENCE_TARGET='h100',VDR_REPORT_SECTION_MIN_WORDS=900)
-class SourceReviewedGenerationTests(TestCase):
+class SinglePassGroundedGenerationTests(TestCase):
     def setUp(self):
         from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
         PipelineRegistryService.ensure_report_pipeline_defaults()
 
     @patch('ai_orchestrator.services.report_sections.cache')
-    def test_complete_source_review_can_accept_a_near_minimum_section(self,cache):
+    @patch('ai_orchestrator.services.report_source_review.review_section',side_effect=AssertionError('Review must not run'))
+    def test_h100_generation_uses_one_writer_call_and_no_source_reviewer(self,review,cache):
         from ai_orchestrator.services.report_sections import ICReportSectionService
         cache.get.return_value=None
-        service=Mock()
-        service.process_content.side_effect=[
-            {'response':'## Executive Summary\n\n'+('Supported analysis ' * 570)+' [R001].'},
-            {'findings':[],'coverage_gaps':[]},
-        ]
+        service=Mock();service.process_content.return_value={
+            'response':'## Executive Summary\n\n'+('Supported analysis '*700)+'[R001].'}
         result=ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',
             evidence='Retrieval block R001\nPrimary source',analysis={'deal_model_data':{}},
             source_id='report-test',source_type='vdr_report_section',citations={'1':{'title':'IM.pdf','document_id':'doc'}},
             evidence_metadata={'selected_chunk_count':60},force_regenerate=True)
         self.assertIn('Supported analysis',result)
-        self.assertEqual(service.process_content.call_count,2)
-        generation=service.process_content.call_args_list[0].kwargs['metadata']
-        self.assertTrue(generation['report_calculator'])
-        self.assertTrue(generation['lossless_input'])
-        self.assertFalse(generation['chat_template_kwargs']['enable_thinking'])
-        review=service.process_content.call_args_list[1].kwargs['metadata']
-        self.assertFalse(review['chat_template_kwargs']['enable_thinking'])
+        service.process_content.assert_called_once()
+        review.assert_not_called()
+        metadata=service.process_content.call_args.kwargs['metadata']
+        self.assertTrue(metadata['report_calculator'])
+        self.assertTrue(metadata['lossless_input'])
+        self.assertFalse(metadata['chat_template_kwargs']['enable_thinking'])
+        self.assertFalse(metadata['_source_metadata']['source_review_enabled'])
 
     @patch('ai_orchestrator.services.report_sections.cache')
-    def test_source_error_cannot_pass_even_when_the_section_is_long(self,cache):
+    def test_bad_calculation_still_rejects_a_long_section_without_a_reviewer(self,cache):
         from ai_orchestrator.services.report_sections import ICReportSectionService,ReportSectionStructureError
         cache.get.return_value=None
-        service=Mock();service.process_content.side_effect=[
-            {'response':'## Executive Summary\n\n'+('Lengthy analysis '*800)+'[R001].'},
-            {'findings':[{'severity':'error','claim':'A claim','issue':'Not supported','sources':['R001'],'correction':'Mark a gap'}],'coverage_gaps':['Explain the investment approval gates']},
-            {'findings':[{'severity':'error','claim':'Lengthy analysis','issue':'Not supported','sources':['R001'],
-                'correction':'Mark a gap','error_type':'unsupported'}],'coverage_gaps':['Explain the investment approval gates']},
-        ]
-        with self.assertRaisesRegex(ReportSectionStructureError,'Source review rejected.*Explain the investment approval gates'):
+        service=Mock();service.process_content.return_value={
+            'response':'## Executive Summary\n\n'+('Lengthy analysis '*800)+'MOIC = 180 / 60 = 5.0x [R001].'}
+        with self.assertRaisesRegex(ReportSectionStructureError,'inconsistent calculations'):
             ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',
                 evidence='Retrieval block R001\nSource',analysis={'deal_model_data':{}},source_id='test',
                 source_type='vdr_report_section',citations={'1':{'title':'IM.pdf','document_id':'doc'}},force_regenerate=True)
+        service.process_content.assert_called_once()

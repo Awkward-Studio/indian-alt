@@ -81,6 +81,28 @@ CALCULATION_GUIDANCE = (
     "a value cannot be calculated from supported inputs, state Not provided and "
     "identify the missing input instead of fabricating a result."
 )
+GENERATION_GUIDANCE = (
+    "Before drafting, organize the section's required analytical themes against "
+    "the supplied primary retrieval blocks. For each material claim distinguish "
+    "documented facts, management claims, projections, explicitly labeled assumptions "
+    "and analytical conclusions. A current cap table does not prove a proposed "
+    "round's primary/secondary split; a funding ask is not enterprise value; cash "
+    "balances alone do not prove an ability to self-fund. Keep unavailable terms "
+    "and records as explicit gaps with a concrete diligence action. Use the exact "
+    "worksheet's period and unit headers for each number. Build derived calculations "
+    "from cited primary inputs and use the available calculator before committing "
+    "their results to prose or tables. Distinguish unadjusted from adjusted metrics "
+    "and identify missing adjustment bridges. Do not fill unsupported classifications "
+    "or expense forecasts with estimates to complete a table. Reassess previous "
+    "draft feedback against the current primary evidence. "
+    "Preserve genuine corrections, and cover unavailable information with a labeled "
+    "gap and diligence action. Do not manufacture facts to satisfy a feedback item. "
+    "Before returning the "
+    "section, check that every requested analytical theme is covered, every material "
+    "claim has the correct evidence marker, every table agrees with its prose, and "
+    "calculated figures preserve source precision and signs. Keep this preparation "
+    "and final check internal; return only the finished Markdown section."
+)
 SECTION_OWNERSHIP = (
     "Keep each calculation and detailed schedule in its owning section. Company Details "
     "owns operating model, products, customers and delivery capability. Promoter and "
@@ -148,6 +170,8 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user = user.rstrip() + "\n\nReport gap and contradiction flags:\n" + REPORT_SIGNAL_GUIDANCE + "\n"
     if "Report calculation discipline:" not in user:
         user = user.rstrip() + "\n\nReport calculation discipline:\n" + CALCULATION_GUIDANCE + "\n"
+    if "Grounded section generation:" not in user:
+        user = user.rstrip() + "\n\nGrounded section generation:\n" + GENERATION_GUIDANCE + "\n"
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "
