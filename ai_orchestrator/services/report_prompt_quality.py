@@ -129,4 +129,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user += "cells separately. Cite all source inputs for calculated rows. Rows entirely marked Not "
         user += "provided need no citation. Final check: exactly one table, exactly the 13 specified "
         user += "rows from Revenue to PAT, and verified markers inside every numeric row.\n"
+    if is_financials and "Financial bridge check:" not in user:
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_BRIDGE_RULE
+        user += FINANCIAL_BRIDGE_RULE
     return system, user

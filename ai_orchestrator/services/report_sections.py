@@ -589,6 +589,10 @@ class ICReportSectionService:
                 cited = {int(number) for number in re.findall(r"\[(\d+)\]", row)}
                 if has_numbers and not cited.intersection(verified_citation_numbers):
                     raise ReportSectionCitationError(f"Key Financials table row '{label}' must include a verified evidence citation inside the table.")
+        from ai_orchestrator.services.report_financial_format import financial_bridge_errors
+        bridge_errors = financial_bridge_errors([cls._table_cells(row) for row in table])
+        if bridge_errors:
+            raise ReportSectionStructureError("Key Financials arithmetic does not reconcile: " + "; ".join(bridge_errors[:5]))
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:

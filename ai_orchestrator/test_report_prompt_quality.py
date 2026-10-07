@@ -11,13 +11,28 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 class ReportQualityTests(SimpleTestCase):
     def test_financial_numeric_rows_require_verified_citations_inside_table(self):
         table = "| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n"
-        table += "\n".join(f"| {row} | 100 |" for row in FINANCIAL_ROWS)
+        table += "\n".join(f"| {row} | {'100' if row == 'Revenue' else 'Not provided'} |" for row in FINANCIAL_ROWS)
         with self.assertRaises(ReportSectionCitationError):
             ICReportSectionService._validate_financial_table(table + "\n\nSource [1]", verified_citation_numbers={1})
         cited = table.replace("| 100 |", "| 100 [1] |")
         ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={1})
         with self.assertRaises(ReportSectionCitationError):
             ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={2})
+
+    def test_financial_bridge_detects_other_income_counted_in_ebitda_twice(self):
+        from ai_orchestrator.services.report_financial_format import financial_bridge_errors
+        values = ["2670.37", "2519.33", "151.04", "134.44", "17.37", "0.91", "16.46", "0.06", "0.77", "Not provided", "16.40", "4.16", "12.24"]
+        rows = [["Metric", "FY25 Actual"], ["---", "---"], *[[name, value + " [1]"] for name, value in zip(FINANCIAL_ROWS, values)]]
+        self.assertTrue(any("EBITDA" in error for error in financial_bridge_errors(rows)))
+        rows[6][1] = "16.60 [1]"
+        rows[8][1] = "15.69 [1]"
+        self.assertEqual(financial_bridge_errors(rows), [])
+
+    def test_financial_bridge_allows_rounding_and_skips_missing_inputs(self):
+        from ai_orchestrator.services.report_financial_format import financial_bridge_errors
+        values = ["100", "33", "66", *["Not provided"] * 10]
+        rows = [["Metric", "FY25 Actual"], ["---", "---"], *[[name,value] for name,value in zip(FINANCIAL_ROWS, values)]]
+        self.assertEqual(financial_bridge_errors(rows), [])
 
     def test_authored_variable_heading_gets_financial_contract_by_stage(self):
         updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
