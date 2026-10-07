@@ -10,15 +10,17 @@ The list API supplies `ledger_financials` from target-company financial statemen
 
 ```text
 (FY26)
-- Revenue: 459 Cr
-YoY Growth: 32%
-- Gross Margin: 40.5%
-- EBITDA %: 11%
-- WC Days: 133
+- Revenue: 459.00 Cr
+YoY Growth: 32.00%
+- Gross Margin: 40.50%
+- EBITDA %: 11.00%
+- WC Days: 133.00
 ```
 
 These numbers are the requested formatting example. Actual values come from each deal's source records. The snapshot prefers the latest closed actual year and consolidated data when both scopes exist for that year. Explicit estimates and future years retain an E label. Missing values say `Not provided`. Revenue is converted to INR crore only when the source currency and scale are known; the existing VI adapter treats bare monetary values as INR crore. The funding ask stays in Investor / Fund raise.
 
 YoY uses consecutive actual fiscal years from the same target profile and reporting scope. Margins may be derived from same-period reported profit and revenue with known units. WC Days uses explicitly supplied working-capital days for the same period and scope, without substituting receivable days or cash-conversion cycle. Target financial relations and statements are prefetched for ledger pages.
 
-The financial extractor is a separate JSON-only step. It retrieves up to 60,000 tokens on H100, keeps source units, and omits unsupported or conflicting facts. Existing stored financial values are not certified by formatting or successful generation. Source quality and legacy extraction errors still require live verification.
+The financial profile first reuses the accepted Key Financials table, including its fiscal periods, amounts, reporting units and citations. It derives margins from that same table. Without an accepted section, the separate JSON extractor retrieves up to 60,000 tokens on H100 and verifies metrics against primary saved cells and explicit source units. Generated summaries cannot certify units or periods. Once current verified metrics exist, the ledger and profile exclude stale AI metrics while retaining externally supplied values.
+
+The ledger renders its metrics as badges. The report and VI overview share a financial matrix component, with two decimal places and explicit units. Report charts read the same table, label monetary series with currency and scale, and show percentage margins in a separate chart. Missing revenue prevents margin calculation; missing observations remain gaps.

@@ -9,6 +9,15 @@ def row(year, data, statement_type='profit_loss', basis='Standalone', source='lo
 
 
 class LedgerFinancialsTests(SimpleTestCase):
+    def test_verified_refresh_suppresses_stale_ai_periods_and_metrics(self):
+        stale = row('FY25', {'revenue': 'INR 300 crore', 'ebitda_margin': '40%'})
+        fresh = row('FY21', {'revenue': 'INR 7.02 crore', 'ebitda_margin': '20.34%'})
+        fresh.provenance = {'metrics': {key: {'source': 'local_ai', 'extraction_contract': 'primary-financial-fields-v2'} for key in fresh.data}}
+        result = snapshot([stale, fresh])
+        self.assertEqual(result['fy'], 'FY21')
+        self.assertEqual(result['revenue_cr'], '7.02')
+        self.assertEqual(result['ebitda_margin_pct'], '20.34')
+
     def test_requested_metrics_and_derived_yoy_use_one_period_and_scope(self):
         result = snapshot([
             row('FY25', {'revenue': 'INR 347.727272727 crore'}),

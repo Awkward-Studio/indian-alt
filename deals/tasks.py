@@ -2220,6 +2220,11 @@ def process_vdr_report_section(
             vdr_dispatch_generation=queue_generation,
             force_regenerate=bool((audit.source_metadata or {}).get("force_regenerate")),
         )
+        if not delivery_is_current(audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title):
+            return {"status": "stale", "reason": "Superseded VDR report delivery."}
+        if section_title == 'Key Financials' and getattr(settings, 'AI_INFERENCE_TARGET', '') == 'h100':
+            from deals.services.key_financials_profile import sync_section
+            sync_section(deal, section, audit_log_id)
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
     except ReportSectionDegenerateOutputError as exc:
         if self.request.retries < self.max_retries:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter
 from types import SimpleNamespace
@@ -377,7 +378,9 @@ class ICReportSectionEvidenceService:
                 f"[R{rank:03d}@'{str(citation['locator']['sheet_name']).replace(chr(39), chr(39) * 2)}'!"
                 f"{citation['locator']['cell_range']}]"
             )
-        return " | ".join(header) + "\n" + str(chunk.content or "").strip()
+        primary = citation.get('financial_cells') or {}
+        facts = '\nPrimary saved cell facts (this worksheet only):\n' + json.dumps(primary, ensure_ascii=False) if primary else ''
+        return " | ".join(header) + "\n" + str(chunk.content or "").strip() + facts
 
     def _formula_graph(self, source_id: str):
         if source_id not in self._formula_graphs:

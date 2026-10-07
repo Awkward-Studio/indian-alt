@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v10"
+    CACHE_VERSION = "ic-report-sections-v11"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {

@@ -16,7 +16,9 @@ The requested section-specific word count remains in the generation prompt. A se
 
 ## Evidence integrity and inference
 
-Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old pre-review section caches are invalidated with the v10 cache key.
+Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v11 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. Reviewers must not transfer column-year mappings between worksheets.
+
+Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Four report sections start together, and each free worker receives the next section without waiting for the other three. Key Financials and Transaction Details retain scheduling priority.
 
 H100 report requests use the configured output budget, currently 16,384 tokens. Source review reserves 8,192 tokens for JSON findings. JSON requests always disable thinking, including callers that explicitly enabled it. The calculator and reviewer add bounded inference work; generation can take longer than the previous single-pass workflow.
 

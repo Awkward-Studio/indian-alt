@@ -61,12 +61,29 @@ def render(value):
 
 
 def snapshot(statements):
+    # Once the target has a refreshed, primary-verified extraction, stale AI
+    # rows from previous runs must not supply competing years or metrics.
+    contract = 'primary-financial-fields-v2'
+    has_verified = any(any(p.get('extraction_contract') == contract for p in ((s.provenance or {}).get('metrics') or {}).values()) for s in statements)
+    if has_verified:
+        from copy import copy
+        filtered = []
+        for statement in statements:
+            source = (statement.provenance or {}).get('metrics') or {}
+            row = copy(statement)
+            row.data = {key: value for key, value in (statement.data or {}).items()
+                        if statement.data_source == 'venture_intelligence' and source.get(key, {}).get('source') != 'local_ai'
+                        or source.get(key, {}).get('extraction_contract') == contract}
+            if row.data:
+                filtered.append(row)
+        statements = filtered
     rows = [s for s in statements if s.statement_type == 'profit_loss' and fiscal_period(s.fy)]
     if not rows:
         return None
     # Prefer actual data over forecasts and consolidated over standalone for
     # the same year. Never blend periods or scopes to fill missing metrics.
-    rows.sort(key=lambda s: (not fiscal_period(s.fy)[1], fiscal_period(s.fy)[0], s.fin_type == 'Consolidated'), reverse=True)
+    rows.sort(key=lambda s: (not fiscal_period(s.fy)[1], fiscal_period(s.fy)[0], s.fin_type == 'Consolidated',
+                            str(getattr(s, 'updated_at', '') or getattr(s, 'created_at', ''))), reverse=True)
     latest = rows[0]
     year, forecast, label = fiscal_period(latest.fy)
     data = latest.data or {}

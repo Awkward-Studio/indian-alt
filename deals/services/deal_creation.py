@@ -222,7 +222,7 @@ class DealCreationService:
                 continue
             
             normalized_value = str(value).strip()
-            if not normalized_value or normalized_value.casefold() in {'n/a', 'na', 'unknown', 'not provided', 'not available', '[verify]'}:
+            if not normalized_value or normalized_value.casefold() in {'n/a', 'na', 'unknown', 'not provided', 'not available', 'not specified', 'unspecified', '[verify]'}:
                 continue
 
             current_value = getattr(deal, deal_field)

@@ -15,6 +15,7 @@ from deals.models import (
     VentureIntelligenceCompanyRelation,
     VentureIntelligenceFinancialStatement,
 )
+from deals.services.financial_evidence import CONTRACT, resolve_metric
 
 
 PROFILE_FIELDS = {
@@ -58,7 +59,7 @@ METRIC_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
 FINANCIAL_FIELDS_BY_STATEMENT = {
     "profit_loss": {
         "revenue", "revenue_growth", "expenses", "gross_profit", "gross_margin", "ebitda",
-        "ebitda_margin", "other_income", "interest", "depreciation",
+        "ebitda_margin", "ebit", "exceptional_items", "other_income", "interest", "depreciation",
         "profit_before_tax", "tax", "tax_rate", "pat", "pat_margin", "eps",
         "dividend_payout", "employee_cost", "material_cost", "cogs",
         "contribution_margin", "roce", "roe", "roic",
@@ -159,6 +160,17 @@ class InternalFinancialProfileService:
         except (TypeError, ValueError):
             return None
 
+    @classmethod
+    def _financial_metric(cls, key, item, fy, citations, evidence_by_ref):
+        if not isinstance(item, dict):
+            return None, []
+        value = item.get('value')
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            return None, []
+        refs = [ref for ref in cls._valid_refs(item.get('evidence_refs'), citations)
+                if citations[ref].get('financial_cells') or cls._value_supported(value, evidence_by_ref.get(ref, ''))]
+        return resolve_metric(key, value, fy, refs, citations, evidence_by_ref)
+
     @staticmethod
     def _prompt(deal_title: str, evidence: str) -> str:
         return f"""Extract only explicitly supported target-company facts from the indexed internal-document evidence below for {deal_title}.
@@ -166,10 +178,11 @@ class InternalFinancialProfileService:
 Hard rules:
 - Do not use general knowledge, the web, Venture Intelligence, Screener, or inference from silence.
 - Every populated value must be copied from and include one or more evidence_refs matching the supplied R### retrieval blocks. The server verifies the value against those referenced blocks.
-- Omit uncertain, estimated, derived, conflicting, or absent values. Never use placeholders such as NA or unknown, and never substitute zero for a missing value.
+- Omit uncertain, inferred, derived, conflicting, or absent values. Explicit source forecasts are allowed; preserve their forecast labels. Never use placeholders such as NA or unknown, and never substitute zero for a missing value.
 - Preserve reported fiscal period, currency, unit, and standalone/consolidated basis.
 - Semantically map source labels to the exact canonical keys listed below. For example, Net Sales / Operating Revenue -> revenue; Operating Profit -> ebitda; Net Profit / Profit After Tax -> pat; CFO -> cash_from_operations.
 - A metric value should include its reported unit/currency when the evidence supplies one. Do not convert values.
+- Primary statement cells and their own worksheet unit/period headers override generated metric or table summaries. Never use an "implied by scale" unit. If currency or scale is absent from the primary source, preserve native numbers without inventing a unit.
 - Return one JSON object only.
 - Prioritize financial information. Extract every explicitly reported historical or projected P&L, balance-sheet, and cash-flow metric across all available periods. Profile fields are secondary.
 
@@ -200,6 +213,10 @@ INDEXED INTERNAL EVIDENCE:
 {evidence}"""
 
     def extract(self, *, deal, parent_audit_log_id: str | None = None) -> dict:
+        from deals.services.key_financials_profile import latest_accepted_section, sync_section
+        accepted = latest_accepted_section(deal)
+        if accepted:
+            return sync_section(deal, *accepted)
         documents = list(
             DealDocument.objects.filter(deal=deal, is_indexed=True).order_by("created_at")
         )
@@ -299,12 +316,7 @@ INDEXED INTERNAL EVIDENCE:
                     and self._is_known(item.get("value"))
                     and isinstance(item.get("value"), (str, int, float))
                     and not isinstance(item.get("value"), bool)
-                    and self._supported_refs(
-                        item.get("evidence_refs"),
-                        item.get("value"),
-                        citations,
-                        evidence_by_ref,
-                    )
+                    and self._financial_metric(clean_key, item, row.get('fy'), citations, evidence_by_ref)[1]
                 ):
                     has_supported_financial = True
                     break
@@ -391,13 +403,11 @@ INDEXED INTERNAL EVIDENCE:
                     or not isinstance(item, dict)
                 ):
                     continue
-                value = item.get("value")
-                refs = self._supported_refs(
-                    item.get("evidence_refs"), value, citations, evidence_by_ref,
-                )
+                value, refs = self._financial_metric(clean_key, item, fy, citations, evidence_by_ref)
                 if refs and self._is_known(value) and isinstance(value, (str, int, float)) and not isinstance(value, bool):
                     supported_metrics[clean_key] = value
                     metric_sources[clean_key] = {
+                        "extraction_contract": CONTRACT,
                         "evidence_refs": refs,
                         "sources": [citations[ref] for ref in refs],
                     }

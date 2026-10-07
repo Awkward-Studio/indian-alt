@@ -15,6 +15,23 @@ def tolerance(value):
     return Decimal("0.5") * Decimal(10) ** -(len(value.split(".")[1]) if "." in value else 0)
 
 
+def ratio_bounds(a, b):
+    """Propagate the stated decimal precision of rounded display operands."""
+    left, right = numeric(a), numeric(b)
+    left_error = tolerance(a) if '.' in a else Decimal(0)
+    right_error = tolerance(b) if '.' in b else Decimal(0)
+    if right-right_error <= 0 <= right+right_error:
+        return None
+    candidates = [(left+da)/(right+db) for da in (-left_error, left_error) for db in (-right_error, right_error)]
+    return min(candidates), max(candidates)
+
+
+def within_display_precision(value, bounds):
+    margin = tolerance(value) + Decimal('0.000001')
+    actual = numeric(value)
+    return actual+margin >= bounds[0] and actual-margin <= bounds[1]
+
+
 def report_calculation_errors(markdown: str) -> list[str]:
     errors = []
     source = re.split(r"^###\s+Citations\s*$", markdown, flags=re.M)[0]
@@ -27,7 +44,9 @@ def report_calculation_errors(markdown: str) -> list[str]:
                 continue
             expected = numeric(match['a']) / denominator
             if match['unit'] == '%': expected *= 100
-            if abs(numeric(match['result']) - expected) > tolerance(match['result']) + Decimal('0.000001'):
+            bounds = ratio_bounds(match['a'], match['b'])
+            if bounds and match['unit'] == '%': bounds = tuple(value*100 for value in bounds)
+            if bounds and not within_display_precision(match['result'], bounds):
                 errors.append(f"{match[0]} should equal {expected:.6f}{match['unit'] or ''}")
             if match['unit'] and match['unit'].lower() in {'x','times'}:
                 ratios.append(float(expected))
@@ -41,7 +60,7 @@ def report_calculation_errors(markdown: str) -> list[str]:
     for match in re.finditer(r"^#{3,4}\s+(.+)\n([\s\S]*?)(?=^#{1,4}\s|\Z)", source, re.M):
         ratios = [m for m in RATIO.finditer(match[2]) if (m['unit'] or '').lower() in {'x','times'} and numeric(m['b'])]
         if len(ratios) == 1:
-            calculated_cases[re.sub(r"[^a-z0-9]", "", match[1].casefold())] = numeric(ratios[0]['a']) / numeric(ratios[0]['b'])
+            calculated_cases[re.sub(r"[^a-z0-9]", "", match[1].casefold())] = ratio_bounds(ratios[0]['a'], ratios[0]['b'])
     lines = source.splitlines()
     for index,line in enumerate(lines):
         if not line.strip().startswith('|'): continue
@@ -56,6 +75,6 @@ def report_calculation_errors(markdown: str) -> list[str]:
             key=re.sub(r"[^a-z0-9]", "", cells[0].casefold())
             value=re.fullmatch(rf"\*{{0,2}}({NUMBER})\s*x\*{{0,2}}(?:\s*\[\d+\])*",cells[column],re.I)
             expected=calculated_cases.get(key)
-            if value and expected is not None and abs(numeric(value[1])-expected)>tolerance(value[1])+Decimal('0.000001'):
-                errors.append(f"{cells[0]} table MOIC {cells[column]} conflicts with its cited-input calculation {expected:.6f}x")
+            if value and expected is not None and not within_display_precision(value[1], expected):
+                errors.append(f"{cells[0]} table MOIC {cells[column]} conflicts with its cited-input calculation range {expected[0]:.6f}–{expected[1]:.6f}x")
     return errors

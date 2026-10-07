@@ -165,6 +165,16 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     if is_financials and "Key Financials table format:" not in system:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
         system += FINANCIAL_TABLE_INSTRUCTION
+    if is_financials and 'Financial currency and display precision:' not in user:
+        precision = ('\n\nFinancial currency and display precision:\n'
+            'State currency and scale in the table header (for example Metric (INR Cr, amounts)). '
+            'Revenue-to-PAT rows contain monetary amounts, never percentages. Display amounts to exactly '
+            'two decimal places; calculate using unrounded saved source values before displaying results. '
+            'Show growth and margins with %, multiples with x, and working-capital duration with days. '
+            'Use native model units; currency/scale Not provided if primary sources do not state them. '
+            'Do not use generated summaries or implied-by-scale guesses to override a worksheet header.\n')
+        user += precision
+        system += precision
     user = re.sub(
         r"- Provide the analytical depth supported by the evidence\. Runtime guidance:.*"
         r"Do not add repetition or unsupported claims to meet a length target\.",
@@ -192,4 +202,4 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     if is_financials and "Financial source and period check:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_SOURCE_RULE
         user += FINANCIAL_SOURCE_RULE
-    return system, user
+    return system.rstrip(), user

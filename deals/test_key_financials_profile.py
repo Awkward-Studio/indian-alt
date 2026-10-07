@@ -1,0 +1,24 @@
+from django.test import TestCase
+from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
+from deals.models import Deal
+from deals.services.key_financials_profile import section_payload, sync_section
+
+def section():
+    values = [459, 273.11, 185.89, 135.4, 50.49, 3, 47.49, 1, 2, 0, 48.49, 12, 36.49]
+    return '## Key Financials\n\n| Metric (INR Cr) | FY26 Actual | FY27E Forecast |\n| --- | --- | --- |\n' + '\n'.join(
+        f'| {name} | {amount:.2f} [1] | Not provided |' for name, amount in zip(FINANCIAL_ROWS, values))
+
+class KeyFinancialsProfileTests(TestCase):
+    def test_accepted_table_drives_profile_without_another_model_request(self):
+        deal = Deal.objects.create(title='Reviewed target')
+        summary = sync_section(deal, section(), 'accepted-report')
+        statement = deal.vi_relations.get().company_profile.financial_statements.get()
+        self.assertEqual(statement.data['revenue'], '459.00 INR Cr')
+        self.assertEqual(statement.data['ebitda'], '50.49 INR Cr')
+        self.assertEqual(statement.data['ebitda_margin'], '11.00%')
+        self.assertEqual(summary['source'], 'accepted_key_financials')
+        self.assertNotIn('FY27E', list(deal.vi_relations.get().company_profile.financial_statements.values_list('fy', flat=True)))
+
+    def test_native_units_are_preserved_and_never_assigned_crores(self):
+        payload, _, _ = section_payload(section().replace('INR Cr', 'Native model units; currency/scale Not provided'), 'report')
+        self.assertEqual(payload['financial_statements'][0]['metrics']['revenue']['value'], '459.00')

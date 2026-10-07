@@ -266,9 +266,11 @@ def dispatch() -> dict:
                 source_metadata__queue_scope="vdr",
                 source_metadata__queue_state__in=["dispatching", "active"],
             ).order_by("created_at").first()
+            can_refill = False
             if in_flight:
                 metadata = dict(in_flight.source_metadata or {})
-                if metadata.get("current_task_id"):
+                can_refill = metadata.get('queue_kind') == 'report' and bool(metadata.get('active_report_units')) and bool(_next_report_batch(metadata))
+                if metadata.get("current_task_id") and not can_refill:
                     return {"status": "active", "audit_log_id": str(in_flight.id)}
 
             runnable = AIAuditLog.objects.select_for_update().filter(
@@ -277,7 +279,7 @@ def dispatch() -> dict:
                 source_metadata__queue_scope="vdr",
                 source_metadata__queue_state__in=RUNNABLE_STATES,
             )
-            audit = runnable.filter(
+            audit = in_flight if in_flight and can_refill else runnable.filter(
                 source_metadata__queue_kind="report",
             ).order_by("created_at").first()
             if not audit:
@@ -292,6 +294,8 @@ def dispatch() -> dict:
                 return {"status": "deferred_for_interactive_work"}
             unit = _next_unit(metadata)
             if not unit:
+                if metadata.get('active_report_units'):
+                    return {"status": "active", "audit_log_id": str(audit.id)}
                 transaction.on_commit(lambda: _finish_job(str(audit.id)))
                 return {"status": "finishing", "audit_log_id": str(audit.id)}
             unit_type, unit_key, item = unit
@@ -320,7 +324,7 @@ def dispatch() -> dict:
                 "worker_instance_id": None,
             })
             if report_batch:
-                owners = {}
+                owners = dict(metadata.get('active_report_units') or {})
                 for index, section in enumerate(report_batch):
                     section_task_id = task_id if index == 0 else str(uuid.uuid4())
                     section.update({"status": "processing", "celery_task_id": section_task_id, "started_at": now})
@@ -369,20 +373,15 @@ def dispatch() -> dict:
 
 
 def _next_report_batch(metadata: dict) -> list[dict]:
-    """Compute canonical financial/transaction inputs before dependent analysis."""
-    phases = [
-        ["Key Financials", "Transaction Details"],
-        ["Company Details", "Promoter and Management Details", "Industry Overview", "Transaction / Trading Multiples"],
-        ["Risk Factors", "Investment Rationale", "Exit Considerations"],
-        ["Executive Summary", "Next Steps"],
-    ]
+    """Fill each free worker slot, prioritizing financial and transaction inputs."""
+    priority = ["Key Financials", "Transaction Details", "Company Details", "Promoter and Management Details",
+                "Industry Overview", "Transaction / Trading Multiples", "Risk Factors", "Investment Rationale",
+                "Exit Considerations", "Executive Summary", "Next Steps"]
     by_title = {item.get("title"): item for item in metadata.get("report_section_queue") or []}
     capacity = max(1, min(4, int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1))))
-    for phase in phases:
-        outstanding = [by_title[t] for t in phase if t in by_title and str(by_title[t].get("status", "queued")).lower() not in {"completed", "failed", "cancelled"}]
-        if outstanding:
-            return [item for item in outstanding if str(item.get("status", "queued")).lower() in {"queued", "recovering"}][:capacity]
-    return []
+    running = sum(str(item.get('status', '')).lower() in {'processing', 'retrying'} for item in by_title.values())
+    available = max(0, capacity - running)
+    return [by_title[t] for t in priority if t in by_title and str(by_title[t].get('status', 'queued')).lower() in {'queued', 'recovering'}][:available]
 
 
 def _delivery_owner(metadata: dict, unit_key: str) -> dict:

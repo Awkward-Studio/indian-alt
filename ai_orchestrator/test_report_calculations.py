@@ -3,6 +3,10 @@ from ai_orchestrator.services.report_calculations import report_calculation_erro
 
 
 class ReportCalculationTests(SimpleTestCase):
+    def test_rounded_input_precision_allows_the_live_financial_ratios(self):
+        self.assertEqual(report_calculation_errors('1.73 / 8.94 = 19.3%\n\n40.53 / 20.32 = 2.00x'), [])
+        self.assertTrue(report_calculation_errors('1.73 / 8.94 = 21.3%\n\n40.53 / 20.32 = 2.20x'))
+
     def test_correct_ratios_and_irr_pass_with_display_rounding(self):
         self.assertEqual(report_calculation_errors('MOIC is 180 / 60 = 3.0x, and Gross IRR is approximately 24.6% over 5 years.'), [])
 

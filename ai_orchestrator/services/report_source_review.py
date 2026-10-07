@@ -13,6 +13,13 @@ document is a gap; a difference in date, forecast or reporting basis needs recon
 Distinguish proposed diligence actions and clearly labeled scenarios from agreed facts.
 Analyst drafts and prior generated summaries are not primary evidence. Do not accept a
 filename or a valid-looking marker as proof. Do not invent external research or sources.
+For workbook figures, use the primary cell facts and the value's OWN worksheet period
+and unit headers. Never transfer a column-year mapping from another worksheet, even
+when the column letters match. Preserve literal source FY labels; explain any mismatch
+between a source's FY label and its date range instead of silently relabelling it.
+Generated metric/table summaries and "implied by scale" units do not override primary
+saved cells or explicit worksheet headers. Account for displayed rounding precision
+when reviewing calculations rather than demanding equality to six decimal places.
 Check coverage against the supplied section requirements. All material analytical
 questions must be addressed with supported analysis or an explicit evidence gap.
 Review business substance, not mechanical word targets or Markdown layout, which

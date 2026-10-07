@@ -22,12 +22,38 @@ class ParallelReportQueueTests(TestCase):
     @patch("deals.services.vdr_queue._email_priority_busy", return_value=False)
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
     @patch("deals.tasks.process_vdr_report_section.apply_async")
-    def test_canonical_inputs_are_generated_before_four_dependent_sections(self, deliver, *_):
+    def test_report_starts_with_four_sections_including_canonical_inputs(self, deliver, *_):
         audit = self.make_job()
         with self.captureOnCommitCallbacks(execute=True):
             vdr_queue.dispatch()
-        self.assertEqual(deliver.call_count, 2)
-        self.assertEqual({call.kwargs["kwargs"]["section_title"] for call in deliver.call_args_list}, {"Key Financials", "Transaction Details"})
+        self.assertEqual(deliver.call_count, 4)
+        self.assertEqual({call.kwargs["kwargs"]["section_title"] for call in deliver.call_args_list}, {"Key Financials", "Transaction Details", "Company Details", "Promoter and Management Details"})
+
+    @patch("deals.services.vdr_queue._email_priority_busy", return_value=False)
+    @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
+    @patch("deals.services.vdr_queue.kick")
+    @patch("deals.tasks.process_vdr_report_section.apply_async")
+    def test_refills_one_slot_without_invalidating_three_running_deliveries(self, deliver, *_):
+        audit = self.make_job()
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+        audit.refresh_from_db()
+        owners = audit.source_metadata['active_report_units']
+        title, owner = next(iter(owners.items()))
+        vdr_queue.unit_finished(str(audit.id), task_id=owner['current_task_id'], generation=owner['dispatch_generation'],
+                                unit_key=title, result={'status': 'completed', 'section': 'Verified section'})
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+        audit.refresh_from_db()
+        self.assertEqual(deliver.call_count, 5)
+        self.assertEqual(len(audit.source_metadata['active_report_units']), 4)
+        for title, previous in owners.items():
+            if title != 'Key Financials':
+                self.assertTrue(vdr_queue.delivery_is_current(str(audit.id), task_id=previous['current_task_id'],
+                    generation=previous['dispatch_generation'], unit_key=title))
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+        self.assertEqual(deliver.call_count, 5)
 
     @patch("deals.services.vdr_queue._email_priority_busy", return_value=False)
     @patch("deals.services.vdr_queue._high_priority_busy", return_value=False)
