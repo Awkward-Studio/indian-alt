@@ -108,7 +108,12 @@ class PipelineRegistryService:
             )
         rendered = template
         for key, value in values.items():
-            rendered = re.sub(r"{{\s*" + re.escape(key) + r"\s*}}", str(value), rendered)
+            # Source evidence is literal text, not a regex replacement template.
+            rendered = re.sub(
+                r"{{\s*" + re.escape(key) + r"\s*}}",
+                lambda _match, replacement=str(value): replacement,
+                rendered,
+            )
         unresolved = sorted(cls.placeholders(rendered))
         if unresolved:
             raise RegistryValidationError(

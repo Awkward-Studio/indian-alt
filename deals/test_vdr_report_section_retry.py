@@ -33,6 +33,10 @@ class VDRReportSectionRetryTests(SimpleTestCase):
                 "ICReportSectionService._generate_section",
                 side_effect=ReportSectionDegenerateOutputError("Repeated citation loop."),
             ),
+            patch(
+                "ai_orchestrator.services.report_sections."
+                "ICReportSectionService._mark_prior_rejected_attempts_retried",
+            ) as mark_retried,
             patch.object(
                 process_vdr_report_section,
                 "retry",
@@ -48,6 +52,9 @@ class VDRReportSectionRetryTests(SimpleTestCase):
             )
 
         retry.assert_called_once()
+        mark_retried.assert_called_once_with(
+            source_type="vdr_report_section", source_id="audit-1", title="Industry Overview",
+        )
 
     def test_validation_failure_does_not_repeat_model_request(self):
         audit = Mock(source_metadata={})
@@ -105,6 +112,10 @@ class VDRReportSectionRetryTests(SimpleTestCase):
                 "ICReportSectionService._generate_section",
                 side_effect=ReportSectionTooShortError("Draft too short."),
             ),
+            patch(
+                "ai_orchestrator.services.report_sections."
+                "ICReportSectionService._mark_prior_rejected_attempts_retried",
+            ) as mark_retried,
             patch.object(
                 process_vdr_report_section,
                 "retry",
@@ -120,3 +131,6 @@ class VDRReportSectionRetryTests(SimpleTestCase):
             )
 
         retry.assert_called_once()
+        mark_retried.assert_called_once_with(
+            source_type="vdr_report_section", source_id="audit-1", title="Transaction / Trading Multiples",
+        )

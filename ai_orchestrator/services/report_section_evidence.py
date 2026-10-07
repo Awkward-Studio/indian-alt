@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from django.conf import settings
@@ -142,6 +143,7 @@ class ICReportSectionEvidenceService:
             for document in self.documents
         }
         self.section_stats: dict[str, dict] = {}
+        self._formula_graphs = {}
 
     @staticmethod
     def _safe_http_url(value) -> str:
@@ -229,6 +231,7 @@ class ICReportSectionEvidenceService:
             "url": url,
             "location": location,
             "locator": self._location_details(metadata),
+            "visible_cells": sorted(set(re.findall(r"(?<![A-Za-z0-9_])([A-Z]{1,3}[1-9]\d*)\s*=", str(chunk.content or "")))),
             "inline": f"[{label}](<{url}>)" if url else label,
             "reference": f"[{label_title}](<{url}>)" if url else label_title,
         }
@@ -330,8 +333,8 @@ class ICReportSectionEvidenceService:
         metadata = chunk.metadata or {}
         citation = self._citation(chunk, rank=rank)
         header = [
-            f"Retrieval block R{rank:03d} (internal ordering only; never cite this label)",
-            f"Citation marker: [R{rank:03d}]",
+            f"Retrieval block R{rank:03d}",
+            f"Citation marker: [R{rank:03d}] (use exactly for supported claims)",
             f"Document: {citation['title']}",
             f"Evidence type: {metadata.get('chunk_kind') or 'document text'}",
         ]
@@ -340,9 +343,68 @@ class ICReportSectionEvidenceService:
         if citation["locator"].get("sheet_name") and citation["locator"].get("cell_range"):
             header.append(
                 "For a narrower spreadsheet citation, cite only cells visible in this block as "
-                f"[R{rank:03d}@'{citation['locator']['sheet_name']}'!A1:B2]"
+                f"[R{rank:03d}@'{str(citation['locator']['sheet_name']).replace(chr(39), chr(39) * 2)}'!"
+                f"{citation['locator']['cell_range']}]"
             )
         return " | ".join(header) + "\n" + str(chunk.content or "").strip()
+
+    def _formula_graph(self, source_id: str):
+        if source_id not in self._formula_graphs:
+            from deals.services.spreadsheet_dependencies import WorkbookFormulaGraph
+
+            document = next((d for d in self.documents if str(d.id) == source_id), None)
+            manifest = getattr(document, "extraction_manifest", None) or {}
+            self._formula_graphs[source_id] = WorkbookFormulaGraph(manifest) if manifest.get("sheets") else None
+        return self._formula_graphs[source_id]
+
+    def _formula_dependencies(self, selected, *, token_budget: int):
+        roots_by_source = {}
+        for chunk in selected:
+            source_id = str(chunk.source_id)
+            graph = self._formula_graph(source_id)
+            if graph:
+                roots_by_source.setdefault(source_id, []).extend(graph.roots_in_range(chunk.metadata or {}))
+        additions, notes = [], []
+        used_tokens = 0
+        for source_id, roots in roots_by_source.items():
+            if not roots:
+                continue
+            graph = self._formula_graph(source_id)
+            traced = graph.precedents(roots)
+            notes.extend(f"{self.document_titles[source_id]}: {w}" for w in traced["warnings"])
+            names = graph.named_range_text()
+            if names:
+                lines = []
+                for line in names.splitlines():
+                    if estimate_tokens("\n".join([*lines, line])) > min(2_000, token_budget // 4):
+                        notes.append(f"{self.document_titles[source_id]}: additional defined names omitted at context budget")
+                        break
+                    lines.append(line)
+                if lines:
+                    chunk = SimpleNamespace(source_type="document", source_id=source_id,
+                        content="Extracted workbook defined names:\n" + "\n".join(lines),
+                        metadata={"chunk_kind": "spreadsheet_defined_names", "source_location": "Workbook defined names"})
+                    cost = estimate_tokens(self._format_chunk(chunk, rank=len(selected) + len(additions) + 1)) + 2
+                    if used_tokens + cost <= token_budget:
+                        additions.append(chunk)
+                        used_tokens += cost
+            for sheet, address in traced["cells"]:
+                match = re.fullmatch(r"([A-Z]+)(\d+)", address)
+                row = int(match.group(2))
+                chunk = SimpleNamespace(
+                    source_type="document", source_id=source_id,
+                    content="Formula precedent from the same extracted workbook:\n" + graph.render_cell((sheet, address)),
+                    metadata={"chunk_kind": "spreadsheet_formula_precedent", "sheet_name": sheet,
+                              "row_start": row, "row_end": row, "column_start": match.group(1),
+                              "column_end": match.group(1), "cell_range": f"{address}:{address}"},
+                )
+                cost = estimate_tokens(self._format_chunk(chunk, rank=len(selected) + len(additions) + 1)) + 2
+                if used_tokens + cost > token_budget:
+                    notes.append(f"{self.document_titles[source_id]}: additional formula precedents omitted at context token budget")
+                    break
+                additions.append(chunk)
+                used_tokens += cost
+        return additions, list(dict.fromkeys(notes))
 
     def retrieve(self, title: str) -> dict:
         query = self._query(title)
@@ -407,9 +469,13 @@ class ICReportSectionEvidenceService:
             ).retrieve(comparison_query)
 
         comparison_budget = min(16_000, int(self.max_tokens * 0.45)) if comparison and comparison["chunks"] else 0
-        selected = self._select(candidates, token_budget=self.max_tokens - comparison_budget)
+        has_workbooks = any((getattr(d, "extraction_manifest", None) or {}).get("sheets") for d in self.documents)
+        dependency_budget = min(16_384, int((self.max_tokens - comparison_budget) * 0.20)) if has_workbooks else 0
+        selected = self._select(candidates, token_budget=self.max_tokens - comparison_budget - dependency_budget)
         if not selected:
             raise ValueError(f"No indexed document chunks were available for report section '{title}'.")
+        dependency_chunks, dependency_notes = self._formula_dependencies(selected, token_budget=dependency_budget)
+        selected.extend(dependency_chunks)
         context = "\n\n".join(
             self._format_chunk(chunk, rank=index)
             for index, chunk in enumerate(selected, start=1)
@@ -418,6 +484,21 @@ class ICReportSectionEvidenceService:
             str(index): self._citation(chunk, rank=index)
             for index, chunk in enumerate(selected, start=1)
         }
+        if dependency_chunks or dependency_notes:
+            note_header = (
+                "Workbook formula interpretation: formulas and precedent cells are extracted evidence. "
+                "Saved Excel results are not recalculated here and may be stale. Follow cross-sheet "
+                "inputs and cite each supplied block. Do not infer missing, dynamic or external inputs."
+            )
+            remaining = self.max_tokens - comparison_budget - estimate_tokens(context) - 20
+            note_text = note_header
+            for note in dependency_notes:
+                candidate = note_text + "\n- " + note
+                if estimate_tokens(candidate) > max(0, remaining):
+                    break
+                note_text = candidate
+            if estimate_tokens(note_text) <= max(0, remaining):
+                context += "\n\n" + note_text
         comparison_selected = []
         if comparison_budget:
             source_info = comparison["source_info"]
@@ -465,6 +546,8 @@ class ICReportSectionEvidenceService:
             "supplemented_document_ids": supplemented_document_ids,
             "estimated_context_tokens": estimate_tokens(context),
             "context_budget_tokens": self.max_tokens,
+            "formula_dependency_chunk_count": len(dependency_chunks),
+            "formula_dependency_warnings": dependency_notes,
         }
         if comparison is not None:
             stats["our_deal_comparison"] = {

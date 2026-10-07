@@ -295,6 +295,13 @@ def dispatch() -> dict:
                 transaction.on_commit(lambda: _finish_job(str(audit.id)))
                 return {"status": "finishing", "audit_log_id": str(audit.id)}
             unit_type, unit_key, item = unit
+            report_batch = []
+            if unit_type != "document" and int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1)) > 1:
+                report_batch = _next_report_batch(metadata)
+                if not report_batch:
+                    return {"status": "active", "audit_log_id": str(audit.id)}
+                item = report_batch[0]
+                unit_key = item["title"]
             generation = int(metadata.get("dispatch_generation") or 0) + 1
             task_id = str(uuid.uuid4())
             now = timezone.now().isoformat()
@@ -312,6 +319,16 @@ def dispatch() -> dict:
                 # task starts and sends its first heartbeat.
                 "worker_instance_id": None,
             })
+            if report_batch:
+                owners = {}
+                for index, section in enumerate(report_batch):
+                    section_task_id = task_id if index == 0 else str(uuid.uuid4())
+                    section.update({"status": "processing", "celery_task_id": section_task_id, "started_at": now})
+                    owners[section["title"]] = {
+                        "current_task_id": section_task_id, "current_unit_key": section["title"],
+                        "dispatch_generation": generation, "heartbeat_at": now, "worker_instance_id": None,
+                    }
+                metadata["active_report_units"] = owners
             audit.status = "PROCESSING"
             audit.celery_task_id = task_id
             audit.source_metadata = metadata
@@ -335,28 +352,54 @@ def dispatch() -> dict:
                     link=vdr_unit_completed.s(str(audit.id), task_id, generation, unit_key),
                 ))
             else:
-                transaction.on_commit(lambda: process_vdr_report_section.apply_async(
-                    kwargs={
-                        "deal_id": str(audit.source_id), "audit_log_id": str(audit.id),
-                        "section_title": unit_key, "queue_generation": generation,
-                    }, queue="vdr_work", task_id=task_id,
-                    link=vdr_unit_completed.s(str(audit.id), task_id, generation, unit_key),
-                ))
+                for section in report_batch or [item]:
+                    section_key = section["title"]
+                    section_task_id = section["celery_task_id"]
+                    transaction.on_commit(lambda key=section_key, delivery_id=section_task_id: process_vdr_report_section.apply_async(
+                        kwargs={
+                            "deal_id": str(audit.source_id), "audit_log_id": str(audit.id),
+                            "section_title": key, "queue_generation": generation,
+                        }, queue="vdr_work", task_id=delivery_id,
+                        link=vdr_unit_completed.s(str(audit.id), delivery_id, generation, key),
+                    ))
             return {"status": "dispatched", "audit_log_id": str(audit.id), "unit": unit_key}
     finally:
         if fallback_locked:
             _unlock_fallback()
 
 
+def _next_report_batch(metadata: dict) -> list[dict]:
+    """Compute canonical financial/transaction inputs before dependent analysis."""
+    phases = [
+        ["Key Financials", "Transaction Details"],
+        ["Company Details", "Promoter and Management Details", "Industry Overview", "Transaction / Trading Multiples"],
+        ["Risk Factors", "Investment Rationale", "Exit Considerations"],
+        ["Executive Summary", "Next Steps"],
+    ]
+    by_title = {item.get("title"): item for item in metadata.get("report_section_queue") or []}
+    capacity = max(1, min(4, int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1))))
+    for phase in phases:
+        outstanding = [by_title[t] for t in phase if t in by_title and str(by_title[t].get("status", "queued")).lower() not in {"completed", "failed", "cancelled"}]
+        if outstanding:
+            return [item for item in outstanding if str(item.get("status", "queued")).lower() in {"queued", "recovering"}][:capacity]
+    return []
+
+
+def _delivery_owner(metadata: dict, unit_key: str) -> dict:
+    owners = metadata.get("active_report_units") or {}
+    return owners.get(unit_key, {}) if owners else metadata
+
+
 def delivery_ownership_matches(audit_log_id: str, *, task_id: str, generation: int, unit_key: str) -> bool:
     from ai_orchestrator.models import AIAuditLog
     row = AIAuditLog.objects.filter(id=audit_log_id, status="PROCESSING").values("source_metadata").first()
     metadata = (row or {}).get("source_metadata") or {}
+    owner = _delivery_owner(metadata, unit_key)
     return (
         metadata.get("queue_version") == QUEUE_VERSION
-        and str(metadata.get("current_task_id") or "") == str(task_id)
-        and int(metadata.get("dispatch_generation") or 0) == int(generation)
-        and str(metadata.get("current_unit_key") or "") == str(unit_key)
+        and str(owner.get("current_task_id") or "") == str(task_id)
+        and int(owner.get("dispatch_generation") or 0) == int(generation)
+        and str(owner.get("current_unit_key") or "") == str(unit_key)
     )
 
 
@@ -381,6 +424,10 @@ def heartbeat(audit_log_id: str, *, task_id: str, generation: int, unit_key: str
         if not delivery_is_current(audit_log_id, task_id=task_id, generation=generation, unit_key=unit_key):
             return False
         metadata.update({"queue_state": "active", "heartbeat_at": timezone.now().isoformat()})
+        owner = _delivery_owner(metadata, unit_key)
+        owner["heartbeat_at"] = metadata["heartbeat_at"]
+        if worker_id:
+            owner["worker_instance_id"] = worker_id
         if worker_id:
             metadata["worker_instance_id"] = worker_id
         audit.source_metadata = metadata
@@ -416,10 +463,13 @@ def unit_finished(audit_log_id: str, *, task_id: str, generation: int, unit_key:
         if not audit:
             return False
         metadata = dict(audit.source_metadata or {})
+        owner = _delivery_owner(metadata, unit_key)
         if not (
-            str(metadata.get("current_task_id") or "") == str(task_id)
-            and int(metadata.get("dispatch_generation") or 0) == int(generation)
-            and str(metadata.get("current_unit_key") or "") == str(unit_key)
+            audit.status == "PROCESSING"
+            and metadata.get("queue_state") not in TERMINAL_STATES
+            and str(owner.get("current_task_id") or "") == str(task_id)
+            and int(owner.get("dispatch_generation") or 0) == int(generation)
+            and str(owner.get("current_unit_key") or "") == str(unit_key)
         ):
             return False
         manifest_key = "document_queue" if metadata.get("queue_kind") == "indexing" else "report_section_queue"
@@ -449,13 +499,18 @@ def unit_finished(audit_log_id: str, *, task_id: str, generation: int, unit_key:
                 if result.get("evidence_metadata"):
                     item["evidence_metadata"] = result["evidence_metadata"]
                 break
-        metadata.update({
-            "queue_state": "waiting_next_unit",
-            "current_task_id": None,
-            "current_unit_type": None,
-            "current_unit_key": None,
-            "heartbeat_at": timezone.now().isoformat(),
-        })
+        owners = metadata.get("active_report_units") or {}
+        owners.pop(unit_key, None)
+        metadata["active_report_units"] = owners
+        if owners:
+            next_owner = next(iter(owners.values()))
+            metadata.update({**next_owner, "queue_state": "active", "current_unit_type": "report_section"})
+        else:
+            metadata.update({
+                "queue_state": "waiting_next_unit", "current_task_id": None,
+                "current_unit_type": None, "current_unit_key": None,
+                "heartbeat_at": timezone.now().isoformat(),
+            })
         audit.source_metadata = metadata
         audit.save(update_fields=["source_metadata"])
     kick()
@@ -676,16 +731,17 @@ def reconcile() -> dict:
                 manifest_key = "document_queue" if metadata.get("queue_kind") == "indexing" else "report_section_queue"
                 key_name = "source_file_id" if manifest_key == "document_queue" else "title"
                 for item in metadata.get(manifest_key) or []:
-                    if str(item.get(key_name) or "") == str(metadata.get("current_unit_key") or ""):
+                    if (str(item.get(key_name) or "") == str(metadata.get("current_unit_key") or "")
+                        or str(item.get(key_name) or "") in (metadata.get("active_report_units") or {})):
                         item["status"] = "recovering"
                         item["celery_task_id"] = None
-                        break
                 metadata.update({
                     "queue_state": "recovering", "recovery_count": recoveries,
                     "deployment_recovery_count": int(metadata.get("deployment_recovery_count") or 0) + (1 if worker_replaced else 0),
                     "dispatch_generation": int(metadata.get("dispatch_generation") or 0) + 1,
                     "current_task_id": None, "current_unit_type": None, "current_unit_key": None,
                     "heartbeat_at": now.isoformat(), "worker_instance_id": None,
+                    "active_report_units": {},
                 })
                 recovered += 1
             audit.source_metadata = metadata

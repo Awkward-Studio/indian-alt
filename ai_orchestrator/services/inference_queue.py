@@ -1,4 +1,4 @@
-"""Distributed lease for the single-slot text inference server."""
+"""Distributed, bounded leases for the selected text inference server."""
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ class InferenceQueueLease:
 
     KEY = "ai:inference:lease:v1"
     DEFAULT_LEASE_TTL = 3600
+
+    @classmethod
+    def lease_keys(cls):
+        count = max(1, min(4, int(getattr(settings, "AI_INFERENCE_MAX_CONCURRENT_REQUESTS", 1))))
+        return [cls.KEY, *(f"{cls.KEY}:slot:{slot}" for slot in range(2, count + 1))]
     SLOT_MONITORED_SOURCE_TYPES = frozenset({
         "document_evidence_segment",
         "email_report_section",
@@ -30,7 +35,10 @@ class InferenceQueueLease:
 
     @classmethod
     def uses_slot_transport(cls, source_type: str) -> bool:
-        return source_type in cls.SLOT_MONITORED_SOURCE_TYPES
+        return (
+            getattr(settings, "AI_SLOT_TRANSPORT_ENABLED", True)
+            and source_type in cls.SLOT_MONITORED_SOURCE_TYPES
+        )
 
     def __init__(self, audit_log, *, max_wait_seconds: int | float = 0) -> None:
         self.audit_log = audit_log
@@ -58,6 +66,7 @@ class InferenceQueueLease:
             "lease_token": uuid.uuid4().hex,
         }
         self.acquired = False
+        self.lease_key = self.KEY
         self.wait_started_at = timezone.now()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
@@ -89,7 +98,7 @@ class InferenceQueueLease:
 
     def record_slot_progress(self, **updates):
         self.check_cancelled()
-        current = cache.get(self.KEY)
+        current = cache.get(self.lease_key)
         if not isinstance(current, dict) or current.get("lease_token") != self.owner["lease_token"]:
             raise InferenceCancelled("Inference lease ownership was lost; closing the model request.")
         if updates.get("inference_state") == "processing" and not (self.audit_log.source_metadata or {}).get("inference_started_at"):
@@ -108,11 +117,11 @@ class InferenceQueueLease:
                 + ("return redis.call('expire', KEYS[1], ARGV[2]) " if renew else "return redis.call('del', KEYS[1]) ")
                 + "else return 0 end"
             )
-            return bool(client.eval(script, 1, cache.make_key(self.KEY), backend.encode(owner), self.lease_ttl))
+            return bool(client.eval(script, 1, cache.make_key(self.lease_key), backend.encode(owner), self.lease_ttl))
         # Local-memory cache is used by local tests, never distributed workers.
-        current = cache.get(self.KEY)
+        current = cache.get(self.lease_key)
         if isinstance(current, dict) and current.get("lease_token") == owner["lease_token"]:
-            return cache.touch(self.KEY, self.lease_ttl) if renew else cache.delete(self.KEY)
+            return cache.touch(self.lease_key, self.lease_ttl) if renew else cache.delete(self.lease_key)
         return False
 
     def _update_audit(self, **updates: Any) -> None:
@@ -150,20 +159,29 @@ class InferenceQueueLease:
     def force_release(cls) -> bool:
         """Release a lease during an administrator queue reset."""
         try:
-            if cache.get(cls.KEY) is None:
-                return True
-            return bool(cache.delete(cls.KEY))
+            success = True
+            for key in cls.lease_keys():
+                if cache.get(key) is not None:
+                    success = bool(cache.delete(key)) and success
+            return success
         except Exception:
             return False
 
     @classmethod
     def release_for_audits(cls, audit_log_ids) -> bool:
+        released = False
+        for key in cls.lease_keys():
+            released = cls._release_for_audits_at_key(audit_log_ids, key) or released
+        return released
+
+    @classmethod
+    def _release_for_audits_at_key(cls, audit_log_ids, key) -> bool:
         """Release the lease only when one of the supplied audits owns it."""
         audit_ids = {str(value) for value in audit_log_ids if value}
         if not audit_ids:
             return False
         try:
-            owner = cache.get(cls.KEY)
+            owner = cache.get(key)
             if (
                 not isinstance(owner, dict)
                 or str(owner.get("audit_log_id") or "") not in audit_ids
@@ -180,13 +198,13 @@ class InferenceQueueLease:
                     client.eval(
                         script,
                         1,
-                        cache.make_key(cls.KEY),
+                        cache.make_key(key),
                         backend.encode(owner),
                     )
                 )
-            current = cache.get(cls.KEY)
+            current = cache.get(key)
             if current == owner:
-                return bool(cache.delete(cls.KEY))
+                return bool(cache.delete(key))
         except Exception:
             return False
         return False
@@ -206,7 +224,12 @@ class InferenceQueueLease:
         while True:
             self.check_cancelled()
             try:
-                acquired = cache.add(self.KEY, self.owner, timeout=self.lease_ttl)
+                acquired = False
+                for key in self.lease_keys():
+                    if cache.add(key, self.owner, timeout=self.lease_ttl):
+                        self.lease_key = key
+                        acquired = True
+                        break
                 if acquired:
                     self.acquired = True
                     acquired_at = timezone.now()
@@ -218,6 +241,7 @@ class InferenceQueueLease:
                                 0, int((acquired_at - self.wait_started_at).total_seconds() * 1000)
                             ),
                             inference_lease_owner=self.owner,
+                            inference_queue_lease_key=self.lease_key,
                         )
                         self._start_heartbeat()
                     except Exception:

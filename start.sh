@@ -15,6 +15,9 @@ echo "Run as coordinator: ${RUN_AS_COORDINATOR_NORMALIZED}"
 echo "Run embedded VDR coordinator: ${RUN_VDR_COORDINATOR_NORMALIZED}"
 echo "Run dedicated folder scan worker: ${RUN_FOLDER_SCAN_WORKER_NORMALIZED}"
 
+# The supervisor resolves AI_INFERENCE_TARGET and exits when no tunnel is needed.
+python -m ai_orchestrator.services.inference_tunnel &
+
 # Check database connection
 if [ -n "$DATABASE_URL" ]; then
     echo "DATABASE_URL: PRESENT (PostgreSQL)"
@@ -50,6 +53,16 @@ if [ "$RUN_AS_COORDINATOR_NORMALIZED" = "true" ]; then
 elif [ "$RUN_AS_WORKER_NORMALIZED" = "true" ]; then
     CELERY_CONCURRENCY_VALUE="${CELERY_CONCURRENCY:-1}"
     CELERY_POOL_VALUE="${CELERY_POOL:-solo}"
+    case "${AI_INFERENCE_TARGET:-}" in
+        h100|H100)
+            CELERY_CONCURRENCY_VALUE="${H100_CELERY_CONCURRENCY:-4}"
+            CELERY_POOL_VALUE="${H100_CELERY_POOL:-prefork}"
+            ;;
+        t4|T4)
+            CELERY_CONCURRENCY_VALUE="${T4_CELERY_CONCURRENCY:-1}"
+            CELERY_POOL_VALUE="${T4_CELERY_POOL:-solo}"
+            ;;
+    esac
     # Interactive chat/search/research outrank email ingestion. Email then
     # outranks reports, and the durable VDR coordinator runs reports before
     # ordinary VDR document work.

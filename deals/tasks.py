@@ -2133,6 +2133,8 @@ def process_vdr_report_section(
     from ai_orchestrator.services.ai_processor import AIProcessorService
     from ai_orchestrator.services.report_sections import (
         ICReportSectionService,
+        ReportSectionCitationError,
+        ReportSectionStructureError,
         ReportSectionDegenerateOutputError,
         ReportSectionTooShortError,
         ReportSectionValidationError,
@@ -2158,22 +2160,32 @@ def process_vdr_report_section(
         analysis, ready_docs, _, _ = _durable_report_foundation(
             deal, audit, allow_gaps=bool((audit.source_metadata or {}).get("allow_gaps")),
         )
+        from ai_orchestrator.services.report_section_context import prior_section_context
+        from ai_orchestrator.services.token_budget import estimate_tokens
+        prior_context = prior_section_context(audit.source_metadata or {}, section_title)
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
-        ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs)
+        ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs,
+            max_tokens=max(4_000, int(getattr(settings, "VDR_REPORT_SECTION_EVIDENCE_TOKENS", 36_000)) - estimate_tokens(prior_context)))
         retrieved = evidence_service.retrieve(section_title)
         context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
         evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None
         citations = retrieved.get("citations") if isinstance(retrieved, dict) else None
         if not context.strip():
             raise ValueError(f"No evidence was retrieved for report section '{section_title}'.")
+        if prior_context:
+            context += "\n\n" + prior_context
         if self.request.retries:
             minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
             context = (
                 f"{context}\n\n<retry_requirement>\n"
-                f"The previous draft failed validation because it was under length. "
+                "The previous draft failed output validation. "
                 f"Write a fresh, complete section of at least {minimum_words:,} words, "
-                "without padding, repetition, or unsupported claims.\n"
+                "excluding source labels and references, without padding, repetition, "
+                "or unsupported claims. Cite every factual claim and supported table "
+                "row with exact supplied [Rnnn] markers, never filename-only "
+                "[IM: filename] labels. Resolve all material analytical themes and "
+                "state exact gaps when records are absent.\n"
                 "</retry_requirement>"
             )
         section = ICReportSectionService._generate_section(
@@ -2189,10 +2201,16 @@ def process_vdr_report_section(
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
     except ReportSectionDegenerateOutputError as exc:
         if self.request.retries < self.max_retries:
+            ICReportSectionService._mark_prior_rejected_attempts_retried(
+                source_type="vdr_report_section", source_id=audit_log_id, title=section_title,
+            )
             raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
         return {"status": "failed", "error": str(exc)}
-    except ReportSectionTooShortError as exc:
+    except (ReportSectionTooShortError, ReportSectionCitationError, ReportSectionStructureError) as exc:
         if self.request.retries < self.max_retries:
+            ICReportSectionService._mark_prior_rejected_attempts_retried(
+                source_type="vdr_report_section", source_id=audit_log_id, title=section_title,
+            )
             raise self.retry(exc=exc, countdown=15 * (self.request.retries + 1))
         return {"status": "failed", "error": str(exc)}
     except ReportSectionValidationError as exc:

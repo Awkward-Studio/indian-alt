@@ -29,8 +29,16 @@ class ReportSectionTooShortError(ReportSectionValidationError):
     """A usable but under-length draft that warrants a corrected model request."""
 
 
+class ReportSectionCitationError(ReportSectionValidationError):
+    """A draft with missing retrieval markers needs a corrected citation request."""
+
+
+class ReportSectionStructureError(ReportSectionValidationError):
+    """A draft violates the financial table layout and needs a corrected request."""
+
+
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v7"
+    CACHE_VERSION = "ic-report-sections-v8"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -194,6 +202,13 @@ class ICReportSectionService:
             or end[1] > source_end[1]
         ):
             return ""
+        visible = citation.get("visible_cells")
+        if visible:
+            area = (end[0] - start[0] + 1) * (end[1] - start[1] + 1)
+            present = sum(1 for address in visible if (parts := cls._cell_parts(address))
+                and start[0] <= parts[0] <= end[0] and start[1] <= parts[1] <= end[1])
+            if present != area:
+                return ""  # Never attach a cell absent from this retrieved block.
         start_label = match.group("start").upper()
         end_label = (match.group("end") or match.group("start")).upper()
         cell_range = start_label if start_label == end_label else f"{start_label}:{end_label}"
@@ -273,6 +288,22 @@ class ICReportSectionService:
         citation_map = citations or {}
         used: list[dict] = []
         citation_numbers: dict[tuple[str, str, str], int] = {}
+
+        # Earlier authored prompts invited [IM: filename @R001, R002]. Resolve
+        # supplied ranks without leaving nested brackets or a filename in a table
+        # cell. Filename-only labels remain invalid; never guess an evidence rank.
+        def source_label(match: re.Match) -> str:
+            value = match.group("value")
+            ranks = cls.CITATION_TOKEN_PATTERN.findall(value)
+            if not ranks:
+                return match.group(0)
+            prefix = "External evidence: " if match.group("kind").upper() == "EXT" else ""
+            return prefix + " ".join(f"[{rank}]" for rank in ranks)
+
+        text = re.sub(
+            r"\[(?P<kind>IM|EXT):\s*(?P<value>[^\]\n]+)\]",
+            source_label, text, flags=re.IGNORECASE,
+        )
 
         # Expand multi-rank clusters first so each rank can be resolved or
         # removed independently without leaving malformed nested brackets.
@@ -464,6 +495,7 @@ class ICReportSectionService:
         *,
         citations: dict | None = None,
         minimum_words: int = 0,
+        strict_financial_table: bool = False,
     ) -> str:
         text = str(response or "").strip()
         citation_tokens = [
@@ -489,9 +521,16 @@ class ICReportSectionService:
         text, used_citations = cls._replace_internal_citations(text, citations)
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
+        if strict_financial_table and title == "Key Financials":
+            cls._validate_financial_table(text)
         if citations and not used_citations:
-            raise ReportSectionValidationError(
+            raise ReportSectionCitationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
+            )
+        if citations and re.search(r"\[(?:IM|EXT):[^\]\n]+\]", text, flags=re.IGNORECASE):
+            raise ReportSectionCitationError(
+                f"Report section '{title}' used filename-only source labels; "
+                "cite the supplied [Rnnn] markers for every sourced claim."
             )
         body = text[len(target):].strip()
         # Check the model-authored body before appending verified references.
@@ -503,22 +542,87 @@ class ICReportSectionService:
                 f"Report section '{title}' returned unresolved internal citation "
                 f"'{unresolved.group(0)}'."
             )
-        text = cls._append_references(text, citations, used_citations)
-        body = text[len(target):].strip()
-        if len(body) < 40:
+        if len(body) < 40 and not used_citations:
             raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
         unverified_links = cls._unverified_links(body, citations)
         if unverified_links:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned an unverified source link."
             )
-        word_count = len(re.findall(r"\b\w+\b", body))
+        # Count authored analysis before adding references. Repeated filenames,
+        # source locations and URLs must not make a short draft pass the floor.
+        analysis_body = re.sub(r"\[(\d+)\]", "", body)
+        analysis_body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", analysis_body)
+        word_count = len(re.findall(r"\b\w+\b", analysis_body))
         if minimum_words and word_count < minimum_words:
             raise ReportSectionTooShortError(
                 f"Report section '{title}' was too short: {word_count} words; "
                 f"minimum is {minimum_words}."
             )
-        return text.strip()
+        return cls._append_references(text, citations, used_citations).strip()
+
+    @classmethod
+    def _validate_financial_table(cls, text: str) -> None:
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
+        tables, pending = [], []
+        for line in [*text.splitlines(), ""]:
+            if line.strip().startswith("|"):
+                pending.append(line)
+            elif pending:
+                if len(pending) >= 2 and cls._is_table_separator(pending[1]):
+                    tables.append(pending)
+                pending = []
+        if len(tables) != 1:
+            raise ReportSectionStructureError("Key Financials must contain exactly one standardized Revenue-to-PAT table.")
+        table = tables[0]
+        labels = [re.sub(r"\[[^]]+\]", "", cls._plain_table_label(cls._table_cells(row)[0])).strip() for row in table[2:]]
+        normalize = lambda value: re.sub(r"[^a-z0-9]+", "", value.casefold())
+        if [normalize(v) for v in labels] != [normalize(v) for v in FINANCIAL_ROWS]:
+            raise ReportSectionStructureError("Key Financials table rows must use the standard order from Revenue to PAT, with missing inputs marked Not provided.")
+        width = len(cls._table_cells(table[0]))
+        if width < 2 or any(len(cls._table_cells(row)) != width for row in table):
+            raise ReportSectionStructureError("Key Financials table must have consistent period columns and one metric per row.")
+
+    @staticmethod
+    def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:
+        if not audit_log_id:
+            return
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+        audit = AIAuditLog.objects.filter(id=audit_log_id).first()
+        if not audit:
+            return
+        audit.status = "FAILED"
+        audit.is_success = False
+        audit.error_message = str(error)
+        audit.source_metadata = {
+            **(audit.source_metadata or {}),
+            "inference_state": "rejected",
+            "report_section_outcome": "rejected",
+        }
+        audit.save(update_fields=["status", "is_success", "error_message", "source_metadata"])
+        broadcast_audit_log_update(audit, event_type="terminal", done=True)
+
+    @staticmethod
+    def _mark_prior_rejected_attempts_retried(*, source_type: str, source_id: str, title: str) -> None:
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.realtime import broadcast_audit_log_update
+
+        rejected = AIAuditLog.objects.filter(
+            source_type=source_type,
+            source_id=str(source_id),
+            source_metadata__report_section=title,
+            source_metadata__report_section_outcome="rejected",
+        )
+        for audit in rejected:
+            audit.source_metadata = {
+                **(audit.source_metadata or {}),
+                "inference_state": "retried",
+                "report_section_outcome": "retried",
+            }
+            audit.save(update_fields=["source_metadata"])
+            broadcast_audit_log_update(audit, event_type="terminal", done=True)
 
     @classmethod
     def _generate_section(
@@ -565,6 +669,9 @@ class ICReportSectionService:
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
             if is_vdr_section else 1200
         )
+        cls._mark_prior_rejected_attempts_retried(
+            source_type=source_type, source_id=str(source_id), title=title,
+        )
         result = ai_service.process_content(
             content=evidence,
             skill_name=None,
@@ -587,6 +694,7 @@ class ICReportSectionService:
                 **({"max_input_tokens": int(max_input_tokens)} if max_input_tokens else {}),
                 "request_timeout": int(getattr(settings, "EMAIL_REPORT_SECTION_TIMEOUT", 1800)),
                 "enforce_context_budget": True,
+                "include_audit_log_id": True,
                 "context_label": f"{context_label_prefix}: {title}",
                 "_source_metadata": {
                     "report_section": title,
@@ -600,12 +708,19 @@ class ICReportSectionService:
                 },
             },
         )
-        section = cls._normalize_section(
-            title,
-            result.get("response") if isinstance(result, dict) else result,
-            citations=citations,
-            minimum_words=minimum_words,
-        )
+        try:
+            section = cls._normalize_section(
+                title,
+                result.get("response") if isinstance(result, dict) else result,
+                citations=citations,
+                minimum_words=minimum_words,
+                strict_financial_table="Key Financials table format:" in revision.user_template,
+            )
+        except ReportSectionValidationError as exc:
+            cls._mark_rejected_section_audit(
+                result.get("_audit_log_id") if isinstance(result, dict) else None, exc,
+            )
+            raise
         try:
             cache.set(
                 cache_key,

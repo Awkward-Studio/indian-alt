@@ -145,6 +145,8 @@ class AIRuntimeService:
 
     @classmethod
     def get_text_model(cls, personality: Optional[AIPersonality] = None) -> str:
+        if getattr(settings, "AI_INFERENCE_TARGET", ""):
+            return settings.VLLM_TEXT_MODEL
         personality_model = getattr(personality, "text_model_name", None)
         # This deployment resolves all text traffic through vLLM. Legacy
         # personality rows may still carry old Ollama-era model overrides,

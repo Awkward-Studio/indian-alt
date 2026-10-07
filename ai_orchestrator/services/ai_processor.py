@@ -357,6 +357,8 @@ class AIProcessorService:
             return self._stream_response(payload, audit_log)
         
         result = self._standard_response(payload, audit_log, response_mode)
+        if (metadata or {}).get("include_audit_log_id") and isinstance(result, dict):
+            result["_audit_log_id"] = str(audit_log.id)
         result["_full_context"] = cleaned_text
         return result
 

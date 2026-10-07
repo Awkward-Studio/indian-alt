@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase, override_settings
 
+from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLES
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import (
@@ -188,6 +189,41 @@ class CitationNormalizationTests(SimpleTestCase):
 
 
 class ICReportSectionServiceTests(TestCase):
+    @patch("ai_orchestrator.services.report_sections.cache")
+    def test_rejected_section_audit_is_retried_not_completed(self, report_cache):
+        report_cache.get.return_value = None
+        PipelineRegistryService.ensure_report_pipeline_defaults()
+        audit = AIAuditLog.objects.create(
+            source_type="vdr_report_section", source_id="report-1",
+            context_label="VDR report section: Next Steps",
+            model_used="test-model", system_prompt="system", user_prompt="prompt",
+            raw_response="short draft", status="COMPLETED", is_success=True,
+            source_metadata={"report_section": "Next Steps", "inference_state": "completed"},
+        )
+        service = Mock()
+        service.process_content.return_value = {
+            "response": "## Next Steps\n\nA concise but insufficiently detailed evidence-backed next step.",
+            "_audit_log_id": str(audit.id),
+        }
+
+        with self.assertRaises(ReportSectionTooShortError):
+            ICReportSectionService._generate_section(
+                ai_service=service, evidence="Evidence", analysis={"deal_model_data": {}},
+                title="Next Steps", source_id="report-1", source_type="vdr_report_section",
+            )
+        audit.refresh_from_db()
+        self.assertEqual(audit.status, "FAILED")
+        self.assertFalse(audit.is_success)
+        self.assertEqual(audit.source_metadata["report_section_outcome"], "rejected")
+
+        ICReportSectionService._mark_prior_rejected_attempts_retried(
+            source_type="vdr_report_section", source_id="report-1", title="Next Steps",
+        )
+        audit.refresh_from_db()
+        self.assertEqual(audit.status, "FAILED")
+        self.assertEqual(audit.source_metadata["report_section_outcome"], "retried")
+        self.assertEqual(audit.source_metadata["inference_state"], "retried")
+
     def complete_report(self):
         return "\n\n".join(f"{header}\n\nComplete evidence-backed content for {header}." for header in IC_REPORT_HEADERS)
 

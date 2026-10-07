@@ -23,6 +23,13 @@ from ai_orchestrator.services.pipeline_registry import (
 
 
 class PromptRenderingTests(SimpleTestCase):
+    def test_source_backslashes_are_preserved_literally(self):
+        evidence = r"Financial note: \u20b9 100 crore; path C:\reports\new; reference \1; escaped newline \n"
+        rendered = PipelineRegistryService.render(
+            "Source: {{ content }}", {"content": evidence}, ["content"],
+        )
+        self.assertEqual(rendered, "Source: " + evidence)
+
     def test_render_requires_declared_and_supplied_variables(self):
         rendered = PipelineRegistryService.render(
             "Deal: {{ deal_title }}\nQuestion: {{ content }}",

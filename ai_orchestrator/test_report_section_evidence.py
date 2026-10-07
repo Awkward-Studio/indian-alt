@@ -209,4 +209,4 @@ class ICReportSectionEvidenceServiceTests(TestCase):
         citation = result["citations"]["1"]
         self.assertEqual(citation["location"], "Revenue Build!A42:H49")
         self.assertEqual(citation["locator"]["row_start"], 42)
-        self.assertIn("[R001@'Revenue Build'!A1:B2]", result["context"])
+        self.assertIn("[R001@'Revenue Build'!A42:H49]", result["context"])

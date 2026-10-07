@@ -5,6 +5,9 @@ from pathlib import Path
 from decouple import config, Csv
 import os
 import dj_database_url
+from ai_orchestrator.services.inference_target import apply_inference_target
+
+AI_INFERENCE_TARGET = apply_inference_target(lambda key, default: config(key, default=default))
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -368,6 +371,10 @@ VLLM_READ_TIMEOUT = config('VLLM_READ_TIMEOUT', default=600, cast=int)
 VLLM_STREAM_TIMEOUT = config('VLLM_STREAM_TIMEOUT', default=600, cast=int)
 VLLM_PLANNER_TIMEOUT = config('VLLM_PLANNER_TIMEOUT', default=600, cast=int)
 AI_INFERENCE_QUEUE_ENABLED = config('AI_INFERENCE_QUEUE_ENABLED', default=True, cast=bool)
+# llama.cpp exposes /slots; vLLM uses the standard OpenAI transport.
+AI_SLOT_TRANSPORT_ENABLED = config('AI_SLOT_TRANSPORT_ENABLED', default=True, cast=bool)
+AI_INFERENCE_MAX_CONCURRENT_REQUESTS = config('AI_INFERENCE_MAX_CONCURRENT_REQUESTS', default=1, cast=int)
+VDR_DURABLE_REPORT_CONCURRENCY = config('VDR_DURABLE_REPORT_CONCURRENCY', default=1, cast=int)
 AI_INFERENCE_QUEUE_POLL_SECONDS = config('AI_INFERENCE_QUEUE_POLL_SECONDS', default=2.0, cast=float)
 AI_INFERENCE_QUEUE_LEASE_TTL = config('AI_INFERENCE_QUEUE_LEASE_TTL', default=3600, cast=int)
 AI_SLOT_POLL_SECONDS = config('AI_SLOT_POLL_SECONDS', default=1.0, cast=float)

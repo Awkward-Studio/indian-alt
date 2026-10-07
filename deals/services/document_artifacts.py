@@ -415,6 +415,10 @@ class DocumentArtifactService:
             chunks_by_sheet.setdefault(sheet_name, []).append(chunk)
 
         lines = [f"# WORKBOOK: {file_name}"]
+        from deals.services.spreadsheet_dependencies import WorkbookFormulaGraph
+        names = WorkbookFormulaGraph(manifest).named_range_text()
+        if names:
+            lines.extend(["DEFINED NAMES:", names])
         if manifest.get("content_sha256"):
             lines.append(f"SHA256: {manifest['content_sha256']}")
         for sheet in manifest.get("sheets") or []:
@@ -488,6 +492,12 @@ class DocumentArtifactService:
             return [f"[WORKBOOK: {file_name}]\n{sheet_lines}".strip()]
 
         segments: list[str] = []
+        from deals.services.spreadsheet_dependencies import WorkbookFormulaGraph
+        graph = WorkbookFormulaGraph(manifest)
+        # Reserve part of each segment for cross-sheet assumptions. Dependencies
+        # cannot disappear merely because a segment is restricted to one sheet.
+        dependency_cap = int(source_cap * 0.20)
+        primary_cap = source_cap - dependency_cap
         pending: list[dict[str, Any]] = []
         pending_sheet = ""
 
@@ -515,7 +525,30 @@ class DocumentArtifactService:
         def flush() -> None:
             nonlocal pending
             if pending:
-                segments.append(render(pending))
+                body = render(pending)
+                roots = [root for item in pending for root in graph.roots_in_range(item["metadata"])]
+                if roots:
+                    traced = graph.precedents(roots, max_cells=128)
+                    extra = "\n[FORMULA PRECEDENTS; SAVED RESULTS ARE NOT RECALCULATED]\n"
+                    names = graph.named_range_text()
+                    if names and estimate_tokens(extra + names) < dependency_cap // 2:
+                        extra += "DEFINED NAMES:\n" + names + "\n"
+                    else:
+                        traced["warnings"].append("Defined-name list omitted at segment budget" if names else "No defined names supplied")
+                    for key in traced["cells"]:
+                        line = f"{key[0]}!{graph.render_cell(key)}\n"
+                        if estimate_tokens(extra + line) > dependency_cap - 50:
+                            traced["warnings"].append("Additional precedents omitted at segment budget")
+                            break
+                        extra += line
+                    for warning in traced["warnings"]:
+                        line = f"GAP: {warning}\n"
+                        if estimate_tokens(extra + line) > dependency_cap:
+                            break
+                        extra += line
+                    if estimate_tokens(extra) <= dependency_cap:
+                        body += extra
+                segments.append(body)
                 pending = []
 
         for chunk in cell_chunks:
@@ -524,7 +557,7 @@ class DocumentArtifactService:
                 flush()
             pending_sheet = sheet_name
             candidate = [*pending, chunk]
-            if pending and estimate_tokens(render(candidate)) > source_cap:
+            if pending and estimate_tokens(render(candidate)) > primary_cap:
                 flush()
                 pending_sheet = sheet_name
             pending.append(chunk)
