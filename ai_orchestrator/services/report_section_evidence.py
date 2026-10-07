@@ -230,6 +230,7 @@ class ICReportSectionEvidenceService:
         sheet = metadata.get("sheet_name")
         if graph and sheet in graph.by_sheet:
             from openpyxl.utils.cell import coordinate_to_tuple
+            from deals.services.spreadsheet_dependencies import is_financial_period_label
             if not hasattr(self, "_financial_unit_cache"):
                 self._financial_unit_cache = {}
             unit_key = (source_id, sheet)
@@ -249,7 +250,7 @@ class ICReportSectionEvidenceService:
                 row, column = coordinate_to_tuple(address)
                 labels = [(c, label) for c, _, label in graph.row_labels.get((sheet, row), []) if c < column]
                 periods = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and
-                    re.fullmatch(r"(?:FY|CY)\s*\d{2,4}[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?", label.strip(), re.I)]
+                    is_financial_period_label(label)]
                 financial_cells[address] = {"value": value, "row_label": max(labels)[1] if labels else "",
                     "period": max(periods)[1] if periods else "", "unit_labels": unit_labels,
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
@@ -428,6 +429,36 @@ class ICReportSectionEvidenceService:
                     used_tokens += cost
                 else:
                     notes.append(f"{self.document_titles[source_id]}: additional schedule headers omitted at context token budget")
+        # Ensure the model sees statement values themselves, not only semantic
+        # summaries or header chunks. This uses extracted rows for every workbook.
+        financial_label = re.compile(r"^(?:(?:total |net |operating )?(?:revenues?|sales|turnover)|revenue from operations|cost of goods sold|(?:total )?cost of revenue|gross profit|(?:total )?operating expenses|EBITDA|EBIT|depreciation(?:.*amortization)?|finance costs|interest expenses?|other income|exceptional items?|(?:profit before tax|profit after tax)(?:\s*\((?:PBT|PAT)\))?|PBT|PAT|(?:income )?tax(?: expense)?)$", re.I)
+        anchor_budget = min(8192, token_budget * 2 // 3)
+        for source_id, sheets in sheets_by_source.items():
+            graph = self._formula_graph(source_id)
+            for sheet in sorted(sheets):
+                statement_rows = [(row, labels) for (name, row), labels in graph.row_labels.items()
+                                  if name == sheet and any(financial_label.fullmatch(label.strip()) for _, _, label in labels)]
+                for row, labels in statement_rows:
+                    keys = [(sheet, address) for address, cell in graph.by_sheet[sheet]
+                            if int(re.search(r"\d+$", address).group()) == row and "%" not in str(cell.get("number_format") or "")]
+                    if len(keys) < 2:
+                        continue
+                    from openpyxl.utils.cell import column_index_from_string
+                    columns = [re.match(r"[A-Z]+", address).group() for _, address in keys]
+                    first = min(columns, key=column_index_from_string)
+                    last = max(columns, key=column_index_from_string)
+                    chunk = SimpleNamespace(source_type="document", source_id=source_id,
+                        content="Recorded financial statement row. Use its own saved value, year and unit for model figures; do not substitute rounded teaser figures or another schedule's metric. Saved Excel results are not recalculated.\n" +
+                            "\n".join(graph.render_cell(key) for key in keys),
+                        metadata={"chunk_kind": "spreadsheet_financial_statement_row", "sheet_name": sheet,
+                            "row_start": row, "row_end": row, "column_start": first, "column_end": last,
+                            "cell_range": f"{first}{row}:{last}{row}"})
+                    cost = estimate_tokens(self._format_chunk(chunk, rank=len(selected) + len(additions) + 1)) + 2
+                    if used_tokens + cost <= anchor_budget:
+                        additions.append(chunk)
+                        used_tokens += cost
+                    else:
+                        notes.append(f"{self.document_titles[source_id]}: additional financial statement rows omitted at context token budget")
         for source_id, roots in roots_by_source.items():
             if not roots:
                 continue

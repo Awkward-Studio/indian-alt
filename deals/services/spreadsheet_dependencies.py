@@ -9,6 +9,10 @@ from openpyxl.formula import Tokenizer
 from openpyxl.utils.cell import range_boundaries, coordinate_to_tuple
 
 
+def is_financial_period_label(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:FY|CY)\s*\d{2,4}\s*[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?|20\d{2}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?", value.strip(), re.I))
+
+
 class WorkbookFormulaGraph:
     def __init__(self, manifest: dict):
         self.manifest = manifest
@@ -255,7 +259,7 @@ class WorkbookFormulaGraph:
         # Financial periods usually sit at the top of a schedule, well beyond
         # three rows from EBITDA, D&A, tax and cash-flow values.
         periods = [(r, a, v) for r, a, v in column_labels if r < row and
-                   re.fullmatch(r"(?:FY|CY)\s*\d{2,4}[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?", v.strip(), re.I)]
+                   is_financial_period_label(v)]
         if periods:
             _, address, period = max(periods)
             labels.append((address, period))

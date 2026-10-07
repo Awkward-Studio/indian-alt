@@ -521,6 +521,10 @@ class ICReportSectionService:
         text, used_citations = cls._replace_internal_citations(text, citations)
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
+        from ai_orchestrator.services.report_calculations import report_calculation_errors
+        calculation_errors = report_calculation_errors(text)
+        if calculation_errors:
+            raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
         if strict_financial_table and title == "Key Financials":
             cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
         if citations and not used_citations:

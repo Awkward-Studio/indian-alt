@@ -119,7 +119,7 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
         return ((match[1] or "FY").upper(), match[2][-2:]) if match else None
 
     aliases = {
-        "Revenue": {"revenue", "totalrevenue", "revenuefromoperations", "netsales", "sales"},
+        "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
         "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
         "Gross Profit": {"grossprofit"},
         "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "opex"},
@@ -129,9 +129,9 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
         "Net Finance Costs": {"netfinancecosts", "financecosts", "interestexpense", "interestexpenses", "interestcost"},
         "Other Non-operating Income / Expenses": {"otherincome", "othernonoperatingincomeexpenses", "nonoperatingincome"},
         "Exceptional Items": {"exceptionalitems", "exceptionalitem"},
-        "PBT": {"pbt", "profitbeforetax", "profitbeforetaxation"},
+        "PBT": {"pbt", "profitbeforetax", "profitbeforetaxpbt", "profitbeforetaxation"},
         "Income Tax Expense": {"incometaxexpense", "taxexpense", "tax", "taxes", "incometax"},
-        "PAT": {"pat", "profitaftertax", "profitaftertaxation", "netprofit"},
+        "PAT": {"pat", "profitaftertax", "profitaftertaxpat", "profitaftertaxation", "netprofit"},
     }
     by_number = {int(c["citation_number"]): c for c in citations}
     table_scale = scale(rows[0][0])

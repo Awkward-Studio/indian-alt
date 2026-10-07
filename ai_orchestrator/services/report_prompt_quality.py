@@ -62,6 +62,25 @@ REPORT_SIGNAL_GUIDANCE = (
     "gaps or contradictions for decoration, or label your own arithmetic error a "
     "source contradiction. Preserve the existing Next Steps table schema."
 )
+CALCULATION_GUIDANCE = (
+    "Use the exact indexed source values and their own period, units and reporting "
+    "basis for financial claims in every section. Use the recorded financial "
+    "statement rows when supplied; prior generated analysis is not an authoritative "
+    "replacement for workbook cells. One crore is 10,000,000 rupees, one lakh is "
+    "100,000, one million is 1,000,000 and one thousand is 1,000. Show conversions "
+    "and preserve signs. CAGR = (ending / starting)^(1 / elapsed years) - 1; count "
+    "elapsed annual intervals, not the number of observations. MOIC = investor "
+    "exit proceeds / invested capital. For one initial investment and one exit, "
+    "annual IRR = MOIC^(1 / holding years) - 1. Multiple dated cash flows need "
+    "a dated cash-flow calculation, not that shortcut. Cite inputs and label "
+    "assumptions. Match every scenario table to its calculated prose, currency "
+    "scale, stake and holding period. Never describe negative source EBITDA as "
+    "positive; keep management-adjusted figures separate and reconcile their "
+    "adjustments. Check numerical assertions throughout the narrative, including "
+    "people costs, fees, valuations, margins, sensitivities and returns. Where "
+    "a value cannot be calculated from supported inputs, state Not provided and "
+    "identify the missing input instead of fabricating a result."
+)
 SECTION_OWNERSHIP = (
     "Keep each calculation and detailed schedule in its owning section. Company Details "
     "owns operating model, products, customers and delivery capability. Promoter and "
@@ -127,6 +146,8 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user = user.rstrip() + "\n\nReport reading hierarchy:\n" + EDITORIAL_GUIDANCE + "\n"
     if "Report gap and contradiction flags:" not in user:
         user = user.rstrip() + "\n\nReport gap and contradiction flags:\n" + REPORT_SIGNAL_GUIDANCE + "\n"
+    if "Report calculation discipline:" not in user:
+        user = user.rstrip() + "\n\nReport calculation discipline:\n" + CALCULATION_GUIDANCE + "\n"
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "
