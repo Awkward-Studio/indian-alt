@@ -209,6 +209,10 @@ class AIAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         log.save(update_fields=[
             "source_metadata", "status", "error_message", "is_success", "completed_at",
         ])
+        owned_audit_ids = [str(log.id), *map(str, AIAuditLog.objects.filter(
+            Q(source_id=str(log.id)) | Q(source_metadata__vdr_parent_audit_id=str(log.id))
+        ).values_list('id', flat=True))]
+        transaction.on_commit(lambda: InferenceQueueLease.release_for_audits(owned_audit_ids))
         if email_ingestion:
             from microsoft.models import Email, EmailIngestionRun
             run_id = source_meta.get("run_id")

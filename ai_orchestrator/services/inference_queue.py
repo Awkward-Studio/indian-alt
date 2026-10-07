@@ -17,7 +17,7 @@ class InferenceCancelled(RuntimeError):
 
 
 class InferenceQueueLease:
-    """Serialize model requests and persist queue ownership on the audit row."""
+    """Bound concurrent model requests and persist ownership on the audit row."""
 
     KEY = "ai:inference:lease:v1"
     DEFAULT_LEASE_TTL = 3600
@@ -226,7 +226,10 @@ class InferenceQueueLease:
             try:
                 acquired = False
                 for key in self.lease_keys():
-                    if cache.add(key, self.owner, timeout=self.lease_ttl):
+                    available = cache.add(key, self.owner, timeout=self.lease_ttl)
+                    if not available and self._release_terminal_owner(key):
+                        available = cache.add(key, self.owner, timeout=self.lease_ttl)
+                    if available:
                         self.lease_key = key
                         acquired = True
                         break
@@ -253,18 +256,6 @@ class InferenceQueueLease:
                 # request to a single-slot model server.
                 if cache.get(self.KEY) is None:
                     self._update_audit(inference_queue_unavailable=True)
-                elif self.uses_slot_transport(self.audit_log.source_type):
-                    from ai_orchestrator.models import AIAuditLog
-                    owner = cache.get(self.KEY)
-                    if isinstance(owner, dict) and owner.get("audit_log_id"):
-                        live = AIAuditLog.objects.filter(
-                            pk=owner["audit_log_id"], status__in=["PENDING", "PROCESSING"],
-                        ).exists()
-                        if not live:
-                            # Slot-aware transports wait for an idle VM before
-                            # posting, so a terminal owner cannot block the
-                            # next serialized request until the lease expires.
-                            self._mutate_owned_lease(owner=owner)
             except Exception as exc:
                 if self.acquired:
                     raise
@@ -283,6 +274,24 @@ class InferenceQueueLease:
                 )
                 raise TimeoutError("Timed out waiting for the text inference queue.")
             time.sleep(self.poll_seconds)
+
+    def _release_terminal_owner(self, key):
+        """Reclaim any slot whose audit or parent is terminal, for every transport."""
+        from ai_orchestrator.models import AIAuditLog
+        owner = cache.get(key)
+        if not isinstance(owner, dict) or not owner.get('audit_log_id'):
+            return False
+        audit = AIAuditLog.objects.filter(id=owner['audit_log_id']).values('status', 'source_metadata').first()
+        metadata = (audit or {}).get('source_metadata') or {}
+        terminal = not audit or audit['status'] not in {'PENDING', 'PROCESSING'} or metadata.get('cancel_requested')
+        parent_id = metadata.get('vdr_parent_audit_id')
+        if not terminal and parent_id:
+            parent = AIAuditLog.objects.filter(id=parent_id).values('status', 'source_metadata').first()
+            terminal = not parent or parent['status'] not in {'PENDING', 'PROCESSING'} or (
+                parent['source_metadata'] or {}).get('cancel_requested')
+        if terminal:
+            return self._release_for_audits_at_key([owner['audit_log_id']], key)
+        return False
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self._stop_heartbeat()

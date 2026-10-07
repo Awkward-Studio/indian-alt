@@ -823,7 +823,7 @@ class ICReportSectionService:
                 try:
                     review = review_section(ai_service=ai_service,title=title,
                         draft=str(result.get('response') or ''),evidence=evidence,source_id=source_id,
-                        requirements=revision.user_template)
+                        requirements=revision.user_template,vdr_dispatch_generation=vdr_dispatch_generation)
                 except ValueError as error:
                     raise ReportSectionStructureError(f"Source review for '{title}' could not complete: {error}") from error
                 findings=review['findings']

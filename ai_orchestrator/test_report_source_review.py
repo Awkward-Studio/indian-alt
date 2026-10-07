@@ -17,6 +17,13 @@ class ReportSourceReviewTests(SimpleTestCase):
         self.assertNotIn('\\"period\\"', content)
         self.assertEqual(service.process_content.call_args.kwargs['metadata']['_source_metadata']['review_source_ranks'], [1, 2])
 
+    def test_source_review_keeps_its_section_delivery_generation(self):
+        service = Mock()
+        service.process_content.return_value = {'findings': [], 'coverage_gaps': []}
+        review_section(ai_service=service, title='Key Financials', draft='Revenue [R001]',
+            evidence='Retrieval block R001\nRevenue source', source_id='test', vdr_dispatch_generation=7)
+        self.assertEqual(service.process_content.call_args.kwargs['metadata']['_source_metadata']['vdr_dispatch_generation'], 7)
+
     def test_all_primary_blocks_are_supplied_for_coverage_and_prior_drafts_are_excluded(self):
         evidence="Retrieval block R001\nRevenue source\n\nRetrieval block R002\nOther source\n\nCompleted sections from this report\nUnsupported draft"
         packet=review_packet('Key Financials','Revenue [R001@\'PL\'!R50].',evidence)
@@ -88,6 +95,31 @@ class ReportSourceReviewTests(SimpleTestCase):
         finding['source_quote'] = 'Unrelated quote'
         with self.assertRaises(ValueError):
             validate_verified_findings([finding], 'Revenue INR 4.05 Cr [R001]', evidence)
+
+    def test_quote_formatting_does_not_create_false_review_failures(self):
+        from ai_orchestrator.services.report_source_review import validate_verified_findings
+        finding = {'severity':'error','claim':'The company is seeking $10 Mn', 'issue':'Unsupported ask',
+                   'error_type':'unsupported'}
+        validate_verified_findings([finding], 'the company is seeking **$10 Mn** [Deal Fields].', [])
+        finding['claim'] = 'The company is seeking $100 Mn'
+        with self.assertRaises(ValueError):
+            validate_verified_findings([finding], 'the company is seeking **$10 Mn** [Deal Fields].', [])
+
+    def test_malformed_review_quote_is_repaired_without_regenerating_the_draft(self):
+        service = Mock()
+        wrong = {'severity':'error','claim':'Revenue is exaggerated', 'issue':'Wrong revenue',
+                 'error_type':'contradiction','source_quote':'Revenue 40.53 Cr','sources':['R001']}
+        repaired = {**wrong, 'claim':'Revenue is INR 4.05 Cr'}
+        service.process_content.side_effect = [
+            {'findings':[wrong], 'coverage_gaps':[]},
+            {'findings':[wrong], 'coverage_gaps':[]},
+            {'findings':[repaired], 'coverage_gaps':[]},
+        ]
+        review = review_section(ai_service=service, title='Key Financials', draft='Revenue is INR 4.05 Cr [R001].',
+            evidence='Retrieval block R001\nRevenue 40.53 Cr', source_id='test')
+        self.assertEqual(review['findings'][0]['claim'], 'Revenue is INR 4.05 Cr')
+        self.assertEqual(service.process_content.call_count, 3)
+        self.assertTrue(service.process_content.call_args.kwargs['metadata']['_source_metadata']['review_response_repair'])
 
 
 @override_settings(AI_INFERENCE_TARGET='h100',VDR_REPORT_SECTION_MIN_WORDS=900)

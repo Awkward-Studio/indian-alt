@@ -610,6 +610,11 @@ def _retire_superseded_inference_children(
     from ai_orchestrator.models import AIAuditLog
 
     retired_ids = []
+    parent_metadata = AIAuditLog.objects.filter(id=parent_audit_id).values_list('source_metadata', flat=True).first() or {}
+    owner_task_ids = {str(owner.get('current_task_id')) for owner in (parent_metadata.get('active_report_units') or {}).values()
+                      if owner.get('current_task_id')}
+    if parent_metadata.get('current_task_id'):
+        owner_task_ids.add(str(parent_metadata['current_task_id']))
     children = AIAuditLog.objects.select_for_update().filter(
         status__in=ACTIVE_STATUSES,
         source_metadata__vdr_parent_audit_id=str(parent_audit_id),
@@ -619,7 +624,11 @@ def _retire_superseded_inference_children(
         try:
             child_generation = int(child_metadata.get("vdr_dispatch_generation"))
         except (TypeError, ValueError):
-            continue
+            if child.source_type != 'report_section_quality_review' or str(child.celery_task_id) not in owner_task_ids:
+                continue
+            # Older source reviews omitted the delivery generation. Their
+            # actual section task still identifies the abandoned owner.
+            child_generation = int(dispatch_generation)
         # A previous recovery may already have advanced the parent while an
         # even older child kept the Redis lease. Every generation through the
         # abandoned delivery is fenced by the replacement generation.

@@ -1,6 +1,7 @@
 """A separate source review for each generated section, using its actual cited evidence."""
 import re
 import json
+import unicodedata
 from ai_orchestrator.services.report_financial_format import FINANCIAL_BASIS_RULE
 
 REVIEW_INSTRUCTIONS = '''Review the draft section against the primary retrieval blocks below.
@@ -119,7 +120,8 @@ omissions into factual contradictions. Return empty lists if no valid problem re
 
 def validate_verified_findings(findings, draft, evidence):
     def plain(value):
-        return ' '.join(re.sub(r'[*_`]', '', str(value)).split())
+        value = unicodedata.normalize('NFKC', str(value)).translate(str.maketrans({'“':'"', '”':'"', '‘':"'", '’':"'", '–':'-', '—':'-'}))
+        return ' '.join(re.sub(r'[*_`]', '', value).split()).casefold()
     for finding in material_review_errors(findings):
         claim = plain(finding.get('claim') or '')
         if not claim or claim not in plain(draft):
@@ -137,7 +139,7 @@ def validate_verified_findings(findings, draft, evidence):
                 raise ValueError('Review verification did not quote its cited primary evidence.')
 
 
-def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
+def review_section(*,ai_service,title,draft,evidence,source_id,requirements="",vdr_dispatch_generation=None):
     packet=review_packet(title,draft,evidence,requirements)
     # Keep every selected source block, but do not wrap the evidence (which
     # already contains saved-cell JSON) in another escaped JSON string.
@@ -154,29 +156,51 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements=""):
             'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
             'context_label':f'Source review: {title}',
             '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
-                                'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2'},
+                                'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2',
+                                **({'vdr_dispatch_generation':int(vdr_dispatch_generation)} if vdr_dispatch_generation is not None else {})},
         })
     if isinstance(result,dict) and result.get('error'):
         raise ValueError('Source review inference failed: '+str(result['error']))
     findings=validate_review(result,set(packet['source_ranks']),require_coverage=True)
     if material_review_errors(findings) or result['coverage_gaps']:
         proposed = json.dumps({'findings': findings, 'coverage_gaps': result['coverage_gaps']}, ensure_ascii=False)
+        disclosures = '\n\n'.join(paragraph for paragraph in re.split(r'\n\s*\n', draft)
+            if re.search(r'\b(?:Gap|Not provided|not supplied|missing|not available)\b', paragraph, re.I))
         verification_content = content + '\n\n' + VERIFICATION_INSTRUCTIONS + '\n<proposed_review>\n' + proposed + '\n</proposed_review>'
+        if disclosures:
+            verification_content += '\n<draft_disclosures>\n'+disclosures+'\n</draft_disclosures>\nThese are existing draft passages, not primary facts. Check each proposed coverage gap against them. Do not retain an omission that is already addressed by an explicit missing-input disclosure and diligence action.'
+        verification_metadata = {
+            'response_mode':'json','response_format':{'type':'json_object'},
+            'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
+            'temperature':0.0,'max_tokens':8192,'max_input_tokens':110_592,
+            'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
+            'context_label':f'Verify source review: {title}',
+            '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
+                'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2',
+                'review_phase':'verification','initial_review_audit_id':result.get('_audit_log_id'),
+                **({'vdr_dispatch_generation':int(vdr_dispatch_generation)} if vdr_dispatch_generation is not None else {})},
+        }
         verified = ai_service.process_content(content=verification_content, skill_name=None,
-            source_type='report_section_quality_review', source_id=str(source_id), metadata={
-                'response_mode':'json','response_format':{'type':'json_object'},
-                'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
-                'temperature':0.0,'max_tokens':8192,'max_input_tokens':110_592,
-                'max_input_chars':len(verification_content)+1024,'lossless_input':True,
-                'enforce_context_budget':True,'include_audit_log_id':True,
-                'context_label':f'Verify source review: {title}',
-                '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
-                    'review_source_ranks':packet['source_ranks'],'review_packet_format':'plain_evidence_v2',
-                    'review_phase':'verification','initial_review_audit_id':result.get('audit_log_id')},
-            })
+            source_type='report_section_quality_review', source_id=str(source_id),
+            metadata={**verification_metadata, 'max_input_chars':len(verification_content)+1024})
         if isinstance(verified, dict) and verified.get('error'):
             raise ValueError('Source review verification inference failed: '+str(verified['error']))
         findings = validate_review(verified, set(packet['source_ranks']), require_coverage=True)
-        validate_verified_findings(findings, draft, packet['primary_evidence'])
+        try:
+            validate_verified_findings(findings, draft, packet['primary_evidence'])
+        except ValueError as error:
+            # Repair the reviewer response once. Do not make the writer rewrite
+            # a report merely because the reviewer paraphrased its evidence.
+            invalid = json.dumps({'findings': findings, 'coverage_gaps': verified['coverage_gaps']}, ensure_ascii=False)
+            repair = verification_content + '\n<review_response_to_repair>\n'+invalid+'\n</review_response_to_repair>\nReview response validation failed: '+str(error)+'. Return corrected JSON. Copy a short continuous draft excerpt for each claim and a short continuous excerpt from its cited block for each source_quote. Preserve genuine errors; remove unsupported reviewer allegations. Do not paraphrase quotes or change their numbers.'
+            verified = ai_service.process_content(content=repair, skill_name=None,
+                source_type='report_section_quality_review', source_id=str(source_id), metadata={
+                    **verification_metadata, 'max_input_chars':len(repair)+1024,
+                    '_source_metadata':{**verification_metadata['_source_metadata'], 'review_response_repair':True},
+                })
+            if isinstance(verified, dict) and verified.get('error'):
+                raise ValueError('Source review response repair failed: '+str(verified['error']))
+            findings = validate_review(verified, set(packet['source_ranks']), require_coverage=True)
+            validate_verified_findings(findings, draft, packet['primary_evidence'])
         result = verified
     return {'findings':findings,'coverage_gaps':result['coverage_gaps']}

@@ -18,6 +18,7 @@ class InferenceCapacityTests(SimpleTestCase):
         lease = InferenceQueueLease(audit, max_wait_seconds=.01)
         lease.check_cancelled = Mock()
         lease._start_heartbeat = Mock()
+        lease._release_terminal_owner = Mock(return_value=False)
         return lease
 
     @override_settings(AI_INFERENCE_MAX_CONCURRENT_REQUESTS=4)
