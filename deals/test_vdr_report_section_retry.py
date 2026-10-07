@@ -50,6 +50,14 @@ class VDRReportSectionRetryTests(SimpleTestCase):
         evidence = self.assert_retry_receives_draft('Report has inconsistent calculations')
         self.assertIn('entire power expression for IRR/CAGR', evidence)
 
+    def test_statement_bridge_and_missing_source_inputs_get_specific_corrections(self):
+        evidence = self.assert_retry_receives_draft('Key Financials arithmetic does not reconcile: EBIT')
+        self.assertIn('PBT is a different metric', evidence)
+        self.assertIn('unrounded operating EBITDA', evidence)
+        evidence = self.assert_retry_receives_draft('Key Financials source values do not match: Cost of Goods Sold')
+        self.assertIn('not estimates or interpolation', evidence)
+        self.assertIn('Never copy a PBT cell into EBIT', evidence)
+
     def test_source_review_and_calculation_retries_receive_draft_with_feedback(self):
         for error in ['Source review rejected: incorrect fiscal year', 'Inconsistent calculation: EBITDA margin']:
             with self.subTest(error=error):

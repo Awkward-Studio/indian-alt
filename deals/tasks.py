@@ -2200,9 +2200,23 @@ def process_vdr_report_section(
             if 'too short' in error.casefold():
                 retry_corrections += ("Add supported analysis of an underdeveloped requested theme and its investment implication; "
                     "changing formatting or copying the same text will not add analytical depth. ")
-            if 'inconsistent calculations' in error.casefold():
+                count = re.search(r'too short: (\d+) words; minimum is (\d+)', error)
+                if count:
+                    additional = max(50, int(count[2]) - int(count[1]) + 50)
+                    retry_corrections += f"Add at least {additional} words of new supported analysis, covering missing records and their implications where evidence is unavailable. "
+            if 'source values do not match' in error.casefold():
+                retry_corrections += ("For each rejected metric/period, use its directly cited saved value or a calculation "
+                    "whose complete same-period primary inputs are actually supplied. A range description showing "
+                    "first and last years does not supply intermediate-year values. Missing COGS components require "
+                    "Not provided, not estimates or interpolation. Never copy a PBT cell into EBIT. ")
+            if 'inconsistent calculations' in error.casefold() or 'arithmetic does not reconcile' in error.casefold():
                 retry_corrections += ("Recalculate each rejected expression with the calculator, including the entire power "
                     "expression for IRR/CAGR, then update the scenario table and prose to the same result. ")
+                retry_corrections += ("For the statement bridge, calculate operating EBIT from cited unrounded operating "
+                    "EBITDA minus depreciation/amortization for each period; PBT is a different metric after finance "
+                    "costs and non-operating items. Keep reported EBITDA and operating EBITDA distinct. If the "
+                    "reporting basis or an adjustment input is missing, mark the unsupported derived row Not provided "
+                    "and describe the gap rather than mixing incompatible rows. ")
             retry_corrections += "\n</required_draft_corrections>"
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
