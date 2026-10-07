@@ -70,7 +70,7 @@ def source_unit_conversion_notes(content, kind):
 
 
 def displayed_amount(cell):
-    value = re.sub(r"\[\d+\]", "", cell).replace(",", "").replace("*", "").strip()
+    value = re.sub(r"\[[^]\n]+\]", "", cell).replace(",", "").replace("*", "").strip()
     match = re.fullmatch(r"(\()?([-+]?\d+(?:\.\d+)?)(\))?", value)
     if not match or bool(match[1]) != bool(match[3]):
         return None
@@ -97,7 +97,7 @@ FINANCIAL_SOURCE_ALIASES = {
     "Exceptional Items": {"exceptionalitems", "exceptionalitem"},
     "PBT": {"pbt", "profitbeforetax", "profitbeforetaxpbt", "profitbeforetaxation"},
     "Income Tax Expense": {"incometaxexpense", "taxexpense", "tax", "taxes", "incometax"},
-    "PAT": {"pat", "profitaftertax", "profitaftertaxpat", "profitaftertaxation", "netprofit"},
+    "PAT": {"pat", "profitaftertax", "profitaftertaxpat", "profitaftertaxation", "netprofit", "netincome"},
 }
 
 
@@ -228,7 +228,7 @@ def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
     return errors
 
 
-def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> list[str]:
+def financial_source_errors(rows: list[list[str]], citations: list[dict], *, check_citation_support: bool = True) -> list[str]:
     """Compare direct workbook figures with cited saved values in the same period and units.
 
     This checks extracted Excel results, not recalculation of arbitrary Excel
@@ -318,10 +318,10 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> lis
             if candidates and all(abs(amount[0] - value) > amount[1] + Decimal("0.0000001") for value, _ in candidates):
                 values = ", ".join(f"{address}={value}" for value, address in candidates[:4])
                 errors.append(f"{metric} in {rows[0][column]}: displayed {amount[0]}, cited saved workbook values {values}")
-            elif not candidates and len(references) == 1 and wrong_precise_rows:
+            elif check_citation_support and not candidates and len(references) == 1 and wrong_precise_rows:
                 errors.append(f"{metric} in {rows[0][column]} cites a different source metric: {wrong_precise_rows[0]}")
-            elif not candidates and len(references) == 1 and wrong_precise_periods:
+            elif check_citation_support and not candidates and len(references) == 1 and wrong_precise_periods:
                 errors.append(f"{metric} in {rows[0][column]} cites a different source period: {wrong_precise_periods[0]}")
-            elif not candidates and workbook_references:
+            elif check_citation_support and not candidates and workbook_references:
                 errors.append(f"{metric} in {rows[0][column]} has no matching cited workbook value or supported source-input calculation. Cite its metric, year and units; otherwise mark Not provided.")
     return errors

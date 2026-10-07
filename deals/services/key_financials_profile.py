@@ -10,11 +10,11 @@ ROW_KEYS = ['revenue', 'cogs', 'gross_profit', 'expenses', 'ebitda', 'depreciati
 def section_payload(section, source_id):
     blocks = re.findall(r'(?:^|\n)(\|[^\n]+\|(?:\n\|[^\n]+\|)+)', section)
     tables = [[[cell.strip() for cell in line.strip().strip('|').split('|')] for line in block.splitlines()] for block in blocks]
-    tables = [table for table in tables if [re.sub(r'\[\d+\]|[*_]', '', row[0]).strip() for row in table[2:]] == list(FINANCIAL_ROWS)]
+    tables = [table for table in tables if [re.sub(r'\[[^]\n]+\]|[*_]', '', row[0]).strip() for row in table[2:]] == list(FINANCIAL_ROWS)]
     if len(tables) != 1:
         raise ValueError('Accepted Key Financials must contain one main Revenue-to-PAT statement; supplemental tables are allowed.')
     rows = tables[0]
-    labels = [re.sub(r'\[\d+\]|[*_]', '', row[0]).strip() for row in rows[2:]]
+    labels = [re.sub(r'\[[^]\n]+\]|[*_]', '', row[0]).strip() for row in rows[2:]]
     if labels != list(FINANCIAL_ROWS) or any(len(row) != len(rows[0]) for row in rows):
         raise ValueError('Key Financials table does not match the Revenue-to-PAT contract.')
     header = rows[0][0]
@@ -41,7 +41,7 @@ def section_payload(section, source_id):
                 continue
             references = re.findall(r'\[(\d+)\]', row[column]) or re.findall(r'\[(\d+)\]', row[0])
             if not references:
-                raise ValueError(f'Key Financials {key} in {fy} has no source citation.')
+                continue
             value = format(parsed[0], 'f') + (' '+unit if unit else '')
             refs = [f'R{int(number):03d}' for number in references]
             metrics[key] = {'value': value, 'evidence_refs': refs}
@@ -54,7 +54,7 @@ def section_payload(section, source_id):
         revenue = displayed_amount(rows[2][column])
         for key, offset in [('gross_margin', 4), ('ebitda_margin', 6)]:
             profit = displayed_amount(rows[offset][column])
-            if revenue and revenue[0] > 0 and profit:
+            if revenue and revenue[0] > 0 and profit and 'revenue' in metrics and ROW_KEYS[offset-2] in metrics:
                 ratio = profit[0] / revenue[0] * Decimal(100)
                 refs = list(dict.fromkeys(metrics['revenue']['evidence_refs'] + metrics[ROW_KEYS[offset-2]]['evidence_refs']))
                 metrics[key] = {'value': format(ratio.quantize(Decimal('.01')), 'f')+'%', 'evidence_refs': refs}
@@ -62,13 +62,14 @@ def section_payload(section, source_id):
                     evidence[ref] += '\n'+metrics[key]['value']
         if metrics:
             statements.append({'statement_type': 'profit_loss', 'fy': fy, 'fin_type': basis, 'metrics': metrics})
-    if not statements:
-        raise ValueError('Key Financials contains no supported fiscal-period values.')
     return {'profile': {}, 'financial_statements': statements}, citations, evidence
 
 def sync_section(deal, section, source_id):
     from deals.services.internal_financial_profile import InternalFinancialProfileService
     payload, citations, evidence = section_payload(section, source_id)
+    if not payload['financial_statements']:
+        return {'source': 'accepted_key_financials', 'source_audit_id': str(source_id), 'status': 'not_synced',
+                'warning': 'No supported scalar fiscal-period values are available for the financial profile.'}
     result = InternalFinancialProfileService().persist(deal=deal, payload=payload, citations=citations, evidence_by_ref=evidence)
     return {**result, 'source': 'accepted_key_financials', 'source_audit_id': str(source_id)}
 

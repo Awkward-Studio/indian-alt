@@ -9,6 +9,13 @@ def section():
         f'| {name} | {amount:.2f} [1] | Not provided |' for name, amount in zip(FINANCIAL_ROWS, values))
 
 class KeyFinancialsProfileTests(TestCase):
+    def test_missing_citations_do_not_block_report_or_persist_unsupported_profile_values(self):
+        deal = Deal.objects.create(title='Uncited report')
+        uncited = section().replace(' [1]', '')
+        payload, _, _ = section_payload(uncited, 'report')
+        self.assertEqual(payload['financial_statements'], [])
+        self.assertEqual(sync_section(deal, uncited, 'report')['status'], 'not_synced')
+
     def test_supplemental_tables_do_not_replace_main_statement_or_block_saving(self):
         extra = '| Metric | FY26 |\n| --- | --- |\n| Revenue | 999.00 |'
         payload, _, _ = section_payload(extra + '\n\n' + section() + '\n\n' + extra, 'report')

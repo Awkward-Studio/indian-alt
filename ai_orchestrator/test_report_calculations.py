@@ -3,6 +3,10 @@ from ai_orchestrator.services.report_calculations import report_calculation_erro
 
 
 class ReportCalculationTests(SimpleTestCase):
+    def test_arithmetic_verification_does_not_depend_on_citation_validation(self):
+        self.assertEqual(report_calculation_errors('MOIC = 100 / 50 = 2.00x [R999].'), [])
+        self.assertTrue(report_calculation_errors('MOIC = 100 / 50 = 3.00x [R999].'))
+
     def test_caret_irr_checks_the_full_power_and_not_an_exponent_suffix(self):
         self.assertEqual(report_calculation_errors('IRR = 2.57^(1/5) − 1 = 20.8%.'), [])
         errors = report_calculation_errors('IRR = 3.85^(1/5) − 1 = 30.0%.')

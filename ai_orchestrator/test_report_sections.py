@@ -7,7 +7,7 @@ from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLE
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import (
     ICReportSectionService,
-    ReportSectionCitationError,
+    ReportSectionStructureError,
     ReportSectionValidationError,
 )
 
@@ -180,16 +180,15 @@ class CitationNormalizationTests(SimpleTestCase):
         ICReportSectionService._normalize_section('Executive Summary', text, minimum_words=1260)
         ICReportSectionService._normalize_section('Executive Summary', 'analysis ' * 400, minimum_words=1260)
 
-    def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
-        with self.assertRaises(ReportSectionValidationError):
-            ICReportSectionService._normalize_section(
-                "Company Details",
-                (
-                    "## Company Details\n\n"
-                    "The company operates a scaled sourcing platform with enterprise demand [R060]."
-                ),
-                citations={"1": {"document_id": "doc-1", "title": "Memo.pdf"}},
-            )
+    def test_unknown_citation_ranks_do_not_block_generation(self):
+        ICReportSectionService._normalize_section(
+            "Company Details",
+            (
+                "## Company Details\n\n"
+                "The company operates a scaled sourcing platform with enterprise demand [R060]."
+            ),
+            citations={"1": {"document_id": "doc-1", "title": "Memo.pdf"}},
+        )
 
 
 class ICReportSectionServiceTests(TestCase):
@@ -206,11 +205,11 @@ class ICReportSectionServiceTests(TestCase):
         )
         service = Mock()
         service.process_content.return_value = {
-            "response": "## Next Steps\n\nA concise but insufficiently detailed evidence-backed next step.",
+            "response": "## Next Steps\n\nMOIC is 100 / 50 = 3.00x. This investment return requires numerical reconciliation.",
             "_audit_log_id": str(audit.id),
         }
 
-        with self.assertRaises(ReportSectionCitationError):
+        with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._generate_section(
                 ai_service=service, evidence="Evidence", analysis={"deal_model_data": {}},
                 title="Next Steps", source_id="report-1", source_type="vdr_report_section",
@@ -537,43 +536,38 @@ class ICReportSectionServiceTests(TestCase):
         self.assertIn("Model.xlsx, Revenue!A1:H8", section)
         self.assertNotIn("Z99", section)
 
-    def test_unresolved_internal_reference_fails_validation(self):
-        with self.assertRaisesRegex(ValueError, "unresolved internal citation"):
-            ICReportSectionService._normalize_section(
-                "Executive Summary",
-                "## Executive Summary\n\nRevenue was INR 100 crore [Evidence 999].",
-                citations={},
-            )
-
-    def test_section_with_ranked_evidence_requires_a_verifiable_marker(self):
-        with self.assertRaisesRegex(ValueError, "no verifiable evidence citations"):
-            ICReportSectionService._normalize_section(
-                "Executive Summary",
-                "## Executive Summary\n\nRevenue was INR 100 crore without a source marker.",
-                citations={
-                    "1": {
-                        "document_id": "doc-1",
-                        "title": "Model.xlsx",
-                        "url": "https://contoso.sharepoint.com/model.xlsx",
-                    }
-                },
-            )
-
-    def test_unverified_model_link_fails_validation(self):
-        with self.assertRaisesRegex(ValueError, "unverified source link"):
-            ICReportSectionService._normalize_section(
-                "Executive Summary",
-                (
-                    "## Executive Summary\n\nRevenue was INR 100 crore [R001]. "
-                    "[Unsupported](https://example.com/source)."
-                ),
-                citations={
-                    "1": {
-                        "document_id": "doc-1",
-                        "title": "Model.xlsx",
-                        "url": "https://contoso.sharepoint.com/model.xlsx",
-                        "location": "Revenue!A1:H8",
-                        "reference": "[Model.xlsx](<https://contoso.sharepoint.com/model.xlsx>)",
-                    }
-                },
-            )
+    def test_unresolved_internal_reference_is_non_blocking(self):
+        ICReportSectionService._normalize_section(
+            "Executive Summary",
+            "## Executive Summary\n\nRevenue was INR 100 crore [Evidence 999].",
+            citations={},
+        )
+    def test_missing_source_marker_is_non_blocking(self):
+        ICReportSectionService._normalize_section(
+            "Executive Summary",
+            "## Executive Summary\n\nRevenue was INR 100 crore without a source marker.",
+            citations={
+                "1": {
+                    "document_id": "doc-1",
+                    "title": "Model.xlsx",
+                    "url": "https://contoso.sharepoint.com/model.xlsx",
+                }
+            },
+        )
+    def test_unverified_model_link_is_non_blocking(self):
+        ICReportSectionService._normalize_section(
+            "Executive Summary",
+            (
+                "## Executive Summary\n\nRevenue was INR 100 crore [R001]. "
+                "[Unsupported](https://example.com/source)."
+            ),
+            citations={
+                "1": {
+                    "document_id": "doc-1",
+                    "title": "Model.xlsx",
+                    "url": "https://contoso.sharepoint.com/model.xlsx",
+                    "location": "Revenue!A1:H8",
+                    "reference": "[Model.xlsx](<https://contoso.sharepoint.com/model.xlsx>)",
+                }
+            },
+        )

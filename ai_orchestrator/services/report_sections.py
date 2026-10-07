@@ -557,32 +557,9 @@ class ICReportSectionService:
             raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
         if strict_financial_table and title == "Key Financials":
             cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
-        if citations and not used_citations:
-            raise ReportSectionCitationError(
-                f"Report section '{title}' returned no verifiable evidence citations."
-            )
-        if citations and re.search(r"\[(?:IM|EXT):[^\]\n]+\]", text, flags=re.IGNORECASE):
-            raise ReportSectionCitationError(
-                f"Report section '{title}' used filename-only source labels; "
-                "cite the supplied [Rnnn] markers for every sourced claim."
-            )
         body = text[len(target):].strip()
-        # Check the model-authored body before appending verified references.
-        # Spreadsheet citation locations such as ``Overall PL!R60`` are valid
-        # Excel cells, not unresolved retrieval markers.
-        unresolved = cls.INTERNAL_CITATION_PATTERN.search(body)
-        if unresolved:
-            raise ReportSectionValidationError(
-                f"Report section '{title}' returned unresolved internal citation "
-                f"'{unresolved.group(0)}'."
-            )
         if len(body) < 40 and not used_citations:
             raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
-        unverified_links = cls._unverified_links(body, citations)
-        if unverified_links:
-            raise ReportSectionValidationError(
-                f"Report section '{title}' returned an unverified source link."
-            )
         # Length is editorial guidance, not an acceptance gate. Empty outputs,
         # citations, required statement structure and numerical checks remain.
         return cls._append_references(text, citations, used_citations).strip()
@@ -755,24 +732,18 @@ class ICReportSectionService:
         width = len(cls._table_cells(table[0]))
         if width < 2 or any(len(cls._table_cells(row)) != width for row in table):
             raise ReportSectionStructureError("Key Financials table must have consistent period columns and one metric per row.")
-        if verified_citation_numbers is not None:
-            from ai_orchestrator.services.report_financial_format import displayed_amount
-            for label, row in zip(labels, table[2:]):
-                values = cls._table_cells(row)[1:]
-                for cell in values:
-                    if re.search(r"\d", re.sub(r"\[\d+\]", "", cell)) and displayed_amount(cell) is None:
-                        raise ReportSectionStructureError(f"Key Financials row '{label}' must use plain numeric amounts with citations; explain qualifications in prose.")
-                has_numbers = any(re.search(r"\d", re.sub(r"\[\d+\]", "", cell)) for cell in values)
-                cited = {int(number) for number in re.findall(r"\[(\d+)\]", row)}
-                if has_numbers and not cited.intersection(verified_citation_numbers):
-                    raise ReportSectionCitationError(f"Key Financials table row '{label}' must include a verified evidence citation inside the table.")
+        from ai_orchestrator.services.report_financial_format import displayed_amount
+        for label, row in zip(labels, table[2:]):
+            for cell in cls._table_cells(row)[1:]:
+                if re.search(r"\d", re.sub(r"\[[^]\n]+\]", "", cell)) and displayed_amount(cell) is None:
+                    raise ReportSectionStructureError(f"Key Financials row '{label}' must use plain numeric amounts; explain qualifications in prose.")
         from ai_orchestrator.services.report_financial_format import financial_bridge_errors
         bridge_errors = financial_bridge_errors([cls._table_cells(row) for row in table])
         if bridge_errors:
             raise ReportSectionStructureError("Key Financials arithmetic does not reconcile: " + "; ".join(bridge_errors[:5]))
         if source_citations:
             from ai_orchestrator.services.report_financial_format import financial_source_errors
-            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations)
+            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=False)
             if source_errors:
                 raise ReportSectionStructureError("Key Financials source values do not match: " + "; ".join(source_errors[:5]))
 
@@ -905,6 +876,7 @@ class ICReportSectionService:
                     "force_regenerate": bool(force_regenerate),
                     "generation_mode": "grounded_single_pass",
                     "source_review_enabled": False,
+                    "citation_validation_enabled": False,
                     "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
                     **({
                         "vdr_parent_audit_id": str(source_id),

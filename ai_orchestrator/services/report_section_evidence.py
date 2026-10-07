@@ -219,16 +219,35 @@ class ICReportSectionEvidenceService:
         return str(source_location or "").strip()
 
     def _citation(self, chunk: DocumentChunk, *, rank: int) -> dict:
-        metadata = chunk.metadata or {}
+        metadata = dict(chunk.metadata or {})
         source_id = str(chunk.source_id)
+        graph = self._formula_graph(source_id)
+        resolved_metric_address = None
+        if graph and metadata.get('chunk_kind') == 'metric':
+            try:
+                metric = json.loads(str(chunk.content or ''))
+                match = re.fullmatch(r"'?([^!,]+?)'?(?:!|,\s*)\$?([A-Za-z]{1,3})\$?([1-9]\d*)", str(metric.get('source_location') or '').strip())
+                if match:
+                    sheet = graph.sheet_names.get(match[1].casefold())
+                    address = match[2].upper() + match[3]
+                    cell = graph.cells.get((sheet, address)) or {}
+                    saved = cell.get('cached_value') if graph.formula(cell) else cell.get('value')
+                    advertised = Decimal(str(metric.get('value')).replace(',', ''))
+                    if saved is not None and not isinstance(saved, bool) and advertised.is_finite() and advertised == Decimal(str(saved)):
+                        metadata.update(sheet_name=sheet, row_start=int(match[3]), row_end=int(match[3]),
+                            column_start=match[2].upper(), column_end=match[2].upper(), cell_range=address)
+                        resolved_metric_address = address
+            except (ValueError, TypeError, InvalidOperation, AttributeError):
+                pass
         title = str(self.document_titles.get(source_id) or metadata.get("title") or source_id).strip()
         location = self._location(metadata)
         label_title = title.replace("[", "\\[").replace("]", "\\]")
         label = f"{label_title}, {location}" if location else label_title
         url = self.document_urls.get(source_id) or ""
         visible_cells = sorted(set(re.findall(r"(?<![A-Za-z0-9_])([A-Z]{1,3}[1-9]\d*)\s*=", str(chunk.content or ""))))
+        if resolved_metric_address:
+            visible_cells = [resolved_metric_address]
         financial_cells = {}
-        graph = self._formula_graph(source_id)
         sheet = metadata.get("sheet_name")
         if graph and sheet in graph.by_sheet:
             from openpyxl.utils.cell import coordinate_to_tuple

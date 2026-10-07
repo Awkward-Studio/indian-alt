@@ -25,6 +25,31 @@ def financial_model():
 
 
 class WorkbookFormulaTests(SimpleTestCase):
+    def test_extracted_metric_resolves_its_exact_primary_workbook_cell(self):
+        import json
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS, financial_source_errors
+        manifest = {'sheets': [{'name':'IS','cells':[
+            {'coordinate':'A1','value':'INR'}, {'coordinate':'G3','value':'2027-28'},
+            {'coordinate':'B8','value':'EBITDA'}, {'coordinate':'G8','value':'=G6-G7','cached_value':'2154373474.2875'}]}]}
+        doc = SimpleNamespace(id='model',title='Model.xlsx',extraction_manifest=manifest)
+        service = ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal',title='Example'),documents=[doc],embedding_service=Mock())
+        metric = {'name':'EBITDA (FY 2027-28)','value':'2,154,373,474.2875','unit':'INR','period':'2027-28','source_location':'IS!G8'}
+        chunk = SimpleNamespace(source_id='model',metadata={'chunk_kind':'metric'},content=json.dumps(metric))
+        citation = service._citation(chunk,rank=1)
+        self.assertEqual(citation['visible_cells'], ['G8'])
+        self.assertEqual(citation['financial_cells']['G8']['row_label'], 'EBITDA')
+        chunk.content=json.dumps({**metric,'source_location':'IS, G8'})
+        self.assertEqual(service._citation(chunk,rank=1)['visible_cells'], ['G8'])
+        citation['citation_number']=1
+        rows=[['Metric (INR Cr)','FY 2027-28 Forecast'],['---','---'],*[[name,'215.44 [1]' if name=='EBITDA' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        self.assertEqual(financial_source_errors(rows,[citation]), [])
+        rows[6][1]='225.44 [1]'
+        self.assertTrue(financial_source_errors(rows,[citation]))
+        chunk.content=json.dumps({**metric,'value':'999'})
+        self.assertEqual(service._citation(chunk,rank=1)['financial_cells'], {})
+        chunk.content=json.dumps({**metric,'source_location':'IS!G99'})
+        self.assertEqual(service._citation(chunk,rank=1)['financial_cells'], {})
+
     def test_numeric_saved_strings_and_explicit_workbook_rupees_remain_verifiable(self):
         from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS, financial_source_errors
         manifest = {'sheets': [

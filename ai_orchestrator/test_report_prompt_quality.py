@@ -9,6 +9,15 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_citation_support_is_non_blocking_but_known_wrong_source_values_still_fail(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows=[['Metric (INR Cr)','FY28 Forecast'],['---','---'],*[[name,'215.44 [1]' if name=='EBITDA' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        sources=[{'citation_number':1,'title':'Model.xlsx','financial_cells':{}}]
+        self.assertEqual(financial_source_errors(rows,sources,check_citation_support=False), [])
+        sources[0]['financial_cells']={'G8':{'value':'2154373474.2875','row_label':'EBITDA','period':'FY28E','unit_labels':['INR']}}
+        rows[6][1]='225.44 [1]'
+        self.assertTrue(financial_source_errors(rows,sources,check_citation_support=False))
+
     def test_prepared_conversions_preserve_sign_precision_and_declared_units(self):
         from ai_orchestrator.services.report_financial_format import prepared_display_values
         fact = {'value': '-122746186', 'row_label': 'Total Revenue', 'unit_labels': ['Revenue (₹)'], 'number_format': '0.00'}
@@ -132,16 +141,13 @@ class ReportQualityTests(SimpleTestCase):
         self.assertEqual(financial_source_errors(rows, [{"citation_number": 1, "financial_cells": {
             "G10": {"value": 100, "row_label": "Revenue", "period": "FY27E", "unit_labels": []}}}]), [])
 
-    def test_financial_numeric_rows_require_verified_citations_inside_table(self):
+    def test_financial_numeric_rows_do_not_require_citation_validation(self):
         table = "| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n"
         table += "\n".join(f"| {row} | {'100' if row == 'Revenue' else 'Not provided'} |" for row in FINANCIAL_ROWS)
-        with self.assertRaises(ReportSectionCitationError):
-            ICReportSectionService._validate_financial_table(table + "\n\nSource [1]", verified_citation_numbers={1})
+        ICReportSectionService._validate_financial_table(table + "\n\nSource [1]", verified_citation_numbers={1})
         cited = table.replace("| 100 |", "| 100 [1] |")
         ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={1})
-        with self.assertRaises(ReportSectionCitationError):
-            ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={2})
-
+        ICReportSectionService._validate_financial_table(cited, verified_citation_numbers={2})
     def test_financial_bridge_detects_other_income_counted_in_ebitda_twice(self):
         from ai_orchestrator.services.report_financial_format import financial_bridge_errors
         values = ["2670.37", "2519.33", "151.04", "134.44", "17.37", "0.91", "16.46", "0.06", "0.77", "Not provided", "16.40", "4.16", "12.24"]
@@ -176,12 +182,12 @@ class ReportQualityTests(SimpleTestCase):
         with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._validate_financial_table(table.replace("| PAT |", "| Cash |"))
 
-    def test_supplemental_tables_do_not_bypass_main_statement_citations_or_math(self):
+    def test_supplemental_tables_do_not_bypass_main_statement_math(self):
         extra = '| Metric | FY25 |\n| --- | --- |\n| Revenue [1] | 100 |'
         values = {name: 'Not provided' for name in FINANCIAL_ROWS}
         values.update({'Revenue': '100', 'Cost of Goods Sold': '60', 'Gross Profit': '55'})
         table = '| Metric | FY25 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | {values[name]} |' for name in FINANCIAL_ROWS)
-        with self.assertRaises(ReportSectionCitationError):
+        with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._validate_financial_table(extra + '\n\n' + table, verified_citation_numbers={1})
         cited = table.replace('| 100 |', '| 100 [1] |').replace('| 60 |', '| 60 [1] |').replace('| 55 |', '| 55 [1] |')
         with self.assertRaises(ReportSectionStructureError):
@@ -208,12 +214,10 @@ class ReportQualityTests(SimpleTestCase):
         self.assertEqual(len(used), 1)
         self.assertEqual(len(rendered.splitlines()), 2)
 
-    def test_filename_only_labels_remain_rejected_even_with_one_valid_marker(self):
-        with self.assertRaises(ReportSectionCitationError):
-            ICReportSectionService._normalize_section("Company Details",
-                "## Company Details\n\nGrowth is reported [R001]. A different claim [IM: Memo.pdf].",
-                citations={"1": {"document_id": "doc", "title": "Memo.pdf"}})
-
+    def test_filename_only_labels_are_non_blocking_with_a_valid_marker(self):
+        ICReportSectionService._normalize_section("Company Details",
+            "## Company Details\n\nGrowth is reported [R001]. A different claim [IM: Memo.pdf].",
+            citations={"1": {"document_id": "doc", "title": "Memo.pdf"}})
     def test_short_cited_section_is_not_rejected_for_word_count(self):
         source = {"document_id": "doc", "title": "A very long document title " * 100}
         ICReportSectionService._normalize_section("Company Details",
