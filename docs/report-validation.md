@@ -18,19 +18,21 @@ Deterministic validation checks the numerical and citation rules it implements. 
 
 ## Evidence integrity and inference
 
-Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v12 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. Reviewers must not transfer column-year mappings between worksheets.
+Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v12 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. The writer must not transfer column-year mappings between worksheets.
 
 Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Four report sections start together, and each free worker receives the next section without waiting for the other three. Key Financials and Transaction Details retain scheduling priority.
 
-H100 report requests use the configured output budget, currently 16,384 tokens. Source review reserves 8,192 tokens for JSON findings. JSON requests always disable thinking, including callers that explicitly enabled it. The calculator and reviewer add bounded inference work; generation can take longer than the previous single-pass workflow.
+H100 report requests use the configured output budget, currently 16,384 tokens. JSON requests always disable thinking, including callers that explicitly enabled it. Calculator continuations and retries after deterministic validation can add inference work. Automatic source-review requests are not scheduled.
 
-Retrieval budgets include JSON string escaping used by the provider's complete-request check. The H100 source pack reserves room for section instructions, deal data, prior sections and calculator continuations, independently of worker concurrency. Source review sends the draft, requirements and every selected primary block as plain text rather than nesting saved-cell JSON inside another JSON packet. Reviews retain their exact source ranks in audit metadata. No selected block is truncated to make the final request fit.
+Retrieval budgets include JSON string escaping used by the provider's complete-request check. The H100 source pack reserves room for section instructions, deal data, prior sections and calculator continuations, independently of worker concurrency. No selected block is truncated to make the final request fit. The deployed model context is 131,072 tokens, with an 81,920-token report evidence budget and a 90,112-token report input budget. Post-index deal enrichment uses up to 144,000 characters and 60,000 tokens on this profile.
 
 vLLM queue diagnostics and cleanup do not call llama.cpp `/slots` when `AI_SLOT_TRANSPORT_ENABLED` is false. The frontend counts live inference audits when native slots are unavailable. Historical rejected attempts that were retried are shown separately from accepted completions.
 
 ## Verification
 
 The focused backend suite covers calculator precision and expression restrictions, provider continuation and audit traces, source-review packets and coverage, financial source values/years/scales/signs, derived-row citations, cosmetic labels, report cache behavior, retry drafts, queue history and vLLM diagnostics. The combined report, enrichment and ledger regression suite passed 168 tests before the final report-summary isolation check. Frontend TypeScript, targeted ESLint and AI history tests passed.
+
+The v12 generator change passed 81 focused regression tests. These include assertions that generation does not call the source-review utility and still rejects incorrect arithmetic. Live attempts identify `generation_mode=grounded_single_pass` and `source_review_enabled=false` in audit metadata. These markers describe the generation path; they do not certify the report's claims.
 
 A live H100 calculator check requested `100*((303/90)**(1/5)-1)`, executed the application calculator and returned 27.48% after using its decimal result. This verifies the calculator integration, not the underlying investment assumptions.
 

@@ -172,6 +172,25 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user = user.rstrip() + "\n\nReport calculation discipline:\n" + CALCULATION_GUIDANCE + "\n"
     if "Grounded section generation:" not in user:
         user = user.rstrip() + "\n\nGrounded section generation:\n" + GENERATION_GUIDANCE + "\n"
+    if "Verified citation output contract:" not in user:
+        user += ("\n\nVerified citation output contract:\n" + CITATION_GUIDANCE +
+            " Prior section titles and the Required Document / Evidence column name future "
+            "work; neither replaces a retrieval marker for a current factual claim. "
+            "Previous drafts may deliberately have their old markers removed. Rebuild "
+            "citations from the current retrieval blocks before returning the section; "
+            "do not copy an uncited draft verbatim.\n")
+    is_next_steps = section_title == "Next Steps" or "## Next Steps" in user
+    if is_next_steps and "Next Steps evidence contract:" not in user:
+        user += ("\n\nNext Steps evidence contract:\n"
+            "Keep the twelve existing columns. In each task row that names a documented "
+            "fact, amount, date or source disagreement, place exact current [Rnnn] markers "
+            "in Category / Question or Risk, Task / Exact Action, or Why It Matters next "
+            "to the factual trigger. Do not add a citation column or treat the requested "
+            "future document as evidence already received. Cite the two primary blocks "
+            "for a contradiction. Generic proposed diligence actions do not establish "
+            "facts: label them as proposed, and use Not assigned or To agree when no "
+            "owner, assignee or deadline is documented. Inspect every row for unsupported "
+            "numbers and missing current markers before returning the complete table.\n")
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "
@@ -199,6 +218,14 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
             'Do not use generated summaries or implied-by-scale guesses to override a worksheet header.\n')
         user += precision
         system += precision
+    if is_financials and "Financial output shape check:" not in user:
+        user += ("\n\nFinancial output shape check:\n"
+            "Count Markdown tables before returning: there must be exactly one. Put "
+            "historical and forecast periods in that same Revenue-to-PAT table, retaining "
+            "the exact thirteen row labels. Describe alternative source cases, management "
+            "adjustments and forecast comparisons in cited paragraphs or bullets; never "
+            "add a second comparison table. Treat a rejected draft's additional tables "
+            "as errors to correct, even if their numbers are supported.\n")
     user = re.sub(
         r"- Provide the analytical depth supported by the evidence\. Runtime guidance:.*"
         r"Do not add repetition or unsupported claims to meet a length target\.",

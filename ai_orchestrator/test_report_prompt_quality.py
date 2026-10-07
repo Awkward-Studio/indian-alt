@@ -9,6 +9,20 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_next_steps_cites_current_task_triggers_without_changing_columns(self):
+        updated = upgrade_report_prompt('Analyst', '## {{ section_title }}\n{{ content }}', section_title='Next Steps')
+        self.assertIn('Next Steps evidence contract:', updated[1])
+        self.assertIn('Keep the twelve existing columns', updated[1])
+        self.assertIn('do not copy an uncited draft verbatim', updated[1])
+        self.assertIn('Not assigned or To agree', updated[1])
+        self.assertEqual(upgrade_report_prompt(*updated, section_title='Next Steps'), updated)
+
+    def test_financial_final_contract_rejects_additional_source_comparison_tables(self):
+        updated = upgrade_report_prompt('Analyst', '## {{ section_title }}\n{{ content }}', section_title='Key Financials')
+        self.assertIn('Financial output shape check:', updated[1])
+        self.assertIn('never add a second comparison table', updated[1])
+        self.assertEqual(upgrade_report_prompt(*updated, section_title='Key Financials'), updated)
+
     def test_calculated_labels_and_supported_input_citations_do_not_force_a_retry(self):
         text='## Key Financials\n\n| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n'
         values={name:'Not provided' for name in FINANCIAL_ROWS}
