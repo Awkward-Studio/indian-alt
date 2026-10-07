@@ -9,6 +9,49 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_source_values_use_saved_results_year_units_and_signed_profit(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows = [["Metric (INR Cr)", "FY27 Forecast"], ["---", "---"],
+                *[[name, "Not provided"] for name in FINANCIAL_ROWS]]
+        rows[2][1] = "10.00 [1]"
+        rows[6][1] = "-2.50 [2]"
+        citations = [{"citation_number": 1, "financial_cells": {"G10": {
+            "value": 100, "row_label": "Total Revenue", "period": "FY27E",
+            "unit_labels": ["INR Millions"], "number_format": "0.00"}}},
+            {"citation_number": 2, "financial_cells": {"G26": {
+            "value": -25, "row_label": "EBITDA", "period": "FY27E",
+            "unit_labels": ["INR Millions"], "number_format": "0.00"}}}]
+        self.assertEqual(financial_source_errors(rows, citations), [])
+        rows[2][1] = "100.00 [1]"
+        self.assertTrue(any("Revenue" in error for error in financial_source_errors(rows, citations)))
+        rows[2][1] = "10.00 [1]"
+        rows[6][1] = "2.50 [2]"
+        self.assertTrue(any("EBITDA" in error for error in financial_source_errors(rows, citations)))
+
+    def test_precise_cell_cannot_borrow_another_cells_value_or_capex_label(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows = [["Metric (INR Cr)", "FY27 Forecast"], ["---", "---"],
+                *[[name, "Not provided"] for name in FINANCIAL_ROWS]]
+        rows[7][1] = "0.11 [1]"
+        source = {"citation_number": 1, "used_location": "CF!G25", "financial_cells": {
+            "G25": {"value": -.11, "row_label": "Capex", "period": "FY27E", "unit_labels": ["INR Crores"]}}}
+        self.assertTrue(any("different source metric" in error for error in financial_source_errors(rows, [source])))
+        source["used_location"] = "IS!G28"
+        source["financial_cells"] = {
+            "F28": {"value": .11, "row_label": "Depreciation", "period": "FY26E", "unit_labels": ["INR Crores"]},
+            "G28": {"value": .48, "row_label": "Depreciation", "period": "FY27E", "unit_labels": ["INR Crores"]}}
+        self.assertTrue(any("G28=0.48" in error for error in financial_source_errors(rows, [source])))
+        source["used_location"] = "IS!F28"
+        self.assertTrue(any("different source period" in error for error in financial_source_errors(rows, [source])))
+
+    def test_unknown_source_units_are_not_claimed_as_verified(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows = [["Metric (INR Cr)", "FY27 Forecast"], ["---", "---"],
+                *[[name, "Not provided"] for name in FINANCIAL_ROWS]]
+        rows[2][1] = "10 [1]"
+        self.assertEqual(financial_source_errors(rows, [{"citation_number": 1, "financial_cells": {
+            "G10": {"value": 100, "row_label": "Revenue", "period": "FY27E", "unit_labels": []}}}]), [])
+
     def test_financial_numeric_rows_require_verified_citations_inside_table(self):
         table = "| Metric (INR Cr) | FY25 Actual |\n| --- | ---: |\n"
         table += "\n".join(f"| {row} | {'100' if row == 'Revenue' else 'Not provided'} |" for row in FINANCIAL_ROWS)

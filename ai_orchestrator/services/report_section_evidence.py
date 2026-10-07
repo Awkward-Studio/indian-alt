@@ -224,6 +224,35 @@ class ICReportSectionEvidenceService:
         label_title = title.replace("[", "\\[").replace("]", "\\]")
         label = f"{label_title}, {location}" if location else label_title
         url = self.document_urls.get(source_id) or ""
+        visible_cells = sorted(set(re.findall(r"(?<![A-Za-z0-9_])([A-Z]{1,3}[1-9]\d*)\s*=", str(chunk.content or ""))))
+        financial_cells = {}
+        graph = self._formula_graph(source_id)
+        sheet = metadata.get("sheet_name")
+        if graph and sheet in graph.by_sheet:
+            from openpyxl.utils.cell import coordinate_to_tuple
+            if not hasattr(self, "_financial_unit_cache"):
+                self._financial_unit_cache = {}
+            unit_key = (source_id, sheet)
+            if unit_key not in self._financial_unit_cache:
+                unit_labels = []
+                for _, cell in graph.by_sheet[sheet]:
+                    value = cell.get("cached_value") if graph.formula(cell) else cell.get("value")
+                    if isinstance(value, str) and len(value) <= 100 and re.search(r"\b(?:crores?|lakhs?|millions?|thousands?|INR|USD|rupees?)\b", value, re.I):
+                        unit_labels.append(value)
+                self._financial_unit_cache[unit_key] = unit_labels
+            unit_labels = self._financial_unit_cache[unit_key]
+            for address in visible_cells:
+                cell = graph.cells.get((sheet, address)) or {}
+                value = cell.get("cached_value") if graph.formula(cell) else cell.get("value")
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                row, column = coordinate_to_tuple(address)
+                labels = [(c, label) for c, _, label in graph.row_labels.get((sheet, row), []) if c < column]
+                periods = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and
+                    re.fullmatch(r"(?:FY|CY)\s*\d{2,4}[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?", label.strip(), re.I)]
+                financial_cells[address] = {"value": value, "row_label": max(labels)[1] if labels else "",
+                    "period": max(periods)[1] if periods else "", "unit_labels": unit_labels,
+                    "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
         return {
             "rank": rank,
             "document_id": source_id,
@@ -231,7 +260,8 @@ class ICReportSectionEvidenceService:
             "url": url,
             "location": location,
             "locator": self._location_details(metadata),
-            "visible_cells": sorted(set(re.findall(r"(?<![A-Za-z0-9_])([A-Z]{1,3}[1-9]\d*)\s*=", str(chunk.content or "")))),
+            "visible_cells": visible_cells,
+            "financial_cells": financial_cells,
             "inline": f"[{label}](<{url}>)" if url else label,
             "reference": f"[{label_title}](<{url}>)" if url else label_title,
         }
@@ -359,13 +389,45 @@ class ICReportSectionEvidenceService:
 
     def _formula_dependencies(self, selected, *, token_budget: int):
         roots_by_source = {}
+        sheets_by_source = {}
         for chunk in selected:
             source_id = str(chunk.source_id)
             graph = self._formula_graph(source_id)
             if graph:
                 roots_by_source.setdefault(source_id, []).extend(graph.roots_in_range(chunk.metadata or {}))
+                sheet = (chunk.metadata or {}).get("sheet_name")
+                if sheet in graph.by_sheet:
+                    sheets_by_source.setdefault(source_id, set()).add(sheet)
         additions, notes = [], []
         used_tokens = 0
+        header_budget = min(4096, token_budget // 3)
+        header_pattern = re.compile(r"\b(?:FY\s*\d{2,4}[AEF]?|CY\s*\d{2,4}[AEF]?|20\d{2}|actuals?|projected|forecasts?|crores?|lakhs?|millions?|thousands?|currency|units|INR|USD)\b", re.I)
+        for source_id, sheets in sheets_by_source.items():
+            graph = self._formula_graph(source_id)
+            for sheet in sorted(sheets):
+                keys = [(sheet, address) for address, cell in graph.by_sheet[sheet]
+                        if isinstance(value := (cell.get("cached_value") if graph.formula(cell) else cell.get("value")), str)
+                        and len(value) <= 100 and header_pattern.search(value)]
+                if not keys:
+                    continue
+                keys = keys[:50]
+                rows = [int(re.search(r"\d+$", address).group()) for _, address in keys]
+                columns = [re.match(r"[A-Z]+", address).group() for _, address in keys]
+                from openpyxl.utils.cell import column_index_from_string
+                first = min(columns, key=column_index_from_string)
+                last = max(columns, key=column_index_from_string)
+                chunk = SimpleNamespace(source_type="document", source_id=source_id,
+                    content="Extracted schedule period and unit labels. Match these headers to the value's own worksheet column; do not transfer column letters between sheets.\n" +
+                        "\n".join(graph.render_cell(key) for key in keys),
+                    metadata={"chunk_kind": "spreadsheet_schedule_headers", "sheet_name": sheet,
+                        "row_start": min(rows), "row_end": max(rows), "column_start": first, "column_end": last,
+                        "cell_range": f"{first}{min(rows)}:{last}{max(rows)}"})
+                cost = estimate_tokens(self._format_chunk(chunk, rank=len(selected) + len(additions) + 1)) + 2
+                if used_tokens + cost <= header_budget:
+                    additions.append(chunk)
+                    used_tokens += cost
+                else:
+                    notes.append(f"{self.document_titles[source_id]}: additional schedule headers omitted at context token budget")
         for source_id, roots in roots_by_source.items():
             if not roots:
                 continue

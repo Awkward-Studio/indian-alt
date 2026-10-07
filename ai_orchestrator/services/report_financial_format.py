@@ -2,6 +2,16 @@
 import re
 from decimal import Decimal
 
+
+def displayed_amount(cell):
+    value = re.sub(r"\[\d+\]", "", cell).replace(",", "").replace("*", "").strip()
+    match = re.fullmatch(r"(\()?([-+]?\d+(?:\.\d+)?)(\))?", value)
+    if not match or bool(match[1]) != bool(match[3]):
+        return None
+    number = Decimal(match[2]) * (-1 if match[1] else 1)
+    precision = len(match[2].split(".")[1]) if "." in match[2] else 0
+    return number, Decimal("0.5") * Decimal(10) ** -precision
+
 FINANCIAL_ROWS = (
     "Revenue", "Cost of Goods Sold", "Gross Profit", "Operating Expenses",
     "EBITDA", "Depreciation and Amortization", "EBIT", "Net Finance Costs",
@@ -61,22 +71,13 @@ FINANCIAL_SOURCE_RULE = (
     "or that a difference is caused by strategic spending without tracing its "
     "source formula. Distinguish saved workbook outputs from calculations you "
     "actually perform and disclose missing, stale or truncated dependencies. "
-    "Check narrative figures as carefully as the table, including crore/lakh/" 
+    "Check narrative figures as carefully as the table, including crore/lakh/"
     "million/thousand conversions and negative values.\n"
 )
 
 
 def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
     """Check available displayed amounts, allowing their combined rounding error."""
-    def amount(cell):
-        value = re.sub(r"\[\d+\]", "", cell).replace(",", "").replace("*", "").strip()
-        match = re.fullmatch(r"(\()?([-+]?\d+(?:\.\d+)?)(\))?", value)
-        if not match or bool(match[1]) != bool(match[3]):
-            return None
-        number = Decimal(match[2]) * (-1 if match[1] else 1)
-        precision = len(match[2].split(".")[1]) if "." in match[2] else 0
-        return number, Decimal("0.5") * Decimal(10) ** -precision
-
     equations = {
         "Gross Profit": [("Revenue", 1), ("Cost of Goods Sold", -1)],
         "EBITDA": [("Gross Profit", 1), ("Operating Expenses", -1)],
@@ -88,7 +89,7 @@ def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
     errors = []
     for column, period in enumerate(rows[0][1:], 1):
         for result, inputs in equations.items():
-            cells = [amount(amounts[name][column]) for name in [result, *[name for name, _ in inputs]]]
+            cells = [displayed_amount(amounts[name][column]) for name in [result, *[name for name, _ in inputs]]]
             if any(cell is None for cell in cells):
                 continue
             actual = cells[0][0]
@@ -96,4 +97,86 @@ def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
             tolerance = sum(cell[1] for cell in cells) + Decimal("0.00001")
             if abs(actual - expected) > tolerance:
                 errors.append(f"{result} in {period}: displayed {actual}, bridge yields {expected}")
+    return errors
+
+
+def financial_source_errors(rows: list[list[str]], citations: list[dict]) -> list[str]:
+    """Compare direct workbook figures with cited saved values in the same period and units.
+
+    This checks extracted Excel results, not recalculation of arbitrary Excel
+    functions. Unknown source periods or units are not claimed as verified.
+    """
+    def scale(text):
+        for pattern, value in [(r"\b(?:crores?|cr)\b", 10_000_000), (r"\blakhs?\b", 100_000),
+                               (r"\b(?:millions?|mn)\b", 1_000_000), (r"\b(?:thousands?|000)\b", 1000),
+                               (r"\b(?:rupees?|INR|USD)\b", 1)]:
+            if re.search(pattern, text, re.I):
+                return Decimal(value)
+        return None
+
+    def period(text):
+        match = re.search(r"\b(FY|CY)?\s*(20\d{2}|\d{2})(?:[AEF])?\b", re.sub(r"\[\d+\]", "", text), re.I)
+        return ((match[1] or "FY").upper(), match[2][-2:]) if match else None
+
+    aliases = {
+        "Revenue": {"revenue", "totalrevenue", "revenuefromoperations", "netsales", "sales"},
+        "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
+        "Gross Profit": {"grossprofit"},
+        "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "opex"},
+        "EBITDA": {"ebitda", "operatingebitda"},
+        "Depreciation and Amortization": {"depreciationandamortization", "depreciationamortization", "depreciation", "da"},
+        "EBIT": {"ebit", "operatingprofit"},
+        "Net Finance Costs": {"netfinancecosts", "financecosts", "interestexpense", "interestexpenses", "interestcost"},
+        "Other Non-operating Income / Expenses": {"otherincome", "othernonoperatingincomeexpenses", "nonoperatingincome"},
+        "Exceptional Items": {"exceptionalitems", "exceptionalitem"},
+        "PBT": {"pbt", "profitbeforetax", "profitbeforetaxation"},
+        "Income Tax Expense": {"incometaxexpense", "taxexpense", "tax", "taxes", "incometax"},
+        "PAT": {"pat", "profitaftertax", "profitaftertaxation", "netprofit"},
+    }
+    by_number = {int(c["citation_number"]): c for c in citations}
+    table_scale = scale(rows[0][0])
+    if table_scale is None:
+        return []
+    errors = []
+    for metric, row in zip(FINANCIAL_ROWS, rows[2:]):
+        for column, cell in enumerate(row[1:], 1):
+            amount = displayed_amount(cell)
+            if amount is None:
+                continue
+            references = re.findall(r"\[(\d+)\]", cell) or re.findall(r"\[(\d+)\]", row[0])
+            candidates = []
+            wrong_precise_rows = []
+            wrong_precise_periods = []
+            for number in references:
+                citation = by_number.get(int(number), {})
+                facts = citation.get("financial_cells") or {}
+                location = citation.get("used_location") or citation.get("location") or ""
+                exact = re.search(r"!([A-Z]{1,3}\d+)(?::([A-Z]{1,3}\d+))?$", location)
+                if exact and (exact[2] is None or exact[2] == exact[1]):
+                    facts = {exact[1]: facts[exact[1]]} if exact[1] in facts else {}
+                for address, fact in facts.items():
+                    label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
+                    if label not in aliases[metric]:
+                        if exact and (exact[2] is None or exact[2] == exact[1]) and label:
+                            wrong_precise_rows.append(f"{address} is labelled {fact['row_label']!r}")
+                        continue
+                    if period(fact.get("period", "")) != period(rows[0][column]) or not fact.get("period"):
+                        if exact and (exact[2] is None or exact[2] == exact[1]) and fact.get("period"):
+                            wrong_precise_periods.append(f"{address} belongs to {fact['period']}")
+                        continue
+                    if "%" in fact.get("number_format", ""):
+                        continue
+                    source_scale = scale(" ".join(fact.get("unit_labels") or []))
+                    if source_scale is not None:
+                        value = Decimal(str(fact["value"])) * source_scale / table_scale
+                        if metric in {"Cost of Goods Sold", "Operating Expenses", "Depreciation and Amortization", "Income Tax Expense"}:
+                            value = abs(value)
+                        candidates.append((value, address))
+            if candidates and all(abs(amount[0] - value) > amount[1] + Decimal("0.0000001") for value, _ in candidates):
+                values = ", ".join(f"{address}={value}" for value, address in candidates[:4])
+                errors.append(f"{metric} in {rows[0][column]}: displayed {amount[0]}, cited saved workbook values {values}")
+            elif not candidates and len(references) == 1 and wrong_precise_rows:
+                errors.append(f"{metric} in {rows[0][column]} cites a different source metric: {wrong_precise_rows[0]}")
+            elif not candidates and len(references) == 1 and wrong_precise_periods:
+                errors.append(f"{metric} in {rows[0][column]} cites a different source period: {wrong_precise_periods[0]}")
     return errors

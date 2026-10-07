@@ -522,7 +522,7 @@ class ICReportSectionService:
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
         if strict_financial_table and title == "Key Financials":
-            cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations})
+            cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
         if citations and not used_citations:
             raise ReportSectionCitationError(
                 f"Report section '{title}' returned no verifiable evidence citations."
@@ -562,7 +562,7 @@ class ICReportSectionService:
         return cls._append_references(text, citations, used_citations).strip()
 
     @classmethod
-    def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None) -> None:
+    def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None, source_citations: list[dict] | None = None) -> None:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
         tables, pending = [], []
         for line in [*text.splitlines(), ""]:
@@ -583,8 +583,12 @@ class ICReportSectionService:
         if width < 2 or any(len(cls._table_cells(row)) != width for row in table):
             raise ReportSectionStructureError("Key Financials table must have consistent period columns and one metric per row.")
         if verified_citation_numbers is not None:
+            from ai_orchestrator.services.report_financial_format import displayed_amount
             for label, row in zip(labels, table[2:]):
                 values = cls._table_cells(row)[1:]
+                for cell in values:
+                    if re.search(r"\d", re.sub(r"\[\d+\]", "", cell)) and displayed_amount(cell) is None:
+                        raise ReportSectionStructureError(f"Key Financials row '{label}' must use plain numeric amounts with citations; explain qualifications in prose.")
                 has_numbers = any(re.search(r"\d", re.sub(r"\[\d+\]", "", cell)) for cell in values)
                 cited = {int(number) for number in re.findall(r"\[(\d+)\]", row)}
                 if has_numbers and not cited.intersection(verified_citation_numbers):
@@ -593,6 +597,11 @@ class ICReportSectionService:
         bridge_errors = financial_bridge_errors([cls._table_cells(row) for row in table])
         if bridge_errors:
             raise ReportSectionStructureError("Key Financials arithmetic does not reconcile: " + "; ".join(bridge_errors[:5]))
+        if source_citations:
+            from ai_orchestrator.services.report_financial_format import financial_source_errors
+            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations)
+            if source_errors:
+                raise ReportSectionStructureError("Key Financials source values do not match: " + "; ".join(source_errors[:5]))
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:

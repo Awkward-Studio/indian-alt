@@ -50,6 +50,18 @@ EDITORIAL_GUIDANCE = (
     "single financial table and Next Steps schema intact. Preserve analytical depth; "
     "formatting must not introduce new claims or replace substantive analysis with labels."
 )
+REPORT_SIGNAL_GUIDANCE = (
+    "When listing missing evidence or unresolved diligence gaps, begin the bullet "
+    "with ⚠️ **Gap:**, name the specific missing record, and state the investment "
+    "implication. When two supplied sources make incompatible claims, begin the "
+    "bullet with 🚩 **Contradiction:**, describe both claims with their separate "
+    "citations, and state what must resolve the conflict. For a genuine unresolved "
+    "numeric mismatch use ⚡ **Number conflict:**, identify the periods, units and "
+    "source values before drawing conclusions. Keep these icons attached to their "
+    "labeled findings, not ordinary bullets or section headings. Do not manufacture "
+    "gaps or contradictions for decoration, or label your own arithmetic error a "
+    "source contradiction. Preserve the existing Next Steps table schema."
+)
 SECTION_OWNERSHIP = (
     "Keep each calculation and detailed schedule in its owning section. Company Details "
     "owns operating model, products, customers and delivery capability. Promoter and "
@@ -113,6 +125,8 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     # requested report formatting in the section user prompt as well.
     if "Report reading hierarchy:" not in user:
         user = user.rstrip() + "\n\nReport reading hierarchy:\n" + EDITORIAL_GUIDANCE + "\n"
+    if "Report gap and contradiction flags:" not in user:
+        user = user.rstrip() + "\n\nReport gap and contradiction flags:\n" + REPORT_SIGNAL_GUIDANCE + "\n"
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "

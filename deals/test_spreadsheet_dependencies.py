@@ -104,3 +104,23 @@ class WorkbookFormulaTests(SimpleTestCase):
         self.assertEqual(result["metadata"]["formula_dependency_chunk_count"], 3)
         self.assertEqual(result["citations"]["3"]["locator"]["sheet_name"], "Assumptions")
         self.assertLessEqual(estimate_tokens(result["context"]), 4_000)
+
+    def test_retrieval_retains_independent_year_headers_and_units_for_each_sheet(self):
+        manifest = {"sheets": [
+            {"name": "IS", "cells": [{"coordinate": "B3", "value": "INR Crores"},
+                {"coordinate": "F4", "value": "FY26E"}, {"coordinate": "G4", "value": "FY27E"},
+                {"coordinate": "B28", "value": "Depreciation"}, {"coordinate": "G28", "value": "=F28", "cached_value": .5}]},
+            {"name": "CF", "cells": [{"coordinate": "F4", "value": "FY27E"},
+                {"coordinate": "B25", "value": "Capex"}, {"coordinate": "F25", "value": -6.75}]},
+        ]}
+        document = SimpleNamespace(id="model", title="Model.xlsx", extraction_manifest=manifest)
+        chunks = [SimpleNamespace(source_type="document", source_id="model", content=f"{cell}=1",
+            metadata={"sheet_name": sheet, "row_start": row, "row_end": row, "column_start": column, "column_end": column})
+            for sheet,cell,row,column in [("IS","G28",28,"G"),("CF","F25",25,"F")]]
+        service = ICReportSectionEvidenceService(deal=SimpleNamespace(id="deal", title="Example"),
+            documents=[document], embedding_service=Mock(), max_tokens=20_000)
+        result, _ = service._formula_dependencies(chunks, token_budget=5000)
+        headers = {chunk.metadata["sheet_name"]:chunk.content for chunk in result if chunk.metadata["chunk_kind"] == "spreadsheet_schedule_headers"}
+        self.assertIn("G4=", headers["IS"])
+        self.assertIn("INR Crores", headers["IS"])
+        self.assertIn("F4=", headers["CF"])
