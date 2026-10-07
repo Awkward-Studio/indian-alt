@@ -232,7 +232,7 @@ class VLLMProviderService:
             trace.extend([{**item, **({'rejected_request': result['response']} if rejected_request else {})} for item in calculations])
             body['messages'].extend([
                 {'role':'assistant','content':('Calculator request rejected: '+calculations[0]['error']) if rejected_request else result['response']},
-                {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section.' + (' This is the final response turn: return only the complete Markdown report, with no further calculator requests.' if round_index == 2 else '')},
+                {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section. Apply any required draft corrections from the original request. Cite source-backed claims and factual triggers inside task rows or financial cells with the current supplied [Rnnn] markers. Calculator results and prior drafts do not supply primary evidence; find the matching retrieval blocks. Preserve the requested section structure and analytical depth.' + (' This is the final response turn: return only the complete Markdown report, with no further calculator requests.' if round_index == 2 else '')},
             ])
             # Calculator continuations are new user turns. Keep Qwen's explicit
             # thinking control on that turn as well as on the initial request.

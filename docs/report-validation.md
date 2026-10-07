@@ -14,7 +14,13 @@ H100 generation disables internal thinking output and retains a bounded decimal 
 
 The writer organizes each required analytical theme against primary evidence, distinguishes facts from claims, projections and assumptions, uses the calculator for supported derivations, and checks its own output before returning Markdown. There is no second model-based reviewer, review verification or quote-repair call in the generation pipeline. Historical review findings remain available as correction context for Regenerate and AI Rewrite and must be reassessed against fresh evidence.
 
-The requested section-specific minimum word count is enforced alongside citation, structure, source-value and arithmetic checks. Rejected drafts receive the prior draft and concrete validation feedback. Retrying does not promote old drafts or review allegations to primary facts.
+The requested section-specific minimum word count is enforced with a counting tolerance of 1%, capped at twenty words, alongside citation, structure, source-value and arithmetic checks. Rejected drafts receive the prior draft and concrete validation feedback after that draft, with instructions specific to citation, length or arithmetic defects. Correction instructions are included when reserving evidence context. Retrying does not promote old drafts or review allegations to primary facts.
+
+Cost classification explanations attached to the standard COGS and Operating Expenses labels move to cited prose while the canonical labels remain in the table. Adjusted or exclusion-based variants do not receive this cosmetic normalization. Explicit verified source citations in period headers can be repeated in uncited numeric cells of the main statement; existing cell citations remain intact. This repeats a declared source and does not independently verify its values. The same source-value and arithmetic checks still apply.
+
+Explicit numeric formulas accept mathematical `^` exponent notation. IRR/CAGR checks evaluate the full power expression rather than a trailing exponent fragment. Incorrect full results still fail.
+
+Numeric forecast ranges in the main statement expand into lower- and upper-bound columns without selecting a midpoint. Existing single values repeat across those bound columns, and reporting qualifiers move into cited notes. Both bounds undergo normal arithmetic and source checks. These columns represent stated bounds, not independently constructed coherent scenarios. Unparseable or unsupported amounts still fail.
 
 Deterministic validation checks the numerical and citation rules it implements. It is not an independent verification of every qualitative claim. Unavailable primary evidence must be identified as a gap.
 

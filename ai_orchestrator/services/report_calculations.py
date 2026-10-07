@@ -74,6 +74,9 @@ def report_calculation_errors(markdown: str) -> list[str]:
     # Currency labels and inline source markers are annotations, not operands.
     arithmetic_source = re.sub(r'\[(?:R\d+[^\]\n]*|\d+(?:\s*[,;]\s*\d+)*)\]', '', source)
     arithmetic_source = re.sub(r'(?:₹|\$|\bINR\b|\bUSD\b)\s*(?=[-+]?\d)', '', arithmetic_source)
+    # Report authors use mathematical ^ for powers. Parse the full expression
+    # as exponentiation rather than validating only its trailing (1/n) - 1.
+    arithmetic_source = arithmetic_source.replace('^', '**')
     for match in EQUATION.finditer(arithmetic_source):
         # Simple ratios below also support scenario/IRR consistency checks.
         if RATIO.fullmatch(match[0]): continue

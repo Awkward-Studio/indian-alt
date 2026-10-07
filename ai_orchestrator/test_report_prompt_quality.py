@@ -9,6 +9,32 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_forecast_ranges_keep_both_bounds_and_qualifiers_without_changing_amounts(self):
+        table = '| Metric | FY25 Actual | FY26 Forecast [2] |\n| --- | --- | --- |\n' + '\n'.join(f'| {name} | Not provided | Not provided |' for name in FINANCIAL_ROWS)
+        table = table.replace('| Revenue | Not provided | Not provided |', '| Revenue [1] | 115.00 | 132.25 – 138.00 [2] |').replace('| EBITDA | Not provided | Not provided |', '| EBITDA [1] | 16.79 (BU) | 26.45 – 28.98 (Target) [2] |')
+        normalized = ICReportSectionService._normalize_financial_amount_cells(table)
+        self.assertIn('FY26 Forecast [2] (Lower bound) | FY26 Forecast [2] (Upper bound)', normalized)
+        self.assertIn('| Revenue [1] | 115.00 | 132.25 [2] | 138.00 [2] |', normalized)
+        self.assertIn('| EBITDA [1] | 16.79 | 26.45 [2] | 28.98 [2] |', normalized)
+        self.assertIn('FY25 Actual: BU.* [1]', normalized)
+        self.assertIn('FY26 Forecast: Target.* [2]', normalized)
+        ICReportSectionService._validate_financial_table(normalized, verified_citation_numbers={1, 2})
+        self.assertEqual(ICReportSectionService._normalize_financial_amount_cells(normalized), normalized)
+        unsupported = table.replace('115.00', 'approximately 115.00')
+        self.assertIn('approximately 115.00', ICReportSectionService._normalize_financial_amount_cells(unsupported))
+
+    def test_main_statement_period_sources_are_repeated_in_numeric_cells(self):
+        table = '| Metric | FY25 Actual [1] | FY26 Forecast [2] |\n| --- | --- | --- |\n' + '\n'.join(f'| {name} | {"100" if name == "Revenue" else "Not provided"} | Not provided |' for name in FINANCIAL_ROWS)
+        expanded = ICReportSectionService._expand_financial_period_citations(table, {1, 2})
+        self.assertIn('| Revenue | 100 [1] | Not provided |', expanded)
+        ICReportSectionService._validate_financial_table(expanded, verified_citation_numbers={1, 2})
+        self.assertEqual(ICReportSectionService._expand_financial_period_citations(expanded, {1, 2}), expanded)
+        self.assertEqual(ICReportSectionService._expand_financial_period_citations(table, {2}), table)
+        explicit = table.replace('| 100 |', '| 100 [3] |')
+        self.assertEqual(ICReportSectionService._expand_financial_period_citations(explicit, {1, 2, 3}), explicit)
+        extra = '| Metric | FY25 Actual [1] |\n| --- | --- |\n| Revenue | 200 |'
+        self.assertEqual(ICReportSectionService._expand_financial_period_citations(extra, {1}), extra)
+
     def test_cost_classification_labels_preserve_notes_and_values_without_schema_retry(self):
         table = '| Metric | FY25 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | Not provided |' for name in FINANCIAL_ROWS)
         table = table.replace('| Cost of Goods Sold |', '| Cost of Goods Sold (Purchased services) [1] |').replace('| Operating Expenses |', '| Operating Expenses (Personnel + administration) [2] |')

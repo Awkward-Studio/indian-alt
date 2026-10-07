@@ -3,6 +3,14 @@ from ai_orchestrator.services.report_calculations import report_calculation_erro
 
 
 class ReportCalculationTests(SimpleTestCase):
+    def test_caret_irr_checks_the_full_power_and_not_an_exponent_suffix(self):
+        self.assertEqual(report_calculation_errors('IRR = 2.57^(1/5) − 1 = 20.8%.'), [])
+        errors = report_calculation_errors('IRR = 3.85^(1/5) − 1 = 30.0%.')
+        self.assertEqual(len(errors), 1)
+        self.assertIn('3.85**(1/5)', errors[0])
+        self.assertNotIn('-80.000000', errors[0])
+        self.assertEqual(report_calculation_errors('CAGR = (200/100)^(1/2) - 1 = 41.4%.'), [])
+
     def test_rounded_input_precision_allows_the_live_financial_ratios(self):
         self.assertEqual(report_calculation_errors('1.73 / 8.94 = 19.3%\n\n40.53 / 20.32 = 2.00x'), [])
         self.assertTrue(report_calculation_errors('1.73 / 8.94 = 21.3%\n\n40.53 / 20.32 = 2.20x'))

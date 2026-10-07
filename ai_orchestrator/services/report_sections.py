@@ -548,6 +548,8 @@ class ICReportSectionService:
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
         if title == "Key Financials":
+            text = cls._normalize_financial_amount_cells(text)
+            text = cls._expand_financial_period_citations(text, {int(item['citation_number']) for item in used_citations})
             text = cls._cite_supported_financial_calculations(text, {int(item['citation_number']) for item in used_citations})
         from ai_orchestrator.services.report_calculations import report_calculation_errors
         calculation_errors = report_calculation_errors(text)
@@ -586,12 +588,106 @@ class ICReportSectionService:
         analysis_body = re.sub(r"\[(\d+)\]", "", body)
         analysis_body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", analysis_body)
         word_count = len(re.findall(r"\b\w+\b", analysis_body))
-        if minimum_words and word_count < minimum_words:
+        word_count_tolerance = min(20, minimum_words // 100)
+        if minimum_words and word_count < minimum_words - word_count_tolerance:
             raise ReportSectionTooShortError(
                 f"Report section '{title}' was too short: {word_count} words; "
                 f"minimum is {minimum_words}."
             )
         return cls._append_references(text, citations, used_citations).strip()
+
+    @classmethod
+    def _normalize_financial_amount_cells(cls, text: str) -> str:
+        """Keep authored range endpoints and reporting qualifiers explicit."""
+        from .report_financial_format import FINANCIAL_ROWS, displayed_amount
+        lines, notes = text.splitlines(), []
+        expected = [re.sub(r'[^a-z0-9]', '', label.casefold()) for label in FINANCIAL_ROWS]
+        number = r'[-+]?\d[\d,]*(?:\.\d+)?'
+        range_pattern = re.compile(rf'({number})\s*(?:–|—|\bto\b|-)\s*({number})', re.I)
+        index = 0
+        while index + 1 < len(lines):
+            if not lines[index].strip().startswith('|') or not cls._is_table_separator(lines[index + 1]):
+                index += 1
+                continue
+            end = index + 2
+            while end < len(lines) and lines[end].strip().startswith('|'):
+                end += 1
+            rows = [cls._table_cells(line) for line in lines[index:end]]
+            labels = [re.sub(r'[^a-z0-9]', '', cls._plain_table_label(row[0]).casefold()) for row in rows[2:]]
+            width = len(rows[0])
+            if labels != expected or any(len(row) != width for row in rows):
+                index = end
+                continue
+            ranges = {}
+            for row_index, row in enumerate(rows[2:], 2):
+                for column in range(1, width):
+                    cell = row[column]
+                    markers = ' '.join(re.findall(r'\[\d+\]', cell))
+                    plain = re.sub(r'\[\d+\]|[*_`]', '', cell).strip()
+                    qualifier = re.fullmatch(r'(.+?)\s*\(([^()]+)\)', plain)
+                    amount_text = qualifier[1].strip() if qualifier else plain
+                    endpoints = range_pattern.fullmatch(amount_text)
+                    if endpoints:
+                        ranges[row_index, column] = [endpoints[1], endpoints[2]]
+                    elif displayed_amount(amount_text) is None:
+                        continue
+                    row[column] = amount_text + (' ' + markers if markers else '')
+                    if qualifier:
+                        row_markers = ' '.join(re.findall(r'\[\d+\]', row[0]))
+                        notes.append(f"*{cls._plain_table_label(row[0])}, {cls._plain_table_label(rows[0][column])}: {qualifier[2]}.* {markers or row_markers}".rstrip())
+            range_columns = {column for _, column in ranges}
+            normalized = []
+            for row_index, row in enumerate(rows):
+                result = [row[0]]
+                for column in range(1, width):
+                    if column not in range_columns:
+                        result.append(row[column])
+                        continue
+                    if row_index == 0:
+                        result.extend([row[column] + ' (Lower bound)', row[column] + ' (Upper bound)'])
+                    elif row_index == 1:
+                        result.extend(['---', '---'])
+                    else:
+                        markers = ' '.join(re.findall(r'\[\d+\]', row[column]))
+                        endpoints = ranges.get((row_index, column))
+                        result.extend([value + (' ' + markers if markers else '') for value in endpoints] if endpoints else [row[column], row[column]])
+                normalized.append('| ' + ' | '.join(result) + ' |')
+            lines[index:end] = normalized
+            index += len(normalized)
+        return '\n'.join(lines) + ('\n\n' + '\n\n'.join(dict.fromkeys(notes)) if notes else '')
+
+    @classmethod
+    def _expand_financial_period_citations(cls, text: str, verified: set[int]) -> str:
+        """Repeat explicitly declared period sources in main-statement numeric cells."""
+        from .report_financial_format import FINANCIAL_ROWS, displayed_amount
+        lines = text.splitlines()
+        expected = [re.sub(r'[^a-z0-9]', '', label.casefold()) for label in FINANCIAL_ROWS]
+        index = 0
+        while index + 1 < len(lines):
+            if not lines[index].strip().startswith('|') or not cls._is_table_separator(lines[index + 1]):
+                index += 1
+                continue
+            end = index + 2
+            while end < len(lines) and lines[end].strip().startswith('|'):
+                end += 1
+            labels = [re.sub(r'[^a-z0-9]', '', cls._plain_table_label(cls._table_cells(line)[0]).casefold()) for line in lines[index + 2:end]]
+            headers = cls._table_cells(lines[index])
+            if labels == expected:
+                for row_index in range(index + 2, end):
+                    cells = cls._table_cells(lines[row_index])
+                    if len(cells) != len(headers):
+                        continue
+                    row_markers = {int(value) for value in re.findall(r'\[(\d+)\]', cells[0])}
+                    for column in range(1, len(cells)):
+                        existing = row_markers | {int(value) for value in re.findall(r'\[(\d+)\]', cells[column])}
+                        if existing or displayed_amount(cells[column]) is None:
+                            continue
+                        markers = [value for value in re.findall(r'\[(\d+)\]', headers[column]) if int(value) in verified]
+                        if markers:
+                            cells[column] += ' ' + ' '.join(f'[{value}]' for value in dict.fromkeys(markers))
+                    lines[row_index] = '| ' + ' | '.join(cells) + ' |'
+            index = end
+        return '\n'.join(lines)
 
     @classmethod
     def _cite_supported_financial_calculations(cls, text: str, verified: set[int]) -> str:

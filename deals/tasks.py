@@ -2186,6 +2186,24 @@ def process_vdr_report_section(
                 draft = re.split(r"^###\s+Citations\s*$", previous_attempt.raw_response or "", maxsplit=1, flags=re.M)[0]
                 draft = re.sub(r"\[(?:R\d+(?:@[^]\n]+)?|\d+)\]", "", draft)
                 retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis previous draft is a starting point, not verified evidence. Correct it using the review feedback and current primary evidence. Re-check every claim against the current retrieval blocks and replace its citations. Preserve supported analysis, correct errors, address coverage gaps and expand only where necessary."
+        retry_corrections = ""
+        if previous_attempt and previous_attempt.error_message:
+            error = previous_attempt.error_message[:8000]
+            retry_corrections += ("\n\n<required_draft_corrections>\nThe supplied draft is rejected, not an approved answer. "
+                "Apply this correction before returning a complete replacement: " + error +
+                "\nPreserve supported content, but do not return unchanged text that still has this defect. ")
+            if 'citation' in error.casefold():
+                retry_corrections += ("Insert current retrieval markers beside every source-backed factual trigger. "
+                    "For a task table put [Rnnn] in Task / Exact Action or Why It Matters in the existing row; "
+                    "names of sections or requested documents are not evidence markers. For financial tables, "
+                    "cite the actual row or value cell. Find matching current primary blocks, never guess a rank. ")
+            if 'too short' in error.casefold():
+                retry_corrections += ("Add supported analysis of an underdeveloped requested theme and its investment implication; "
+                    "changing formatting or copying the same text will not add analytical depth. ")
+            if 'inconsistent calculations' in error.casefold():
+                retry_corrections += ("Recalculate each rejected expression with the calculator, including the entire power "
+                    "expression for IRR/CAGR, then update the scenario table and prose to the same result. ")
+            retry_corrections += "\n</required_draft_corrections>"
         evidence_service = __import__(
             "ai_orchestrator.services.report_section_evidence", fromlist=["ICReportSectionEvidenceService"]
         ).ICReportSectionEvidenceService(deal=deal, documents=ready_docs,
@@ -2194,7 +2212,7 @@ def process_vdr_report_section(
                 input_budget=int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 40_960)),
                 output_budget=int(getattr(settings, 'VDR_REPORT_SECTION_MAX_TOKENS', 16_384)),
                 evidence_budget=int(getattr(settings, 'VDR_REPORT_SECTION_EVIDENCE_TOKENS', 36_000)),
-                extra_context=prior_context+'\n\n'+retry_draft))
+                extra_context=prior_context+'\n\n'+retry_draft+retry_corrections))
         retrieved = evidence_service.retrieve(section_title)
         context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
         evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None
@@ -2223,6 +2241,7 @@ def process_vdr_report_section(
             )
         if retry_draft:
             context += retry_draft
+        context += retry_corrections
         section = ICReportSectionService._generate_section(
             ai_service=AIProcessorService(), evidence=context, analysis=analysis, title=section_title,
             source_id=audit_log_id, evidence_metadata=evidence_metadata,

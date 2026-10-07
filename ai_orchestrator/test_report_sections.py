@@ -176,6 +176,12 @@ class CitationNormalizationTests(SimpleTestCase):
                 minimum_words=585,
             )
 
+    def test_word_count_tolerance_is_small_and_does_not_accept_shallow_drafts(self):
+        text = '## Executive Summary\n\n' + 'analysis ' * 1253
+        ICReportSectionService._normalize_section('Executive Summary', text, minimum_words=1260)
+        with self.assertRaises(ReportSectionTooShortError):
+            ICReportSectionService._normalize_section('Executive Summary', 'analysis ' * 1240, minimum_words=1260)
+
     def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
         with self.assertRaises(ReportSectionValidationError):
             ICReportSectionService._normalize_section(

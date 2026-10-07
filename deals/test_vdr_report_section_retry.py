@@ -39,7 +39,16 @@ class VDRReportSectionRetryTests(SimpleTestCase):
         return evidence
 
     def test_under_length_retry_receives_the_rejected_draft_and_fresh_citation_instruction(self):
-        self.assert_retry_receives_draft("Report section 'Executive Summary' was too short: 900 words; minimum is 1260.")
+        evidence = self.assert_retry_receives_draft("Report section 'Executive Summary' was too short: 900 words; minimum is 1260.")
+        self.assertGreater(evidence.index('<required_draft_corrections>'), evidence.index('</draft_to_expand>'))
+        self.assertIn('underdeveloped requested theme', evidence)
+
+    def test_citation_and_calculation_retry_corrections_follow_the_old_draft(self):
+        evidence = self.assert_retry_receives_draft('No verifiable evidence citations')
+        self.assertIn('Task / Exact Action or Why It Matters', evidence)
+        self.assertGreater(evidence.index('<required_draft_corrections>'), evidence.index('</draft_to_expand>'))
+        evidence = self.assert_retry_receives_draft('Report has inconsistent calculations')
+        self.assertIn('entire power expression for IRR/CAGR', evidence)
 
     def test_source_review_and_calculation_retries_receive_draft_with_feedback(self):
         for error in ['Source review rejected: incorrect fiscal year', 'Inconsistent calculation: EBITDA margin']:
