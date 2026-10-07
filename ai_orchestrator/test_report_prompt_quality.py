@@ -17,10 +17,10 @@ class ReportQualityTests(SimpleTestCase):
         self.assertIn('Not assigned or To agree', updated[1])
         self.assertEqual(upgrade_report_prompt(*updated, section_title='Next Steps'), updated)
 
-    def test_financial_final_contract_rejects_additional_source_comparison_tables(self):
+    def test_financial_final_contract_allows_additional_source_comparison_tables(self):
         updated = upgrade_report_prompt('Analyst', '## {{ section_title }}\n{{ content }}', section_title='Key Financials')
         self.assertIn('Financial output shape check:', updated[1])
-        self.assertIn('never add a second comparison table', updated[1])
+        self.assertIn('Supplemental tables are allowed', updated[1])
         self.assertEqual(upgrade_report_prompt(*updated, section_title='Key Financials'), updated)
 
     def test_calculated_labels_and_supported_input_citations_do_not_force_a_retry(self):
@@ -110,17 +110,32 @@ class ReportQualityTests(SimpleTestCase):
     def test_authored_variable_heading_gets_financial_contract_by_stage(self):
         updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
         self.assertIn("Key Financials table format:", updated[1])
-        self.assertIn("exactly ONE Markdown table", updated[0])
+        self.assertIn("one main standardized Markdown table", updated[0])
         self.assertEqual(upgrade_report_prompt(*updated, section_title="Key Financials"), updated)
 
     def test_single_income_statement_has_exact_revenue_to_pat_order(self):
         table = "| Metric (INR Cr) | FY25 Actual | FY26 Forecast |\n| --- | ---: | ---: |\n"
         table += "\n".join(f"| {row} | Not provided | Not provided |" for row in FINANCIAL_ROWS)
         ICReportSectionService._validate_financial_table("## Key Financials\n\n" + table)
+        extra = '| Metric | FY25 |\n| --- | --- |\n| Revenue | 100 |\n| EBITDA | 10 |'
+        ICReportSectionService._validate_financial_table(extra + '\n\n' + table + '\n\n' + extra)
+        with self.assertRaises(ReportSectionStructureError):
+            ICReportSectionService._validate_financial_table(extra)
         with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._validate_financial_table(table + "\n\n" + table)
         with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._validate_financial_table(table.replace("| PAT |", "| Cash |"))
+
+    def test_supplemental_tables_do_not_bypass_main_statement_citations_or_math(self):
+        extra = '| Metric | FY25 |\n| --- | --- |\n| Revenue [1] | 100 |'
+        values = {name: 'Not provided' for name in FINANCIAL_ROWS}
+        values.update({'Revenue': '100', 'Cost of Goods Sold': '60', 'Gross Profit': '55'})
+        table = '| Metric | FY25 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | {values[name]} |' for name in FINANCIAL_ROWS)
+        with self.assertRaises(ReportSectionCitationError):
+            ICReportSectionService._validate_financial_table(extra + '\n\n' + table, verified_citation_numbers={1})
+        cited = table.replace('| 100 |', '| 100 [1] |').replace('| 60 |', '| 60 [1] |').replace('| 55 |', '| 55 [1] |')
+        with self.assertRaises(ReportSectionStructureError):
+            ICReportSectionService._validate_financial_table(extra + '\n\n' + cited, verified_citation_numbers={1})
 
     def test_cell_citation_cannot_target_an_unseen_cell_inside_a_broad_range(self):
         citation = {"locator": {"sheet_name": "PL", "row_start": 1, "row_end": 20,
@@ -130,7 +145,7 @@ class ReportQualityTests(SimpleTestCase):
 
     def test_financial_prompt_owns_one_table_and_is_idempotent(self):
         updated = upgrade_report_prompt("Analyst instructions", "- Begin with the exact heading: ## Key Financials\n{{ content }}")
-        self.assertIn("exactly ONE Markdown table", updated[0])
+        self.assertIn("one main standardized Markdown table", updated[0])
         self.assertIn("Key Financials table format:", updated[1])
         self.assertEqual(upgrade_report_prompt(*updated), updated)
     def test_verified_source_wrappers_render_cleanly_in_tables(self):

@@ -47,7 +47,7 @@ EDITORIAL_GUIDANCE = (
     "by its evidence and implication. Use a brief blockquote only for a material "
     "approval condition or limitation already supported in the analysis. Keep formulas "
     "and their cited inputs legible, all citations adjacent to their claims, and the "
-    "single financial table and Next Steps schema intact. Preserve analytical depth; "
+    "main financial statement and Next Steps schema intact. Preserve analytical depth; "
     "formatting must not introduce new claims or replace substantive analysis with labels."
 )
 REPORT_SIGNAL_GUIDANCE = (
@@ -201,7 +201,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
         user = user.replace(
             "- Begin with period-by-period financial tables, metrics in rows and periods in columns,",
-            "- Present the single standardized P&L table specified below, metrics in rows and periods in columns,",
+            "- Present the main standardized P&L table specified below, metrics in rows and periods in columns,",
         )
         user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash findings in prose where supported")
         user = FINANCIAL_TABLE_INSTRUCTION.lstrip() + "\n\n" + user
@@ -220,12 +220,12 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         system += precision
     if is_financials and "Financial output shape check:" not in user:
         user += ("\n\nFinancial output shape check:\n"
-            "Count Markdown tables before returning: there must be exactly one. Put "
+            "Ensure the main standardized Revenue-to-PAT table is present. Put "
             "historical and forecast periods in that same Revenue-to-PAT table, retaining "
             "the exact thirteen row labels. Describe alternative source cases, management "
-            "adjustments and forecast comparisons in cited paragraphs or bullets; never "
-            "add a second comparison table. Treat a rejected draft's additional tables "
-            "as errors to correct, even if their numbers are supported.\n")
+            "adjustments and forecast comparisons in cited paragraphs, bullets or supplemental "
+            "tables. Supplemental tables are allowed and do not replace the main "
+            "statement. Keep the main statement unambiguous.\n")
     user = re.sub(
         r"- Provide the analytical depth supported by the evidence\. Runtime guidance:.*"
         r"Do not add repetition or unsupported claims to meet a length target\.",
@@ -245,7 +245,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user += "For example, | Revenue [R001] | 100 | 120 |. Use your actual evidence markers and "
         user += "values, not this example's numbers. If periods use different sources, cite the relevant "
         user += "cells separately. Cite all source inputs for calculated rows. Rows entirely marked Not "
-        user += "provided need no citation. Final check: exactly one table, exactly the 13 specified "
+        user += "provided need no citation. Final check: the main statement contains exactly the 13 specified "
         user += "rows from Revenue to PAT, and verified markers inside every numeric row.\n"
     if is_financials and "Financial bridge check:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_BRIDGE_RULE

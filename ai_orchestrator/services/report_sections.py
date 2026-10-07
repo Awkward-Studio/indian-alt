@@ -642,11 +642,21 @@ class ICReportSectionService:
                 if len(pending) >= 2 and cls._is_table_separator(pending[1]):
                     tables.append(pending)
                 pending = []
-        if len(tables) != 1:
-            raise ReportSectionStructureError("Key Financials must contain exactly one standardized Revenue-to-PAT table.")
-        table = tables[0]
-        labels = [re.sub(r"\[[^]]+\]", "", cls._plain_table_label(cls._table_cells(row)[0])).strip() for row in table[2:]]
         normalize = lambda value: re.sub(r"[^a-z0-9]+", "", value.casefold())
+        def table_labels(table):
+            return [re.sub(r"\[[^]]+\]", "", cls._plain_table_label(cls._table_cells(row)[0])).strip() for row in table[2:]]
+        expected = [normalize(v) for v in FINANCIAL_ROWS]
+        standardized = [table for table in tables if [normalize(v) for v in table_labels(table)] == expected]
+        if len(standardized) > 1:
+            raise ReportSectionStructureError("Key Financials contains multiple standardized Revenue-to-PAT tables. Consolidate periods into one main statement; supplemental tables may remain.")
+        if standardized:
+            table = standardized[0]
+        else:
+            candidates = [table for table in tables if {'revenue', 'pat'}.issubset({normalize(v) for v in table_labels(table)})]
+            if len(candidates) != 1:
+                raise ReportSectionStructureError("Key Financials must contain a standardized Revenue-to-PAT table. Supplemental tables are allowed, but do not replace the main statement.")
+            table = candidates[0]
+        labels = table_labels(table)
         if [normalize(v) for v in labels] != [normalize(v) for v in FINANCIAL_ROWS]:
             raise ReportSectionStructureError("Key Financials row layout is invalid. Expected exactly: " + "; ".join(FINANCIAL_ROWS) + ". Received: " + "; ".join(labels) + ". Keep the source values and citations; repair only labels/order and mark missing inputs Not provided.")
         width = len(cls._table_cells(table[0]))

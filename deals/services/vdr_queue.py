@@ -246,7 +246,7 @@ def higher_priority_work_waiting(
 
 
 def dispatch() -> dict:
-    """Dispatch one unit, preferring reports over document indexing."""
+    """Fill shared report capacity across deals, preferring reports over indexing."""
     from ai_orchestrator.models import AIAuditLog
     from deals.tasks import process_single_document_async, process_vdr_report_section, vdr_unit_completed
 
@@ -260,32 +260,38 @@ def dispatch() -> dict:
             if not _lock_coordinator():
                 return {"status": "locked"}
             fallback_locked = connection.vendor != "postgresql"
-            in_flight = AIAuditLog.objects.select_for_update().filter(
-                status="PROCESSING",
-                source_metadata__queue_version=QUEUE_VERSION,
-                source_metadata__queue_scope="vdr",
-                source_metadata__queue_state__in=["dispatching", "active"],
-            ).order_by("created_at").first()
-            can_refill = False
-            if in_flight:
-                metadata = dict(in_flight.source_metadata or {})
-                can_refill = metadata.get('queue_kind') == 'report' and bool(metadata.get('active_report_units')) and bool(_next_report_batch(metadata))
-                if metadata.get("current_task_id") and not can_refill:
-                    return {"status": "active", "audit_log_id": str(in_flight.id)}
-
-            runnable = AIAuditLog.objects.select_for_update().filter(
+            jobs = list(AIAuditLog.objects.select_for_update().filter(
                 status__in=ACTIVE_STATUSES,
                 source_metadata__queue_version=QUEUE_VERSION,
                 source_metadata__queue_scope="vdr",
-                source_metadata__queue_state__in=RUNNABLE_STATES,
-            )
-            audit = in_flight if in_flight and can_refill else runnable.filter(
-                source_metadata__queue_kind="report",
-            ).order_by("created_at").first()
+                source_metadata__queue_state__in=[*RUNNABLE_STATES, "dispatching", "active"],
+            ).order_by("created_at"))
+            active_jobs = [job for job in jobs if (job.source_metadata or {}).get("current_task_id")]
+            # Indexing still yields at document boundaries; report sections can
+            # share their lane without waiting for another deal's last section.
+            active_indexing = next((job for job in active_jobs if
+                (job.source_metadata or {}).get("queue_kind") == "indexing"), None)
+            if active_indexing:
+                return {"status": "active", "audit_log_id": str(active_indexing.id)}
+            report_jobs = [job for job in jobs if (job.source_metadata or {}).get("queue_kind") == "report"]
+            capacity = _report_capacity()
+            running = sum(_running_report_sections(job.source_metadata or {}) for job in report_jobs)
+            available = max(0, capacity - running)
+            audit = None
+            for job in report_jobs:
+                job_metadata = job.source_metadata or {}
+                if available and _next_report_batch(job_metadata, available_slots=available):
+                    audit = job
+                    break
+                if not _running_report_sections(job_metadata) and not _next_unit(job_metadata):
+                    transaction.on_commit(lambda job_id=str(job.id): _finish_job(job_id))
+                    return {"status": "finishing", "audit_log_id": str(job.id)}
+            if not audit and running:
+                return {"status": "active", "audit_log_id": str(active_jobs[0].id if active_jobs else report_jobs[0].id)}
             if not audit:
-                audit = runnable.filter(
-                    source_metadata__queue_kind="indexing",
-                ).order_by("created_at").first()
+                audit = next((job for job in jobs if
+                    (job.source_metadata or {}).get("queue_kind") == "indexing" and
+                    (job.source_metadata or {}).get("queue_state") in RUNNABLE_STATES), None)
             if not audit:
                 return {"status": "idle"}
             metadata = dict(audit.source_metadata or {})
@@ -301,7 +307,7 @@ def dispatch() -> dict:
             unit_type, unit_key, item = unit
             report_batch = []
             if unit_type != "document" and int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1)) > 1:
-                report_batch = _next_report_batch(metadata)
+                report_batch = _next_report_batch(metadata, available_slots=available)
                 if not report_batch:
                     return {"status": "active", "audit_log_id": str(audit.id)}
                 item = report_batch[0]
@@ -366,21 +372,38 @@ def dispatch() -> dict:
                         }, queue="vdr_work", task_id=delivery_id,
                         link=vdr_unit_completed.s(str(audit.id), delivery_id, generation, key),
                     ))
+                if available > len(report_batch or [item]):
+                    transaction.on_commit(kick)
             return {"status": "dispatched", "audit_log_id": str(audit.id), "unit": unit_key}
     finally:
         if fallback_locked:
             _unlock_fallback()
 
 
-def _next_report_batch(metadata: dict) -> list[dict]:
+def _report_capacity() -> int:
+    return max(1, min(4, int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1)),
+        int(getattr(settings, "AI_INFERENCE_MAX_CONCURRENT_REQUESTS", 4))))
+
+
+def _running_report_sections(metadata: dict) -> int:
+    running = sum(str(item.get('status', '')).lower() in {'processing', 'retrying'}
+        for item in metadata.get("report_section_queue") or [])
+    # Include legacy single-section ownership while old deliveries drain.
+    return max(running, int(bool(metadata.get('current_task_id'))))
+
+
+def _next_report_batch(metadata: dict, *, available_slots: int | None = None) -> list[dict]:
     """Fill each free worker slot, prioritizing financial and transaction inputs."""
     priority = ["Key Financials", "Transaction Details", "Company Details", "Promoter and Management Details",
                 "Industry Overview", "Transaction / Trading Multiples", "Risk Factors", "Investment Rationale",
                 "Exit Considerations", "Executive Summary", "Next Steps"]
     by_title = {item.get("title"): item for item in metadata.get("report_section_queue") or []}
-    capacity = max(1, min(4, int(getattr(settings, "VDR_DURABLE_REPORT_CONCURRENCY", 1))))
-    running = sum(str(item.get('status', '')).lower() in {'processing', 'retrying'} for item in by_title.values())
+    priority.extend(title for title in by_title if title not in priority)
+    capacity = _report_capacity()
+    running = _running_report_sections(metadata)
     available = max(0, capacity - running)
+    if available_slots is not None:
+        available = min(available, max(0, available_slots))
     return [by_title[t] for t in priority if t in by_title and str(by_title[t].get('status', 'queued')).lower() in {'queued', 'recovering'}][:available]
 
 

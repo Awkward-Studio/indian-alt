@@ -86,7 +86,7 @@ FINANCIAL_ROWS = (
 )
 FINANCIAL_TABLE_INSTRUCTION = (
     "\n\nKey Financials table format:\n"
-    "- Produce exactly ONE Markdown table in this section: a consolidated P&L / "
+    "- Include one main standardized Markdown table in this section: a consolidated P&L / "
     "income statement. Put currency and scale in the first column header and the "
     "available historical and forecast periods across columns, clearly marked Actual "
     "or Forecast. State currency and scale explicitly, such as Metric (INR Cr, amounts) "
@@ -109,9 +109,10 @@ FINANCIAL_TABLE_INSTRUCTION = (
     "Explain source differences and supported calculation bridges in prose.\n"
     "- Discuss revenue growth, margins, cash flow, working capital, debt, assets, model "
     "dependencies, balance-sheet reconciliation and sensitivities in ### subsections "
-    "with paragraphs or bullets below this single table. Show supported formulas and "
-    "their cited inputs in prose. Do not create additional evidence-base, financial, "
-    "sensitivity or action tables here; route actions to Next Steps. Keep all material "
+    "with paragraphs, bullets or supplemental tables below the main statement. Show supported formulas and "
+    "their cited inputs. Supplemental source comparisons, cash-flow, working-capital and "
+    "sensitivity tables are allowed; keep units, periods and citations explicit. Do not "
+    "replace or duplicate the main Revenue-to-PAT statement; route actions to Next Steps. Keep all material "
     "analytical themes from the instructions above."
 )
 

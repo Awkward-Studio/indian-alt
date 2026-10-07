@@ -153,6 +153,55 @@ class HighPriorityBusyTests(SimpleTestCase):
 
 @override_settings(VDR_DURABLE_QUEUE_ENABLED=True)
 class DurableVdrQueueTests(TestCase):
+    @override_settings(VDR_DURABLE_REPORT_CONCURRENCY=4, AI_INFERENCE_MAX_CONCURRENT_REQUESTS=4)
+    @patch('deals.services.vdr_queue.kick')
+    @patch('deals.services.vdr_queue._email_priority_busy', return_value=False)
+    @patch('deals.services.vdr_queue._high_priority_busy', return_value=False)
+    @patch('deals.tasks.process_vdr_report_section.apply_async')
+    def test_next_deal_fills_free_slots_without_waiting_for_first_deal(self, send, *_):
+        _, first = self.make_report_job('First', sections=('Key Financials',))
+        _, second = self.make_report_job('Second', sections=('Key Financials', 'Transaction Details', 'Company Details', 'Risk Factors'))
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+            result = vdr_queue.dispatch()
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(result['audit_log_id'], str(second.id))
+        self.assertEqual(len(first.source_metadata['active_report_units']), 1)
+        self.assertEqual(len(second.source_metadata['active_report_units']), 3)
+        self.assertEqual(send.call_count, 4)
+        self.assertEqual(vdr_queue.dispatch()['status'], 'active')
+        self.assertEqual(send.call_count, 4)
+        for job in (first, second):
+            for key, owner in job.source_metadata['active_report_units'].items():
+                self.assertTrue(vdr_queue.delivery_ownership_matches(str(job.id),
+                    task_id=owner['current_task_id'], generation=owner['dispatch_generation'], unit_key=key))
+
+    @override_settings(VDR_DURABLE_REPORT_CONCURRENCY=4, AI_INFERENCE_MAX_CONCURRENT_REQUESTS=2)
+    @patch('deals.services.vdr_queue.kick')
+    @patch('deals.services.vdr_queue._email_priority_busy', return_value=False)
+    @patch('deals.services.vdr_queue._high_priority_busy', return_value=False)
+    @patch('deals.tasks.process_vdr_report_section.apply_async')
+    def test_shared_report_capacity_obeys_inference_limit_and_reuses_freed_slot(self, send, *_):
+        _, first = self.make_report_job('First', sections=('Key Financials',))
+        _, second = self.make_report_job('Second', sections=('Key Financials', 'Transaction Details'))
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+            vdr_queue.dispatch()
+        first.refresh_from_db()
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(vdr_queue.dispatch()['status'], 'active')
+        owner = first.source_metadata['active_report_units']['Key Financials']
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.unit_finished(str(first.id), task_id=owner['current_task_id'],
+                generation=owner['dispatch_generation'], unit_key='Key Financials',
+                result={'status': 'failed', 'error': 'validation failed'})
+            vdr_queue.dispatch()  # Finalize the terminal first job.
+        with self.captureOnCommitCallbacks(execute=True):
+            result = vdr_queue.dispatch()
+        self.assertEqual(result['audit_log_id'], str(second.id))
+        self.assertEqual(send.call_count, 3)
+
     def make_job(self, title="First", files=("a", "b")):
         deal = Deal.objects.create(title=title, processing_status="processing")
         manifest = [{

@@ -6,6 +6,8 @@ H100 VDR reports use the published section prompts, primary document chunks and 
 
 A section must pass citation normalization, table structure, arithmetic and source checks. Financial statement amounts are compared with cited saved workbook values for the same metric, period and scale. Unsupported workbook values are rejected; missing inputs must be stated as missing. The extractor supplies statement rows, period headers, units, formulas and bounded precedent traces from every indexed workbook. Saved Excel results are not independently recalculated.
 
+Key Financials requires one main standardized Revenue-to-PAT table with the thirteen specified rows. Supplemental tables are allowed. Validation locates the main statement by its rows rather than rejecting a section merely for having another table. Missing or duplicate main statements still fail, and the main statement retains its citation, source-value and arithmetic checks.
+
 Calculated rows can inherit their input rows' verified citations only when every displayed calculation reconciles. Cosmetic annotations such as `(Calculated)` and accepted metric aliases are normalized without changing numbers. Native model units can be retained explicitly when currency or scale is not supplied, rather than guessing a conversion.
 
 H100 generation disables internal thinking output and retains a bounded decimal calculator. The calculator accepts numeric arithmetic expressions with +, -, *, /, ** and parentheses. It does not evaluate Python code, access files or fetch data. Up to three request batches of at most 24 calculations are followed by a final report response. Calculator requests/results are recorded in the generation audit. Source authenticity remains a separate check.
@@ -21,6 +23,8 @@ Deterministic validation checks the numerical and citation rules it implements. 
 Report evidence bypasses the legacy 180,000-character clipping and arbitrary token truncation. The provider enforces the model context window explicitly. Old section caches are invalidated with the v12 cache key. Primary saved cell facts include their own worksheet's fiscal periods, units and number formats. The writer must not transfer column-year mappings between worksheets.
 
 Arithmetic checks account for the precision of displayed operands and results. For example, 1.73 / 8.94 may be reported as 19.3%, and 40.53 / 20.32 as 2.00x. A materially inconsistent result still fails. Four report sections start together, and each free worker receives the next section without waiting for the other three. Key Financials and Transaction Details retain scheduling priority.
+
+Report capacity is shared across deals. The coordinator counts processing and retrying sections across active reports and fills free capacity from the oldest eligible report, including the next queued deal when an earlier deal has no sections ready to start. The shared limit is the smaller of report concurrency and inference concurrency, capped at four. Document indexing continues to yield at document boundaries. Each section retains its own delivery owner and generation.
 
 H100 report requests use the configured output budget, currently 16,384 tokens. JSON requests always disable thinking, including callers that explicitly enabled it. Calculator continuations and retries after deterministic validation can add inference work. Automatic source-review requests are not scheduled.
 
