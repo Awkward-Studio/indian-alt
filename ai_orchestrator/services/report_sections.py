@@ -583,17 +583,8 @@ class ICReportSectionService:
             raise ReportSectionValidationError(
                 f"Report section '{title}' returned an unverified source link."
             )
-        # Count authored analysis before adding references. Repeated filenames,
-        # source locations and URLs must not make a short draft pass the floor.
-        analysis_body = re.sub(r"\[(\d+)\]", "", body)
-        analysis_body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", analysis_body)
-        word_count = len(re.findall(r"\b\w+\b", analysis_body))
-        word_count_tolerance = min(20, minimum_words // 100)
-        if minimum_words and word_count < minimum_words - word_count_tolerance:
-            raise ReportSectionTooShortError(
-                f"Report section '{title}' was too short: {word_count} words; "
-                f"minimum is {minimum_words}."
-            )
+        # Length is editorial guidance, not an acceptance gate. Empty outputs,
+        # citations, required statement structure and numerical checks remain.
         return cls._append_references(text, citations, used_citations).strip()
 
     @classmethod

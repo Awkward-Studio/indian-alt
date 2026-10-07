@@ -130,9 +130,9 @@ SECTION_OWNERSHIP = (
 FINAL_CHECK = (
     "\n\n- Final output check: cover every material analytical theme above; "
     "cite source-backed claims and table rows with exact [Rnnn] markers from the "
-    "evidence, not filename-only labels; meet minimum_words={{ minimum_words }} "
-    "in your analysis excluding source labels/references and aim for "
-    "target_words={{ target_words }} when evidence supports it. Keep the exact "
+    "evidence, not filename-only labels. Length guidance is optional: "
+    "suggested_depth_words={{ minimum_words }} and target_words={{ target_words }}. "
+    "Use the length the evidence and analysis need; do not pad to meet a count. Keep the exact "
     "section heading, readable subheadings, tables and concrete unresolved actions."
 )
 
@@ -233,9 +233,9 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
     user = re.sub(
         r"- Provide the analytical depth supported by the evidence\. Runtime guidance:.*"
         r"Do not add repetition or unsupported claims to meet a length target\.",
-        "- Cover every material theme above in depth. Write at least {{ minimum_words }} "
-        "words of substantive analysis, excluding citations/source labels, and aim for "
-        "{{ target_words }} words when the evidence supports it. Explain mechanisms, "
+        "- Cover every material theme above in depth. Length guidance is optional: "
+        "suggested_depth_words={{ minimum_words }} and target_words={{ target_words }}. "
+        "Use the length the evidence and analysis need. Explain mechanisms, "
         "supported calculations, sensitivities, counterevidence and investment implications. "
         "Avoid repetition and unsupported claims; make missing evidence actionable.",
         user,

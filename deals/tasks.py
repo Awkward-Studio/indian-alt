@@ -2198,12 +2198,8 @@ def process_vdr_report_section(
                     "names of sections or requested documents are not evidence markers. For financial tables, "
                     "cite the actual row or value cell. Find matching current primary blocks, never guess a rank. ")
             if 'too short' in error.casefold():
-                retry_corrections += ("Add supported analysis of an underdeveloped requested theme and its investment implication; "
-                    "changing formatting or copying the same text will not add analytical depth. ")
-                count = re.search(r'too short: (\d+) words; minimum is (\d+)', error)
-                if count:
-                    additional = max(50, int(count[2]) - int(count[1]) + 50)
-                    retry_corrections += f"Add at least {additional} words of new supported analysis, covering missing records and their implications where evidence is unavailable. "
+                retry_corrections += ("This is legacy length feedback. Word count no longer blocks acceptance. "
+                    "Cover the requested themes using supported analysis, but do not pad or rewrite merely to meet a count. ")
             if 'source values do not match' in error.casefold():
                 retry_corrections += ("For each rejected metric/period, use its directly cited saved value or a calculation "
                     "whose complete same-period primary inputs are actually supplied. A range description showing "
@@ -2236,13 +2232,11 @@ def process_vdr_report_section(
         if prior_context:
             context += "\n\n" + prior_context
         if self.request.retries:
-            minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
             validation_feedback = (previous_attempt.error_message or "")[:8000] if previous_attempt else ""
             context = (
                 f"{context}\n\n<retry_requirement>\n"
                 f"Retry attempt {self.request.retries}. The previous draft failed output validation: {validation_feedback}. "
-                f"Write a fresh, complete section of at least {minimum_words:,} words, "
-                "and aim for 2,500 words when the evidence supports it. Do not resubmit "
+                "Write a complete section at the length needed by the evidence. Word count is not an acceptance gate. Do not resubmit "
                 "the same draft. Review every analytical theme in the original section "
                 "instructions and expand supported mechanisms, counterevidence and "
                 "investment implications; explain the consequence of each material gap, "

@@ -7,7 +7,7 @@ from ai_orchestrator.prompt_contracts import IC_REPORT_HEADERS, IC_SECTION_TITLE
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.report_sections import (
     ICReportSectionService,
-    ReportSectionTooShortError,
+    ReportSectionCitationError,
     ReportSectionValidationError,
 )
 
@@ -164,9 +164,8 @@ class CitationNormalizationTests(SimpleTestCase):
         self.assertEqual(ICReportSectionService._minimum_words("Company Details", metadata), 1350)
         self.assertEqual(ICReportSectionService._minimum_words("Key Financials", {"selected_chunk_count": 5}), 675)
 
-    def test_under_length_vdr_section_raises_retryable_validation_error(self):
-        with self.assertRaises(ReportSectionTooShortError):
-            ICReportSectionService._normalize_section(
+    def test_under_length_vdr_section_does_not_fail_for_word_count(self):
+        ICReportSectionService._normalize_section(
                 "Transaction / Trading Multiples",
                 (
                     "## Transaction / Trading Multiples\n\n"
@@ -176,11 +175,10 @@ class CitationNormalizationTests(SimpleTestCase):
                 minimum_words=585,
             )
 
-    def test_word_count_tolerance_is_small_and_does_not_accept_shallow_drafts(self):
+    def test_word_count_is_not_an_acceptance_gate(self):
         text = '## Executive Summary\n\n' + 'analysis ' * 1253
         ICReportSectionService._normalize_section('Executive Summary', text, minimum_words=1260)
-        with self.assertRaises(ReportSectionTooShortError):
-            ICReportSectionService._normalize_section('Executive Summary', 'analysis ' * 1240, minimum_words=1260)
+        ICReportSectionService._normalize_section('Executive Summary', 'analysis ' * 400, minimum_words=1260)
 
     def test_section_with_only_unknown_ranks_fails_as_non_retryable_validation(self):
         with self.assertRaises(ReportSectionValidationError):
@@ -212,10 +210,11 @@ class ICReportSectionServiceTests(TestCase):
             "_audit_log_id": str(audit.id),
         }
 
-        with self.assertRaises(ReportSectionTooShortError):
+        with self.assertRaises(ReportSectionCitationError):
             ICReportSectionService._generate_section(
                 ai_service=service, evidence="Evidence", analysis={"deal_model_data": {}},
                 title="Next Steps", source_id="report-1", source_type="vdr_report_section",
+                citations={"1": {"document_id": "doc", "title": "Memo.pdf"}},
             )
         audit.refresh_from_db()
         self.assertEqual(audit.status, "FAILED")
