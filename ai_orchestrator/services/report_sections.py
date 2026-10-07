@@ -449,6 +449,7 @@ class ICReportSectionService:
             "profitaftertax": "PAT", "profitaftertaxpat": "PAT",
         }
         output = []
+        classification_notes = []
         for line in text.splitlines():
             if "|" not in line or cls._is_table_separator(line):
                 output.append(line)
@@ -458,6 +459,11 @@ class ICReportSectionService:
             from .report_financial_format import FINANCIAL_ROWS
             cleaned_label = re.sub(r"\s*\((?:calculated|derived)\)\s*[¹²³⁴⁵⁶⁷⁸⁹⁰]*", "", label).strip()
             canonical = canonical_aliases.get(re.sub(r"[^a-z0-9]", "", cleaned_label))
+            classification = re.fullmatch(r"(cost of goods sold|operating expenses)\s*\(([^()]+)\)", cleaned_label)
+            if classification and not re.search(r"\badjusted\b|\bnormalized\b|\bpro\s*forma\b|\bmargin\b|\bgrowth\b|%|\bexcl(?:uding)?\b", classification.group(2)):
+                canonical = next(name for name in FINANCIAL_ROWS if name.casefold() == classification.group(1))
+                markers = " ".join(re.findall(r"\[\d+\]", cells[0]))
+                classification_notes.append(f"*{canonical} classification: {classification.group(2)}.* {markers}".rstrip())
             if cleaned_label != label:
                 canonical = canonical or next((name for name in FINANCIAL_ROWS if name.casefold() == cleaned_label),None)
             if canonical:
@@ -486,7 +492,7 @@ class ICReportSectionService:
                 flags=re.IGNORECASE,
             )
             output.append("| " + " | ".join(cells) + " |")
-        return "\n".join(output)
+        return "\n".join(output) + ("\n\n" + "\n\n".join(dict.fromkeys(classification_notes)) if classification_notes else "")
 
     @classmethod
     def _append_references(cls, text: str, citations: dict | None, used: list[dict]) -> str:

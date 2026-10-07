@@ -9,6 +9,19 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_cost_classification_labels_preserve_notes_and_values_without_schema_retry(self):
+        table = '| Metric | FY25 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | Not provided |' for name in FINANCIAL_ROWS)
+        table = table.replace('| Cost of Goods Sold |', '| Cost of Goods Sold (Purchased services) [1] |').replace('| Operating Expenses |', '| Operating Expenses (Personnel + administration) [2] |')
+        normalized = ICReportSectionService._normalize_financial_metric_labels(table, 'Key Financials')
+        self.assertIn('| Cost of Goods Sold [1] | Not provided |', normalized)
+        self.assertIn('| Operating Expenses [2] | Not provided |', normalized)
+        self.assertIn('*Cost of Goods Sold classification: purchased services.* [1]', normalized)
+        self.assertIn('*Operating Expenses classification: personnel + administration.* [2]', normalized)
+        ICReportSectionService._validate_financial_table(normalized)
+        self.assertEqual(ICReportSectionService._normalize_financial_metric_labels(normalized, 'Key Financials'), normalized)
+        adjusted = table.replace('Purchased services', 'Adjusted excluding overhead')
+        self.assertIn('Adjusted excluding overhead', ICReportSectionService._normalize_financial_metric_labels(adjusted, 'Key Financials'))
+
     def test_next_steps_cites_current_task_triggers_without_changing_columns(self):
         updated = upgrade_report_prompt('Analyst', '## {{ section_title }}\n{{ content }}', section_title='Next Steps')
         self.assertIn('Next Steps evidence contract:', updated[1])
