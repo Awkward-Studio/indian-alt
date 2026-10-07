@@ -13,6 +13,9 @@ calculations, reply ONLY with <report_calculations> followed by a JSON array and
 For example, expression "(180 / 60) ** (1 / 5) - 1" computes a single-entry/exit
 annual return. Use your supplied source inputs, not these example numbers. Supported
 operators are +, -, *, /, ** and parentheses. Batch up to 24 calculations per request.
+Prioritize the material calculations; do not attempt an exhaustive conversion of every
+retrieved number. A request must be a complete JSON array with its closing tag. After
+at most three small batches, return the complete final report, not more calculator JSON.
 The application returns decimal results. Then write the requested complete Markdown
 section with exact evidence markers and no calculator protocol or implementation
 details. A calculator result verifies arithmetic, not source authenticity. Preserve
@@ -56,7 +59,10 @@ def calculate(expression: str) -> str:
 
 def calculation_request(text: str) -> list[dict] | None:
     match=re.fullmatch(r'\s*<report_calculations>([\s\S]+)</report_calculations>\s*',text)
-    if not match: return None
+    if not match:
+        if '<report_calculations>' in text or '</report_calculations>' in text:
+            raise ValueError('Calculator request must be a complete JSON array of at most 24 calculations with its closing tag.')
+        return None
     requests=json.loads(match[1])
     if not isinstance(requests,list) or not 1<=len(requests)<=24:
         raise ValueError('Request between 1 and 24 calculations.')

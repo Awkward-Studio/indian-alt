@@ -218,19 +218,21 @@ class VLLMProviderService:
             thinking.append(result.get('thinking') or '')
             for key,value in (result.get('usage') or {}).items():
                 if isinstance(value,(int,float)): usage[key]=usage.get(key,0)+value
+            rejected_request = False
             try:
                 calculations=calculation_request(result['response'])
             except (ValueError,TypeError) as error:
                 if '<report_calculations>' not in result['response']: raise
                 calculations=[{'error':str(error)[:200]}]
+                rejected_request = True
             if calculations is None:
                 result.update(thinking='\n'.join(thinking),usage=usage,_report_calculation_trace=trace)
                 return result
             if round_index==3: raise ValueError('Report calculator round limit reached without a final report.')
-            trace.extend(calculations)
+            trace.extend([{**item, **({'rejected_request': result['response']} if rejected_request else {})} for item in calculations])
             body['messages'].extend([
-                {'role':'assistant','content':result['response']},
-                {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section.'},
+                {'role':'assistant','content':('Calculator request rejected: '+calculations[0]['error']) if rejected_request else result['response']},
+                {'role':'user','content':'<report_calculation_results>\n'+json.dumps(calculations,ensure_ascii=False)+'\n</report_calculation_results>\nUse these arithmetic results with their cited inputs. Correct any calculation errors, then write the complete requested Markdown section.' + (' This is the final response turn: return only the complete Markdown report, with no further calculator requests.' if round_index == 2 else '')},
             ])
             # Calculator continuations are new user turns. Keep Qwen's explicit
             # thinking control on that turn as well as on the initial request.

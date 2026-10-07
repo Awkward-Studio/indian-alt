@@ -6,6 +6,18 @@ from ai_orchestrator.services.llm_providers import VLLMProviderService
 
 
 class ReportCalculatorTests(SimpleTestCase):
+    def test_incomplete_calculator_json_is_repaired_instead_of_returned_as_report(self):
+        malformed = '<report_calculations>\n[{"expression":"90/3",' + (' ' * 20000)
+        with self.assertRaisesRegex(ValueError, 'complete JSON array'):
+            calculation_request(malformed)
+        first=Mock();first.json.return_value={'choices':[{'message':{'content':malformed},'finish_reason':'length'}]}
+        last=Mock();last.json.return_value={'choices':[{'message':{'content':'## Company Details\nSupported final report [R001].'},'finish_reason':'stop'}]}
+        with patch('ai_orchestrator.services.llm_providers.requests.post',side_effect=[first,last]) as post:
+            result=VLLMProviderService().execute_standard({'model':'Qwen/test','prompt':'Write report','_report_calculator':True})
+        self.assertIn('Supported final report',result['response'])
+        self.assertEqual(result['_report_calculation_trace'][0]['rejected_request'],malformed)
+        self.assertNotIn(malformed,post.call_args.kwargs['json']['messages'][-2]['content'])
+
     def test_units_returns_growth_and_discrepancies_use_decimal_arithmetic(self):
         self.assertEqual(Decimal(calculate('2071.93 * 1000 / 10000000')),Decimal('.207193'))
         self.assertAlmostEqual(float(calculate('100*((303/90)**(1/5)-1)')),27.4794038379585,places=9)
