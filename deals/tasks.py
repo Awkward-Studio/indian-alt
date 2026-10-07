@@ -2197,7 +2197,7 @@ def process_vdr_report_section(
             context += "\n\n" + prior_context
         if self.request.retries:
             minimum_words = ICReportSectionService._minimum_words(section_title, evidence_metadata)
-            validation_feedback = (previous_attempt.error_message or "")[:4000] if previous_attempt else ""
+            validation_feedback = (previous_attempt.error_message or "")[:8000] if previous_attempt else ""
             context = (
                 f"{context}\n\n<retry_requirement>\n"
                 f"Retry attempt {self.request.retries}. The previous draft failed output validation: {validation_feedback}. "

@@ -828,6 +828,8 @@ class ICReportSectionService:
                 errors=[finding for finding in findings if finding['severity']=='error']
                 if errors:
                     feedback='; '.join(f"{finding.get('claim','')[:160]}: {finding['issue']} Correction: {finding.get('correction','')}" for finding in errors[:5])
+                    if review['coverage_gaps']:
+                        feedback = 'Coverage gaps to address in the same retry: ' + '; '.join(review['coverage_gaps'][:8]) + ' Source errors: ' + feedback
                     raise ReportSectionStructureError(f"Source review rejected '{title}': {feedback}")
                 if review['coverage_gaps']:
                     raise ReportSectionStructureError(f"Source review found missing coverage in '{title}': " + "; ".join(review['coverage_gaps'][:8]))

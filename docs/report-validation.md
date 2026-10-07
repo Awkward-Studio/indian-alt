@@ -12,6 +12,8 @@ H100 generation disables internal thinking output and retains a bounded decimal 
 
 Each H100 section receives an independent JSON review against the original analytical requirements and the supplied primary retrieval blocks. Material source errors and omitted analytical coverage reject the draft. The reviewer must reference only supplied ranks and distinguish facts, disclosed assumptions, proposals and evidence gaps. An empty findings list is a review result, not a guarantee of universal accuracy.
 
+When a review reports both factual errors and coverage omissions, the same retry receives both sets of feedback. Review audits retain all original findings and coverage gaps. A section passes only after material errors and omitted coverage are resolved; explicitly disclosed missing source evidence is an acceptable treatment of a required topic.
+
 The requested section-specific word count remains in the generation prompt. A section that passes source and coverage review may finish up to 15% below that target. A shorter section or one with missing coverage still fails. Rejected drafts receive the concrete correction feedback; an under-length retry receives its prior draft for expansion with old citation markers removed and an instruction to recheck claims against current evidence. Primary evidence is reserved within the context budget before draft feedback is appended.
 
 ## Evidence integrity and inference

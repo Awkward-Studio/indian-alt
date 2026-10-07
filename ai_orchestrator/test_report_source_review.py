@@ -70,9 +70,9 @@ class SourceReviewedGenerationTests(TestCase):
         cache.get.return_value=None
         service=Mock();service.process_content.side_effect=[
             {'response':'## Executive Summary\n\n'+('Lengthy analysis '*800)+'[R001].'},
-            {'findings':[{'severity':'error','claim':'A claim','issue':'Not supported','sources':['R001'],'correction':'Mark a gap'}],'coverage_gaps':[]},
+            {'findings':[{'severity':'error','claim':'A claim','issue':'Not supported','sources':['R001'],'correction':'Mark a gap'}],'coverage_gaps':['Explain the investment approval gates']},
         ]
-        with self.assertRaisesRegex(ReportSectionStructureError,'Source review rejected'):
+        with self.assertRaisesRegex(ReportSectionStructureError,'Source review rejected.*Explain the investment approval gates'):
             ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',
                 evidence='Retrieval block R001\nSource',analysis={'deal_model_data':{}},source_id='test',
                 source_type='vdr_report_section',citations={'1':{'title':'IM.pdf','document_id':'doc'}},force_regenerate=True)
