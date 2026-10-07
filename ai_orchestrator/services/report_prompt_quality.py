@@ -34,6 +34,22 @@ PRESENTATION_GUIDANCE = (
     "Keep Next Steps' twelve-column task schema unchanged. Do not author a References "
     "or Citations section; the application supplies verified source links."
 )
+EDITORIAL_GUIDANCE = (
+    "Organize the analysis for an investment committee reader scanning a long report. "
+    "Use specific ### topic headings and #### subheadings when a topic has distinct parts. "
+    "Write focused paragraphs of two to four sentences, usually 40-90 words; split long "
+    "paragraphs at a change of finding, evidence or implication. Bold one or two short "
+    "phrases per paragraph to highlight the central finding, decision-critical metric "
+    "or investment implication. Never bold entire sentences or paragraphs or every "
+    "number. Use italics sparingly for assumptions, forecast qualifications or unresolved "
+    "limitations; keep the evidence and reasoning in ordinary text. Use bullets for "
+    "parallel findings, risks or diligence questions, with a short bold lead-in followed "
+    "by its evidence and implication. Use a brief blockquote only for a material "
+    "approval condition or limitation already supported in the analysis. Keep formulas "
+    "and their cited inputs legible, all citations adjacent to their claims, and the "
+    "single financial table and Next Steps schema intact. Preserve analytical depth; "
+    "formatting must not introduce new claims or replace substantive analysis with labels."
+)
 SECTION_OWNERSHIP = (
     "Keep each calculation and detailed schedule in its owning section. Company Details "
     "owns operating model, products, customers and delivery capability. Promoter and "
@@ -91,6 +107,8 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         system += "\n\nReport depth and layout:\n- " + DEPTH_GUIDANCE + "\n- " + PRESENTATION_GUIDANCE
     if "Section ownership and cross-references:" not in system:
         system += "\n\nSection ownership and cross-references:\n" + SECTION_OWNERSHIP
+    if "Report reading hierarchy:" not in system:
+        system += "\n\nReport reading hierarchy:\n" + EDITORIAL_GUIDANCE
     # Consolidate actions in one section; avoid eleven copies of the same register.
     system = re.sub(r"^- For A–I, end with an action table.*$",
         "- State section-specific unresolved issues in concise prose or bullets. "
