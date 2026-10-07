@@ -459,7 +459,8 @@ class ICReportSectionService:
             from .report_financial_format import FINANCIAL_ROWS
             cleaned_label = re.sub(r"\s*\((?:calculated|derived)\)\s*[¹²³⁴⁵⁶⁷⁸⁹⁰]*", "", label).strip()
             canonical = canonical_aliases.get(re.sub(r"[^a-z0-9]", "", cleaned_label))
-            classification = re.fullmatch(r"(cost of goods sold|operating expenses)\s*\(([^()]+)\)", cleaned_label)
+            metric_names = "|".join(re.escape(name.casefold()) for name in FINANCIAL_ROWS)
+            classification = re.fullmatch(rf"({metric_names})\s*\(([^()]+)\)", cleaned_label)
             if classification and not re.search(r"\badjusted\b|\bnormalized\b|\bpro\s*forma\b|\bmargin\b|\bgrowth\b|%|\bexcl(?:uding)?\b", classification.group(2)):
                 canonical = next(name for name in FINANCIAL_ROWS if name.casefold() == classification.group(1))
                 markers = " ".join(re.findall(r"\[\d+\]", cells[0]))
@@ -556,7 +557,15 @@ class ICReportSectionService:
         if calculation_errors:
             raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
         if strict_financial_table and title == "Key Financials":
-            cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
+            reconciliation_warnings = cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
+            if reconciliation_warnings:
+                text += (
+                    "\n\n### Calculation review warnings\n\n"
+                    "The displayed statement has unresolved reconciliation differences. "
+                    "Amounts have been preserved; these figures are not verified as a reconciled "
+                    "income statement. Confirm source classifications and reporting basis before relying on them.\n\n"
+                    + "\n".join(f"- {warning}" for warning in reconciliation_warnings)
+                )
         body = text[len(target):].strip()
         if len(body) < 40 and not used_citations:
             raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
@@ -702,7 +711,7 @@ class ICReportSectionService:
         return '\n'.join(lines)
 
     @classmethod
-    def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None, source_citations: list[dict] | None = None) -> None:
+    def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None, source_citations: list[dict] | None = None) -> list[str]:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
         tables, pending = [], []
         for line in [*text.splitlines(), ""]:
@@ -739,13 +748,15 @@ class ICReportSectionService:
                     raise ReportSectionStructureError(f"Key Financials row '{label}' must use plain numeric amounts; explain qualifications in prose.")
         from ai_orchestrator.services.report_financial_format import financial_bridge_errors
         bridge_errors = financial_bridge_errors([cls._table_cells(row) for row in table])
-        if bridge_errors:
-            raise ReportSectionStructureError("Key Financials arithmetic does not reconcile: " + "; ".join(bridge_errors[:5]))
+        # Source statements can use different expense classifications. Report every
+        # unresolved bridge visibly without regenerating the whole section. Explicit
+        # authored equations and known saved-value mismatches still block acceptance.
         if source_citations:
             from ai_orchestrator.services.report_financial_format import financial_source_errors
             source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=False)
             if source_errors:
                 raise ReportSectionStructureError("Key Financials source values do not match: " + "; ".join(source_errors[:5]))
+        return bridge_errors
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:

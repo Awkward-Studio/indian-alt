@@ -182,16 +182,32 @@ class ReportQualityTests(SimpleTestCase):
         with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._validate_financial_table(table.replace("| PAT |", "| Cash |"))
 
-    def test_supplemental_tables_do_not_bypass_main_statement_math(self):
+    def test_supplemental_tables_do_not_hide_main_statement_warnings(self):
         extra = '| Metric | FY25 |\n| --- | --- |\n| Revenue [1] | 100 |'
         values = {name: 'Not provided' for name in FINANCIAL_ROWS}
         values.update({'Revenue': '100', 'Cost of Goods Sold': '60', 'Gross Profit': '55'})
         table = '| Metric | FY25 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | {values[name]} |' for name in FINANCIAL_ROWS)
-        with self.assertRaises(ReportSectionStructureError):
-            ICReportSectionService._validate_financial_table(extra + '\n\n' + table, verified_citation_numbers={1})
+        warnings = ICReportSectionService._validate_financial_table(extra + '\n\n' + table, verified_citation_numbers={1})
+        self.assertEqual(warnings, ['Gross Profit in FY25 Actual: displayed 55, bridge yields 40'])
         cited = table.replace('| 100 |', '| 100 [1] |').replace('| 60 |', '| 60 [1] |').replace('| 55 |', '| 55 [1] |')
-        with self.assertRaises(ReportSectionStructureError):
-            ICReportSectionService._validate_financial_table(extra + '\n\n' + cited, verified_citation_numbers={1})
+        self.assertEqual(ICReportSectionService._validate_financial_table(extra + '\n\n' + cited, verified_citation_numbers={1}), warnings)
+        normalized = ICReportSectionService._normalize_section('Key Financials', table, strict_financial_table=True)
+        self.assertIn('### Calculation review warnings', normalized)
+        self.assertIn('displayed 55, bridge yields 40', normalized)
+        self.assertIn('| Gross Profit | 55 |', normalized)
+
+    def test_uolo_metric_annotations_preserve_basis_and_missing_values(self):
+        table = '| Metric (USD Mn) | AY23 Actual |\n| --- | --- |\n' + '\n'.join(f'| {name} | Not provided |' for name in FINANCIAL_ROWS)
+        table = table.replace('| Revenue | Not provided |', '| **Revenue** (Gross) [1] | 3.13 |')
+        table = table.replace('| Gross Profit |', '| **Gross Profit** (Calculated: Rev - COGS) [1] |')
+        table = table.replace('| EBITDA |', '| **EBITDA** (Not directly provided; see Note) |')
+        normalized = ICReportSectionService._normalize_financial_metric_labels(table, 'Key Financials')
+        self.assertIn('| Revenue [1] | 3.13 |', normalized)
+        self.assertIn('*Revenue classification: gross.* [1]', normalized)
+        self.assertIn('*Gross Profit classification: calculated: rev - cogs.* [1]', normalized)
+        self.assertIn('| EBITDA | Not provided |', normalized)
+        self.assertEqual(ICReportSectionService._validate_financial_table(normalized), [])
+        self.assertEqual(ICReportSectionService._normalize_financial_metric_labels(normalized, 'Key Financials'), normalized)
 
     def test_cell_citation_cannot_target_an_unseen_cell_inside_a_broad_range(self):
         citation = {"locator": {"sheet_name": "PL", "row_start": 1, "row_end": 20,
