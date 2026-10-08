@@ -9,6 +9,11 @@ def section():
         f'| {name} | {amount:.2f} [1] | Not provided |' for name, amount in zip(FINANCIAL_ROWS, values))
 
 class KeyFinancialsProfileTests(TestCase):
+    def test_saved_draft_gaps_do_not_promote_unverified_figures_to_the_ledger(self):
+        deal=Deal.objects.create(title='Flagged report')
+        flagged=section()+'\n\n### Source gaps and calculation issues\n\n- **Gap:** Source amount not verified.'
+        self.assertEqual(sync_section(deal,flagged,'report')['status'],'not_synced')
+        self.assertFalse(deal.vi_relations.exists())
     def test_missing_citations_do_not_block_report_or_persist_unsupported_profile_values(self):
         deal = Deal.objects.create(title='Uncited report')
         uncited = section().replace(' [1]', '')

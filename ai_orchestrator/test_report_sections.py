@@ -193,40 +193,22 @@ class CitationNormalizationTests(SimpleTestCase):
 
 class ICReportSectionServiceTests(TestCase):
     @patch("ai_orchestrator.services.report_sections.cache")
-    def test_rejected_section_audit_is_retried_not_completed(self, report_cache):
+    def test_section_with_calculation_issues_is_saved_with_audited_gaps(self, report_cache):
         report_cache.get.return_value = None
         PipelineRegistryService.ensure_report_pipeline_defaults()
-        audit = AIAuditLog.objects.create(
-            source_type="vdr_report_section", source_id="report-1",
-            context_label="VDR report section: Next Steps",
-            model_used="test-model", system_prompt="system", user_prompt="prompt",
-            raw_response="short draft", status="COMPLETED", is_success=True,
-            source_metadata={"report_section": "Next Steps", "inference_state": "completed"},
-        )
-        service = Mock()
-        service.process_content.return_value = {
-            "response": "## Next Steps\n\nMOIC is 100 / 50 = 3.00x. This investment return requires numerical reconciliation.",
-            "_audit_log_id": str(audit.id),
-        }
-
-        with self.assertRaises(ReportSectionStructureError):
-            ICReportSectionService._generate_section(
-                ai_service=service, evidence="Evidence", analysis={"deal_model_data": {}},
-                title="Next Steps", source_id="report-1", source_type="vdr_report_section",
-                citations={"1": {"document_id": "doc", "title": "Memo.pdf"}},
-            )
+        audit = AIAuditLog.objects.create(source_type="vdr_report_section",source_id="report-1",
+            context_label="VDR report section: Next Steps",model_used="test-model",system_prompt="system",user_prompt="prompt",
+            status="COMPLETED",is_success=True,source_metadata={"report_section":"Next Steps"})
+        service=Mock()
+        service.process_content.return_value={"response":"## Next Steps\n\nMOIC is 100 / 50 = 3.00x. This investment return requires numerical reconciliation.","_audit_log_id":str(audit.id)}
+        section=ICReportSectionService._generate_section(ai_service=service,evidence="Evidence",analysis={"deal_model_data":{}},
+            title="Next Steps",source_id="report-1",source_type="vdr_report_section")
         audit.refresh_from_db()
-        self.assertEqual(audit.status, "FAILED")
-        self.assertFalse(audit.is_success)
-        self.assertEqual(audit.source_metadata["report_section_outcome"], "rejected")
-
-        ICReportSectionService._mark_prior_rejected_attempts_retried(
-            source_type="vdr_report_section", source_id="report-1", title="Next Steps",
-        )
-        audit.refresh_from_db()
-        self.assertEqual(audit.status, "FAILED")
-        self.assertEqual(audit.source_metadata["report_section_outcome"], "retried")
-        self.assertEqual(audit.source_metadata["inference_state"], "retried")
+        self.assertEqual(audit.status,"COMPLETED")
+        self.assertTrue(audit.is_success)
+        self.assertEqual(audit.source_metadata['report_section_outcome'],'saved_with_gaps')
+        self.assertTrue(audit.source_metadata['report_validation_warnings'])
+        self.assertIn('Number conflict',section)
 
     def complete_report(self):
         return "\n\n".join(f"{header}\n\nComplete evidence-backed content for {header}." for header in IC_REPORT_HEADERS)

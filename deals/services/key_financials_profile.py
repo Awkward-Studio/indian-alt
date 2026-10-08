@@ -65,6 +65,9 @@ def section_payload(section, source_id):
     return {'profile': {}, 'financial_statements': statements}, citations, evidence
 
 def sync_section(deal, section, source_id):
+    if '### Source gaps and calculation issues' in section:
+        return {'source': 'accepted_key_financials', 'source_audit_id': str(source_id), 'status': 'not_synced',
+                'warning': 'The draft was saved with unresolved source or calculation issues; its figures have not been promoted to the financial profile.'}
     from deals.services.internal_financial_profile import InternalFinancialProfileService
     payload, citations, evidence = section_payload(section, source_id)
     if not payload['financial_statements']:
@@ -80,7 +83,7 @@ def latest_accepted_section(deal):
     for parent in parents:
         item = next((item for item in (parent.source_metadata or {}).get('report_section_queue', [])
                      if item.get('title') == 'Key Financials' and item.get('status') == 'completed' and item.get('content')), None)
-        if item and AIAuditLog.objects.filter(source_id=str(parent.id), source_type='vdr_report_section', status='COMPLETED',
+        if item and '### Source gaps and calculation issues' not in item['content'] and AIAuditLog.objects.filter(source_id=str(parent.id), source_type='vdr_report_section', status='COMPLETED',
                 source_metadata__report_section='Key Financials').filter(
                 Q(source_metadata__generation_mode='grounded_single_pass') |
                 Q(source_metadata__report_source_review__status='no_material_error_found')).exists():

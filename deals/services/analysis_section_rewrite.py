@@ -238,7 +238,7 @@ class AnalysisSectionRewriteService:
             )
         if table_only:
             from .financial_table_rewrite import merge_financial_table
-            warning_block = re.search(r'^### Calculation review warnings\n(.*?)(?=^### |\Z)', rewritten, re.M | re.S)
+            warning_block = re.search(r'^### (?:Calculation review warnings|Source gaps and calculation issues)\n(.*?)(?=^### |\Z)', rewritten, re.M | re.S)
             self.table_calculation_warnings = warning_block[1].strip() if warning_block else ''
             rewritten, _ = merge_financial_table(section_markdown, rewritten)
         return rewritten

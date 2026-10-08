@@ -39,4 +39,7 @@ def merge_financial_table(original, generated):
     if references:
         heading = '' if re.search(r'^###\s+Citations\s*$', original, re.M) else '### Citations\n\n'
         updated = updated.rstrip() + '\n\n' + heading + references + '\n'
+    warnings = re.search(r'^### Source gaps and calculation issues\n(.*?)(?=^### |\Z)', generated, re.M | re.S)
+    if warnings:
+        updated = updated.rstrip() + '\n\n' + warnings[0].strip() + '\n'
     return updated, table

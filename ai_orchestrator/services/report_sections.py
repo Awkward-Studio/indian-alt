@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v13"
+    CACHE_VERSION = "ic-report-sections-v14"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -522,6 +522,7 @@ class ICReportSectionService:
         minimum_words: int = 0,
         strict_financial_table: bool = False,
         calculation_corrections: list | None = None,
+        validation_warnings: list | None = None,
     ) -> str:
         text = str(response or "").strip()
         if "<report_calculations>" in text or "</report_calculations>" in text:
@@ -558,25 +559,30 @@ class ICReportSectionService:
         # Validate the cited metric, period and normalized reporting basis before
         # testing arithmetic. Correct arithmetic alone cannot establish facts.
         reconciliation_warnings = []
+        warnings = []
+        if len(text[len(target):].strip()) < 40 and not used_citations:
+            raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
         if strict_financial_table and title == 'Key Financials':
-            reconciliation_warnings = cls._validate_financial_table(text,
-                verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
+            try:
+                reconciliation_warnings = cls._validate_financial_table(text,
+                    verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
+            except ReportSectionStructureError as exc:
+                warnings.append({'kind': 'source_or_format', 'message': str(exc)})
+        warnings.extend({'kind': 'source_or_reconciliation', 'message': issue} for issue in reconciliation_warnings)
         from ai_orchestrator.services.report_calculations import report_calculation_errors, correct_small_percentage_calculations
         text, corrections = correct_small_percentage_calculations(text)
         if calculation_corrections is not None:
             calculation_corrections.extend(corrections)
         calculation_errors = report_calculation_errors(text)
-        if calculation_errors:
-            raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
-        if strict_financial_table and title == "Key Financials":
-            if reconciliation_warnings:
-                text += (
-                    "\n\n### Calculation review warnings\n\n"
-                    "The displayed statement has unresolved source-verification or reconciliation issues. "
-                    "Amounts have been preserved; these figures are not verified as a reconciled "
-                    "income statement. Confirm source classifications and reporting basis before relying on them.\n\n"
-                    + "\n".join(f"- {warning}" for warning in reconciliation_warnings)
-                )
+        warnings.extend({'kind': 'calculation', 'message': issue} for issue in calculation_errors)
+        if validation_warnings is not None:
+            validation_warnings.extend(warnings)
+        if warnings:
+            text += ('\n\n### Source gaps and calculation issues\n\n'
+                'This draft has been saved for review. The issues below remain unresolved; affected '
+                'figures are not verified.\n\n' + '\n'.join(
+                    '- **' + ('Number conflict' if item['kind']=='calculation' else 'Gap') + ':** ' + item['message']
+                    for item in warnings))
         body = text[len(target):].strip()
         if len(body) < 40 and not used_citations:
             raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
@@ -762,6 +768,12 @@ class ICReportSectionService:
         # unresolved bridge visibly without regenerating the whole section. Explicit
         # authored equations and known saved-value mismatches still block acceptance.
         unverified = []
+        if re.search(r'native|currency/scale Not provided', cls._table_cells(table[0])[0], re.I):
+            unverified.append('Currency or reporting scale is not established. Native amounts are preserved; currency-based ledger figures are not verified.')
+        for label, row in zip(labels, table[2:]):
+            for column, cell in enumerate(cls._table_cells(row)[1:], 1):
+                if displayed_amount(cell) is not None and not re.search(r'\[\d+\]', cell + cls._table_cells(row)[0]):
+                    unverified.append(f'{label} in {cls._table_cells(table[0])[column]} has no source reference; the amount is not verified.')
         if source_citations:
             from ai_orchestrator.services.report_financial_format import financial_source_errors
             source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=True, unverified=unverified)
@@ -910,6 +922,7 @@ class ICReportSectionService:
             },
         )
         calculation_corrections = []
+        validation_warnings = []
         try:
             if isinstance(result, dict) and result.get('error'):
                 raise ReportSectionStructureError(f"Generation for '{title}' could not complete: {result['error']}")
@@ -920,13 +933,14 @@ class ICReportSectionService:
                 minimum_words=minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
                 calculation_corrections=calculation_corrections,
+                validation_warnings=validation_warnings,
             )
         except ReportSectionValidationError as exc:
             cls._mark_rejected_section_audit(
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,
             )
             raise
-        if calculation_corrections and isinstance(result, dict) and result.get('_audit_log_id'):
+        if (calculation_corrections or validation_warnings) and isinstance(result, dict) and result.get('_audit_log_id'):
             from ai_orchestrator.models import AIAuditLog
             from django.db import transaction
             with transaction.atomic():
@@ -935,6 +949,8 @@ class ICReportSectionService:
                     audit.source_metadata = {
                         **(audit.source_metadata or {}),
                         'calculation_corrections': calculation_corrections,
+                        'report_validation_warnings': validation_warnings,
+                        'report_section_outcome': 'saved_with_gaps' if validation_warnings else 'accepted',
                     }
                     audit.save(update_fields=['source_metadata'])
         try:

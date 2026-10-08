@@ -25,7 +25,7 @@ class ReportCalculationTests(SimpleTestCase):
         references = 'Analysis.\n\n### Citations\n\n1. Source title: 12.42 / 15.52 = 79.9%.\n'
         self.assertEqual(correct_small_percentage_calculations(references), (references, []))
 
-    def test_section_records_correction_and_still_rejects_larger_errors(self):
+    def test_section_records_correction_and_saves_larger_errors_with_a_visible_flag(self):
         from ai_orchestrator.services.report_sections import ICReportSectionService, ReportSectionStructureError
         corrections = []
         section = ICReportSectionService._normalize_section(
@@ -34,10 +34,14 @@ class ReportCalculationTests(SimpleTestCase):
         )
         self.assertIn('12.42 / 15.52 = 80.0%', section)
         self.assertEqual(corrections[0]['basis'], 'displayed operands')
-        with self.assertRaises(ReportSectionStructureError):
-            ICReportSectionService._normalize_section(
-                'Key Financials', 'Calculated margin for the displayed amounts is 12.42 / 15.52 = 70.0%.',
-            )
+        warnings = []
+        flagged = ICReportSectionService._normalize_section(
+            'Key Financials', 'Calculated margin for the displayed amounts is 12.42 / 15.52 = 70.0%.',
+            validation_warnings=warnings,
+        )
+        self.assertIn('### Source gaps and calculation issues', flagged)
+        self.assertIn('Number conflict', flagged)
+        self.assertTrue(warnings)
     def test_percentage_stake_keeps_the_full_exit_proceeds_equation(self):
         self.assertEqual(report_calculation_errors('10% × (13,422.20 − 2,624.81) = INR 1,079.74 Mn.'), [])
         self.assertEqual(report_calculation_errors('10% × (26,844.40 − 2,624.81) = INR 2,421.96 Mn.'), [])
