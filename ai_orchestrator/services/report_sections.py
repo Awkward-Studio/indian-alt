@@ -572,7 +572,7 @@ class ICReportSectionService:
             if reconciliation_warnings:
                 text += (
                     "\n\n### Calculation review warnings\n\n"
-                    "The displayed statement has unresolved reconciliation differences. "
+                    "The displayed statement has unresolved source-verification or reconciliation issues. "
                     "Amounts have been preserved; these figures are not verified as a reconciled "
                     "income statement. Confirm source classifications and reporting basis before relying on them.\n\n"
                     + "\n".join(f"- {warning}" for warning in reconciliation_warnings)
@@ -761,12 +761,13 @@ class ICReportSectionService:
         # Source statements can use different expense classifications. Report every
         # unresolved bridge visibly without regenerating the whole section. Explicit
         # authored equations and known saved-value mismatches still block acceptance.
+        unverified = []
         if source_citations:
             from ai_orchestrator.services.report_financial_format import financial_source_errors
-            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=True)
+            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=True, unverified=unverified)
             if source_errors:
                 raise ReportSectionStructureError("Key Financials source values do not match: " + "; ".join(source_errors[:5]))
-        return financial_bridge_errors([cls._table_cells(row) for row in table])
+        return unverified + financial_bridge_errors([cls._table_cells(row) for row in table])
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:

@@ -64,6 +64,23 @@ class VDRReportSectionRetryTests(SimpleTestCase):
                 evidence = self.assert_retry_receives_draft(error)
                 self.assertIn(error, evidence)
 
+    def test_missing_operating_costs_retry_requires_inputs_or_explicit_gap(self):
+        error = 'Key Financials source values do not match: Operating Expenses in FY24 Actual has no matching cited workbook value or supported source-input calculation.'
+        evidence = self.assert_retry_receives_draft(error)
+        self.assertIn(error, evidence)
+        self.assertIn('Gross Profit minus operating EBITDA', evidence)
+        self.assertIn('Revenue and COGS inputs as well as EBITDA', evidence)
+        self.assertIn("each derived value's cell", evidence)
+        self.assertIn('replace that cell with Not provided', evidence)
+        self.assertIn('Update dependent calculations and narrative claims', evidence)
+        self.assertGreater(evidence.index('<required_draft_corrections>'), evidence.index('</draft_to_expand>'))
+
+    def test_duplicate_statement_retry_replaces_instead_of_appending(self):
+        evidence = self.assert_retry_receives_draft('Key Financials contains multiple standardized Revenue-to-PAT tables.')
+        self.assertIn('Replace the provisional table in place', evidence)
+        self.assertIn('rather than assuming the last table is correct', evidence)
+        self.assertIn('Supplemental tables on other financial topics may remain', evidence)
+
     def test_frontend_regeneration_receives_previous_run_draft_and_both_feedbacks(self):
         evidence = self.assert_retry_receives_draft('Prior review rejection', retries=0, feedback={
             'report_audit_id': 'previous-report', 'coverage_gaps': ['Explain dilution'],

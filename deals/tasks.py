@@ -2275,6 +2275,22 @@ def process_vdr_report_section(
                     "whose complete same-period primary inputs are actually supplied. A range description showing "
                     "first and last years does not supply intermediate-year values. Missing COGS components require "
                     "Not provided, not estimates or interpolation. Never copy a PBT cell into EBIT. ")
+                retry_corrections += ("Repair every affected period, not only the first example in the error. "
+                    "For Operating Expenses, cite a directly reported operating-cost total excluding COGS, "
+                    "D&A, finance costs and tax, or derive Gross Profit minus operating EBITDA using "
+                    "same-period, same-currency, same-scale inputs on the same reporting basis. If Gross "
+                    "Profit is itself derived, cite the Revenue and COGS inputs as well as EBITDA. "
+                    "Put all supporting input markers in each derived value's cell and explain the formula "
+                    "below the table. A citation to a workbook alone does not establish an operating-cost "
+                    "value. Do not invent a balancing expense or substitute total expenses. When compatible "
+                    "inputs are unavailable, replace that cell with Not provided and identify the missing "
+                    "input. Update dependent calculations and narrative claims to match the corrected cells. ")
+            if 'multiple standardized' in error.casefold():
+                retry_corrections += ("Return exactly one final Revenue-to-PAT statement. Replace the "
+                    "provisional table in place; do not append a corrected main table. Recheck its values "
+                    "against primary evidence rather than assuming the last table is correct. Remove "
+                    "superseded tables and drafting commentary, and reconcile every surrounding narrative "
+                    "figure with the final statement. Supplemental tables on other financial topics may remain. ")
             if 'inconsistent calculations' in error.casefold() or 'arithmetic does not reconcile' in error.casefold():
                 retry_corrections += ("Recalculate each rejected expression with the calculator, including the entire power "
                     "expression for IRR/CAGR, then update the scenario table and prose to the same result. ")
@@ -2307,9 +2323,10 @@ def process_vdr_report_section(
                 f"{context}\n\n<retry_requirement>\n"
                 f"Retry attempt {self.request.retries}. The previous draft failed output validation: {validation_feedback}. "
                 "Write a complete section at the length needed by the evidence. Word count is not an acceptance gate. Do not resubmit "
-                "the same draft. Review every analytical theme in the original section "
-                "instructions and expand supported mechanisms, counterevidence and "
-                "investment implications; explain the consequence of each material gap, "
+                "the same draft. First correct each reported validation defect in place, "
+                "then verify the replacement against the current primary evidence and "
+                "the original section instructions. Preserve unaffected supported analysis. "
+                "Explain the consequence of each material gap, "
                 "excluding source labels and references, without padding, repetition, "
                 "or unsupported claims. Cite every factual claim and supported table "
                 "row with exact supplied [Rnnn] markers, never filename-only "

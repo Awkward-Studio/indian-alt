@@ -9,6 +9,46 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_derived_operating_costs_use_normalized_same_sheet_source_inputs(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows = [['Metric (INR Cr)', 'FY25 Actual'], ['---', '---'],
+                *[[name, '30.00 [1]' if name == 'Operating Expenses' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        source = {'citation_number': 1, 'title': 'Model.xlsx', 'document_id': 'model',
+                  'locator': {'sheet_name': 'PL'}, 'financial_cells': {
+                      address: {'value': value, 'row_label': label, 'period': '2024-25', 'unit_labels': ['INR million']}
+                      for address, value, label in [('B1', '1000', 'Revenue'), ('B2', '-600', 'COGS'), ('B3', '100', 'EBITDA')]
+                  }}
+        warnings = []
+        self.assertEqual(financial_source_errors(rows, [source], unverified=warnings), [])
+        self.assertEqual(warnings, [])
+        rows[5][1] = '35.00 [1]'
+        self.assertTrue(financial_source_errors(rows, [source], unverified=[]))
+        source['financial_cells']['B3']['period'] = '2025-26'
+        warnings = []
+        self.assertEqual(financial_source_errors(rows, [source], unverified=warnings), [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_unrecognized_source_support_is_visible_not_a_false_value_mismatch(self):
+        table = '| Metric (INR Cr) | FY25 Actual |\n| --- | --- |\n' + '\n'.join(
+            f'| {name} | {"30.00 [1]" if name == "Operating Expenses" else "Not provided"} |' for name in FINANCIAL_ROWS)
+        warnings = ICReportSectionService._validate_financial_table(table,
+            source_citations=[{'citation_number': 1, 'title': 'Model.xlsx', 'financial_cells': {}}])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('could not be independently verified', warnings[0])
+
+    def test_unrelated_foreign_currency_cell_does_not_reject_valid_source(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows = [['Metric (INR Cr)', 'FY25 Actual'], ['---', '---'],
+                *[[name, '10.00 [1]' if name == 'Revenue' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        source = {'citation_number': 1, 'financial_cells': {
+            'B1': {'value': '100', 'row_label': 'Revenue', 'period': 'FY25', 'unit_labels': ['INR million']},
+            'C1': {'value': '5', 'row_label': 'Revenue', 'period': 'FY24', 'unit_labels': ['USD million']},
+            'B2': {'value': '5', 'row_label': 'FX sensitivity', 'period': 'FY25', 'unit_labels': ['USD million']},
+        }}
+        self.assertEqual(financial_source_errors(rows, [source]), [])
+        source['financial_cells']['B1']['unit_labels'] = ['USD million']
+        self.assertTrue(financial_source_errors(rows, [source], unverified=[]))
+
     def test_source_currency_and_annual_period_are_checked_before_comparing_amounts(self):
         from ai_orchestrator.services.report_financial_format import financial_source_errors
         rows=[['Metric (INR Mn)','FY25 Actual'],['---','---'],

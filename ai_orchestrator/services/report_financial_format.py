@@ -242,7 +242,7 @@ def financial_bridge_errors(rows: list[list[str]]) -> list[str]:
     return errors
 
 
-def financial_source_errors(rows: list[list[str]], citations: list[dict], *, check_citation_support: bool = True) -> list[str]:
+def financial_source_errors(rows: list[list[str]], citations: list[dict], *, check_citation_support: bool = True, unverified: list[str] | None = None) -> list[str]:
     """Compare direct workbook figures with cited saved values in the same period and units.
 
     This checks extracted Excel results, not recalculation of arbitrary Excel
@@ -292,14 +292,15 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
                 if exact and (exact[2] is None or exact[2] == exact[1]):
                     facts = {exact[1]: facts[exact[1]]} if exact[1] in facts else {}
                 for address, fact in facts.items():
+                    label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
                     if fact.get('period_scope') == 'monthly' and not re.search(r'YTD|month|quarter|Q[1-4]', rows[0][column], re.I):
                         wrong_precise_periods.append(f'{address} is a monthly value, not the stated annual period')
                         continue
                     source_currencies = currencies(' '.join(fact.get('unit_labels') or []))
                     if table_currencies and source_currencies and table_currencies != source_currencies:
-                        errors.append(f'{metric} in {rows[0][column]} mixes report currency {sorted(table_currencies)} with cited source currency {sorted(source_currencies)}; a supported FX conversion is required.')
+                        if label in aliases[metric] and fact.get('period') and period(fact['period']) == period(rows[0][column]):
+                            errors.append(f'{metric} in {rows[0][column]} mixes report currency {sorted(table_currencies)} with cited source currency {sorted(source_currencies)}; a supported FX conversion is required.')
                         continue
-                    label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
                     source_scale = next((value for text in fact.get("unit_labels") or []
                         if (value := scale(text)) is not None and value != 1), None)
                     if source_scale is None:
@@ -309,6 +310,8 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
                         source_value = Decimal(str(fact["value"])) * source_scale / table_scale
                         source_metric = next((name for name,names in aliases.items() if label in names),None)
                         if source_metric:
+                            if source_metric in {'Cost of Goods Sold', 'Operating Expenses', 'Depreciation and Amortization'}:
+                                source_value = abs(source_value)
                             key=(citation.get("document_id"), (citation.get("locator") or {}).get("sheet_name"))
                             source_ledgers.setdefault(key,{}).setdefault(source_metric,set()).add(source_value)
                     if label not in aliases[metric]:
@@ -336,6 +339,8 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
             }
             for ledger in source_ledgers.values():
                 inputs=equations.get(metric)
+                if metric == 'Operating Expenses' and not ledger.get('Gross Profit'):
+                    inputs = [('Revenue', 1), ('Cost of Goods Sold', -1), ('EBITDA', -1)]
                 if inputs and all(len(ledger.get(name,set()))==1 for name,_ in inputs):
                     candidates.append((sum(next(iter(ledger[name]))*sign for name,sign in inputs),'cited source-input calculation'))
                 if metric=='EBITDA' and len(ledger.get('EBITDA',set()))==1 and len(ledger.get('Other Non-operating Income / Expenses',set()))==1:
@@ -348,5 +353,9 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
             elif check_citation_support and not candidates and len(references) == 1 and wrong_precise_periods:
                 errors.append(f"{metric} in {rows[0][column]} cites a different source period: {wrong_precise_periods[0]}")
             elif check_citation_support and not candidates and workbook_references:
-                errors.append(f"{metric} in {rows[0][column]} has no matching cited workbook value or supported source-input calculation. Cite its metric, year and units; otherwise mark Not provided.")
+                issue = f"{metric} in {rows[0][column]} could not be independently verified from the cited workbook cells and supported source-input calculations. Check its metric, period, currency, units and derivation."
+                if unverified is not None:
+                    unverified.append(issue)
+                else:
+                    errors.append(issue)
     return errors
