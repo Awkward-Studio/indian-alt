@@ -57,3 +57,5 @@ The first v9 acceptance batch was cancelled after the reviewer exhausted its ent
 Citation validation is disabled in generation audit metadata (`citation_validation_enabled=false`). Calculator verification operates on supplied inputs and does not certify their document lineage. Metrics with exact source-cell locations resolve to primary saved cells only when their advertised values match those cells. Financial-profile saving skips values with no supporting references and does not block report completion when nothing can be synced.
 
 Percent-stake equations retain their leading multiplier during numeric validation, for example `10% × (13422.20 - 2624.81)`. This does not verify the commercial cash bridge: equity value is EV - debt + cash before other documented adjustments. Report tables and prose must use the same assumptions.
+
+Fiscal ranges compare by their ending year: FY24 matches 2023–24, FY25 matches 2024–25. Calendar and academic year labels remain distinct. Source amounts from different same-year statements still need their own citations and reconciliation.

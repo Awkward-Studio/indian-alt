@@ -9,6 +9,20 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_fiscal_range_matches_ending_year_and_does_not_shift_saved_columns(self):
+        from ai_orchestrator.services.report_financial_format import financial_period_key,financial_source_errors
+        self.assertEqual(financial_period_key('2023-24'),financial_period_key('FY24 Actual'))
+        self.assertEqual(financial_period_key('FY 2024-25'),financial_period_key('FY25 Actual'))
+        self.assertEqual(financial_period_key('2027-03-31 00:00:00'),financial_period_key('FY27E'))
+        self.assertNotEqual(financial_period_key('CY24'),financial_period_key('FY24'))
+        rows=[['Metric (INR Cr)','FY24 Actual','FY25 Actual'],['---','---','---'],
+              *[[name,'12.27 [1]' if name=='Revenue' else 'Not provided','46.58 [1]' if name=='Revenue' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        source={'citation_number':1,'title':'Model.xlsx','financial_cells':{
+            'C4':{'value':'122746186','row_label':'Total Revenue','period':'2023-24','unit_labels':['INR']},
+            'D4':{'value':'465805011','row_label':'Total Revenue','period':'2024-25','unit_labels':['INR']}}}
+        self.assertEqual(financial_source_errors(rows,[source]), [])
+        rows[2][2]='46.54 [1]'
+        self.assertTrue(any('D4=46.5805011' in error for error in financial_source_errors(rows,[source])))
     def test_citation_support_is_non_blocking_but_known_wrong_source_values_still_fail(self):
         from ai_orchestrator.services.report_financial_format import financial_source_errors
         rows=[['Metric (INR Cr)','FY28 Forecast'],['---','---'],*[[name,'215.44 [1]' if name=='EBITDA' else 'Not provided'] for name in FINANCIAL_ROWS]]

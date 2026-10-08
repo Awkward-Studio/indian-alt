@@ -84,6 +84,16 @@ FINANCIAL_ROWS = (
     "Other Non-operating Income / Expenses", "Exceptional Items", "PBT",
     "Income Tax Expense", "PAT",
 )
+
+
+def financial_period_key(text: str):
+    """Compare fiscal ranges by their ending year, preserving calendar/academic labels."""
+    text = re.sub(r'\[[^]\n]+\]', '', str(text))
+    date = re.search(r'\b(20\d{2})-\d{2}-\d{2}\b', text)
+    if date:
+        return 'FY', date[1][-2:]
+    match = re.search(r'\b(FY|CY|AY)?\s*(20\d{2}|\d{2})(?:\s*[-/–]\s*(20\d{2}|\d{2}))?\s*[AEFP]?\b', text, re.I)
+    return ((match[1] or 'FY').upper(), (match[3] or match[2])[-2:]) if match else None
 FINANCIAL_SOURCE_ALIASES = {
     "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
     "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
@@ -243,8 +253,7 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
         return None
 
     def period(text):
-        match = re.search(r"\b(FY|CY)?\s*(20\d{2}|\d{2})(?:[AEF])?\b", re.sub(r"\[\d+\]", "", text), re.I)
-        return ((match[1] or "FY").upper(), match[2][-2:]) if match else None
+        return financial_period_key(text)
 
     aliases = FINANCIAL_SOURCE_ALIASES
     by_number = {int(c["citation_number"]): c for c in citations}
