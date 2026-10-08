@@ -136,6 +136,37 @@ SECTION_OWNERSHIP = (
     "to explain a new investment implication is allowed; repeating a paragraph, schedule, "
     "biography or calculation is not. Do not imply a prior section was reviewed if absent."
 )
+FINANCIAL_DEPTH_GUIDANCE = (
+    "The main Revenue-to-PAT table is the opening financial schedule, not the full section. "
+    "Apply all material October 5 analytical requirements below and use readable subsections to cover:\n"
+    "- Evidence, fiscal periods, reporting perimeter and model/audited/MIS reconciliation; "
+    "available history, projections and separately labelled LTM.\n"
+    "- Revenue drivers, gross-to-net and contribution/EBITDA bridges, margins, cost behaviour "
+    "and operating leverage. Do not invent CM allocations.\n"
+    "- EBITDA-to-CFO-to-free-cash-flow reconciliation, capex, cash, debt, liquidity, funding "
+    "needs and runway. Show a separate cash-flow/liquidity schedule when source values exist.\n"
+    "- Balance-sheet and working-capital schedules, receivable/inventory/payable days with "
+    "explicit denominators, cash conversion, inventory valuation and contract accounting.\n"
+    "- Asset quality, capitalisation, commitments, provisions, related-party balances and "
+    "contingent or off-balance-sheet obligations.\n"
+    "- Supported ROCE, ROIC, ROE/DuPont, liquidity and debt/fixed-charge coverage ratios; "
+    "state definitions and deal with negative or unavailable denominators.\n"
+    "- Earnings quality and annual-report accounting screens; audit qualifications, auditor "
+    "independence/changes, internal controls, MIS and reporting reliability.\n"
+    "- Tax/effective-rate reconciliation, deferred tax, open exposures and material "
+    "jurisdiction-specific issues supported by the supplied records.\n"
+    "- Forecast credibility and supported operating/cash/debt sensitivities; distinguish "
+    "management projections from labelled analyst scenarios.\n"
+    "- Sustainable earnings, cash conversion, balance-sheet strength and the findings that "
+    "change valuation, funding, downside or approval.\n"
+    "For each material topic, interpret the source evidence and calculations rather than "
+    "repeating table cells. When evidence is missing, state the limitation and exact record "
+    "or test needed once. Explain briefly if a topic does not apply to the business. "
+    "Do not silently omit a material theme or fill pages with empty schedules. Supplemental "
+    "financial schedules are encouraged where they aid the analysis. These are coverage "
+    "and depth instructions, not a word-count acceptance gate. Table-only rewrites apply "
+    "only the table requirements; full section generation must retain this analysis."
+)
 FINAL_CHECK = (
     "\n\n- Final output check: cover every material analytical theme above; "
     "cite source-backed claims and table rows with exact [Rnnn] markers from the "
@@ -216,7 +247,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
             "- Begin with period-by-period financial tables, metrics in rows and periods in columns,",
             "- Present the main standardized P&L table specified below, metrics in rows and periods in columns,",
         )
-        user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash findings in prose where supported")
+        user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash in a separate cash-flow and liquidity schedule where supported")
         user = FINANCIAL_TABLE_INSTRUCTION.lstrip() + "\n\n" + user
     if is_financials and "Key Financials table format:" not in system:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
@@ -239,6 +270,9 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
             "adjustments and forecast comparisons in cited paragraphs, bullets or supplemental "
             "tables. Supplemental tables are allowed and do not replace the main "
             "statement. Keep the main statement unambiguous.\n")
+    if is_financials and 'Financial analytical depth and coverage:' not in user:
+        user += '\n\nFinancial analytical depth and coverage:\n' + FINANCIAL_DEPTH_GUIDANCE + '\n'
+        system += '\n\nFinancial analytical depth and coverage:\n' + FINANCIAL_DEPTH_GUIDANCE
     user = re.sub(
         r"- Provide the analytical depth supported by the evidence\. Runtime guidance:.*"
         r"Do not add repetition or unsupported claims to meet a length target\.",
