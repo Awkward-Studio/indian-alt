@@ -12,6 +12,11 @@ from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 
 class DealFieldSynthesisServiceTests(TestCase):
+    def test_existing_short_summary_is_available_as_context_without_copying_full_reports(self):
+        self.deal.deal_summary='A source-based company background summary.'
+        self.assertEqual(DealFieldSynthesisService._existing_deal_payload(self.deal)['existing_summaries']['deal_summary'],self.deal.deal_summary)
+        self.deal.deal_summary='## Executive Summary\n\nAn existing eleven-section report.'
+        self.assertNotIn('deal_summary',DealFieldSynthesisService._existing_deal_payload(self.deal)['existing_summaries'])
     def test_completed_funding_is_not_a_current_ask_and_current_round_is_grounded(self):
         self.document.normalized_text='The company has closed $5Mn. It is now seeking $10 million at a $50 million valuation.'
         self.document.save()

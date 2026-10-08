@@ -217,6 +217,10 @@ Rules:
   evidence even when funding_ask is null. Do not quote the current ledger as evidence.
 - Existing AI-generated or unattributed fields are context, not primary facts. Verify
   them against current documents. Preserve analyst decisions and substantive sheet values.
+- Reuse existing_summaries for supported company background and transaction context
+  where available. Confirm their facts against current indexed evidence; correct stale
+  figures, periods or interpretations. Existing summaries never establish a source
+  amount, currency, unit, or current fundraising request on their own.
 - Keep actual results, estimates, management projections and targets distinct. Preserve
   fiscal/academic/calendar periods and source definitions; do not turn AY25 into an
   unsupported month or collapse differently named margin layers into a verified metric.

@@ -439,6 +439,18 @@ class DealFieldSynthesisService:
             provenance.setdefault(entry.field_name, entry.source_type)
         payload['field_provenance'] = {key:provenance.get(key,'UNATTRIBUTED') for key in payload}
         payload['existing_fields_are_context_not_primary_evidence'] = True
+        latest = deal.latest_analysis
+        analysis = latest.analysis_json if latest and isinstance(latest.analysis_json, dict) else {}
+        snapshot = analysis.get('canonical_snapshot')
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        model = analysis.get('deal_model_data') or snapshot.get('deal_model_data')
+        model = model if isinstance(model, dict) else {}
+        summaries = {}
+        for field in ('deal_summary', 'company_details', 'deal_details'):
+            text = model.get(field) or getattr(deal, field, '')
+            if isinstance(text, str) and text.strip() and len(text) <= 18_000 and not re.search(r'^##\s+(?:Executive Summary|Key Financials|Next Steps)\b', text, re.M):
+                summaries[field] = text
+        payload['existing_summaries'] = summaries
         return payload
 
     @staticmethod
