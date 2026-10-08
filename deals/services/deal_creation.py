@@ -192,6 +192,11 @@ class DealCreationService:
             if not overwrite_ai_owned:
                 return False
             latest = deal.field_provenance.filter(field_name=field_name).order_by('-created_at', '-id').first()
+            placeholder = isinstance(current_value, str) and current_value.strip().casefold() in {
+                'n/a', 'na', 'unknown', 'not provided', 'not available', 'not specified', 'unspecified', '[verify]', '-', '—',
+            }
+            if placeholder and (latest is None or latest.source_type != DealFieldProvenance.SourceType.HUMAN):
+                return True
             return bool(latest and latest.source_type == DealFieldProvenance.SourceType.AI)
 
         def can_write_bool(field_name, current_value):

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
+from decimal import Decimal
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, Iterator
@@ -355,7 +357,7 @@ class DealFieldSynthesisService:
     ) -> dict:
         existing_deal_json = cls._serialize(cls._existing_deal_payload(deal))
         request_sha = hashlib.sha256(cls._serialize({
-            "contract_version": "ledger-fields-v2",
+            "contract_version": "ledger-fields-v3-grounded",
             "batch_key": batch_key,
             "phase": phase,
             "phase_index": phase_index,
@@ -417,7 +419,7 @@ class DealFieldSynthesisService:
 
     @staticmethod
     def _existing_deal_payload(deal: Deal) -> dict:
-        return {
+        payload = {
             "title": deal.title,
             "industry": deal.industry,
             "sector": deal.sector,
@@ -432,6 +434,73 @@ class DealFieldSynthesisService:
             "primary_contact": deal.primary_contact.email if deal.primary_contact_id else deal.primary_contact_name,
             "ia_team": list(deal.responsibility.values_list("email", flat=True)),
         }
+        provenance = {}
+        for entry in deal.field_provenance.order_by('-created_at', '-id'):
+            provenance.setdefault(entry.field_name, entry.source_type)
+        payload['field_provenance'] = {key:provenance.get(key,'UNATTRIBUTED') for key in payload}
+        payload['existing_fields_are_context_not_primary_evidence'] = True
+        return payload
+
+    @staticmethod
+    def _money_key(value):
+        text=str(value or '').strip().casefold().replace(',','')
+        currency='INR' if re.search(r'₹|\binr\b|\brupees?\b',text) else 'USD' if re.search(r'\$|\busd\b',text) else 'GBP' if '£' in text else 'EUR' if '€' in text else None
+        amount=re.search(r'\d+(?:\.\d+)?',text)
+        if not currency or not amount:return None
+        suffix=re.match(r'\s*(crores?|cr|lakhs?|lacs?|millions?|mn|mm|m|billions?|bn|b|thousands?|k)\b',text[amount.end():])
+        scales={'cr':10000000,'crore':10000000,'crores':10000000,'lakh':100000,'lakhs':100000,'lac':100000,'lacs':100000,'million':1000000,'millions':1000000,'mn':1000000,'mm':1000000,'m':1000000,'billion':1000000000,'billions':1000000000,'bn':1000000000,'b':1000000000,'thousand':1000,'thousands':1000,'k':1000}
+        scale=Decimal(scales.get(suffix[1],1) if suffix else 1)
+        return currency,Decimal(amount[0])*scale
+
+    @staticmethod
+    def _quote_key(text):
+        return ' '.join(unicodedata.normalize('NFKC',str(text or '')).casefold().replace('\r',' ').split())
+
+    @classmethod
+    def _ground_funding_ask(cls, result, documents):
+        """Qualify requests against actual source quotes without another model call."""
+        model=result.get('deal_model_data') or {};metadata=result.setdefault('metadata',{})
+        candidate=model.get('funding_ask');valid=[];closed=[]
+        by_title={d.title:cls._quote_key('\n'.join(filter(None,[d.normalized_text,d.extracted_text]))) for d in documents}
+        for evidence in metadata.get('field_evidence') or []:
+            if not isinstance(evidence,dict) or evidence.get('field')!='funding_ask':continue
+            quote=cls._quote_key(evidence.get('source_quote'))
+            source=by_title.get(evidence.get('source_document'),'')
+            if len(quote)<12 or quote not in source:continue
+            status=evidence.get('status')
+            if status in {'closed_round','historical_funding'}:
+                for clause in re.split(r'[;\n]|(?<!\d)\.\s+|\b(?:but|however|and now)\b', quote):
+                    completed = re.search(r'\b(?:closed|raised|secured|completed)\b', clause)
+                    if not completed or re.search(r'\b(?:not|never|no|failed|yet|if|may|might)\b', clause):
+                        continue
+                    amounts = list(re.finditer(r'(?:₹|\$|£|€|\b(?:inr|usd)\s*)\s*\d[\d,.]*(?:\s*(?:crores?|cr|lakhs?|lacs?|millions?|mn|mm|m|billions?|bn|b|thousands?|k))?', clause, re.I))
+                    following = [amount for amount in amounts if amount.start() >= completed.end()]
+                    preceding = [amount for amount in amounts if amount.end() <= completed.start()]
+                    funded = following[0] if following else preceding[-1] if preceding else None
+                    if funded and cls._money_key(evidence.get('value')) == cls._money_key(funded[0]):
+                        closed.append(evidence)
+                        break
+            if status!='current_request' or cls._money_key(evidence.get('value'))!=cls._money_key(candidate):continue
+            # A quote can describe a completed round and a different new ask.
+            # Require the candidate amount in the clause requesting capital.
+            for clause in re.split(r'[;\n]|(?<!\d)\.\s+|\b(?:but|however|and now)\b',quote):
+                request = re.search(r'\b(?:seek(?:s|ing)?|sought|rais(?:e|ing)|request(?:s|ed|ing)?|looking to|funding ask|fundraise target|target raise|proposed fundraise|funds required|capital required)\b',clause)
+                if not request:continue
+                if re.search(r'\b(?:not|never|no longer)\b', clause[:request.end()]):continue
+                if re.search(r'\b(?:closed|have raised|has raised|already raised|previous round)\b',clause):continue
+                amounts=list(re.finditer(r'(?:₹|\$|£|€|\b(?:inr|usd)\s*)\s*\d[\d,.]*(?:\s*(?:crores?|cr|lakhs?|lacs?|millions?|mn|mm|m|billions?|bn|b|thousands?|k))?',clause,re.I))
+                following=[amount for amount in amounts if amount.start() >= request.end()]
+                preceding=[amount for amount in amounts if amount.end() <= request.start()]
+                requested=following[0] if following else preceding[-1] if preceding else None
+                if requested and cls._money_key(candidate) and cls._money_key(candidate)==cls._money_key(requested[0]):
+                    valid.append(evidence);break
+        if candidate and not valid:
+            model['funding_ask']=None;model['funding_ask_for']=None
+            metadata.setdefault('ambiguous_points',[]).append('The current funding ask is not established by an exact quoted request in the supplied documents. Completed funding is retained as historical evidence.')
+            metadata.setdefault('missing_information_requests',[]).append('Obtain the current fundraising request, amount, currency, purpose and round status.')
+        metadata['funding_ask_evidence_validated']=bool(valid)
+        metadata['closed_funding_evidence']=closed
+        return closed
 
     @classmethod
     def synthesize(
@@ -478,6 +547,7 @@ class DealFieldSynthesisService:
                 source_type=source_type, phase=f'candidate_reduce_{reduction_round}', delivery_context=delivery_context)
             reduction_round += 1
         result = dict(results[0])
+        closed_funding = cls._ground_funding_ask(result, documents)
         model_data = dict(result.get("deal_model_data") or {})
         if str(model_data.get("deal_summary") or "").strip():
             result["analyst_report"] = str(model_data["deal_summary"]).strip()
@@ -498,6 +568,13 @@ class DealFieldSynthesisService:
                         generation=delivery_context['generation'],unit_key='Deal synthesis'):
                     raise ValueError('Deal synthesis delivery was cancelled or superseded.')
             deal = Deal.objects.select_for_update().get(pk=deal.pk)
+            current_provenance=deal.field_provenance.filter(field_name='funding_ask').order_by('-created_at','-id').first()
+            if not result.get('deal_model_data',{}).get('funding_ask') and closed_funding and (
+                    current_provenance is None or current_provenance.source_type==DealFieldProvenance.SourceType.AI):
+                if cls._money_key(deal.funding_ask) and cls._money_key(deal.funding_ask) in [cls._money_key(e.get('value')) for e in closed_funding]:
+                    old=deal.funding_ask;deal.funding_ask='';deal.save(update_fields=['funding_ask'])
+                    record_deal_field_changes(deal,{'funding_ask':(old,'')},source_type=DealFieldProvenance.SourceType.AI,source_id=f'field-synthesis:{batch_key}')
+                    result['metadata'].setdefault('ambiguous_points',[]).append('Cleared an AI/unattributed funding ask that matched a documented completed round; a new request is not established.')
             existing = DealAnalysis.objects.filter(
                 deal=deal,
                 analysis_json__metadata__field_synthesis_key=batch_key,

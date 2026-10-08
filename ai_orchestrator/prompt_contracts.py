@@ -150,10 +150,19 @@ DEAL_FIELD_SYNTHESIS_JSON_SCHEMA = {
                 "documents_analyzed": {"type": "array", "items": {"type": "string"}},
                 "missing_information_requests": {"type": "array", "items": {"type": "string"}},
                 "title_evidence": TITLE_EVIDENCE_SCHEMA,
+                "field_evidence": {
+                    "type": "array", "items": {"type": "object", "properties": {
+                        "field": {"type": "string"}, "value": {"type": ["string", "null"]},
+                        "status": {"type": "string", "enum": ["current_request", "closed_round", "historical_funding", "documented_fact", "management_claim", "projection", "unclear"]},
+                        "source_document": {"type": "string"}, "source_quote": {"type": "string"},
+                        "period": {"type": ["string", "null"]},
+                    }, "required": ["field", "value", "status", "source_document", "source_quote", "period"], "additionalProperties": False},
+                },
             },
             "required": [
                 "ambiguous_points", "documents_analyzed", "missing_information_requests",
                 "title_evidence",
+                "field_evidence",
             ],
             "additionalProperties": False,
         },
@@ -201,6 +210,19 @@ Rules:
   refer to the subject company's headquarters, not a banker or customer location.
 - funding_ask is the requested round amount with explicit currency and units. It is not
   revenue or enterprise value. funding_ask_for describes the stated uses of that capital.
+- A completed or closed funding round is historical funding, not a current funding_ask.
+  Return null for the current ask unless a source explicitly requests a new amount.
+- For funding amounts, return metadata.field_evidence with field, value, status,
+  source_document, an exact source_quote, and period. Preserve closed/historical funding
+  evidence even when funding_ask is null. Do not quote the current ledger as evidence.
+- Existing AI-generated or unattributed fields are context, not primary facts. Verify
+  them against current documents. Preserve analyst decisions and substantive sheet values.
+- Keep actual results, estimates, management projections and targets distinct. Preserve
+  fiscal/academic/calendar periods and source definitions; do not turn AY25 into an
+  unsupported month or collapse differently named margin layers into a verified metric.
+- In reduction, a populated candidate is not automatically more reliable than null.
+  Select the field supported by primary evidence and preserve conflicting claims, dates
+  and definitions in ambiguous_points. Never promote closed funding into a requested round.
 - themes must be source-supported investment themes. is_female_led requires evidence
   of a female founder or executive leadership, never inference from a name.
 - priority_rationale explains only an evidence-supported priority. Use null for both when
@@ -208,7 +230,7 @@ Rules:
 - Preserve all identified external banker/advisor contacts in source_relationships,
   with designation, firm, email, telephone and location when available.
 - In candidate reduction, merge complementary supported fields across all candidates;
-  do not discard a populated field merely because a different candidate has null.
+  preserve a populated field only when its source evidence supports the field's meaning.
   Reconcile contradictory fields explicitly, rather than choosing a value arbitrarily.
 - Identify the external source bank and primary external contact only when a source names them.
 - Ignore India Alternatives employees and addresses at @india-alt.com or @india-alternatives.com as external contacts.

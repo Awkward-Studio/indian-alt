@@ -12,6 +12,64 @@ from ai_orchestrator.services.token_budget import ContextBudgetExceeded
 
 
 class DealFieldSynthesisServiceTests(TestCase):
+    def test_completed_funding_is_not_a_current_ask_and_current_round_is_grounded(self):
+        self.document.normalized_text='The company has closed $5Mn. It is now seeking $10 million at a $50 million valuation.'
+        self.document.save()
+        result=self._synthesis_result()
+        result['deal_model_data']['funding_ask']='$5 million'
+        result['metadata']['field_evidence']=[{'field':'funding_ask','value':'$5 million','status':'closed_round',
+            'source_document':self.document.title,'source_quote':'The company has closed $5Mn.', 'period':'2025'}]
+        closed=DealFieldSynthesisService._ground_funding_ask(result,[self.document])
+        self.assertIsNone(result['deal_model_data']['funding_ask'])
+        self.assertEqual(len(closed),1)
+        for amount,valid in [('$10 million',True),('$50 million',False)]:
+            candidate=self._synthesis_result();candidate['deal_model_data']['funding_ask']=amount
+            candidate['metadata']['field_evidence']=[{'field':'funding_ask','value':amount,'status':'current_request',
+                'source_document':self.document.title,'source_quote':'It is now seeking $10 million at a $50 million valuation.', 'period':None}]
+            DealFieldSynthesisService._ground_funding_ask(candidate,[self.document])
+            self.assertEqual(candidate['metadata']['funding_ask_evidence_validated'],valid)
+
+    def test_unquoted_or_invented_funding_evidence_is_suppressed_without_failing_synthesis(self):
+        result=self._synthesis_result();result['metadata']['field_evidence'][0]['source_quote']='The company seeks INR 75 Cr in an invented source.'
+        DealFieldSynthesisService._ground_funding_ask(result,[self.document])
+        self.assertIsNone(result['deal_model_data']['funding_ask'])
+        self.assertTrue(result['metadata']['missing_information_requests'])
+
+    def test_closed_funding_requires_matching_amount_and_an_affirmative_statement(self):
+        for quote, amount in [
+            ('The company has closed $5 million at a $50 million valuation.', '$50 million'),
+            ('The company has not closed $5 million.', '$5 million'),
+            ('The company may have raised $5 million.', '$5 million'),
+        ]:
+            self.document.normalized_text = quote
+            result = self._synthesis_result()
+            result['metadata']['field_evidence'] = [{'field': 'funding_ask', 'value': amount,
+                'status': 'closed_round', 'source_document': self.document.title,
+                'source_quote': quote, 'period': None}]
+            self.assertEqual(DealFieldSynthesisService._ground_funding_ask(result, [self.document]), [])
+
+    def test_negated_funding_request_is_not_an_ask(self):
+        quote = 'The company is not seeking INR 75 Cr.'
+        self.document.normalized_text = quote
+        result = self._synthesis_result()
+        result['metadata']['field_evidence'][0]['source_quote'] = quote
+        DealFieldSynthesisService._ground_funding_ask(result, [self.document])
+        self.assertIsNone(result['deal_model_data']['funding_ask'])
+
+    @patch('deals.services.deal_field_synthesis.EmbeddingService')
+    @patch('deals.services.deal_field_synthesis.AIProcessorService')
+    def test_sheet_placeholder_is_backfilled_but_human_placeholder_is_preserved(self, ai_cls, _embedder):
+        from deals.services.field_provenance import record_deal_field_changes
+        ai_cls.return_value.process_content.return_value=self._synthesis_result()
+        self.deal.funding_ask='Not Specified';self.deal.save()
+        record_deal_field_changes(self.deal,{'funding_ask':('',self.deal.funding_ask)},source_type='SHEET',source_id='sheet')
+        DealFieldSynthesisService.synthesize(self.deal,batch_key='placeholder:sheet',source_type='manual_vdr')
+        self.deal.refresh_from_db();self.assertEqual(self.deal.funding_ask,'INR 75 Cr')
+        self.deal.funding_ask='Not Specified';self.deal.save()
+        record_deal_field_changes(self.deal,{'funding_ask':('INR 75 Cr',self.deal.funding_ask)},source_type='HUMAN',source_id='analyst')
+        DealFieldSynthesisService.synthesize(self.deal,batch_key='placeholder:human',source_type='manual_vdr')
+        self.deal.refresh_from_db();self.assertEqual(self.deal.funding_ask,'Not Specified')
+
     @patch('deals.services.deal_field_synthesis.EmbeddingService')
     @patch('deals.services.deal_field_synthesis.AIProcessorService')
     def test_refreshes_ai_summary_and_keeps_human_themes(self, ai_cls, _embedder):
@@ -91,6 +149,8 @@ class DealFieldSynthesisServiceTests(TestCase):
                 "ambiguous_points": [],
                 "documents_analyzed": ["Pitch Deck.pdf"],
                 "missing_information_requests": [],
+                "field_evidence": [{'field':'funding_ask','value':'INR 75 Cr','status':'current_request',
+                    'source_document':'Pitch Deck.pdf','source_quote':'The company operates in logistics and seeks INR 75 Cr.', 'period':None}],
                 "title_evidence": {
                     "title": self.deal.title,
                     "confidence": "Low",
