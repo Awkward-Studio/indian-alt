@@ -2,6 +2,11 @@ from django.test import SimpleTestCase
 from deals.services.financial_evidence import resolve_metric
 
 class FinancialEvidenceTests(SimpleTestCase):
+    def test_monthly_values_cannot_fill_annual_ledger_fields(self):
+        source={'R001':{'financial_cells':{'E10':{'value':100,'period':'FY25','period_scope':'monthly',
+            'row_label':'Total Income','unit_labels':['INR Mn'],'number_format':''}}}}
+        self.assertEqual(resolve_metric('revenue','100 INR Mn','FY25',['R001'],source,{}),(None,[]))
+
     def test_primary_worksheet_units_override_generated_crore_guess(self):
         sources = {'R001': {'financial_cells': {'H53': {'value': 41.274181703511154,
                     'period': '2026-03-31 00:00:00', 'row_label': 'PBT', 'unit_labels': ['Currency: INR Mn'], 'number_format': '#,##0'}}}}

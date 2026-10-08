@@ -3,6 +3,17 @@ from ai_orchestrator.services.report_calculations import report_calculation_erro
 
 
 class ReportCalculationTests(SimpleTestCase):
+    def test_percentage_notation_is_normalized_before_arithmetic(self):
+        self.assertEqual(report_calculation_errors(r'Margin = $47.90 / 15.52 = 308.63\%$.'), [])
+        self.assertEqual(report_calculation_errors(r'Margin = $3,022.02 / 6,957.26 = 43.44\%$.'), [])
+        self.assertTrue(report_calculation_errors(r'Margin = $100 / 200 = 90\%$.' ))
+        self.assertTrue(report_calculation_errors('Margin = 100 / 200 = 90 percent.'))
+    def test_compound_equations_do_not_validate_only_the_trailing_division(self):
+        self.assertEqual(report_calculation_errors('Adjusted leverage = 33.39 * 5.62 / 161.31 = 1.16x.'), [])
+        self.assertTrue(report_calculation_errors('Adjusted leverage = 33.39 * 5.62 / 161.31 = 2.16x.'))
+        self.assertTrue(report_calculation_errors('Simple ratio = 5.62 / 161.31 = 1.16x.'))
+        self.assertEqual(report_calculation_errors('Proceeds = 100 * 5 / 10 = 50.0.'), [])
+        self.assertTrue(report_calculation_errors('Proceeds = 100 * 5 / 0 = 50.0.'))
     def test_small_percentage_error_is_corrected_with_the_calculator(self):
         from ai_orchestrator.services.report_calculations import correct_small_percentage_calculations
         text,corrections=correct_small_percentage_calculations('Margin = 12.42 / 15.52 = 79.9%.')

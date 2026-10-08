@@ -282,6 +282,12 @@ class ICReportSectionEvidenceService:
                         unit_labels = workbook_labels
                 self._financial_unit_cache[unit_key] = unit_labels
             unit_labels = self._financial_unit_cache[unit_key]
+            if not hasattr(self, '_financial_period_scope_cache'):
+                self._financial_period_scope_cache = {}
+            if unit_key not in self._financial_period_scope_cache:
+                dates = {str(label)[5:10] for (name, _), items in graph.column_labels.items() if name == sheet
+                    for header_row, _, label in items if header_row <= 20 and re.match(r'20\d{2}-\d{2}-\d{2}', str(label))}
+                self._financial_period_scope_cache[unit_key] = 'monthly' if len(dates) > 1 else 'annual'
             for address in visible_cells:
                 cell = graph.cells.get((sheet, address)) or {}
                 value = cell.get("cached_value") if graph.formula(cell) else cell.get("value")
@@ -302,10 +308,21 @@ class ICReportSectionEvidenceService:
                     continue
                 row, column = coordinate_to_tuple(address)
                 labels = [(c, label) for c, _, label in graph.row_labels.get((sheet, row), []) if c < column]
+                unit_pattern = r'^(?:\(?figures?\s+in\s+)?(?:INR|USD|EUR|GBP|Rs\.?|₹|\$)?\s*(?:Cr|crores?|Mn|millions?|lakhs?|lacs?|thousands?|000)?\)?$'
+                row_units = [label for _, label in labels if re.fullmatch(unit_pattern, label.strip(), re.I) and label.strip()]
+                metric_labels = [(c, label) for c, label in labels if label not in row_units]
+                # A unit selector's dropdown options are not the statement unit.
+                # Prefer the explicit unit on this metric row, then a complete
+                # currency-and-scale declaration on the statement itself.
+                declared_units = [label for label in unit_labels
+                    if re.search(r'₹|\b(?:INR|USD|EUR|GBP|Rs)\b', label, re.I)
+                    and re.search(r'\b(?:Cr|crores?|Mn|millions?|lakhs?|lacs?|thousands?|000)\b', label, re.I)]
+                selected_units = list(dict.fromkeys(row_units or declared_units or unit_labels))
                 periods = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and
                     is_financial_period_label(label)]
-                financial_cells[address] = {"value": value, "row_label": max(labels)[1] if labels else "",
-                    "period": max(periods)[1] if periods else "", "unit_labels": unit_labels,
+                financial_cells[address] = {"value": value, "row_label": max(metric_labels)[1] if metric_labels else "",
+                    "period": max(periods)[1] if periods else "", "unit_labels": selected_units,
+                    'period_scope': self._financial_period_scope_cache[unit_key],
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
                 from .report_financial_format import prepared_display_values
                 prepared = prepared_display_values(financial_cells[address])
@@ -494,11 +511,21 @@ class ICReportSectionEvidenceService:
                     notes.append(f"{self.document_titles[source_id]}: additional schedule headers omitted at context token budget")
         # Ensure the model sees statement values themselves, not only semantic
         # summaries or header chunks. This uses extracted rows for every workbook.
-        financial_label = re.compile(r"^(?:(?:total |net |operating )?(?:revenues?|sales|turnover)|revenue from operations|cost of goods sold|(?:total )?cost of revenue|gross profit|(?:total )?operating expenses|EBITDA|EBIT|depreciation(?:.*amortization)?|finance costs|interest expenses?|other income|exceptional items?|(?:profit before tax|profit after tax)(?:\s*\((?:PBT|PAT)\))?|PBT|PAT|(?:income )?tax(?: expense)?)$", re.I)
+        financial_label = re.compile(r"^(?:(?:total |net |operating )?(?:revenues?|sales|turnover)|total income|net profit|revenue from operations|cost of goods sold|(?:total )?cost of revenue|gross profit|(?:total )?operating expenses|EBITDA|EBIT|depreciation(?:.*amortization)?|finance costs?|interest expenses?|other income|exceptional items?|(?:profit before tax|profit after tax)(?:\s*\((?:PBT|PAT)\))?|PBT|PAT|(?:income )?tax(?: expense)?)$", re.I)
         anchor_budget = min(8192, token_budget * 2 // 3)
         for source_id, sheets in sheets_by_source.items():
             graph = self._formula_graph(source_id)
-            for sheet in sorted(sheets):
+            # Annual summary statements can be on a different worksheet from
+            # the ranked monthly schedules. Include actual statement rows from
+            # the workbook rather than trusting generated table summaries.
+            def statement_order(sheet):
+                labels = [str(label) for (name, _), items in graph.column_labels.items()
+                    if name == sheet for _, _, label in items]
+                annual_years = {label.casefold() for label in labels if re.fullmatch(r'FY\s*\d{2,4}[AEFP]?', label, re.I)}
+                dated_columns = sum(bool(re.match(r'20\d{2}-\d{2}-\d{2}', label)) for label in labels)
+                return -len(annual_years), dated_columns, sheet
+            ordered_sheets = sorted(graph.by_sheet, key=statement_order)
+            for sheet in ordered_sheets:
                 statement_rows = [(row, labels) for (name, row), labels in graph.row_labels.items()
                                   if name == sheet and any(financial_label.fullmatch(label.strip()) for _, _, label in labels)]
                 for row, labels in statement_rows:
@@ -600,6 +627,11 @@ class ICReportSectionEvidenceService:
         if not candidates:
             strategy = "ordered_index_fallback"
             candidates = self._fallback_chunks()
+        if title == 'Key Financials':
+            candidates = [chunk for chunk in candidates if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim'}]
+            if not candidates:
+                candidates = [chunk for chunk in self._fallback_chunks()
+                    if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim'}]
 
         comparison = None
         if title == "Industry Overview":

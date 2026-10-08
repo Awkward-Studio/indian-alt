@@ -10,6 +10,22 @@ from ai_orchestrator.services.token_budget import estimate_tokens, estimate_mess
 
 
 class ICReportSectionEvidenceServiceTests(TestCase):
+    def test_metric_label_and_units_are_bound_to_the_same_primary_row(self):
+        document = SimpleNamespace(id='row-source', title='Model.xlsx', extraction_manifest={'sheets': [{
+            'name': 'Annual statement', 'cells': [
+                {'coordinate':'E6','value':'FY24'}, {'coordinate':'F6','value':'FY25'},
+                {'coordinate':'B67','value':'Total Income'}, {'coordinate':'D67','value':'INR Mn'},
+                {'coordinate':'E67','value':268.99}, {'coordinate':'F67','value':443.95},
+                {'coordinate':'A2','value':'USD'}, {'coordinate':'A3','value':'Lakhs'},
+            ]}]})
+        service=ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal',title='Example'),documents=[document],embedding_service=MagicMock())
+        chunk=SimpleNamespace(source_type='document',source_id='row-source',content='E67=268.99 | F67=443.95',
+            metadata={'chunk_kind':'spreadsheet_cells','sheet_name':'Annual statement'})
+        fact=service._citation(chunk,rank=1)['financial_cells']['F67']
+        self.assertEqual(fact['row_label'],'Total Income')
+        self.assertEqual(fact['period'],'FY25')
+        self.assertEqual(fact['unit_labels'],['INR Mn'])
+
     @classmethod
     def setUpTestData(cls):
         PipelineRegistryService.ensure_report_pipeline_defaults()

@@ -9,6 +9,17 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_source_currency_and_annual_period_are_checked_before_comparing_amounts(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows=[['Metric (INR Mn)','FY25 Actual'],['---','---'],
+            *[[name,'100.00 [1]' if name=='Revenue' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        fact={'value':100,'row_label':'Total Income','period':'FY25','unit_labels':['USD Mn']}
+        source={'citation_number':1,'title':'Model.xlsx','financial_cells':{'C10':fact}}
+        self.assertTrue(any('currency' in error for error in financial_source_errors(rows,[source])))
+        fact.update(unit_labels=['INR Mn'],period_scope='monthly')
+        self.assertTrue(financial_source_errors(rows,[source]))
+        fact['period_scope']='annual'
+        self.assertEqual(financial_source_errors(rows,[source]),[])
     def test_fiscal_range_matches_ending_year_and_does_not_shift_saved_columns(self):
         from ai_orchestrator.services.report_financial_format import financial_period_key,financial_source_errors
         self.assertEqual(financial_period_key('2023-24'),financial_period_key('FY24 Actual'))

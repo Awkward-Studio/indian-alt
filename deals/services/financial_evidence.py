@@ -5,7 +5,7 @@ from deals.services.ledger_financials import fiscal_period, number
 
 CONTRACT = 'primary-financial-fields-v2'
 ALIASES = {
-    'revenue': {'revenue', 'revenues', 'totalrevenue', 'operatingrevenue', 'netsales', 'revenuefromoperations'},
+    'revenue': {'revenue', 'revenues', 'totalrevenue', 'totalincome', 'operatingrevenue', 'netsales', 'revenuefromoperations'},
     'cogs': {'cogs', 'costofgoodssold', 'costofmaterials', 'purchasesofservices'},
     'gross_profit': {'grossprofit', 'grossmargin'},
     'gross_margin': {'grossmargin', 'gm', 'grossprofitmargin'},
@@ -49,6 +49,8 @@ def resolve_metric(key, value, fy, refs, citations, evidence_by_ref):
         cells = source.get('financial_cells') or {}
         if cells:
             for fact in cells.values():
+                if fact.get('period_scope') == 'monthly':
+                    continue
                 if source_year(fact.get('period')) != year:
                     continue
                 aliases = ALIASES.get(key, {clean(key)})

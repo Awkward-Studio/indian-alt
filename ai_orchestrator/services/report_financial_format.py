@@ -16,6 +16,10 @@ FINANCIAL_BASIS_RULE = (
     "For each formula, use matching source periods, currency/scale and reporting basis; "
     "do not mix actual and forecast, adjusted and unadjusted EBITDA, or worksheet years. "
     "Do not replace unknown units with guessed units."
+    " Validation order: verify each cited amount against its saved primary-source metric, "
+    "worksheet cell, period, currency and units; normalize to the stated reporting basis; "
+    "then calculate from the verified unrounded inputs and round only for display. "
+    "AI-produced table summaries are navigation aids, never primary evidence for an amount or year."
 )
 
 
@@ -95,7 +99,7 @@ def financial_period_key(text: str):
     match = re.search(r'\b(FY|CY|AY)?\s*(20\d{2}|\d{2})(?:\s*[-/–]\s*(20\d{2}|\d{2}))?\s*[AEFP]?\b', text, re.I)
     return ((match[1] or 'FY').upper(), (match[3] or match[2])[-2:]) if match else None
 FINANCIAL_SOURCE_ALIASES = {
-    "Revenue": {"revenue", "revenues", "totalrevenue", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
+    "Revenue": {"revenue", "revenues", "totalrevenue", "totalincome", "operatingrevenue", "revenuefromoperations", "netsales", "sales"},
     "Cost of Goods Sold": {"costofgoodssold", "cogs", "totalcostofrevenue", "costofrevenue", "costofsales"},
     "Gross Profit": {"grossprofit"},
     "Operating Expenses": {"operatingexpenses", "totaloperatingexpenses", "operatingexpenditure", "totaloperatingexpenditure", "opex"},
@@ -259,6 +263,11 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
     by_number = {int(c["citation_number"]): c for c in citations}
     table_scale = scale(rows[0][0])
     native_units = bool(re.search(r"native\s+(?:model\s+)?units",rows[0][0],re.I))
+    def currencies(text):
+        return {code for code, pattern in [('INR', r'₹|\b(?:INR|rupees?|Rs)\b'),
+            ('USD', r'\bUSD\b'), ('EUR', r'€|\bEUR\b'), ('GBP', r'£|\bGBP\b')]
+            if re.search(pattern, text, re.I)}
+    table_currencies = currencies(rows[0][0])
     if native_units: table_scale=Decimal(1)
     if table_scale is None:
         return []
@@ -283,6 +292,13 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
                 if exact and (exact[2] is None or exact[2] == exact[1]):
                     facts = {exact[1]: facts[exact[1]]} if exact[1] in facts else {}
                 for address, fact in facts.items():
+                    if fact.get('period_scope') == 'monthly' and not re.search(r'YTD|month|quarter|Q[1-4]', rows[0][column], re.I):
+                        wrong_precise_periods.append(f'{address} is a monthly value, not the stated annual period')
+                        continue
+                    source_currencies = currencies(' '.join(fact.get('unit_labels') or []))
+                    if table_currencies and source_currencies and table_currencies != source_currencies:
+                        errors.append(f'{metric} in {rows[0][column]} mixes report currency {sorted(table_currencies)} with cited source currency {sorted(source_currencies)}; a supported FX conversion is required.')
+                        continue
                     label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
                     source_scale = next((value for text in fact.get("unit_labels") or []
                         if (value := scale(text)) is not None and value != 1), None)

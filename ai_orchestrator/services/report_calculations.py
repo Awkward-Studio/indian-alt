@@ -9,6 +9,30 @@ RATIO = re.compile(rf"(?P<a>{NUMBER})\s*/\s*(?P<b>{NUMBER})\s*=\s*(?P<result>{NU
 EQUATION = re.compile(rf"(?P<expression>[(-]*{NUMBER}(?:\s*(?:\*\*|[+*/×÷−-])\s*[(+-]*{NUMBER}\s*\)*)+)\s*=\s*(?P<result>{NUMBER})\s*(?P<unit>x|times|%)?", re.I)
 
 
+def normalize_financial_notation(text):
+    """Normalize notation without changing source amounts or inferring currency."""
+    text = text.replace(r'\%', '%').replace(r'\times', '×').replace(r'\div', '÷').replace(r'\cdot', '×')
+    text = re.sub(r'\$([^$\n]*=[^$\n]*)\$', r'\1', text)
+    text = re.sub(r'\\\(([^\n]*?)\\\)', r'\1', text)
+    text = re.sub(rf'({NUMBER})\s*(?:percent|per cent)\b', r'\1%', text, flags=re.I)
+    return text
+
+
+def standalone_ratios(text):
+    """Exclude trailing division fragments already checked as full equations."""
+    compound = []
+    for match in EQUATION.finditer(text):
+        if RATIO.fullmatch(match[0]):
+            continue
+        try:
+            arithmetic_bounds(match['expression'])
+        except (ValueError, SyntaxError, ArithmeticError):
+            continue
+        compound.append(match.span())
+    return [match for match in RATIO.finditer(text)
+        if not any(start <= match.start() and match.end() <= end for start, end in compound)]
+
+
 def arithmetic_bounds(expression):
     """Propagate displayed input precision through bounded numeric arithmetic."""
     expression = expression.replace(',', '').replace('×', '*').replace('÷', '/').replace('−', '-')
@@ -102,7 +126,7 @@ def correct_small_percentage_calculations(markdown: str) -> tuple[str, list[dict
 
 def report_calculation_errors(markdown: str) -> list[str]:
     errors = []
-    source = re.split(r"^###\s+Citations\s*$", markdown, flags=re.M)[0]
+    source = normalize_financial_notation(re.split(r"^###\s+Citations\s*$", markdown, flags=re.M)[0])
     # Currency labels and inline source markers are annotations, not operands.
     arithmetic_source = re.sub(r'\[(?:R\d+[^\]\n]*|\d+(?:\s*[,;]\s*\d+)*)\]', '', source)
     arithmetic_source = re.sub(r'(?:₹|\$|\bINR\b|\bUSD\b)\s*(?=[-+]?\d)', '', arithmetic_source)
@@ -126,7 +150,7 @@ def report_calculation_errors(markdown: str) -> list[str]:
             errors.append(f"{match[0]} falls outside its displayed-input calculation range {bounds[0]:.6f} to {bounds[1]:.6f}{match['unit'] or ''}")
     for paragraph in re.split(r"\n\s*\n", arithmetic_source):
         ratios = []
-        for match in RATIO.finditer(paragraph):
+        for match in standalone_ratios(paragraph):
             denominator = numeric(match['b'])
             if denominator == 0:
                 errors.append(f"Undefined division by zero: {match[0]}")
@@ -152,7 +176,7 @@ def report_calculation_errors(markdown: str) -> list[str]:
     # A scenario table and its own explicitly calculated paragraph must agree.
     calculated_cases = {}
     for match in re.finditer(r"^#{3,4}\s+(.+)\n([\s\S]*?)(?=^#{1,4}\s|\Z)", source, re.M):
-        ratios = [m for m in RATIO.finditer(match[2]) if (m['unit'] or '').lower() in {'x','times'} and numeric(m['b'])]
+        ratios = [m for m in standalone_ratios(match[2]) if (m['unit'] or '').lower() in {'x','times'} and numeric(m['b'])]
         if len(ratios) == 1:
             calculated_cases[re.sub(r"[^a-z0-9]", "", match[1].casefold())] = ratio_bounds(ratios[0]['a'], ratios[0]['b'])
     lines = source.splitlines()

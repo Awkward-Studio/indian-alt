@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v12"
+    CACHE_VERSION = "ic-report-sections-v13"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -547,12 +547,20 @@ class ICReportSectionService:
             text = f"{target}\n\n{text}"
         text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
+        from ai_orchestrator.services.report_calculations import normalize_financial_notation
+        text = normalize_financial_notation(text)
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
         if title == "Key Financials":
             text = cls._normalize_financial_amount_cells(text)
             text = cls._expand_financial_period_citations(text, {int(item['citation_number']) for item in used_citations})
             text = cls._cite_supported_financial_calculations(text, {int(item['citation_number']) for item in used_citations})
+        # Validate the cited metric, period and normalized reporting basis before
+        # testing arithmetic. Correct arithmetic alone cannot establish facts.
+        reconciliation_warnings = []
+        if strict_financial_table and title == 'Key Financials':
+            reconciliation_warnings = cls._validate_financial_table(text,
+                verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
         from ai_orchestrator.services.report_calculations import report_calculation_errors, correct_small_percentage_calculations
         text, corrections = correct_small_percentage_calculations(text)
         if calculation_corrections is not None:
@@ -561,7 +569,6 @@ class ICReportSectionService:
         if calculation_errors:
             raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
         if strict_financial_table and title == "Key Financials":
-            reconciliation_warnings = cls._validate_financial_table(text, verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
             if reconciliation_warnings:
                 text += (
                     "\n\n### Calculation review warnings\n\n"
@@ -751,16 +758,15 @@ class ICReportSectionService:
                 if re.search(r"\d", re.sub(r"\[[^]\n]+\]", "", cell)) and displayed_amount(cell) is None:
                     raise ReportSectionStructureError(f"Key Financials row '{label}' must use plain numeric amounts; explain qualifications in prose.")
         from ai_orchestrator.services.report_financial_format import financial_bridge_errors
-        bridge_errors = financial_bridge_errors([cls._table_cells(row) for row in table])
         # Source statements can use different expense classifications. Report every
         # unresolved bridge visibly without regenerating the whole section. Explicit
         # authored equations and known saved-value mismatches still block acceptance.
         if source_citations:
             from ai_orchestrator.services.report_financial_format import financial_source_errors
-            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=False)
+            source_errors = financial_source_errors([cls._table_cells(row) for row in table], source_citations, check_citation_support=True)
             if source_errors:
                 raise ReportSectionStructureError("Key Financials source values do not match: " + "; ".join(source_errors[:5]))
-        return bridge_errors
+        return financial_bridge_errors([cls._table_cells(row) for row in table])
 
     @staticmethod
     def _mark_rejected_section_audit(audit_log_id: str | None, error: ReportSectionValidationError) -> None:
@@ -892,6 +898,8 @@ class ICReportSectionService:
                     "generation_mode": "grounded_single_pass",
                     "source_review_enabled": False,
                     "citation_validation_enabled": False,
+                    "financial_source_validation_enabled": title == 'Key Financials',
+                    "financial_validation_order": ['source_metric_and_period', 'currency_and_scale', 'arithmetic'] if title == 'Key Financials' else [],
                     "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
                     **({
                         "vdr_parent_audit_id": str(source_id),

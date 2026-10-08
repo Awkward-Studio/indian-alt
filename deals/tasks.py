@@ -2332,7 +2332,7 @@ def process_vdr_report_section(
         )
         if not delivery_is_current(audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title):
             return {"status": "stale", "reason": "Superseded VDR report delivery."}
-        if section_title == 'Key Financials' and getattr(settings, 'AI_INFERENCE_TARGET', '') == 'h100':
+        if section_title == 'Key Financials':
             from deals.services.key_financials_profile import sync_section
             sync_section(deal, section, audit_log_id)
         return {"status": "completed", "section": section, "evidence_metadata": evidence_metadata}
