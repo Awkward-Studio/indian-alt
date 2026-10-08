@@ -576,6 +576,47 @@ class DealDocumentViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
     ),
 )
 class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
+    @action(detail=True, methods=['get'], url_path='citation-document')
+    def citation_document(self, request, pk=None):
+        """Resolve a citation label to an existing document, never a guessed URL."""
+        import unicodedata
+        deal = self.get_object()
+        label = str(request.query_params.get('label') or '').strip()
+        label = re.sub(r'^\[?Source:\s*', '', label, flags=re.I).rstrip(']')
+        if not label or len(label) > 1500:
+            return Response({'error':'A valid source label is required.'}, status=400)
+        def normalized(value):
+            return ' '.join(unicodedata.normalize('NFKC',str(value)).casefold().split())
+        source = normalized(label)
+        documents = list(deal.documents.select_related('deal'))
+        if ': ' in label:
+            owner = label.split(': ',1)[0]
+            documents += list(DealDocument.objects.filter(deal__title__iexact=owner).select_related('deal'))
+        candidates = []
+        for doc in documents:
+            for title in (doc.title, f'{doc.deal.title}: {doc.title}'):
+                name=normalized(title)
+                if source == name or (source.startswith(name) and source[len(name):len(name)+1] in {',',';',']'}):
+                    candidates.append(doc)
+                    break
+        candidates = list({doc.pk:doc for doc in candidates}.values())
+        if len(candidates) != 1:
+            return Response({'error':'The exact cited document could not be resolved. Open the source from the deal documents.'},status=404 if not candidates else 409)
+        doc=candidates[0]
+        evidence=doc.evidence_json if isinstance(doc.evidence_json,dict) else {}
+        metadata=evidence.get('source_metadata') or {}
+        open_url=None
+        if doc.onedrive_id:
+            from microsoft.services.graph_service import GraphAPIService, DMS_DRIVE_ID
+            drive_id=metadata.get('source_drive_id') or doc.deal.source_drive_id or DMS_DRIVE_ID
+            try:
+                open_url=GraphAPIService().get_drive_item_download_url(drive_id,doc.onedrive_id)
+            except Exception:
+                logger.warning('Could not obtain original citation document %s',doc.pk)
+        if not open_url and not doc.onedrive_id and doc.file_url:
+            open_url=doc.file_url if urlsplit(doc.file_url).scheme in {'http','https'} else None
+        return Response({'document_id':str(doc.pk),'title':doc.title,'open_url':open_url,
+            'indexed_text':str(doc.normalized_text or doc.extracted_text or '') if not open_url else ''})
     # Use select_related to avoid N+1 queries on foreign keys
     queryset = Deal.objects.select_related(
         'bank', 'primary_contact', 'request'
