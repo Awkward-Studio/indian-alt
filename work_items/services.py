@@ -89,13 +89,23 @@ def record_task_activity(
 def analysis_report(analysis: DealAnalysis | None, deal: Deal | None = None) -> str:
     if analysis:
         payload = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
+        snapshot = payload.get("canonical_snapshot")
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("analyst_report"), str) and snapshot['analyst_report'].strip():
+            return snapshot["analyst_report"]
         report = payload.get("analyst_report")
         if isinstance(report, str) and report.strip():
             return report
-        snapshot = payload.get("canonical_snapshot")
-        if isinstance(snapshot, dict) and isinstance(snapshot.get("analyst_report"), str):
-            return snapshot["analyst_report"]
     return (deal.deal_summary if deal else "") or ""
+
+
+def latest_task_analysis(deal):
+    """Keep task-bearing reports available while synthesis or a partial report runs."""
+    latest = deal.latest_analysis
+    for analysis in deal.analyses.order_by('-version', '-created_at').iterator():
+        report = analysis_report(analysis)
+        if re.search(r'^#{1,3}\s+(?:\d+[.)]\s*)?Next Steps\b', report, re.I | re.M) or inspect_analysis_next_steps(report)['tasks']:
+            return analysis
+    return latest
 
 
 def normalized_task_text(value: str) -> str:
@@ -128,7 +138,7 @@ def _similarity(left: str, right: str) -> float:
         return 0.0
     sequence = SequenceMatcher(None, left_normalized, right_normalized).ratio()
     left_tokens, right_tokens = set(left_normalized.split()), set(right_normalized.split())
-    overlap = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+    overlap = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
     return max(sequence, overlap)
 
 
@@ -226,7 +236,7 @@ def _priority(value: str) -> str:
 
 @transaction.atomic
 def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> dict:
-    analysis = analysis or deal.latest_analysis
+    analysis = analysis or latest_task_analysis(deal)
     markdown = analysis_report(analysis, deal)
     report_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
     candidates = merged_task_candidates(markdown)
@@ -270,6 +280,8 @@ def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> d
             setattr(suggestion, field, candidate[field])
         suggestion.analysis = analysis
         suggestion.analysis_version = analysis.version if analysis else None
+        if suggestion.state == TaskSuggestionState.SUPERSEDED:
+            suggestion.state = TaskSuggestionState.ACCEPTED if existing_task else TaskSuggestionState.PENDING
         if existing_task and suggestion.state not in (TaskSuggestionState.DISMISSED, TaskSuggestionState.ACCEPTED):
             suggestion.task = existing_task
             suggestion.state = TaskSuggestionState.ACCEPTED
@@ -284,14 +296,17 @@ def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> d
 
 def sync_latest_deal_suggestions(deal_id) -> dict:
     deal = Deal.objects.get(id=deal_id)
-    return sync_deal_suggestions(deal, deal.latest_analysis)
+    return sync_deal_suggestions(deal, latest_task_analysis(deal))
 
 
 def ensure_latest_suggestions(deal: Deal) -> None:
-    analysis = deal.latest_analysis
+    analysis = latest_task_analysis(deal)
     markdown = analysis_report(analysis, deal)
     report_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-    if not TaskSuggestion.objects.filter(deal=deal, report_hash=report_hash).exists():
+    current = TaskSuggestion.objects.filter(deal=deal, report_hash=report_hash)
+    expected = {(candidate['fingerprint'], candidate['source_section']) for candidate in merged_task_candidates(markdown)}
+    stored = set(current.exclude(state=TaskSuggestionState.SUPERSEDED).values_list('fingerprint', 'source_section'))
+    if expected != stored:
         sync_deal_suggestions(deal, analysis)
 
 

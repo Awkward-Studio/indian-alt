@@ -42,6 +42,9 @@ class TaskViewSet(viewsets.ModelViewSet):
         params = self.request.query_params
         if params.get("deal"):
             queryset = queryset.filter(deal_id=params["deal"])
+        if params.get('source_section'):
+            queryset = queryset.filter(Q(source_suggestions__source_section__iexact=params['source_section']) |
+                Q(source_suggestions__source_references__contains=[{'section': params['source_section']}])).distinct()
         if params.get("assignee"):
             queryset = queryset.filter(assignee_id=params["assignee"])
         if _boolean(params.get("mine", "false")):
@@ -228,6 +231,9 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
             if deal:
                 ensure_latest_suggestions(deal)
             queryset = queryset.filter(deal_id=params["deal"])
+        if params.get('source_section'):
+            queryset = queryset.filter(Q(source_section__iexact=params['source_section']) |
+                Q(source_references__contains=[{'section': params['source_section']}]))
         state = params.get("state", TaskSuggestionState.PENDING)
         if state:
             queryset = queryset.filter(state=state)
@@ -241,12 +247,21 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
             # Lock only the suggestion row. Joining the nullable task relation here
             # produces an outer join that PostgreSQL cannot lock with FOR UPDATE.
             suggestion = TaskSuggestion.objects.select_for_update().get(pk=pk)
+            # Different report versions may carry the same action. Serialize
+            # acceptance for this deal so concurrent clicks cannot duplicate it.
+            Deal.objects.select_for_update().get(pk=suggestion.deal_id)
             if suggestion.task_id:
                 return Response(TaskSerializer(suggestion.task, context={"request": request}).data)
             existing = Task.objects.filter(deal=suggestion.deal, fingerprint=suggestion.fingerprint).first()
-            task = existing or Task.objects.create(
-                **accepted_task_defaults(suggestion), created_by=request.user.profile
-            )
+            if existing:
+                task = existing
+            else:
+                allowed = {'title', 'description', 'priority', 'due_date', 'assignee_id'}
+                serializer = TaskSerializer(data={key: value for key, value in request.data.items() if key in allowed}, partial=True)
+                serializer.is_valid(raise_exception=True)
+                defaults = {**accepted_task_defaults(suggestion), **serializer.validated_data}
+                defaults['position'] = (Task.objects.aggregate(max_position=Max('position'))['max_position'] or 0) + 1
+                task = Task.objects.create(**defaults, created_by=request.user.profile)
             suggestion.task = task
             suggestion.state = TaskSuggestionState.ACCEPTED
             suggestion.save(update_fields=["task", "state", "updated_at"])

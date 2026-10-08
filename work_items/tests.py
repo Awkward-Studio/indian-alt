@@ -24,6 +24,32 @@ REPORT = """
 
 
 class SuggestionMergeTests(SimpleTestCase):
+    def test_nested_headings_keep_parent_section_and_task_column_is_not_owner(self):
+        from deals.services.analysis_next_steps import inspect_analysis_next_steps
+        parsed = inspect_analysis_next_steps('''## Key Financials
+### Further diligence
+| Next Step | Owner |
+| --- | --- |
+| Obtain the audited accounts. | Finance team |
+''')
+        self.assertEqual(parsed['tasks'][0]['source_section'], 'Key Financials')
+        self.assertEqual(parsed['tasks'][0]['task'], 'Obtain the audited accounts.')
+        self.assertEqual(parsed['tasks'][0]['owner'], 'Finance team')
+
+    def test_explicit_action_lists_are_picked_up_without_citation_or_risk_bullets(self):
+        from deals.services.analysis_next_steps import inspect_analysis_next_steps
+        parsed = inspect_analysis_next_steps('''## Risk Factors
+- Revenue is concentrated.
+## Next Steps
+### Pre-IC decision gates
+- Obtain the latest cap table.
+1. Financials: Reconcile audited accounts against the model.
+### Citations
+1. Obtain source title only.
+''')
+        self.assertEqual(len(parsed['tasks']), 2)
+        self.assertTrue(all(task['source_section']=='Next Steps' for task in parsed['tasks']))
+
     def test_merges_matching_canonical_row_and_keeps_unmatched_row(self):
         candidates = merged_task_candidates(REPORT)
 
@@ -35,6 +61,38 @@ class SuggestionMergeTests(SimpleTestCase):
 
 
 class WorkItemAPITests(TestCase):
+    def test_synthesis_summary_keeps_previous_report_suggestions_available(self):
+        from .services import ensure_latest_suggestions, latest_task_analysis
+        sync_deal_suggestions(self.deal, self.analysis)
+        DealAnalysis.objects.create(deal=self.deal, version=2,
+            analysis_json={'analyst_report': 'Short source-based company summary.', 'metadata': {'field_synthesis_key': 'new-run'}})
+        self.assertEqual(latest_task_analysis(self.deal).pk, self.analysis.pk)
+        ensure_latest_suggestions(self.deal)
+        self.assertEqual(TaskSuggestion.objects.filter(deal=self.deal,state=TaskSuggestionState.PENDING).count(),2)
+
+    def test_accept_supports_reviewed_owner_and_due_date_and_source_filter(self):
+        sync_deal_suggestions(self.deal, self.analysis)
+        suggestion = TaskSuggestion.objects.filter(deal=self.deal).first()
+        response = self.client.post(reverse('task-suggestion-accept',kwargs={'pk':suggestion.pk}),
+            {'title':'Verify current financial statements', 'assignee_id': str(self.profile.pk), 'due_date':'2026-12-01'},format='json')
+        self.assertEqual(response.status_code,201,response.data)
+        self.assertEqual(response.data['assignee']['id'],str(self.profile.pk))
+        self.assertEqual(response.data['due_date'],'2026-12-01')
+        filtered=self.client.get(reverse('task-list'),{'deal':str(self.deal.pk),'source_section':'Next Steps'})
+        self.assertEqual(filtered.data['count'],1)
+
+    def test_subsection_attribution_is_repaired_without_reviving_dismissed_suggestions(self):
+        from .services import ensure_latest_suggestions
+        sync_deal_suggestions(self.deal, self.analysis)
+        suggestion=TaskSuggestion.objects.filter(deal=self.deal).first()
+        suggestion.source_section='Pre-IC Decision Gates'
+        suggestion.state=TaskSuggestionState.DISMISSED
+        suggestion.save()
+        ensure_latest_suggestions(self.deal)
+        suggestion.refresh_from_db()
+        self.assertNotEqual(suggestion.source_section,'Pre-IC Decision Gates')
+        self.assertEqual(suggestion.state,TaskSuggestionState.DISMISSED)
+
     def setUp(self):
         self.user = User.objects.create_user(username="analyst@example.com", password="test")
         self.profile = Profile.objects.create(user=self.user, email="analyst@example.com", name="Analyst")

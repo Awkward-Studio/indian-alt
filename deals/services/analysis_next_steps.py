@@ -4,6 +4,7 @@ import html
 import re
 from collections import Counter
 from typing import Any
+from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -71,6 +72,8 @@ def _classify_table(headers: list[str]) -> str | None:
         return "canonical_task_table"
     if any("next step" in header or "further diligence" in header for header in normalized):
         return "section_next_steps"
+    if has_task:
+        return "section_next_steps"
     if has_action:
         return "action_table"
     return None
@@ -102,8 +105,15 @@ def _normalize_task(headers: list[str], row: list[str], table_kind: str) -> dict
     )
 
     if table_kind == "section_next_steps":
-        category_index = 0
-        task_index = 1 if len(headers) > 1 else 0
+        category_index = _matching_index(headers, 'category', 'area', 'item', 'risk', 'question')
+        normalized_headers = [_normalized_header(header) for header in headers]
+        action_columns = [index for index, header in enumerate(normalized_headers)
+            if re.search(r'\b(?:tasks?|next steps?|actions?|further diligence)\b', header)
+            and not re.search(r'\b(?:owner|assigned|assignee|status|priority)\b', header)]
+        task_index = action_columns[0] if action_columns else 1 if len(headers) > 1 else 0
+        # Legacy tables use a compound section label followed by Details.
+        if task_index == 0 and len(headers) > 1 and normalized_headers[1] in {'details', 'description'}:
+            category_index, task_index = 0, 1
     elif table_kind == "action_table":
         category_index = _matching_index(headers, "item", "category", "area")
         task_index = _matching_index(headers, "action")
@@ -135,13 +145,40 @@ def inspect_analysis_next_steps(markdown: str) -> dict[str, Any]:
     lines = (markdown or "").splitlines()
     sections: list[dict[str, Any]] = []
     current_section = "Document"
+    report_section = None
+    action_list_scope = False
     table_index = 0
     line_index = 0
 
     while line_index < len(lines):
         heading_match = HEADING_RE.match(lines[line_index].strip())
         if heading_match:
-            current_section = _clean_cell(heading_match.group(2))
+            title = _clean_cell(heading_match.group(2))
+            title_key = re.sub(r'[^a-z0-9]', '', re.sub(r'^\d+[.)]\s*', '', title).casefold())
+            canonical = next((section for section in IC_SECTION_TITLES
+                if re.sub(r'[^a-z0-9]', '', section.casefold()) == title_key), None)
+            if canonical:
+                report_section = canonical
+            elif len(heading_match.group(1)) <= 2:
+                report_section = title
+            current_section = report_section or title
+            action_list_scope = 'citation' not in title.casefold() and (
+                current_section.casefold() == 'next steps' or bool(re.search(r'next steps?|further diligence|action items', title, re.I)))
+            line_index += 1
+            continue
+
+        bullet = re.match(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+)', lines[line_index])
+        if bullet and action_list_scope:
+            task_text = _clean_cell(bullet[1])
+            action_text = task_text.split(':', 1)[-1].strip()
+            if re.match(r'^(?:request|obtain|review|verify|confirm|validate|collect|reconcile|assess|arrange|schedule|complete|conduct|prepare|establish|resolve|document|agree|appoint|update|share|provide|check|ensure|test|perform|commission|inspect|finali[sz]e|execute|monitor|track|implement|evaluate|gather|map|set)\b', action_text, re.I):
+                table_index += 1
+                normalized = _normalize_task(['Task'], [task_text], 'section_next_steps')
+                normalized.update({'source_section': current_section, 'source_table': table_index,
+                    'source_line': line_index + 1, 'source_row': [task_text]})
+                sections.append({'section': current_section, 'table_kind': 'section_next_steps',
+                    'table_index': table_index, 'source_line': line_index + 1,
+                    'headers': ['Task'], 'tasks': [normalized]})
             line_index += 1
             continue
 
