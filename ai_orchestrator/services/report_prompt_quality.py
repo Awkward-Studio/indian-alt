@@ -138,6 +138,10 @@ SECTION_OWNERSHIP = (
 )
 FINANCIAL_DEPTH_GUIDANCE = (
     "The main Revenue-to-PAT table is the opening financial schedule, not the full section. "
+    "For a comprehensive source set, use the optional depth guidance to develop the full "
+    "analysis, typically around 4,500 words with useful schedules. Do not stop at a brief "
+    "overview when detailed statement and model evidence is available. A smaller source "
+    "set may warrant a shorter section with precise gaps; never pad or invent facts. "
     "Apply all material October 5 analytical requirements below and use readable subsections to cover:\n"
     "- Evidence, fiscal periods, reporting perimeter and model/audited/MIS reconciliation; "
     "available history, projections and separately labelled LTM.\n"
@@ -162,8 +166,13 @@ FINANCIAL_DEPTH_GUIDANCE = (
     "For each material topic, interpret the source evidence and calculations rather than "
     "repeating table cells. When evidence is missing, state the limitation and exact record "
     "or test needed once. Explain briefly if a topic does not apply to the business. "
-    "Do not silently omit a material theme or fill pages with empty schedules. Supplemental "
-    "financial schedules are encouraged where they aid the analysis. These are coverage "
+    "Do not silently omit a material theme or fill pages with empty schedules. "
+    "Include supported year-by-year growth and margin schedules, an EBITDA-to-CFO-to-FCF "
+    "bridge, working-capital and debt schedules, and return/coverage ratios when inputs "
+    "permit. Quantify sensitivity magnitudes and explain what changes for the investment "
+    "decision. Reconcile alternative source figures and adjusted versus reported earnings; "
+    "do not merely list numbers or describe an uncalculated sensitivity. "
+    "Supplemental financial schedules are encouraged where they aid the analysis. These are coverage "
     "and depth instructions, not a word-count acceptance gate. Table-only rewrites apply "
     "only the table requirements; full section generation must retain this analysis."
 )

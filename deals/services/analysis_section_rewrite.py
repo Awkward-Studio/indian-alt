@@ -202,7 +202,7 @@ class AnalysisSectionRewriteService:
                 "section_markdown": section_markdown,
                 "full_report": self._report_context(full_report, section_title),
                 "minimum_words": f"{minimum_words:,}",
-                "target_words": f"{max(minimum_words, int(getattr(settings, 'VDR_REPORT_SECTION_TARGET_WORDS', 2500))):,}",
+                "target_words": f"{max(minimum_words, int(getattr(settings, 'VDR_REPORT_SECTION_TARGET_WORDS', 2500)), int(getattr(settings, 'VDR_KEY_FINANCIALS_TARGET_WORDS', 4500)) if section_title == 'Key Financials' and not table_only else 0):,}",
                 "model_data_json": json.dumps(model_data, ensure_ascii=False, default=str),
                 "document_context": document_context or "No specific deal documents attached for this rewrite.",
                 "meeting_context": meeting_context or "No indexed meeting evidence matched this rewrite.",

@@ -871,6 +871,8 @@ class ICReportSectionService:
             max(minimum_words, int(getattr(settings, "VDR_REPORT_SECTION_TARGET_WORDS", 2500)))
             if is_vdr_section else 1200
         )
+        if title == 'Key Financials' and is_vdr_section:
+            target_words = max(target_words, int(getattr(settings, 'VDR_KEY_FINANCIALS_TARGET_WORDS', 4500)))
         cls._mark_prior_rejected_attempts_retried(
             source_type=source_type, source_id=str(source_id), title=title,
         )
