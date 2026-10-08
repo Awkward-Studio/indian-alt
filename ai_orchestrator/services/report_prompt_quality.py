@@ -139,7 +139,7 @@ SECTION_OWNERSHIP = (
 FINANCIAL_DEPTH_GUIDANCE = (
     "The main Revenue-to-PAT table is the opening financial schedule, not the full section. "
     "For a comprehensive source set, use the optional depth guidance to develop the full "
-    "analysis, typically around 4,500 words with useful schedules. Do not stop at a brief "
+    "analysis, typically around 4,500 words with useful financial detail. Do not stop at a brief "
     "overview when detailed statement and model evidence is available. A smaller source "
     "set may warrant a shorter section with precise gaps; never pad or invent facts. "
     "Apply all material October 5 analytical requirements below and use readable subsections to cover:\n"
@@ -148,7 +148,7 @@ FINANCIAL_DEPTH_GUIDANCE = (
     "- Revenue drivers, gross-to-net and contribution/EBITDA bridges, margins, cost behaviour "
     "and operating leverage. Do not invent CM allocations.\n"
     "- EBITDA-to-CFO-to-free-cash-flow reconciliation, capex, cash, debt, liquidity, funding "
-    "needs and runway. Show a separate cash-flow/liquidity schedule when source values exist.\n"
+    "needs and runway. Explain cash-flow/liquidity figures in prose and bullets.\n"
     "- Balance-sheet and working-capital schedules, receivable/inventory/payable days with "
     "explicit denominators, cash conversion, inventory valuation and contract accounting.\n"
     "- Asset quality, capitalisation, commitments, provisions, related-party balances and "
@@ -167,12 +167,12 @@ FINANCIAL_DEPTH_GUIDANCE = (
     "repeating table cells. When evidence is missing, state the limitation and exact record "
     "or test needed once. Explain briefly if a topic does not apply to the business. "
     "Do not silently omit a material theme or fill pages with empty schedules. "
-    "Include supported year-by-year growth and margin schedules, an EBITDA-to-CFO-to-FCF "
-    "bridge, working-capital and debt schedules, and return/coverage ratios when inputs "
+    "Explain supported growth and margins, the EBITDA-to-CFO-to-FCF "
+    "bridge, working capital, debt and return/coverage ratios in prose when inputs "
     "permit. Quantify sensitivity magnitudes and explain what changes for the investment "
     "decision. Reconcile alternative source figures and adjusted versus reported earnings; "
     "do not merely list numbers or describe an uncalculated sensitivity. "
-    "Supplemental financial schedules are encouraged where they aid the analysis. These are coverage "
+    "Use exactly one table: the main Revenue-to-PAT statement. Every other financial finding, comparison, ratio, cash-flow bridge and sensitivity must be written in readable paragraphs or short bullets with its units, period, formula where useful, and source citations. Do not create supplemental tables, repeated statements or tables of ratios or gaps. These are coverage "
     "and depth instructions, not a word-count acceptance gate. Table-only rewrites apply "
     "only the table requirements; full section generation must retain this analysis."
 )
@@ -256,7 +256,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
             "- Begin with period-by-period financial tables, metrics in rows and periods in columns,",
             "- Present the main standardized P&L table specified below, metrics in rows and periods in columns,",
         )
-        user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash in a separate cash-flow and liquidity schedule where supported")
+        user = user.replace("Operating Cash Flow and Cash rows where supported", "Operating Cash Flow and Cash findings in prose where supported")
         user = FINANCIAL_TABLE_INSTRUCTION.lstrip() + "\n\n" + user
     if is_financials and "Key Financials table format:" not in system:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
@@ -276,9 +276,8 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
             "Ensure the main standardized Revenue-to-PAT table is present. Put "
             "historical and forecast periods in that same Revenue-to-PAT table, retaining "
             "the exact thirteen row labels. Describe alternative source cases, management "
-            "adjustments and forecast comparisons in cited paragraphs, bullets or supplemental "
-            "tables. Supplemental tables are allowed and do not replace the main "
-            "statement. Keep the main statement unambiguous.\n")
+            "adjustments and forecast comparisons in cited paragraphs and bullets. "
+            "Exactly one table is allowed. Keep the main statement unambiguous.\n")
     if is_financials and 'Financial analytical depth and coverage:' not in user:
         user += '\n\nFinancial analytical depth and coverage:\n' + FINANCIAL_DEPTH_GUIDANCE + '\n'
         system += '\n\nFinancial analytical depth and coverage:\n' + FINANCIAL_DEPTH_GUIDANCE
@@ -303,6 +302,9 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user += "cells separately. Cite all source inputs for calculated rows. Rows entirely marked Not "
         user += "provided need no citation. Final check: the main statement contains exactly the 13 specified "
         user += "rows from Revenue to PAT, and verified markers inside every numeric row.\n"
+    if is_financials:
+        system = system.replace("Split unrelated schedules into separate tables.", "Keep exactly one financial table and explain all supporting analyses in prose and bullets.")
+        user = user.replace("Build balance-sheet and working-capital schedules covering", "Analyze balance-sheet and working-capital details in prose and bullets, covering")
     if is_financials and "Financial bridge check:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_BRIDGE_RULE
         user += FINANCIAL_BRIDGE_RULE

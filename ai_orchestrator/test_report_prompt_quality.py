@@ -9,6 +9,24 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
+    def test_financial_output_keeps_one_table_without_losing_values_units_or_citations(self):
+        main='| Metric (INR Mn) | FY25 |\n| --- | --- |\n'+'\n'.join(f'| {name} | Not provided |' for name in FINANCIAL_ROWS)
+        extra='| Cash (INR Mn) | FY25 |\n| --- | --- |\n| Closing cash | 100 [1] |'
+        normalized=ICReportSectionService._financial_tables_to_narrative(main+'\n\n'+extra)
+        self.assertEqual(normalized.count('| --- | --- |'),1)
+        self.assertIn('Cash (INR Mn)',normalized)
+        self.assertIn('100 [1]',normalized)
+        self.assertIn('Closing cash',normalized)
+
+    def test_unrelated_monthly_facts_do_not_create_false_source_gaps(self):
+        from ai_orchestrator.services.report_financial_format import financial_source_errors
+        rows=[['Metric (INR Mn)','AY25 Actual'],['---','---'],*[[name,'100 [1]' if name=='Revenue' else 'Not provided'] for name in FINANCIAL_ROWS]]
+        source={'citation_number':1,'title':'Model.xlsx','financial_cells':{
+            'B4':{'value':100,'row_label':'Revenue','period':'AY25','unit_labels':['INR Mn'],'period_scope':'annual'},
+            'C6':{'value':5,'row_label':'PAT','period':'FY25','unit_labels':['INR Mn'],'period_scope':'monthly'}}}
+        reviews=[]
+        self.assertEqual(financial_source_errors(rows,[source],unverified=reviews),[])
+        self.assertEqual(reviews,[])
     def test_derived_operating_costs_use_normalized_same_sheet_source_inputs(self):
         from ai_orchestrator.services.report_financial_format import financial_source_errors
         rows = [['Metric (INR Cr)', 'FY25 Actual'], ['---', '---'],
@@ -141,10 +159,10 @@ class ReportQualityTests(SimpleTestCase):
         self.assertIn('Not assigned or To agree', updated[1])
         self.assertEqual(upgrade_report_prompt(*updated, section_title='Next Steps'), updated)
 
-    def test_financial_final_contract_allows_additional_source_comparison_tables(self):
+    def test_financial_final_contract_requires_one_table_and_narrative_comparisons(self):
         updated = upgrade_report_prompt('Analyst', '## {{ section_title }}\n{{ content }}', section_title='Key Financials')
         self.assertIn('Financial output shape check:', updated[1])
-        self.assertIn('Supplemental tables are allowed', updated[1])
+        self.assertIn('Exactly one table is allowed', updated[1])
         self.assertEqual(upgrade_report_prompt(*updated, section_title='Key Financials'), updated)
 
     def test_calculated_labels_and_supported_input_citations_do_not_force_a_retry(self):
@@ -231,7 +249,7 @@ class ReportQualityTests(SimpleTestCase):
     def test_authored_variable_heading_gets_financial_contract_by_stage(self):
         updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
         self.assertIn("Key Financials table format:", updated[1])
-        self.assertIn("one main standardized Markdown table", updated[0])
+        self.assertIn("exactly one Markdown table", updated[0])
         self.assertEqual(upgrade_report_prompt(*updated, section_title="Key Financials"), updated)
 
     def test_single_income_statement_has_exact_revenue_to_pat_order(self):
@@ -282,7 +300,7 @@ class ReportQualityTests(SimpleTestCase):
 
     def test_financial_prompt_owns_one_table_and_is_idempotent(self):
         updated = upgrade_report_prompt("Analyst instructions", "- Begin with the exact heading: ## Key Financials\n{{ content }}")
-        self.assertIn("one main standardized Markdown table", updated[0])
+        self.assertIn("exactly one Markdown table", updated[0])
         self.assertIn("Key Financials table format:", updated[1])
         self.assertEqual(upgrade_report_prompt(*updated), updated)
     def test_verified_source_wrappers_render_cleanly_in_tables(self):

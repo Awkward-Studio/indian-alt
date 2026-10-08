@@ -513,6 +513,37 @@ class ICReportSectionService:
         return text.rstrip() + "\n\n### Citations\n\n" + "\n".join(references)
 
     @classmethod
+    def _financial_tables_to_narrative(cls, text):
+        """Keep the main statement; retain supplemental values and citations as bullets."""
+        from .report_financial_format import FINANCIAL_ROWS
+        blocks = list(re.finditer(r'^[ \t]*\|[^\n]*(?:\n[ \t]*\|[^\n]*)+', text, re.M))
+        tables = [block for block in blocks if len(block[0].splitlines()) >= 3
+            and cls._is_table_separator(block[0].strip().splitlines()[1])]
+        def labels(block):
+            return [re.sub(r'\[[^]]+\]', '', cls._plain_table_label(cls._table_cells(line)[0])).strip()
+                for line in block[0].strip().splitlines()[2:]]
+        main = next((block for block in tables if labels(block) == list(FINANCIAL_ROWS)), None)
+        main = main or next((block for block in tables if {'Revenue','PAT'}.issubset(labels(block))), None)
+        if main is None:
+            return text
+        for block in reversed(tables):
+            if block.start() == main.start():
+                continue
+            if block[0].strip() == main[0].strip():
+                replacement = ''
+            else:
+                lines = block[0].strip().splitlines()
+                headers = cls._table_cells(lines[0])
+                bullets = []
+                for line in lines[2:]:
+                    cells = cls._table_cells(line)
+                    details = '; '.join(f'{header}: {value}' for header,value in zip(headers[1:],cells[1:]))
+                    bullets.append(f'- **{cells[0]}:** {details}')
+                replacement = '\n**' + headers[0] + '**\n\n' + '\n'.join(bullets) + '\n'
+            text = text[:block.start()] + replacement + text[block.end():]
+        return text
+
+    @classmethod
     def _normalize_section(
         cls,
         title: str,
@@ -553,6 +584,7 @@ class ICReportSectionService:
         text = cls._normalize_financial_table_axes(text, title)
         text = cls._normalize_financial_metric_labels(text, title)
         if title == "Key Financials":
+            text = cls._financial_tables_to_narrative(text)
             text = cls._normalize_financial_amount_cells(text)
             text = cls._expand_financial_period_citations(text, {int(item['citation_number']) for item in used_citations})
             text = cls._cite_supported_financial_calculations(text, {int(item['citation_number']) for item in used_citations})
@@ -568,20 +600,32 @@ class ICReportSectionService:
                     verified_citation_numbers={int(item['citation_number']) for item in used_citations}, source_citations=used_citations)
             except ReportSectionStructureError as exc:
                 warnings.append({'kind': 'source_or_format', 'message': str(exc)})
-        warnings.extend({'kind': 'source_or_reconciliation', 'message': issue} for issue in reconciliation_warnings)
+        for issue in reconciliation_warnings:
+            kind = 'verification' if re.search(r'verif|source reference|currency.*not established', issue, re.I) else 'reconciliation'
+            warnings.append({'kind':kind, 'message':issue, 'confirmed':False})
         from ai_orchestrator.services.report_calculations import report_calculation_errors, correct_small_percentage_calculations
         text, corrections = correct_small_percentage_calculations(text)
         if calculation_corrections is not None:
             calculation_corrections.extend(corrections)
         calculation_errors = report_calculation_errors(text)
-        warnings.extend({'kind': 'calculation', 'message': issue} for issue in calculation_errors)
+        warnings.extend({'kind': 'calculation', 'message': issue, 'confirmed':True} for issue in calculation_errors)
+        grouped = {}
+        for index, issue in enumerate(warnings):
+            period_pattern = r'\b(?:FY|AY|CY)\s*\d{2,4}(?:[-/–]\d{2,4})?(?:\s+(?:Actual|Estimated|Forecast|Projected))?'
+            key = re.sub(r'\[\d+\]', '', re.sub(period_pattern, 'the listed periods', issue['message'], flags=re.I)) if issue['kind']=='verification' else str(index)
+            if key in grouped:
+                grouped[key]['details'].append(issue['message'])
+                grouped[key]['message'] = key
+            else:
+                grouped[key] = {**issue, 'details':[issue['message']]}
+        warnings = list(grouped.values())
         if validation_warnings is not None:
             validation_warnings.extend(warnings)
         if warnings:
             text += ('\n\n### Source gaps and calculation issues\n\n'
                 'This draft has been saved for review. The issues below remain unresolved; affected '
                 'figures are not verified.\n\n' + '\n'.join(
-                    '- **' + ('Number conflict' if item['kind']=='calculation' else 'Gap') + ':** ' + item['message']
+                    '- **' + ('Number conflict' if item['kind']=='calculation' else 'Verification review' if item['kind']=='verification' else 'Reconciliation review' if item['kind']=='reconciliation' else 'Source/format review') + ':** ' + item['message']
                     for item in warnings))
         body = text[len(target):].strip()
         if len(body) < 40 and not used_citations:
@@ -942,7 +986,7 @@ class ICReportSectionService:
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,
             )
             raise
-        if (calculation_corrections or validation_warnings) and isinstance(result, dict) and result.get('_audit_log_id'):
+        if (source_type == 'vdr_report_section' or calculation_corrections or validation_warnings) and isinstance(result, dict) and result.get('_audit_log_id'):
             from ai_orchestrator.models import AIAuditLog
             from django.db import transaction
             with transaction.atomic():
@@ -952,9 +996,10 @@ class ICReportSectionService:
                         **(audit.source_metadata or {}),
                         'calculation_corrections': calculation_corrections,
                         'report_validation_warnings': validation_warnings,
-                        'report_section_outcome': 'saved_with_gaps' if validation_warnings else 'accepted',
+                        'report_section_outcome': ('draft_ready_with_gaps' if validation_warnings else 'draft_ready') if source_type == 'vdr_report_section' else ('saved_with_gaps' if validation_warnings else 'accepted'),
                     }
-                    audit.save(update_fields=['source_metadata'])
+                    audit.parsed_json = {**(audit.parsed_json or {}), '_normalized_section': section}
+                    audit.save(update_fields=['source_metadata', 'parsed_json'])
         try:
             cache.set(
                 cache_key,

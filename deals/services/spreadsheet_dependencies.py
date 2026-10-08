@@ -10,7 +10,7 @@ from openpyxl.utils.cell import range_boundaries, coordinate_to_tuple
 
 
 def is_financial_period_label(value: str) -> bool:
-    return bool(re.fullmatch(r"(?:FY|CY)\s*\d{2,4}\s*[AEF]?|20\d{2}(?:[-/]\d{2,4})?[AEF]?|20\d{2}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?", value.strip(), re.I))
+    return bool(re.fullmatch(r"(?:FY|CY|AY)\s*\d{2,4}(?:\s*[-/–]\s*\d{2,4})?\s*[AEFP]?|20\d{2}(?:[-/–]\d{2,4})?[AEFP]?|20\d{2}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?", value.strip(), re.I))
 
 
 class WorkbookFormulaGraph:

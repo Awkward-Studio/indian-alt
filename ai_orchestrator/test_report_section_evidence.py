@@ -10,6 +10,16 @@ from ai_orchestrator.services.token_budget import estimate_tokens, estimate_mess
 
 
 class ICReportSectionEvidenceServiceTests(TestCase):
+    def test_academic_year_headers_are_primary_periods(self):
+        document=SimpleNamespace(id='academic',title='Model.xlsx',extraction_manifest={'sheets':[{'name':'Annual','cells':[
+            {'coordinate':'B1','value':'AY24'}, {'coordinate':'C1','value':'AY25'}, {'coordinate':'D1','value':'AY27'},
+            {'coordinate':'A2','value':'INR Mn'}, {'coordinate':'A4','value':'Revenue'},
+            {'coordinate':'B4','value':100}, {'coordinate':'C4','value':200}, {'coordinate':'D4','value':300},
+        ]}]})
+        service=ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal',title='Example'),documents=[document],embedding_service=MagicMock())
+        chunk=SimpleNamespace(source_id='academic',source_type='document',content='B4=100 | C4=200 | D4=300',metadata={'sheet_name':'Annual','chunk_kind':'spreadsheet_cells'})
+        facts=service._citation(chunk,rank=1)['financial_cells']
+        self.assertEqual([facts[cell]['period'] for cell in ['B4','C4','D4']],['AY24','AY25','AY27'])
     def test_annual_total_columns_are_preserved_on_a_monthly_worksheet(self):
         document=SimpleNamespace(id='mixed',title='Model.xlsx',extraction_manifest={'sheets':[{'name':'Mixed periods','cells':[
             {'coordinate':'B1','value':'2025-01-31'}, {'coordinate':'C1','value':'2025-02-28'},

@@ -206,7 +206,8 @@ class ICReportSectionServiceTests(TestCase):
         audit.refresh_from_db()
         self.assertEqual(audit.status,"COMPLETED")
         self.assertTrue(audit.is_success)
-        self.assertEqual(audit.source_metadata['report_section_outcome'],'saved_with_gaps')
+        self.assertEqual(audit.source_metadata['report_section_outcome'],'draft_ready_with_gaps')
+        self.assertEqual(audit.parsed_json['_normalized_section'],section)
         self.assertTrue(audit.source_metadata['report_validation_warnings'])
         self.assertIn('Number conflict',section)
 

@@ -1140,13 +1140,16 @@ class FolderAnalysisService:
         for attempt in AIAuditLog.objects.filter(source_type='vdr_report_section', status='COMPLETED',
                 source_metadata__vdr_parent_audit_id__in=[str(pk) for pk in parents]).only('id','source_metadata').order_by('-created_at'):
             metadata = attempt.source_metadata or {}
+            if metadata.get('report_section_outcome') in {'draft_ready','draft_ready_with_gaps','superseded'} or metadata.get('inference_state') == 'superseded':
+                continue
             section = metadata.get('report_section')
             if not section or section in seen_sections:
                 continue
             seen_sections.add(section)
             for index, issue in enumerate(metadata.get('report_validation_warnings') or []):
                 validation_gaps.append({'source_type':'report_validation', 'source_id':f'{attempt.pk}:{index}',
-                    'title':section, 'error':issue['message'], 'status':'needs_review'})
+                    'title':section, 'error':issue['message'], 'status':'needs_review', 'issue_kind':issue.get('kind'),
+                    'confirmed':bool(issue.get('confirmed',False)), 'details':issue.get('details') or []})
         gaps = [*document_gaps, *source_gaps, *validation_gaps]
         return {
             'document_count': len(documents),

@@ -320,8 +320,9 @@ class ICReportSectionEvidenceService:
                 selected_units = list(dict.fromkeys(row_units or declared_units or unit_labels))
                 periods = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and
                     is_financial_period_label(label)]
+                named_periods = [(r,label) for r,label in periods if re.match(r'^(?:FY|CY|AY)\b|^(?:FY|CY|AY)\d',label,re.I)]
                 financial_cells[address] = {"value": value, "row_label": max(metric_labels)[1] if metric_labels else "",
-                    "period": max(periods)[1] if periods else "", "unit_labels": selected_units,
+                    "period": max(named_periods or periods)[1] if periods else "", "unit_labels": selected_units,
                     'period_scope': 'monthly' if self._financial_period_scope_cache[unit_key] == 'monthly'
                         and any(re.match(r'20\d{2}-\d{2}-\d{2}', label) for _, label in periods) else 'annual',
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}

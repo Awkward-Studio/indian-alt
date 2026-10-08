@@ -537,6 +537,14 @@ def unit_finished(audit_log_id: str, *, task_id: str, generation: int, unit_key:
                     item["content"] = result["section"]
                 if result.get("evidence_metadata"):
                     item["evidence_metadata"] = result["evidence_metadata"]
+                if terminal == 'completed' and manifest_key == 'report_section_queue':
+                    for child in AIAuditLog.objects.filter(source_type='vdr_report_section',
+                            source_metadata__vdr_parent_audit_id=str(audit_log_id),
+                            source_metadata__report_section=unit_key,
+                            source_metadata__vdr_dispatch_generation=generation, status='COMPLETED'):
+                        child.source_metadata = {**(child.source_metadata or {}),
+                            'report_section_outcome':'saved_with_gaps' if (child.source_metadata or {}).get('report_validation_warnings') else 'accepted'}
+                        child.save(update_fields=['source_metadata'])
                 break
         owners = metadata.get("active_report_units") or {}
         owners.pop(unit_key, None)
@@ -697,6 +705,12 @@ def reconcile() -> dict:
     now = timezone.now()
     recovered = 0
     failed = 0
+    # A completed report cannot still own an active drafting request. Retire
+    # orphaned audit rows so the history does not show a saved section running.
+    for parent in AIAuditLog.objects.filter(status='COMPLETED', source_metadata__queue_kind='report').only('id','source_metadata').order_by('-created_at')[:50]:
+        with transaction.atomic():
+            _retire_superseded_inference_children(parent_audit_id=str(parent.pk),
+                dispatch_generation=int((parent.source_metadata or {}).get('dispatch_generation') or 0), now=now)
     observed_task_ids: set[str] = set()
     inspection_available = False
     try:
@@ -781,8 +795,30 @@ def reconcile() -> dict:
                 manifest_key = "document_queue" if metadata.get("queue_kind") == "indexing" else "report_section_queue"
                 key_name = "source_file_id" if manifest_key == "document_queue" else "title"
                 for item in metadata.get(manifest_key) or []:
+                    if item.get('status') in {'completed','cached'}:
+                        continue
                     if (str(item.get(key_name) or "") == str(metadata.get("current_unit_key") or "")
                         or str(item.get(key_name) or "") in (metadata.get("active_report_units") or {})):
+                        if manifest_key == 'report_section_queue':
+                            owner = _delivery_owner(metadata, item['title'])
+                            prepared = AIAuditLog.objects.filter(source_type='vdr_report_section', status='COMPLETED',
+                                source_metadata__vdr_parent_audit_id=str(audit.pk), source_metadata__report_section=item['title'],
+                                source_metadata__vdr_dispatch_generation=owner.get('dispatch_generation')).order_by('-created_at').first()
+                            content = (prepared.parsed_json or {}).get('_normalized_section') if prepared else None
+                            if isinstance(content,str) and content.strip():
+                                item.update(status='completed',content=content,error=None,completed_at=now.isoformat())
+                                prepared.source_metadata={**(prepared.source_metadata or {}),
+                                    'report_section_outcome':'saved_with_gaps' if (prepared.source_metadata or {}).get('report_validation_warnings') else 'accepted',
+                                    'recovered_prepared_section':True}
+                                prepared.save(update_fields=['source_metadata'])
+                                if item['title']=='Key Financials':
+                                    from deals.models import Deal
+                                    from deals.services.key_financials_profile import sync_section
+                                    try:
+                                        sync_section(Deal.objects.get(pk=audit.source_id),content,str(audit.pk))
+                                    except Exception as exc:
+                                        item['financial_profile_warning']=str(exc)
+                                continue
                         item["status"] = "recovering"
                         item["celery_task_id"] = None
                 metadata.update({

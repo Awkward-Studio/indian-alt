@@ -593,3 +593,23 @@ class DurableVdrQueueTests(TestCase):
         self.assertEqual(audit.source_metadata["report_section_queue"][0]["status"], "processing")
         self.assertEqual(audit.source_metadata["report_section_queue"][1]["status"], "queued")
         apply_async.assert_called_once()
+
+class PreparedReportRecoveryTests(TestCase):
+    @patch('deals.services.vdr_queue.kick')
+    @patch('config.celery.app.control.inspect')
+    @patch('ai_orchestrator.services.celery_queue_snapshot.CeleryQueueSnapshotService.snapshot')
+    def test_recovery_reuses_saved_draft_and_never_requeues_completed_sections(self, snapshot, inspector, kick):
+        deal=Deal.objects.create(title='Recovery example')
+        metadata=vdr_queue.initial_metadata(kind='report',manifest=[{'title':'Company Details','status':'processing'}, {'title':'Next Steps','status':'completed','content':'Already saved'}])
+        metadata.update(queue_state='active',dispatch_generation=1,current_task_id='missing',current_unit_type='report_section',current_unit_key='Company Details',heartbeat_at=(timezone.now()-timedelta(minutes=6)).isoformat(),active_report_units={'Company Details':{'current_task_id':'missing','current_unit_key':'Company Details','dispatch_generation':1}})
+        parent=AIAuditLog.objects.create(source_type='deal_full_synthesis',source_id=str(deal.pk),status='PROCESSING',source_metadata=metadata)
+        text='## Company Details\n\nA supported company finding that is ready to save.'
+        child=AIAuditLog.objects.create(source_type='vdr_report_section',source_id=str(parent.pk),status='COMPLETED',parsed_json={'_normalized_section':text},source_metadata={'vdr_parent_audit_id':str(parent.pk),'report_section':'Company Details','vdr_dispatch_generation':1,'report_section_outcome':'draft_ready'})
+        snapshot.return_value={'messages':[],'unacked':{'messages':[]}}
+        inspector.return_value.active.return_value={};inspector.return_value.reserved.return_value={}
+        vdr_queue.reconcile()
+        parent.refresh_from_db();child.refresh_from_db()
+        sections=parent.source_metadata['report_section_queue']
+        self.assertEqual(sections[0]['status'],'completed');self.assertEqual(sections[0]['content'],text)
+        self.assertEqual(sections[1]['status'],'completed')
+        self.assertTrue(child.source_metadata['recovered_prepared_section'])

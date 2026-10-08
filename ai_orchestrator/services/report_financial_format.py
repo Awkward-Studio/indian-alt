@@ -148,7 +148,7 @@ def prepared_display_values(fact: dict) -> dict:
 
 FINANCIAL_TABLE_INSTRUCTION = (
     "\n\nKey Financials table format:\n"
-    "- Include one main standardized Markdown table in this section: a consolidated P&L / "
+    "- Include exactly one Markdown table in this section: the main P&L / "
     "income statement. Put currency and scale in the first column header and the "
     "available historical and forecast periods across columns, clearly marked Actual "
     "or Forecast. State currency and scale explicitly, such as Metric (INR Cr, amounts) "
@@ -171,9 +171,9 @@ FINANCIAL_TABLE_INSTRUCTION = (
     "Explain source differences and supported calculation bridges in prose.\n"
     "- Discuss revenue growth, margins, cash flow, working capital, debt, assets, model "
     "dependencies, balance-sheet reconciliation and sensitivities in ### subsections "
-    "with paragraphs, bullets or supplemental tables below the main statement. Show supported formulas and "
-    "their cited inputs. Supplemental source comparisons, cash-flow, working-capital and "
-    "sensitivity tables are allowed; keep units, periods and citations explicit. Do not "
+    "with paragraphs and short bullets below the main statement. Show supported formulas and "
+    "their cited inputs. Write source comparisons, cash flow, working capital, ratios and "
+    "sensitivities as narrative with explicit units, periods and citations. Do not add tables, "
     "replace or duplicate the main Revenue-to-PAT statement; route actions to Next Steps. Keep all material "
     "analytical themes from the instructions above."
 )
@@ -281,6 +281,7 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
             candidates = []
             wrong_precise_rows = []
             wrong_precise_periods = []
+            period_reviews = []
             source_ledgers = {}
             workbook_references = False
             for number in references:
@@ -294,7 +295,8 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
                 for address, fact in facts.items():
                     label = re.sub(r"[^a-z0-9]", "", fact.get("row_label", "").casefold())
                     if fact.get('period_scope') == 'monthly' and not re.search(r'YTD|month|quarter|Q[1-4]', rows[0][column], re.I):
-                        wrong_precise_periods.append(f'{address} is a monthly value, not the stated annual period')
+                        if label in aliases[metric] and period(fact.get('period','')) == period(rows[0][column]):
+                            period_reviews.append(f'{metric} in {rows[0][column]} needs period verification: {address} is on a dated monthly schedule; verify an annual total or supported aggregation before treating it as annual.')
                         continue
                     source_currencies = currencies(' '.join(fact.get('unit_labels') or []))
                     if table_currencies and source_currencies and table_currencies != source_currencies:
@@ -348,6 +350,11 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
             if candidates and all(abs(amount[0] - value) > amount[1] + Decimal("0.0000001") for value, _ in candidates):
                 values = ", ".join(f"{address}={value}" for value, address in candidates[:4])
                 errors.append(f"{metric} in {rows[0][column]}: displayed {amount[0]}, cited saved workbook values {values}")
+            elif check_citation_support and not candidates and period_reviews:
+                if unverified is not None:
+                    unverified.extend(period_reviews)
+                else:
+                    errors.extend(period_reviews)
             elif check_citation_support and not candidates and len(references) == 1 and wrong_precise_rows:
                 errors.append(f"{metric} in {rows[0][column]} cites a different source metric: {wrong_precise_rows[0]}")
             elif check_citation_support and not candidates and len(references) == 1 and wrong_precise_periods:
