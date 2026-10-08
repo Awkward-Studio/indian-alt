@@ -521,6 +521,7 @@ class ICReportSectionService:
         citations: dict | None = None,
         minimum_words: int = 0,
         strict_financial_table: bool = False,
+        calculation_corrections: list | None = None,
     ) -> str:
         text = str(response or "").strip()
         if "<report_calculations>" in text or "</report_calculations>" in text:
@@ -552,7 +553,10 @@ class ICReportSectionService:
             text = cls._normalize_financial_amount_cells(text)
             text = cls._expand_financial_period_citations(text, {int(item['citation_number']) for item in used_citations})
             text = cls._cite_supported_financial_calculations(text, {int(item['citation_number']) for item in used_citations})
-        from ai_orchestrator.services.report_calculations import report_calculation_errors
+        from ai_orchestrator.services.report_calculations import report_calculation_errors, correct_small_percentage_calculations
+        text, corrections = correct_small_percentage_calculations(text)
+        if calculation_corrections is not None:
+            calculation_corrections.extend(corrections)
         calculation_errors = report_calculation_errors(text)
         if calculation_errors:
             raise ReportSectionStructureError(f"Report section '{title}' has inconsistent calculations: " + "; ".join(calculation_errors[:5]))
@@ -896,6 +900,7 @@ class ICReportSectionService:
                 },
             },
         )
+        calculation_corrections = []
         try:
             if isinstance(result, dict) and result.get('error'):
                 raise ReportSectionStructureError(f"Generation for '{title}' could not complete: {result['error']}")
@@ -905,12 +910,24 @@ class ICReportSectionService:
                 citations=citations,
                 minimum_words=minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
+                calculation_corrections=calculation_corrections,
             )
         except ReportSectionValidationError as exc:
             cls._mark_rejected_section_audit(
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,
             )
             raise
+        if calculation_corrections and isinstance(result, dict) and result.get('_audit_log_id'):
+            from ai_orchestrator.models import AIAuditLog
+            from django.db import transaction
+            with transaction.atomic():
+                audit = AIAuditLog.objects.select_for_update().filter(pk=result['_audit_log_id']).first()
+                if audit:
+                    audit.source_metadata = {
+                        **(audit.source_metadata or {}),
+                        'calculation_corrections': calculation_corrections,
+                    }
+                    audit.save(update_fields=['source_metadata'])
         try:
             cache.set(
                 cache_key,

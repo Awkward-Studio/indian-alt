@@ -68,6 +68,38 @@ def within_display_precision(value, bounds):
     return actual+margin >= bounds[0] and actual-margin <= bounds[1]
 
 
+def correct_small_percentage_calculations(markdown: str) -> tuple[str, list[dict]]:
+    """Correct small explicit percentage-result errors using the decimal calculator."""
+    from .report_calculator import calculate
+    corrections=[]
+    def correct_line(line):
+        if line.lstrip().startswith('>'):
+            return line
+        def replace(match):
+            if match['unit']!='%' or numeric(match['b'])==0:
+                return match[0]
+            before=line[:match.start()].rstrip()
+            if before and before[-1] in '+*/×÷−-':
+                return match[0]
+            bounds=ratio_bounds(match['a'],match['b'])
+            if not bounds or within_display_precision(match['result'],tuple(value*100 for value in bounds)):
+                return match[0]
+            exact=Decimal(calculate('100*('+match['a'].replace(',','')+'/'+match['b'].replace(',','')+')'))
+            if abs(exact-numeric(match['result']))>Decimal('.2'):
+                return match[0]
+            decimals = len(match['result'].split('.')[1]) if '.' in match['result'] else 0
+            corrected = format(exact.quantize(Decimal(1).scaleb(-decimals)), 'f')
+            result_start=match.start('result')-match.start()
+            result_end=match.end('result')-match.start()
+            replacement=match[0][:result_start]+corrected+match[0][result_end:]
+            corrections.append({'original':match[0],'corrected':replacement,'exact_result':str(exact),'basis':'displayed operands'})
+            return replacement
+        return RATIO.sub(replace,line)
+    parts = re.split(r"(^###\s+Citations\s*$)", markdown, maxsplit=1, flags=re.M)
+    parts[0] = ''.join(correct_line(line) for line in parts[0].splitlines(keepends=True))
+    return ''.join(parts), corrections
+
+
 def report_calculation_errors(markdown: str) -> list[str]:
     errors = []
     source = re.split(r"^###\s+Citations\s*$", markdown, flags=re.M)[0]
