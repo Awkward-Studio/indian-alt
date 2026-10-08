@@ -2048,6 +2048,19 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         section_title = request.data.get('section_title')
         instruction = request.data.get('instruction')
         full_report = request.data.get('full_report')
+        rewrite_scope = request.data.get('rewrite_scope', 'section')
+        if rewrite_scope not in ('section', 'financial_table'):
+            return Response({'error': 'Invalid rewrite_scope.'}, status=400)
+        if rewrite_scope == 'financial_table':
+            from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
+            if AnalysisSectionRewriteService.published_section_title(section_title) != 'Key Financials':
+                return Response({'error': 'Table rewrites are available only for Key Financials.'}, status=400)
+            try:
+                from deals.services.financial_table_rewrite import locate_main_financial_table
+                selected, _, _ = AnalysisSectionRewriteService.locate_section(full_report or '', section_title)
+                locate_main_financial_table(selected)
+            except (ValueError, TypeError) as exc:
+                return Response({'error': str(exc)}, status=400)
 
         for field_name, value in (
             ('section_markdown', section_markdown),
@@ -2061,6 +2074,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         section_markdown = section_markdown.strip()
         section_title = section_title.strip() or "Untitled Section"
         instruction = instruction.strip()
+        if rewrite_scope == 'financial_table' and not instruction:
+            instruction = 'Regenerate the main financial table from indexed sources using the existing Key Financials prompt.'
         full_report = full_report.strip()
 
         if not section_markdown:
@@ -2152,6 +2167,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     "section_title": section_title,
                     "analysis_version": version,
                     "rewrite": True,
+                    "rewrite_scope": rewrite_scope,
                 },
             )
             try:
@@ -2166,6 +2182,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                         "document_ids": document_ids,
                         "audit_log_id": str(audit.id),
                         "use_review_feedback": bool(request.data.get('use_review_feedback', True)),
+                        "rewrite_scope": rewrite_scope,
                     },
                     queue="high_priority", task_id=task_id,
                 )

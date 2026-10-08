@@ -47,6 +47,7 @@ def rewrite_analysis_section_async(
     instruction: str, full_report: str, version, document_ids: list[str],
     audit_log_id: str,
     use_review_feedback: bool = True,
+    rewrite_scope: str = 'section',
 ):
     """Generate a reviewable section draft using its published IC prompt."""
     from django.core import signing
@@ -57,7 +58,8 @@ def rewrite_analysis_section_async(
     log_worker_event(audit, f"Retrieving evidence for {section_title} rewrite.", status="PROCESSING")
     try:
         deal = Deal.objects.get(id=deal_id)
-        rewritten = AnalysisSectionRewriteService().rewrite(
+        rewrite_service = AnalysisSectionRewriteService()
+        rewritten = rewrite_service.rewrite(
             deal=deal,
             section_title=section_title,
             section_markdown=section_markdown,
@@ -68,6 +70,7 @@ def rewrite_analysis_section_async(
             audit_log_id=audit_log_id,
             celery_task_id=str(self.request.id),
             use_review_feedback=use_review_feedback,
+            rewrite_scope=rewrite_scope,
         )
         confirmation_token = signing.dumps(
             {
@@ -82,14 +85,23 @@ def rewrite_analysis_section_async(
         )
         audit.refresh_from_db()
         audit.parsed_json = {
+            'rewrite_scope': rewrite_scope,
             "section_title": section_title,
             "section_markdown": rewritten,
             "confirmation_token": confirmation_token,
             "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
         }
+        if rewrite_scope == 'financial_table':
+            from deals.services.financial_table_rewrite import locate_main_financial_table
+            table, _, _ = locate_main_financial_table(rewritten)
+            references = re.split(r'^###\s+Citations\s*$', rewritten, maxsplit=1, flags=re.M)
+            audit.parsed_json['table_markdown'] = table + ('\n\n### Citations\n\n' + references[1].strip() if len(references) == 2 else '')
+            audit.parsed_json['calculation_warnings'] = getattr(rewrite_service, 'table_calculation_warnings', '')
+            audit.source_metadata = {**(audit.source_metadata or {}),
+                'calculation_corrections': getattr(rewrite_service, 'calculation_corrections', [])}
         audit.is_success = True
         audit.completed_at = timezone.now()
-        audit.save(update_fields=["parsed_json", "is_success", "completed_at"])
+        audit.save(update_fields=["parsed_json", "is_success", "completed_at", "source_metadata"])
         log_worker_event(audit, "Section rewrite preview is ready for review.", status="COMPLETED", event_type="terminal", done=True)
         return {"audit_log_id": str(audit.id)}
     except Exception as exc:

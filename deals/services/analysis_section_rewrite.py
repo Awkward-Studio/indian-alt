@@ -72,8 +72,26 @@ class AnalysisSectionRewriteService:
         audit_log_id: str | None = None,
         celery_task_id: str | None = None,
         use_review_feedback: bool = True,
+        rewrite_scope: str = 'section',
     ) -> str:
         section_title = self.published_section_title(section_title) or section_title
+        table_only = rewrite_scope == 'financial_table'
+        if rewrite_scope not in {'section', 'financial_table'} or (table_only and section_title != 'Key Financials'):
+            raise ValueError('Table rewrites are available only for Key Financials.')
+        if table_only:
+            from .financial_table_rewrite import locate_main_financial_table
+            section_markdown, _, _ = self.locate_section(full_report, section_title)
+            current_table, _, _ = locate_main_financial_table(section_markdown)
+            instruction += (
+                '\n\nScope: regenerate only the single main standardized Revenue-to-PAT table. '
+                'Apply the existing Key Financials prompt requirements for source values, fiscal periods, '
+                'currency, units, row layout and calculations, together with the analyst instructions. '
+                'Return the table and its source references only. Do not rewrite narrative, supplemental '
+                'tables or other sections. Do not invent missing amounts; use Not provided. '
+                'State currency and units in the table header. Keep the existing currency/unit basis '
+                'unless explicitly instructed to convert it.\n\n'
+                'Current main table:\n' + current_table
+            )
         published_section = section_title in IC_SECTION_TITLES
         evidence_scope = self._requested_evidence_scope(instruction)
         from deals.services.report_coverage import latest_review_feedback, format_review_feedback
@@ -173,12 +191,14 @@ class AnalysisSectionRewriteService:
                 "max_input_chars": max(180_000, len(content) + 1024),
                 "temperature": 0.0,
                 "repetition_penalty": float(getattr(settings, "REPORT_SECTION_REPETITION_PENALTY", 1.08)),
+                **({'report_calculator': True, 'chat_template_kwargs': {'enable_thinking': False}} if table_only else {}),
                 **({"personality_only_system": True, "response_mode": "markdown"} if published_section else {}),
                 "pipeline_key": "ic_report_generation" if published_section else "analysis_support",
                 "stage_key": stage_key or "section_rewrite",
                 "deal_title": deal.title,
                 "instruction": instruction,
                 "rewrite_instruction": instruction if published_section else None,
+                "rewrite_scope": rewrite_scope,
                 "section_markdown": section_markdown,
                 "full_report": self._report_context(full_report, section_title),
                 "minimum_words": f"{minimum_words:,}",
@@ -196,6 +216,7 @@ class AnalysisSectionRewriteService:
                     "analysis_version": version,
                     "evidence_retrieval": evidence_metadata or {},
                     "rewrite": True,
+                    "rewrite_scope": rewrite_scope,
                     "review_feedback": review_feedback,
                 },
             },
@@ -207,12 +228,19 @@ class AnalysisSectionRewriteService:
         rewritten = rewritten.strip()
         if not rewritten:
             raise ValueError("AI did not return a rewritten section.")
-        if citations:
+        if citations or table_only:
             from ai_orchestrator.services.report_sections import ICReportSectionService
-
+            self.calculation_corrections = []
             rewritten = ICReportSectionService._normalize_section(
                 section_title, rewritten, citations=citations,
+                strict_financial_table=table_only,
+                calculation_corrections=self.calculation_corrections,
             )
+        if table_only:
+            from .financial_table_rewrite import merge_financial_table
+            warning_block = re.search(r'^### Calculation review warnings\n(.*?)(?=^### |\Z)', rewritten, re.M | re.S)
+            self.table_calculation_warnings = warning_block[1].strip() if warning_block else ''
+            rewritten, _ = merge_financial_table(section_markdown, rewritten)
         return rewritten
 
     @staticmethod

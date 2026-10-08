@@ -66,10 +66,17 @@ class AIProcessorService:
 
     @staticmethod
     def _append_section_rewrite_request(user_prompt: str, metadata: dict) -> str:
+        scope_instruction = (
+            'Regenerate only the main standardized Revenue-to-PAT table, applying the financial '
+            'table requirements above. Return only that table and its citations. Section length '
+            'and narrative requirements do not apply to this table-only rewrite. '
+        ) if metadata.get('rewrite_scope') == 'financial_table' else (
+            'Revise only the selected section under the section requirements above. '
+            'Keep its heading and return the complete revised section. '
+        )
         return user_prompt + (
             "\n\n[ANALYST SECTION REWRITE REQUEST]\n"
-            "Revise only the selected section under the section requirements above. "
-            "Keep its heading and return the complete revised section. Use the "
+            + scope_instruction + "Use the "
             "retrieved evidence and its citation markers for material facts. "
             "The existing draft and surrounding report are context, not verified "
             "evidence; do not copy an unsupported claim or reuse an old numbered "
