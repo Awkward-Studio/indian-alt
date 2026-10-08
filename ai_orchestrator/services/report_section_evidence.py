@@ -322,7 +322,8 @@ class ICReportSectionEvidenceService:
                     is_financial_period_label(label)]
                 financial_cells[address] = {"value": value, "row_label": max(metric_labels)[1] if metric_labels else "",
                     "period": max(periods)[1] if periods else "", "unit_labels": selected_units,
-                    'period_scope': self._financial_period_scope_cache[unit_key],
+                    'period_scope': 'monthly' if self._financial_period_scope_cache[unit_key] == 'monthly'
+                        and any(re.match(r'20\d{2}-\d{2}-\d{2}', label) for _, label in periods) else 'annual',
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
                 from .report_financial_format import prepared_display_values
                 prepared = prepared_display_values(financial_cells[address])

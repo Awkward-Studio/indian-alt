@@ -10,6 +10,17 @@ from ai_orchestrator.services.token_budget import estimate_tokens, estimate_mess
 
 
 class ICReportSectionEvidenceServiceTests(TestCase):
+    def test_annual_total_columns_are_preserved_on_a_monthly_worksheet(self):
+        document=SimpleNamespace(id='mixed',title='Model.xlsx',extraction_manifest={'sheets':[{'name':'Mixed periods','cells':[
+            {'coordinate':'B1','value':'2025-01-31'}, {'coordinate':'C1','value':'2025-02-28'},
+            {'coordinate':'D1','value':'FY25'}, {'coordinate':'A3','value':'Revenue'},
+            {'coordinate':'B3','value':10}, {'coordinate':'C3','value':20}, {'coordinate':'D3','value':300},
+        ]}]})
+        service=ICReportSectionEvidenceService(deal=SimpleNamespace(id='deal',title='Example'),documents=[document],embedding_service=MagicMock())
+        chunk=SimpleNamespace(source_id='mixed',source_type='document',content='B3=10 | C3=20 | D3=300',metadata={'sheet_name':'Mixed periods','chunk_kind':'spreadsheet_cells'})
+        facts=service._citation(chunk,rank=1)['financial_cells']
+        self.assertEqual(facts['B3']['period_scope'],'monthly')
+        self.assertEqual(facts['D3']['period_scope'],'annual')
     def test_metric_label_and_units_are_bound_to_the_same_primary_row(self):
         document = SimpleNamespace(id='row-source', title='Model.xlsx', extraction_manifest={'sheets': [{
             'name': 'Annual statement', 'cells': [
