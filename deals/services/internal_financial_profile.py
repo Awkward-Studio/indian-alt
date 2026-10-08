@@ -212,9 +212,9 @@ Allowed financial fields by statement:
 INDEXED INTERNAL EVIDENCE:
 {evidence}"""
 
-    def extract(self, *, deal, parent_audit_log_id: str | None = None) -> dict:
+    def extract(self, *, deal, parent_audit_log_id: str | None = None, use_accepted_report: bool = True) -> dict:
         from deals.services.key_financials_profile import latest_accepted_section, sync_section
-        accepted = latest_accepted_section(deal)
+        accepted = latest_accepted_section(deal) if use_accepted_report else None
         if accepted:
             return sync_section(deal, *accepted)
         documents = list(

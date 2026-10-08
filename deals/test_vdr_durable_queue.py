@@ -153,12 +153,55 @@ class HighPriorityBusyTests(SimpleTestCase):
 
 @override_settings(VDR_DURABLE_QUEUE_ENABLED=True)
 class DurableVdrQueueTests(TestCase):
+    @patch('deals.services.vdr_queue.kick')
+    @patch('deals.services.vdr_queue.start_heartbeat')
+    @patch('deals.tasks.broadcast_audit_log_update')
+    @patch('deals.tasks._durable_report_foundation')
+    @patch('deals.services.deal_synthesis.DealSynthesisService.run')
+    @patch('deals.tasks.synthesize_vdr_report_deal.apply_async')
+    def test_completed_synthesis_releases_sections_with_the_same_deal_still_active(self, send, synthesis, foundation, *_):
+        from types import SimpleNamespace
+        from deals.tasks import synthesize_vdr_report_deal
+        deal,audit=self.make_report_job()
+        audit.source_metadata={**audit.source_metadata,'field_synthesis_required':True,'field_synthesis_status':'queued'}
+        audit.save()
+        with self.captureOnCommitCallbacks(execute=True):vdr_queue.dispatch()
+        audit.refresh_from_db()
+        foundation.return_value=({},[SimpleNamespace(id='document')],None,None)
+        synthesis.return_value={'analysis':SimpleNamespace(id='analysis'),'financial':{'status':'skipped','warning':'No supported financial inputs'}}
+        with patch.object(synthesize_vdr_report_deal.request,'id',audit.celery_task_id):
+            result=synthesize_vdr_report_deal.run(audit_log_id=str(audit.id),queue_generation=audit.source_metadata['dispatch_generation'])
+        self.assertEqual(result['status'],'completed')
+        audit.refresh_from_db()
+        self.assertEqual(audit.status,'PROCESSING')
+        self.assertEqual(audit.source_metadata['field_synthesis_status'],'completed')
+        self.assertEqual(audit.source_metadata['report_section_queue'][0]['status'],'queued')
+        self.assertIsNone(audit.source_metadata['current_task_id'])
+        self.assertEqual(synthesis.call_args.kwargs['required_document_ids'],['document'])
+
+    @patch('deals.services.vdr_queue.kick')
+    @patch('deals.tasks.process_vdr_report_section.apply_async')
+    @patch('deals.tasks.synthesize_vdr_report_deal.apply_async')
+    def test_synthesis_is_a_prerequisite_and_holds_the_next_deal(self, synthesis, sections, _kick):
+        _, first=self.make_report_job('First')
+        _, second=self.make_report_job('Second')
+        first.source_metadata={**first.source_metadata,'field_synthesis_required':True,'field_synthesis_status':'queued'}
+        first.save()
+        with self.captureOnCommitCallbacks(execute=True):
+            result=vdr_queue.dispatch()
+        self.assertEqual(result['unit'],'Deal synthesis')
+        synthesis.assert_called_once()
+        sections.assert_not_called()
+        self.assertEqual(vdr_queue.dispatch()['audit_log_id'],str(first.id))
+        second.refresh_from_db()
+        self.assertEqual(second.status,'PENDING')
+
     @override_settings(VDR_DURABLE_REPORT_CONCURRENCY=4, AI_INFERENCE_MAX_CONCURRENT_REQUESTS=4)
     @patch('deals.services.vdr_queue.kick')
     @patch('deals.services.vdr_queue._email_priority_busy', return_value=False)
     @patch('deals.services.vdr_queue._high_priority_busy', return_value=False)
     @patch('deals.tasks.process_vdr_report_section.apply_async')
-    def test_next_deal_fills_free_slots_without_waiting_for_first_deal(self, send, *_):
+    def test_next_deal_waits_until_first_deal_finishes(self, send, *_):
         _, first = self.make_report_job('First', sections=('Key Financials',))
         _, second = self.make_report_job('Second', sections=('Key Financials', 'Transaction Details', 'Company Details', 'Risk Factors'))
         with self.captureOnCommitCallbacks(execute=True):
@@ -166,14 +209,14 @@ class DurableVdrQueueTests(TestCase):
             result = vdr_queue.dispatch()
         first.refresh_from_db()
         second.refresh_from_db()
-        self.assertEqual(result['audit_log_id'], str(second.id))
+        self.assertEqual(result['audit_log_id'], str(first.id))
         self.assertEqual(len(first.source_metadata['active_report_units']), 1)
-        self.assertEqual(len(second.source_metadata['active_report_units']), 3)
-        self.assertEqual(send.call_count, 4)
+        self.assertEqual(second.status, 'PENDING')
+        self.assertEqual(send.call_count, 1)
         self.assertEqual(vdr_queue.dispatch()['status'], 'active')
-        self.assertEqual(send.call_count, 4)
+        self.assertEqual(send.call_count, 1)
         for job in (first, second):
-            for key, owner in job.source_metadata['active_report_units'].items():
+            for key, owner in (job.source_metadata.get('active_report_units') or {}).items():
                 self.assertTrue(vdr_queue.delivery_ownership_matches(str(job.id),
                     task_id=owner['current_task_id'], generation=owner['dispatch_generation'], unit_key=key))
 
@@ -189,7 +232,7 @@ class DurableVdrQueueTests(TestCase):
             vdr_queue.dispatch()
             vdr_queue.dispatch()
         first.refresh_from_db()
-        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_count, 1)
         self.assertEqual(vdr_queue.dispatch()['status'], 'active')
         owner = first.source_metadata['active_report_units']['Key Financials']
         with self.captureOnCommitCallbacks(execute=True):

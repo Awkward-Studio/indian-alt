@@ -32,12 +32,14 @@ class DealSynthesisService:
         source_type: str,
         required_document_ids: list[str] | None = None,
         parent_audit_log_id: str | None = None,
+        delivery_context: dict | None = None,
     ) -> dict:
         analysis = DealFieldSynthesisService.synthesize(
             deal,
             batch_key=batch_key,
             source_type=source_type,
             required_document_ids=required_document_ids,
+            **({'delivery_context': delivery_context} if delivery_context else {}),
         )
         analysis.refresh_from_db(fields=["analysis_json"])
         analysis_payload = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
@@ -52,6 +54,7 @@ class DealSynthesisService:
             summary = InternalFinancialProfileService().extract(
                 deal=deal,
                 parent_audit_log_id=parent_audit_log_id,
+                **({'use_accepted_report':False} if delivery_context else {}),
             )
             financial = {"status": "completed", "summary": summary, "warning": None}
         except NoSupportedFinancialData as exc:

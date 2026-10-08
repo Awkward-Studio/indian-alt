@@ -2129,6 +2129,64 @@ def finalize_durable_vdr_indexing(self, audit_log_id: str):
     bind=True, max_retries=2, soft_time_limit=0, time_limit=0,
     acks_late=True, reject_on_worker_lost=True,
 )
+def synthesize_vdr_report_deal(self, audit_log_id: str, queue_generation: int):
+    """Complete durable deal synthesis before this deal's report sections start."""
+    from ai_orchestrator.models import AIAuditLog
+    from deals.services import vdr_queue
+    from deals.services.deal_synthesis import DealSynthesisService
+    task_id=str(self.request.id)
+    if not vdr_queue.delivery_is_current(audit_log_id,task_id=task_id,generation=queue_generation,unit_key='Deal synthesis'):
+        return {'status':'stale'}
+    vdr_queue.heartbeat(audit_log_id,task_id=task_id,generation=queue_generation,unit_key='Deal synthesis',
+        worker_id=os.getenv('RAILWAY_DEPLOYMENT_ID') or str(getattr(self.request,'hostname','')))
+    vdr_queue.start_heartbeat(audit_log_id,task_id=task_id,generation=queue_generation,unit_key='Deal synthesis')
+    audit=AIAuditLog.objects.get(id=audit_log_id)
+    try:
+        deal=Deal.objects.get(id=audit.source_id)
+        _,documents,_,_=_durable_report_foundation(deal,audit,allow_gaps=bool((audit.source_metadata or {}).get('allow_gaps')))
+        result=DealSynthesisService.run(deal,batch_key=f'vdr-report-fields:{audit_log_id}',source_type='confirmed_report',
+            required_document_ids=[str(d.id) for d in documents],parent_audit_log_id=audit_log_id,
+            delivery_context={'audit_log_id':audit_log_id,'task_id':task_id,'generation':queue_generation})
+        with transaction.atomic():
+            audit=AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+            if not vdr_queue.delivery_is_current(audit_log_id,task_id=task_id,generation=queue_generation,unit_key='Deal synthesis'):
+                return {'status':'stale'}
+            audit.source_metadata={**(audit.source_metadata or {}),'queue_state':'queued','workflow_stage':'report_sections',
+                'field_synthesis_status':'completed','field_synthesis_analysis_id':str(result['analysis'].id),
+                'financial_synthesis_status':result['financial']['status'],'financial_synthesis_warning':result['financial'].get('warning'),
+                'current_task_id':None,'current_unit_key':None,'current_unit_type':None,'active_report_units':{}}
+            audit.error_message=''
+            audit.save(update_fields=['source_metadata','error_message'])
+            Deal.objects.filter(id=deal.id).update(processing_status='processing',processing_error=None)
+        vdr_queue.kick()
+        broadcast_audit_log_update(audit,event_type='progress',done=False)
+        return {'status':'completed','analysis_id':str(result['analysis'].id)}
+    except Exception as error:
+        if not vdr_queue.delivery_is_current(audit_log_id,task_id=task_id,generation=queue_generation,unit_key='Deal synthesis'):
+            return {'status':'stale'}
+        if self.request.retries < self.max_retries:
+            with transaction.atomic():
+                audit=AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+                audit.source_metadata={**(audit.source_metadata or {}),'field_synthesis_status':'retrying'}
+                audit.error_message=f'Deal synthesis retry pending: {error}'
+                audit.save(update_fields=['source_metadata','error_message'])
+            raise self.retry(exc=error,countdown=15*(self.request.retries+1))
+        with transaction.atomic():
+            audit=AIAuditLog.objects.select_for_update().get(id=audit_log_id)
+            audit.status='FAILED';audit.is_success=False;audit.completed_at=timezone.now();audit.error_message=str(error)
+            audit.source_metadata={**(audit.source_metadata or {}),'queue_state':'failed','field_synthesis_status':'failed',
+                'current_task_id':None,'current_unit_key':None,'current_unit_type':None}
+            audit.save(update_fields=['status','is_success','completed_at','error_message','source_metadata'])
+            Deal.objects.filter(id=audit.source_id).update(processing_status='failed',processing_error=str(error))
+        vdr_queue.kick()
+        broadcast_audit_log_update(audit,event_type='terminal',done=True)
+        return {'status':'failed','error':str(error)}
+
+
+@shared_task(
+    bind=True, max_retries=2, soft_time_limit=0, time_limit=0,
+    acks_late=True, reject_on_worker_lost=True,
+)
 def process_vdr_report_section(
     self, deal_id: str, audit_log_id: str, section_title: str, queue_generation: int,
 ):

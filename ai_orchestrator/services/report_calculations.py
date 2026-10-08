@@ -77,6 +77,10 @@ def report_calculation_errors(markdown: str) -> list[str]:
     # Report authors use mathematical ^ for powers. Parse the full expression
     # as exponentiation rather than validating only its trailing (1/n) - 1.
     arithmetic_source = arithmetic_source.replace('^', '**')
+    # Percent stakes are operands, not result-unit annotations. Preserve the
+    # multiplier so a proceeds equation is not checked as its inner EV bridge.
+    arithmetic_source = re.sub(rf'(?P<stake>{NUMBER})\s*%\s*(?=[×*÷/+(−-])',
+        lambda match: '(' + match['stake'] + ' / 100)', arithmetic_source)
     for match in EQUATION.finditer(arithmetic_source):
         # Simple ratios below also support scenario/IRR consistency checks.
         if RATIO.fullmatch(match[0]): continue

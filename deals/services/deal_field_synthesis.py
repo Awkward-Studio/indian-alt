@@ -6,9 +6,10 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, Iterator
 
-from django.db import transaction
+from django.db import transaction, close_old_connections
 from django.conf import settings
 
 from ai_orchestrator.models import AIAuditLog
@@ -295,6 +296,7 @@ class DealFieldSynthesisService:
         source_type: str,
         phase: str,
         phase_index: int,
+        delivery_context: dict | None = None,
     ) -> list[dict]:
         """Retry an oversized serialized request as smaller logical batches."""
         try:
@@ -306,6 +308,7 @@ class DealFieldSynthesisService:
                 source_type=source_type,
                 phase=phase,
                 phase_index=phase_index,
+                **({'delivery_context':delivery_context} if delivery_context else {}),
             )]
         except ContextBudgetExceeded:
             try:
@@ -333,6 +336,7 @@ class DealFieldSynthesisService:
                     source_type=source_type,
                     phase=phase,
                     phase_index=phase_index,
+                    **({'delivery_context':delivery_context} if delivery_context else {}),
                 ))
             return results
 
@@ -347,6 +351,7 @@ class DealFieldSynthesisService:
         source_type: str,
         phase: str,
         phase_index: int,
+        delivery_context: dict | None = None,
     ) -> dict:
         existing_deal_json = cls._serialize(cls._existing_deal_payload(deal))
         request_sha = hashlib.sha256(cls._serialize({
@@ -373,6 +378,7 @@ class DealFieldSynthesisService:
             source_type="deal_field_synthesis",
             source_id=str(deal.id),
             metadata={
+                **({'celery_task_id':delivery_context['task_id']} if delivery_context else {}),
                 "existing_deal_json": existing_deal_json,
                 "batch_key": batch_key,
                 "ingestion_source_type": source_type,
@@ -384,6 +390,8 @@ class DealFieldSynthesisService:
                 "chat_template_kwargs": {"enable_thinking": False},
                 "context_label": f"{deal.title}: field synthesis {phase} {phase_index + 1}",
                 "_source_metadata": {
+                    **({'vdr_parent_audit_id':delivery_context['audit_log_id'],
+                        'vdr_dispatch_generation':delivery_context['generation'], 'report_section':'Deal synthesis'} if delivery_context else {}),
                     "field_synthesis_key": batch_key,
                     "field_synthesis_phase": phase,
                     "field_synthesis_phase_index": phase_index,
@@ -433,6 +441,7 @@ class DealFieldSynthesisService:
         batch_key: str,
         source_type: str,
         required_document_ids: list[str] | None = None,
+        delivery_context: dict | None = None,
     ) -> DealAnalysis:
         """Fill supported fields once a source batch has durable indexed evidence."""
         existing = DealAnalysis.objects.filter(
@@ -460,35 +469,13 @@ class DealFieldSynthesisService:
 
         processor = AIProcessorService()
         evidence_batches = cls._evidence_batches(documents)
-        results = [
-            result
-            for index, content in enumerate(evidence_batches)
-            for result in cls._run_model_adaptive(
-                processor,
-                deal=deal,
-                content=content,
-                batch_key=batch_key,
-                source_type=source_type,
-                phase="evidence_map",
-                phase_index=index,
-            )
-        ]
+        results = cls._run_batches(processor, evidence_batches, deal=deal, batch_key=batch_key,
+            source_type=source_type, phase='evidence_map', delivery_context=delivery_context)
         reduction_round = 0
         while len(results) > 1:
             candidate_batches = cls._candidate_batches(results)
-            results = [
-                result
-                for index, content in enumerate(candidate_batches)
-                for result in cls._run_model_adaptive(
-                    processor,
-                    deal=deal,
-                    content=content,
-                    batch_key=batch_key,
-                    source_type=source_type,
-                    phase=f"candidate_reduce_{reduction_round}",
-                    phase_index=index,
-                )
-            ]
+            results = cls._run_batches(processor, candidate_batches, deal=deal, batch_key=batch_key,
+                source_type=source_type, phase=f'candidate_reduce_{reduction_round}', delivery_context=delivery_context)
             reduction_round += 1
         result = dict(results[0])
         model_data = dict(result.get("deal_model_data") or {})
@@ -505,6 +492,11 @@ class DealFieldSynthesisService:
         })
 
         with transaction.atomic():
+            if delivery_context:
+                from deals.services.vdr_queue import delivery_is_current
+                if not delivery_is_current(delivery_context['audit_log_id'],task_id=delivery_context['task_id'],
+                        generation=delivery_context['generation'],unit_key='Deal synthesis'):
+                    raise ValueError('Deal synthesis delivery was cancelled or superseded.')
             deal = Deal.objects.select_for_update().get(pk=deal.pk)
             existing = DealAnalysis.objects.filter(
                 deal=deal,
@@ -563,3 +555,30 @@ class DealFieldSynthesisService:
         embedder.vectorize_deal(deal)
         embedder.refresh_deal_profile(deal)
         return analysis
+
+    @classmethod
+    def _run_batches(cls, processor, batches, *, deal, batch_key, source_type, phase, delivery_context=None):
+        # Partition a single multi-fragment source packet when the requested
+        # report synthesis has parallel capacity. The later reduce phase joins
+        # the partial results before any deal fields are persisted.
+        if delivery_context and phase == 'evidence_map' and len(batches) == 1:
+            packet = json.loads(batches[0])
+            fragments = packet.get('evidence_fragments') or []
+            capacity = min(3, max(1,int(getattr(settings,'AI_INFERENCE_MAX_CONCURRENT_REQUESTS',1))), len(fragments))
+            if capacity > 1:
+                batches = [cls._serialize({**packet,'evidence_fragments':fragments[index::capacity]}) for index in range(capacity)]
+        workers = min(len(batches), max(1,int(getattr(settings,'VDR_DURABLE_REPORT_CONCURRENCY',1))),
+            max(1,int(getattr(settings,'AI_INFERENCE_MAX_CONCURRENT_REQUESTS',1)))) if delivery_context else 1
+        kwargs={'deal':deal,'batch_key':batch_key,'source_type':source_type,'phase':phase}
+        if workers <= 1:
+            return [result for index,content in enumerate(batches) for result in cls._run_model_adaptive(
+                processor,content=content,phase_index=index,**kwargs,**({'delivery_context':delivery_context} if delivery_context else {}))]
+        def run(item):
+            close_old_connections()
+            try:
+                return cls._run_model_adaptive(AIProcessorService(),content=item[1],phase_index=item[0],
+                    **kwargs,delivery_context=delivery_context)
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return [result for group in executor.map(run,enumerate(batches)) for result in group]

@@ -246,7 +246,7 @@ def higher_priority_work_waiting(
 
 
 def dispatch() -> dict:
-    """Fill shared report capacity across deals, preferring reports over indexing."""
+    """Finish the oldest report deal before dispatching the next deal."""
     from ai_orchestrator.models import AIAuditLog
     from deals.tasks import process_single_document_async, process_vdr_report_section, vdr_unit_completed
 
@@ -264,9 +264,13 @@ def dispatch() -> dict:
                 status__in=ACTIVE_STATUSES,
                 source_metadata__queue_version=QUEUE_VERSION,
                 source_metadata__queue_scope="vdr",
-                source_metadata__queue_state__in=[*RUNNABLE_STATES, "dispatching", "active"],
+                source_metadata__queue_state__in=[*RUNNABLE_STATES, "dispatching", "active", "field_synthesis", "field_synthesis_retry"],
             ).order_by("created_at"))
             active_jobs = [job for job in jobs if (job.source_metadata or {}).get("current_task_id")]
+            synthesizing = next((job for job in jobs if (job.source_metadata or {}).get('queue_state') in
+                {'field_synthesis', 'field_synthesis_retry'} or (job.source_metadata or {}).get('field_synthesis_status') in {'processing', 'retrying'}), None)
+            if synthesizing:
+                return {'status': 'active', 'audit_log_id': str(synthesizing.id), 'phase': 'deal_synthesis'}
             # Indexing still yields at document boundaries; report sections can
             # share their lane without waiting for another deal's last section.
             active_indexing = next((job for job in active_jobs if
@@ -278,8 +282,21 @@ def dispatch() -> dict:
             running = sum(_running_report_sections(job.source_metadata or {}) for job in report_jobs)
             available = max(0, capacity - running)
             audit = None
-            for job in report_jobs:
+            for job in report_jobs[:1]:
                 job_metadata = job.source_metadata or {}
+                if job_metadata.get('field_synthesis_required') and job_metadata.get('field_synthesis_status') != 'completed':
+                    from deals.tasks import synthesize_vdr_report_deal
+                    task_id = str(uuid.uuid4())
+                    generation = int(job_metadata.get('dispatch_generation') or 0) + 1
+                    job_metadata.update(queue_state='active', workflow_stage='deal_synthesis', field_synthesis_status='processing',
+                        current_task_id=task_id, current_unit_key='Deal synthesis', current_unit_type='field_synthesis',
+                        dispatch_generation=generation, active_report_units={}, worker_instance_id=None, heartbeat_at=timezone.now().isoformat())
+                    job.status='PROCESSING'; job.celery_task_id=task_id; job.source_metadata=job_metadata
+                    job.save(update_fields=['status','celery_task_id','source_metadata'])
+                    transaction.on_commit(lambda job_id=str(job.id), delivery_id=task_id, gen=generation:
+                        synthesize_vdr_report_deal.apply_async(kwargs={'audit_log_id':job_id,'queue_generation':gen},queue='vdr_work',task_id=delivery_id))
+                    transaction.on_commit(lambda job_id=str(job.id): _broadcast(job_id))
+                    return {'status':'dispatched','audit_log_id':str(job.id),'unit':'Deal synthesis'}
                 if available and _next_report_batch(job_metadata, available_slots=available):
                     audit = job
                     break
@@ -759,6 +776,8 @@ def reconcile() -> dict:
                 metadata.update({"current_task_id": None, "current_unit_type": None, "current_unit_key": None})
                 failed += 1
             else:
+                if metadata.get('current_unit_type') == 'field_synthesis':
+                    metadata['field_synthesis_status'] = 'queued'
                 manifest_key = "document_queue" if metadata.get("queue_kind") == "indexing" else "report_section_queue"
                 key_name = "source_file_id" if manifest_key == "document_queue" else "title"
                 for item in metadata.get(manifest_key) or []:

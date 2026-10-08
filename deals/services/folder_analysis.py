@@ -1127,6 +1127,7 @@ class FolderAnalysisService:
                 'transcription_status': doc.transcription_status,
                 'chunking_status': doc.chunking_status,
                 'is_indexed': doc.is_indexed,
+                'error': doc.error_message or '',
             }
             for doc in documents
             if doc not in ready
@@ -1209,6 +1210,7 @@ class FolderAnalysisService:
                         user_confirmation_received=True, readiness=readiness,
                         workflow_stage="analysis_queued",
                         regeneration_feedback=regeneration_feedback,
+                        field_synthesis_required=True, field_synthesis_status='queued',
                     ),
                 )
                 transaction.on_commit(vdr_queue.kick)

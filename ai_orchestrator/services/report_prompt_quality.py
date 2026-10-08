@@ -83,6 +83,12 @@ CALCULATION_GUIDANCE = (
     " Reuse exact application-computed derived_display_values supplied with primary "
     "saved cells for unit conversions; do not request the calculator to recompute them. "
     "Use the calculator for material derivations whose results are not already supplied."
+    " Equity value = enterprise value - debt + cash (with explicitly stated other "
+    "bridge adjustments). If debt is assumed zero, equity value is EV + cash, "
+    "not EV - cash. Missing debt is not proof of zero debt. Investor exit proceeds "
+    "apply the assumed or documented exit stake to equity value, then the actual "
+    "preference/waterfall terms. Keep each scenario's table, prose, MOIC and IRR "
+    "on the same cash bridge, stake and holding-period assumptions."
 )
 GENERATION_GUIDANCE = (
     "Before drafting, organize the section's required analytical themes against "

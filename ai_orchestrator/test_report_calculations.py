@@ -3,6 +3,10 @@ from ai_orchestrator.services.report_calculations import report_calculation_erro
 
 
 class ReportCalculationTests(SimpleTestCase):
+    def test_percentage_stake_keeps_the_full_exit_proceeds_equation(self):
+        self.assertEqual(report_calculation_errors('10% × (13,422.20 − 2,624.81) = INR 1,079.74 Mn.'), [])
+        self.assertEqual(report_calculation_errors('10% × (26,844.40 − 2,624.81) = INR 2,421.96 Mn.'), [])
+        self.assertTrue(report_calculation_errors('10% × (13,422.20 − 2,624.81) = INR 2,079.74 Mn.'))
     def test_arithmetic_verification_does_not_depend_on_citation_validation(self):
         self.assertEqual(report_calculation_errors('MOIC = 100 / 50 = 2.00x [R999].'), [])
         self.assertTrue(report_calculation_errors('MOIC = 100 / 50 = 3.00x [R999].'))
