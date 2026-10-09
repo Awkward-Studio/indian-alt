@@ -91,6 +91,43 @@ class EmailIngestionAPITests(TestCase):
         self.assertEqual(response['Cache-Control'], 'private, no-store')
         self.assertIn(b'Revised terms', b''.join(response.streaming_content))
 
+    def test_download_reads_database_attachment_without_a_local_file(self):
+        content = b'%PDF-original-email-attachment'
+        blob = EmailPrivateBlob.objects.create(
+            email_account=self.email.email_account, sha256='b' * 64,
+            size=len(content), payload=content,
+        )
+        occurrence = EmailContributionOccurrence.objects.create(
+            run=self.run, source_key='attachment:database-pdf', blob=blob,
+            metadata={'name': 'Original attachment.pdf'},
+        )
+
+        response = self.client.get(self.url + 'evidence-source/', {
+            'run_id': str(self.run.id), 'occurrence_id': str(occurrence.id),
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b''.join(response.streaming_content), content)
+        self.assertIn('attachment;', response['Content-Disposition'])
+        self.assertIn('Original attachment.pdf', response['Content-Disposition'])
+        self.assertEqual(response['Cache-Control'], 'private, no-store')
+        self.assertEqual(response['X-Content-Type-Options'], 'nosniff')
+
+    def test_unavailable_attachment_returns_a_clear_error(self):
+        blob = EmailPrivateBlob.objects.create(
+            email_account=self.email.email_account, sha256='c' * 64, size=0,
+        )
+        occurrence = EmailContributionOccurrence.objects.create(
+            run=self.run, source_key='attachment:unavailable', blob=blob,
+        )
+
+        response = self.client.get(self.url + 'evidence-source/', {
+            'run_id': str(self.run.id), 'occurrence_id': str(occurrence.id),
+        })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data['error'], 'The original email attachment is unavailable.')
+
     def test_invalid_deal_identifier_is_validation_error(self):
         response = self.client.post(self.url + 'ingestion-confirm/', {'run_id': str(self.run.id),
             'expected_revision': 1, 'deal_id': 'invalid'}, format='json')

@@ -268,7 +268,10 @@ class EmailIngestionActions:
             run.occurrences.select_related('blob', 'contribution'),
             pk=request.query_params.get('occurrence_id'))
         if occurrence.blob_id:
-            stream = occurrence.blob.file.open('rb')
+            try:
+                stream = io.BytesIO(occurrence.blob.read_bytes())
+            except (OSError, ValueError):
+                return Response({'error': 'The original email attachment is unavailable.'}, status=404)
             filename = PurePath(occurrence.metadata.get('name') or 'attachment').name
         elif occurrence.contribution_id:
             stream = io.BytesIO(occurrence.contribution.text.encode('utf-8'))
