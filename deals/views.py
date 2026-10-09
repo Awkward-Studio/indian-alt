@@ -605,18 +605,42 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         doc=candidates[0]
         evidence=doc.evidence_json if isinstance(doc.evidence_json,dict) else {}
         metadata=evidence.get('source_metadata') or {}
+        metadata=metadata if isinstance(metadata,dict) else {}
+        attachment=doc.email_evidence_links.filter(active=True,kind='email_attachment').select_related('blob').first()
+        if request.query_params.get('download') == '1':
+            if not attachment or not attachment.blob_id:
+                return Response({'error':'Only captured email attachments can be downloaded here.'},status=404)
+            from io import BytesIO
+            from django.http import FileResponse
+            try:
+                content=attachment.blob.read_bytes()
+            except (OSError,ValueError):
+                return Response({'error':'The original email attachment is unavailable.'},status=404)
+            response=FileResponse(BytesIO(content),as_attachment=True,filename=doc.title,
+                content_type='application/octet-stream')
+            response['Cache-Control']='private, no-store'
+            return response
         open_url=None
-        if doc.onedrive_id:
+        if not attachment:
+            from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
+            open_url=ICReportSectionEvidenceService._document_source_url(doc) or None
+            if not open_url:
+                email_link=doc.email_evidence_links.filter(active=True,kind='email_link').first()
+                if email_link:
+                    open_url=ICReportSectionEvidenceService._safe_http_url((email_link.provenance or {}).get('source_url')) or None
+        if not attachment and not open_url and doc.onedrive_id:
             from microsoft.services.graph_service import GraphAPIService, DMS_DRIVE_ID
             drive_id=metadata.get('source_drive_id') or doc.deal.source_drive_id or DMS_DRIVE_ID
             try:
-                open_url=GraphAPIService().get_drive_item_download_url(drive_id,doc.onedrive_id)
+                item=GraphAPIService().get_drive_item(drive_id,doc.onedrive_id)
+                open_url=ICReportSectionEvidenceService._safe_http_url(item.get('webUrl')) or None
             except Exception:
-                logger.warning('Could not obtain original citation document %s',doc.pk)
-        if not open_url and not doc.onedrive_id and doc.file_url:
-            open_url=doc.file_url if urlsplit(doc.file_url).scheme in {'http','https'} else None
+                logger.warning('Could not obtain citation document web link %s',doc.pk)
+        download_available=bool(attachment and attachment.blob_id)
         return Response({'document_id':str(doc.pk),'title':doc.title,'open_url':open_url,
-            'indexed_text':str(doc.normalized_text or doc.extracted_text or '') if not open_url else ''})
+            'download_available':download_available,
+            'source_kind':'email_attachment' if attachment else 'document_link',
+            'indexed_text':str(doc.normalized_text or doc.extracted_text or '') if not open_url and not download_available else ''})
     # Use select_related to avoid N+1 queries on foreign keys
     queryset = Deal.objects.select_related(
         'bank', 'primary_contact', 'request'
