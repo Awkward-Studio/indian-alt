@@ -249,10 +249,11 @@ def report_gap_candidates(deal: Deal) -> list[dict]:
         message = str(gap['error']).strip()
         verification = gap.get('issue_kind') == 'verification' or bool(re.search(
             r'could not be independently verified|no source reference|needs period verification', message, re.I))
-        normalized = re.sub(r'\b(?:FY|AY|CY)\s*\d{2,4}(?:[-/–]\d{2,4})?(?:\s+(?:Actual|Estimated|Forecast|Projected))?',
-            'period', message, flags=re.I) if verification else message
-        normalized = re.sub(r'\[\d+\]', '', normalized)
-        key = (gap['title'], 'verification' if verification else gap.get('issue_kind'), normalized_task_text(normalized))
+        metric = re.split(r'\s+in\s+|\s+has no\s+|\s+could not\s+', message, maxsplit=1, flags=re.I)[0]
+        # One verification task per metric and section; retain every period and
+        # qualification in the evidence instead of repeating the same task title.
+        key = (gap['title'], 'verification' if verification else gap.get('issue_kind'),
+            normalized_task_text(metric if verification else message))
         group = grouped.setdefault(key, {'gap': gap, 'verification': verification, 'messages': [], 'references': []})
         for detail in [message, *(gap.get('details') or [])]:
             if isinstance(detail, str) and detail.strip() and detail not in group['messages']:

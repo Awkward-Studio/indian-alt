@@ -366,12 +366,13 @@ class ReportGapSuggestionTests(TestCase):
 
     def test_repeated_period_warnings_group_and_repeated_sync_does_not_duplicate(self):
         messages = [f'Revenue in FY{year} Actual could not be independently verified from the cited workbook cells.' for year in (24, 25)]
+        messages.append('Revenue in FY26 Forecast has no source reference; the amount is not verified.')
         self.section([{'kind': 'verification', 'message': message} for message in messages])
         sync_deal_suggestions(self.deal)
         sync_deal_suggestions(self.deal)
         suggestions = TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap', state='pending')
         self.assertEqual(suggestions.count(), 1)
-        self.assertEqual(len(suggestions.get().source_references), 2)
+        self.assertEqual(len(suggestions.get().source_references), 3)
         self.assertTrue(all(message in suggestions.get().title for message in messages))
 
     def test_newer_saved_section_clears_old_gap_and_draft_does_not_create_one(self):
