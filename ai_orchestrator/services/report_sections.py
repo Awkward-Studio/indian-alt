@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v14"
+    CACHE_VERSION = "ic-report-sections-v15"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -555,7 +555,8 @@ class ICReportSectionService:
         calculation_corrections: list | None = None,
         validation_warnings: list | None = None,
     ) -> str:
-        text = str(response or "").strip()
+        from deals.services.report_assembly import strip_report_review_blocks
+        text = strip_report_review_blocks(str(response or ""))
         if "<report_calculations>" in text or "</report_calculations>" in text:
             raise ReportSectionStructureError("Return only the final Markdown report after completing calculator requests.")
         citation_tokens = [
@@ -621,12 +622,6 @@ class ICReportSectionService:
         warnings = list(grouped.values())
         if validation_warnings is not None:
             validation_warnings.extend(warnings)
-        if warnings:
-            text += ('\n\n### Source gaps and calculation issues\n\n'
-                'This draft has been saved for review. The issues below remain unresolved; affected '
-                'figures are not verified.\n\n' + '\n'.join(
-                    '- **' + ('Number conflict' if item['kind']=='calculation' else 'Verification review' if item['kind']=='verification' else 'Reconciliation review' if item['kind']=='reconciliation' else 'Source/format review') + ':** ' + item['message']
-                    for item in warnings))
         body = text[len(target):].strip()
         if len(body) < 40 and not used_citations:
             raise ReportSectionValidationError(f"Report section '{title}' was empty or incomplete.")
@@ -1001,11 +996,14 @@ class ICReportSectionService:
                     audit.parsed_json = {**(audit.parsed_json or {}), '_normalized_section': section}
                     audit.save(update_fields=['source_metadata', 'parsed_json'])
         try:
-            cache.set(
-                cache_key,
-                section,
-                timeout=int(getattr(settings, "EMAIL_REPORT_SECTION_CACHE_TTL", 7 * 24 * 60 * 60)),
-            )
+            # Warning-bearing drafts need their own audit metadata on each run.
+            # A text-only cache entry cannot carry their unresolved findings.
+            if not validation_warnings:
+                cache.set(
+                    cache_key,
+                    section,
+                    timeout=int(getattr(settings, "EMAIL_REPORT_SECTION_CACHE_TTL", 7 * 24 * 60 * 60)),
+                )
         except Exception:
             pass
         return section

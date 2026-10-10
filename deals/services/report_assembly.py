@@ -29,6 +29,13 @@ SECTION_KEYS.update({
 })
 
 
+def strip_report_review_blocks(value: str) -> str:
+    """Keep generated validation findings in metadata, outside report prose."""
+    return re.sub(
+        r'^###[ \t]+(?:Source gaps and calculation issues|Calculation review warnings)[ \t]*\r?\n.*?(?=^#{1,3}[ \t]+|\Z)',
+        '', str(value or ''), flags=re.I | re.M | re.S).strip()
+
+
 def _report_prose(value, depth=0) -> str:
     if not isinstance(value, str) or depth > 4:
         return ''
@@ -51,7 +58,7 @@ def clean_report_text(value) -> str:
     notes = []
     preamble = ''
     for raw_block in SEPARATOR.split(value):
-        block = _report_prose(raw_block)
+        block = strip_report_review_blocks(_report_prose(raw_block))
         if not block:
             continue
         headings = [match for match in re.finditer(r'^(#{1,3})\s+(.+?)\s*$', block, re.MULTILINE)

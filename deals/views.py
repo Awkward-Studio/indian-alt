@@ -2196,6 +2196,15 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                 rewritten = str(confirmation.get("section_markdown") or "").strip()
                 updated_report = rewrite_service.replace_section(full_report, section_title, rewritten)
                 rewrite_service.persist(deal=deal, full_report=updated_report, version=version)
+                if confirmation.get('audit_log_id'):
+                    applied_audit = AIAuditLog.objects.filter(pk=confirmation['audit_log_id'],
+                        source_type='analysis_section_rewrite', source_id=str(deal.id)).first()
+                    if applied_audit:
+                        metadata = applied_audit.source_metadata or {}
+                        applied_audit.source_metadata = {**metadata, 'report_section_outcome':
+                            'saved_with_gaps' if metadata.get('report_validation_warnings') else 'accepted'}
+                        applied_audit.completed_at = timezone.now()
+                        applied_audit.save(update_fields=['source_metadata', 'completed_at'])
                 return Response({
                     "section_markdown": rewritten,
                     "full_report": updated_report,

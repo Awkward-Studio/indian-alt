@@ -209,7 +209,7 @@ class ICReportSectionServiceTests(TestCase):
         self.assertEqual(audit.source_metadata['report_section_outcome'],'draft_ready_with_gaps')
         self.assertEqual(audit.parsed_json['_normalized_section'],section)
         self.assertTrue(audit.source_metadata['report_validation_warnings'])
-        self.assertIn('Number conflict',section)
+        self.assertNotIn('Number conflict',section)
 
     def complete_report(self):
         return "\n\n".join(f"{header}\n\nComplete evidence-backed content for {header}." for header in IC_REPORT_HEADERS)

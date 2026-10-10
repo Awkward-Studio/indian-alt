@@ -274,9 +274,11 @@ class ReportQualityTests(SimpleTestCase):
         self.assertIn('Gross Profit in FY25 Actual: displayed 55, bridge yields 40', warnings)
         cited = table.replace('| 100 |', '| 100 [1] |').replace('| 60 |', '| 60 [1] |').replace('| 55 |', '| 55 [1] |')
         self.assertEqual(ICReportSectionService._validate_financial_table(extra + '\n\n' + cited, verified_citation_numbers={1}), ['Gross Profit in FY25 Actual: displayed 55, bridge yields 40'])
-        normalized = ICReportSectionService._normalize_section('Key Financials', table, strict_financial_table=True)
-        self.assertIn('### Source gaps and calculation issues', normalized)
-        self.assertIn('displayed 55, bridge yields 40', normalized)
+        validation_warnings = []
+        normalized = ICReportSectionService._normalize_section('Key Financials', table, strict_financial_table=True,
+            validation_warnings=validation_warnings)
+        self.assertNotIn('### Source gaps and calculation issues', normalized)
+        self.assertTrue(any('displayed 55, bridge yields 40' in issue['message'] for issue in validation_warnings))
         self.assertIn('| Gross Profit | 55 |', normalized)
 
     def test_uolo_metric_annotations_preserve_basis_and_missing_values(self):

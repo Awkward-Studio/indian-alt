@@ -1,6 +1,7 @@
 """Coverage review history for the current deal report, without exposing prompts."""
 from ai_orchestrator.models import AIAuditLog
 from django.db.models import Q
+from django.db.models.functions import Coalesce
 from ai_orchestrator.services.report_source_review import material_review_errors
 
 
@@ -10,8 +11,11 @@ def recorded_report_gaps(deal):
         .filter(Q(source_metadata__queue_state__isnull=True) | ~Q(source_metadata__queue_state='cancelled'))
         .order_by('-created_at').values_list('id', flat=True)[:10])
     seen_sections, gaps = set(), []
-    attempts = AIAuditLog.objects.filter(source_type='vdr_report_section', status='COMPLETED',
-        source_metadata__vdr_parent_audit_id__in=[str(pk) for pk in parents]).only('id', 'source_metadata').order_by('-created_at')
+    attempts = AIAuditLog.objects.filter(status='COMPLETED').filter(
+        Q(source_type='vdr_report_section', source_metadata__vdr_parent_audit_id__in=[str(pk) for pk in parents]) |
+        Q(source_type='analysis_section_rewrite', source_id=str(deal.id),
+            source_metadata__report_section_outcome__in=['accepted', 'saved_with_gaps'])
+    ).only('id', 'source_metadata').annotate(saved_review_at=Coalesce('completed_at', 'created_at')).order_by('-saved_review_at', '-created_at')
     for attempt in attempts:
         metadata = attempt.source_metadata or {}
         if metadata.get('report_section_outcome') in {'draft_ready', 'draft_ready_with_gaps', 'superseded'} or metadata.get('inference_state') == 'superseded':

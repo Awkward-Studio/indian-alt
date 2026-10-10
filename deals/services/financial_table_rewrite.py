@@ -25,6 +25,8 @@ def locate_main_financial_table(markdown):
 
 
 def merge_financial_table(original, generated):
+    from .report_assembly import strip_report_review_blocks
+    original, generated = strip_report_review_blocks(original), strip_report_review_blocks(generated)
     table, _, _ = locate_main_financial_table(generated)
     _, start, end = locate_main_financial_table(original)
     # New retrieval references have their own numbering. Keep old references
@@ -39,7 +41,4 @@ def merge_financial_table(original, generated):
     if references:
         heading = '' if re.search(r'^###\s+Citations\s*$', original, re.M) else '### Citations\n\n'
         updated = updated.rstrip() + '\n\n' + heading + references + '\n'
-    warnings = re.search(r'^### Source gaps and calculation issues\n(.*?)(?=^### |\Z)', generated, re.M | re.S)
-    if warnings:
-        updated = updated.rstrip() + '\n\n' + warnings[0].strip() + '\n'
     return updated, table

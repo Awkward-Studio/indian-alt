@@ -79,6 +79,7 @@ def rewrite_analysis_section_async(
                 "section_title": section_title,
                 "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
                 "section_markdown": rewritten,
+                "audit_log_id": str(audit.pk),
             },
             salt="analysis-section-rewrite",
             compress=True,
@@ -91,6 +92,10 @@ def rewrite_analysis_section_async(
             "confirmation_token": confirmation_token,
             "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
         }
+        audit.source_metadata = {**(audit.source_metadata or {}),
+            'report_section': rewrite_service.published_section_title(section_title) or section_title,
+            'report_validation_warnings': getattr(rewrite_service, 'validation_warnings', []),
+            'report_section_outcome': 'draft_ready_with_gaps' if getattr(rewrite_service, 'validation_warnings', []) else 'draft_ready'}
         if rewrite_scope == 'financial_table':
             from deals.services.financial_table_rewrite import locate_main_financial_table
             table, _, _ = locate_main_financial_table(rewritten)

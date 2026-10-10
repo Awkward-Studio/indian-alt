@@ -14,12 +14,15 @@ logger = logging.getLogger(__name__)
 @receiver(post_save, sender=AIAuditLog)
 def synchronize_saved_report_gap_suggestions(sender, instance, **kwargs):
     metadata = instance.source_metadata or {}
-    if instance.source_type != 'vdr_report_section' or instance.status != 'COMPLETED' or metadata.get('report_section_outcome') not in {'accepted', 'saved_with_gaps'}:
+    if instance.source_type not in {'vdr_report_section', 'analysis_section_rewrite'} or instance.status != 'COMPLETED' or metadata.get('report_section_outcome') not in {'accepted', 'saved_with_gaps'}:
         return
-    parent_id = metadata.get('vdr_parent_audit_id')
-    if not parent_id:
-        return
-    deal_id = AIAuditLog.objects.filter(pk=parent_id).values_list('source_id', flat=True).first()
+    if instance.source_type == 'analysis_section_rewrite':
+        deal_id = instance.source_id
+    else:
+        parent_id = metadata.get('vdr_parent_audit_id')
+        if not parent_id:
+            return
+        deal_id = AIAuditLog.objects.filter(pk=parent_id).values_list('source_id', flat=True).first()
     if not deal_id:
         return
 

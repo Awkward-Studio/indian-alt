@@ -7,6 +7,26 @@ from deals.services.financial_evidence import reported_unit
 ROW_KEYS = ['revenue', 'cogs', 'gross_profit', 'expenses', 'ebitda', 'depreciation', 'ebit',
             'interest', 'other_income', 'exceptional_items', 'profit_before_tax', 'tax', 'pat']
 
+
+def section_validation_warnings(source_id):
+    from uuid import UUID
+    from django.db.models import Q
+    from ai_orchestrator.models import AIAuditLog
+    try:
+        audit_id = UUID(str(source_id))
+    except (ValueError, TypeError):
+        return []
+    audits = AIAuditLog.objects.filter(Q(pk=audit_id) | Q(source_id=str(audit_id)),
+        source_type__in=['vdr_report_section', 'analysis_section_rewrite'], status='COMPLETED',
+        source_metadata__report_section='Key Financials').only('source_metadata').order_by('-created_at')
+    for audit in audits:
+        metadata = audit.source_metadata or {}
+        if metadata.get('inference_state') == 'superseded' or metadata.get('report_section_outcome') == 'superseded':
+            continue
+        if 'report_validation_warnings' in metadata:
+            return metadata['report_validation_warnings'] or []
+    return []
+
 def section_payload(section, source_id):
     blocks = re.findall(r'(?:^|\n)(\|[^\n]+\|(?:\n\|[^\n]+\|)+)', section)
     tables = [[[cell.strip() for cell in line.strip().strip('|').split('|')] for line in block.splitlines()] for block in blocks]
@@ -65,7 +85,7 @@ def section_payload(section, source_id):
     return {'profile': {}, 'financial_statements': statements}, citations, evidence
 
 def sync_section(deal, section, source_id):
-    if '### Source gaps and calculation issues' in section:
+    if '### Source gaps and calculation issues' in section or section_validation_warnings(source_id):
         return {'source': 'accepted_key_financials', 'source_audit_id': str(source_id), 'status': 'not_synced',
                 'warning': 'The draft was saved with unresolved source or calculation issues; its figures have not been promoted to the financial profile.'}
     from deals.services.internal_financial_profile import InternalFinancialProfileService
@@ -79,11 +99,14 @@ def sync_section(deal, section, source_id):
 def latest_accepted_section(deal):
     from ai_orchestrator.models import AIAuditLog
     from django.db.models import Q
+    from deals.services.report_coverage import recorded_report_gaps
+    if any(gap['title'] == 'Key Financials' for gap in recorded_report_gaps(deal)):
+        return None
     parents = AIAuditLog.objects.filter(source_id=str(deal.id), source_metadata__queue_kind='report').exclude(source_metadata__queue_state='cancelled').order_by('-created_at')[:10]
     for parent in parents:
         item = next((item for item in (parent.source_metadata or {}).get('report_section_queue', [])
                      if item.get('title') == 'Key Financials' and item.get('status') == 'completed' and item.get('content')), None)
-        if item and '### Source gaps and calculation issues' not in item['content'] and AIAuditLog.objects.filter(source_id=str(parent.id), source_type='vdr_report_section', status='COMPLETED',
+        if item and '### Source gaps and calculation issues' not in item['content'] and not section_validation_warnings(parent.id) and AIAuditLog.objects.filter(source_id=str(parent.id), source_type='vdr_report_section', status='COMPLETED',
                 source_metadata__report_section='Key Financials').filter(
                 Q(source_metadata__generation_mode='grounded_single_pass') |
                 Q(source_metadata__report_source_review__status='no_material_error_found')).exists():

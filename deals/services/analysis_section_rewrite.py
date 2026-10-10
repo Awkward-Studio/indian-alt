@@ -28,6 +28,7 @@ class AnalysisSectionRewriteService:
 
     def __init__(self, ai_service=None):
         self.ai_service = ai_service or AIProcessorService()
+        self.validation_warnings = []
 
     @classmethod
     def locate_section(cls, report: str, section_title: str) -> tuple[str, int, int]:
@@ -74,6 +75,7 @@ class AnalysisSectionRewriteService:
         use_review_feedback: bool = True,
         rewrite_scope: str = 'section',
     ) -> str:
+        self.validation_warnings = []
         section_title = self.published_section_title(section_title) or section_title
         table_only = rewrite_scope == 'financial_table'
         if rewrite_scope not in {'section', 'financial_table'} or (table_only and section_title != 'Key Financials'):
@@ -228,19 +230,23 @@ class AnalysisSectionRewriteService:
         rewritten = rewritten.strip()
         if not rewritten:
             raise ValueError("AI did not return a rewritten section.")
-        if citations or table_only:
+        if citations or table_only or section_title == 'Key Financials':
             from ai_orchestrator.services.report_sections import ICReportSectionService
             self.calculation_corrections = []
             rewritten = ICReportSectionService._normalize_section(
                 section_title, rewritten, citations=citations,
-                strict_financial_table=table_only,
+                strict_financial_table=section_title == 'Key Financials',
                 calculation_corrections=self.calculation_corrections,
+                validation_warnings=self.validation_warnings,
             )
         if table_only:
             from .financial_table_rewrite import merge_financial_table
-            warning_block = re.search(r'^### (?:Calculation review warnings|Source gaps and calculation issues)\n(.*?)(?=^### |\Z)', rewritten, re.M | re.S)
-            self.table_calculation_warnings = warning_block[1].strip() if warning_block else ''
             rewritten, _ = merge_financial_table(section_markdown, rewritten)
+            from ai_orchestrator.services.report_calculations import report_calculation_errors
+            self.validation_warnings = [issue for issue in self.validation_warnings if issue.get('kind') != 'calculation']
+            self.validation_warnings.extend({'kind': 'calculation', 'message': message, 'confirmed': True}
+                for message in report_calculation_errors(rewritten))
+            self.table_calculation_warnings = '\n'.join(issue['message'] for issue in self.validation_warnings)
         return rewritten
 
     @staticmethod
