@@ -588,10 +588,11 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         def normalized(value):
             return ' '.join(unicodedata.normalize('NFKC',str(value)).casefold().split())
         source = normalized(label)
-        documents = list(deal.documents.select_related('deal'))
+        source_fields=('id','title','onedrive_id','file_url','deal__id','deal__title','deal__source_drive_id')
+        documents = list(deal.documents.select_related('deal').only(*source_fields))
         if ': ' in label:
             owner = label.split(': ',1)[0]
-            documents += list(DealDocument.objects.filter(deal__title__iexact=owner).select_related('deal'))
+            documents += list(DealDocument.objects.filter(deal__title__iexact=owner).select_related('deal').only(*source_fields))
         candidates = []
         for doc in documents:
             for title in (doc.title, f'{doc.deal.title}: {doc.title}'):
@@ -603,10 +604,9 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         if len(candidates) != 1:
             return Response({'error':'The exact cited document could not be resolved. Open the source from the deal documents.'},status=404 if not candidates else 409)
         doc=candidates[0]
-        evidence=doc.evidence_json if isinstance(doc.evidence_json,dict) else {}
-        metadata=evidence.get('source_metadata') or {}
+        metadata=DealDocument.objects.filter(pk=doc.pk).values_list('evidence_json__source_metadata',flat=True).first() or {}
         metadata=metadata if isinstance(metadata,dict) else {}
-        attachment=doc.email_evidence_links.filter(active=True,kind='email_attachment').select_related('blob').first()
+        attachment=doc.email_evidence_links.filter(active=True,kind='email_attachment').first()
         if request.query_params.get('download') == '1':
             if not attachment or not attachment.blob_id:
                 return Response({'error':'Only captured email attachments can be downloaded here.'},status=404)
@@ -623,7 +623,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         open_url=None
         if not attachment:
             from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
-            open_url=ICReportSectionEvidenceService._document_source_url(doc) or None
+            open_url=ICReportSectionEvidenceService._safe_http_url(doc.file_url or metadata.get('source_url') or metadata.get('webUrl')) or None
             if not open_url:
                 email_link=doc.email_evidence_links.filter(active=True,kind='email_link').first()
                 if email_link:
