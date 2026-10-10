@@ -4,6 +4,7 @@ from django.test import SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import Profile
+from ai_orchestrator.models import AIAuditLog
 from deals.models import Deal, DealAnalysis
 from .models import Task, TaskActivity, TaskComment, TaskStatus, TaskSuggestion, TaskSuggestionState
 from .services import merged_task_candidates, sync_deal_suggestions
@@ -316,3 +317,89 @@ class WorkItemAPITests(TestCase):
         self.profile.save(update_fields=["is_disabled"])
 
         self.assertEqual(self.client.get(reverse("task-activity-list")).status_code, 403)
+
+
+class ReportGapSuggestionTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='gap-reviewer')
+        self.profile = Profile.objects.create(user=self.user, email='gaps@example.test', name='Reviewer')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.deal = Deal.objects.create(title='Gap company')
+        self.analysis = DealAnalysis.objects.create(deal=self.deal, version=1,
+            analysis_json={'analyst_report': REPORT})
+        self.parent = AIAuditLog.objects.create(source_type='deal_full_synthesis', source_id=str(self.deal.pk),
+            source_metadata={'queue_kind': 'report'}, status='PROCESSING')
+
+    def section(self, warnings, *, section='Key Financials', outcome='saved_with_gaps'):
+        return AIAuditLog.objects.create(source_type='vdr_report_section', source_id=str(self.parent.pk),
+            status='COMPLETED', source_metadata={'vdr_parent_audit_id': str(self.parent.pk),
+                'report_section': section, 'report_section_outcome': outcome,
+                'report_validation_warnings': warnings})
+
+    def test_saved_gap_creates_suggestion_first_without_assigning_priority(self):
+        from .services import ensure_latest_suggestions
+        message = 'Revenue in FY24 Actual could not be independently verified from the cited workbook cells.'
+        self.section([{'kind': 'verification', 'message': message, 'details': ['Review Revenue!B4'], 'confirmed': False}])
+
+        ensure_latest_suggestions(self.deal)
+        suggestion = TaskSuggestion.objects.get(deal=self.deal, source_table_kind='report_source_gap')
+
+        self.assertEqual(suggestion.source_section, 'Key Financials')
+        self.assertEqual(suggestion.source_priority, '')
+        from .services import accepted_task_defaults
+        self.assertNotIn('priority', accepted_task_defaults(suggestion))
+        self.assertIn(message, suggestion.title)
+        self.assertIn('does not establish', suggestion.title)
+        self.assertIn('Review Revenue!B4', suggestion.title)
+        self.assertFalse(suggestion.source_references[0]['confirmed'])
+        response = self.client.get(reverse('task-suggestion-list'), {'deal': str(self.deal.pk)})
+        self.assertEqual(response.data['results'][0]['id'], str(suggestion.pk))
+        accepted = self.client.post(reverse('task-suggestion-accept', kwargs={'pk': suggestion.pk}))
+        self.assertEqual(accepted.data['priority'], 'medium')  # Existing task-model default.
+        self.assertEqual(accepted.data['position'], 0)
+
+    def test_saved_section_signal_syncs_without_waiting_for_tasks_page(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            self.section([{'kind': 'calculation', 'message': '2 + 2 = 5 is inconsistent.'}])
+        self.assertTrue(TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap').exists())
+
+    def test_repeated_period_warnings_group_and_repeated_sync_does_not_duplicate(self):
+        messages = [f'Revenue in FY{year} Actual could not be independently verified from the cited workbook cells.' for year in (24, 25)]
+        self.section([{'kind': 'verification', 'message': message} for message in messages])
+        sync_deal_suggestions(self.deal)
+        sync_deal_suggestions(self.deal)
+        suggestions = TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap', state='pending')
+        self.assertEqual(suggestions.count(), 1)
+        self.assertEqual(len(suggestions.get().source_references), 2)
+        self.assertTrue(all(message in suggestions.get().title for message in messages))
+
+    def test_newer_saved_section_clears_old_gap_and_draft_does_not_create_one(self):
+        from .services import ensure_latest_suggestions
+        self.section([{'kind': 'verification', 'message': 'Revenue needs verification.'}])
+        ensure_latest_suggestions(self.deal)
+        self.section([{'kind': 'calculation', 'message': 'Draft error'}], outcome='draft_ready_with_gaps')
+        ensure_latest_suggestions(self.deal)
+        self.assertEqual(TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap', state='pending').count(), 1)
+        self.section([], outcome='accepted')
+        ensure_latest_suggestions(self.deal)
+        self.assertFalse(TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap', state='pending').exists())
+
+    def test_dismissed_gap_stays_dismissed_when_report_changes(self):
+        from .services import ensure_latest_suggestions
+        self.section([{'kind': 'verification', 'message': 'Revenue needs verification.'}])
+        ensure_latest_suggestions(self.deal)
+        suggestion = TaskSuggestion.objects.get(deal=self.deal, source_table_kind='report_source_gap')
+        suggestion.state = TaskSuggestionState.DISMISSED
+        suggestion.save()
+        DealAnalysis.objects.create(deal=self.deal, version=2, analysis_json={'analyst_report': REPORT + '\nUpdated report.'})
+        ensure_latest_suggestions(self.deal)
+        self.assertFalse(TaskSuggestion.objects.filter(deal=self.deal, source_table_kind='report_source_gap', state='pending').exists())
+
+    def test_gap_stays_with_its_deal(self):
+        from .services import ensure_latest_suggestions
+        self.section([{'kind': 'verification', 'message': 'Revenue needs verification.'}])
+        other = Deal.objects.create(title='Another company')
+        DealAnalysis.objects.create(deal=other, version=1, analysis_json={'analyst_report': REPORT})
+        ensure_latest_suggestions(other)
+        self.assertFalse(TaskSuggestion.objects.filter(deal=other, source_table_kind='report_source_gap').exists())

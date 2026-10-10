@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -101,7 +102,7 @@ def analysis_report(analysis: DealAnalysis | None, deal: Deal | None = None) -> 
 def latest_task_analysis(deal):
     """Keep task-bearing reports available while synthesis or a partial report runs."""
     latest = deal.latest_analysis
-    for analysis in deal.analyses.order_by('-version', '-created_at').iterator():
+    for analysis in deal.analyses.order_by('-version', '-created_at').iterator(chunk_size=1):
         report = analysis_report(analysis)
         if re.search(r'^#{1,3}\s+(?:\d+[.)]\s*)?Next Steps\b', report, re.I | re.M) or inspect_analysis_next_steps(report)['tasks']:
             return analysis
@@ -152,7 +153,7 @@ def _reference(task: dict) -> dict:
     }
 
 
-def merged_task_candidates(markdown: str) -> list[dict]:
+def merged_task_candidates(markdown: str, deal: Deal | None = None) -> list[dict]:
     parsed = inspect_analysis_next_steps(markdown)
     tasks = []
     for table in parsed["tables"]:
@@ -226,7 +227,66 @@ def merged_task_candidates(markdown: str) -> list[dict]:
         }
         candidates.append(candidate)
         by_fingerprint[fingerprint] = candidate
+    if deal is not None:
+        gaps = report_gap_candidates(deal)
+        by_fingerprint = {candidate['fingerprint']: candidate for candidate in candidates}
+        for gap in gaps:
+            existing = by_fingerprint.get(gap['fingerprint'])
+            if existing:
+                existing['source_references'].extend(gap['source_references'])
+                existing['source_table_kind'] = 'report_source_gap'
+            else:
+                candidates.append(gap)
+        candidates.sort(key=lambda item: item['source_table_kind'] != 'report_source_gap')
     return candidates
+
+
+def report_gap_candidates(deal: Deal) -> list[dict]:
+    from deals.services.report_coverage import recorded_report_gaps
+
+    grouped = {}
+    for gap in recorded_report_gaps(deal):
+        message = str(gap['error']).strip()
+        verification = gap.get('issue_kind') == 'verification' or bool(re.search(
+            r'could not be independently verified|no source reference|needs period verification', message, re.I))
+        normalized = re.sub(r'\b(?:FY|AY|CY)\s*\d{2,4}(?:[-/–]\d{2,4})?(?:\s+(?:Actual|Estimated|Forecast|Projected))?',
+            'period', message, flags=re.I) if verification else message
+        normalized = re.sub(r'\[\d+\]', '', normalized)
+        key = (gap['title'], 'verification' if verification else gap.get('issue_kind'), normalized_task_text(normalized))
+        group = grouped.setdefault(key, {'gap': gap, 'verification': verification, 'messages': [], 'references': []})
+        for detail in [message, *(gap.get('details') or [])]:
+            if isinstance(detail, str) and detail.strip() and detail not in group['messages']:
+                group['messages'].append(detail)
+        group['references'].append({'section': gap['title'], 'table_kind': 'report_source_gap',
+            'source_type': 'report_validation', 'source_id': gap['source_id'],
+            'issue_kind': gap.get('issue_kind'), 'confirmed': gap.get('confirmed', False),
+            'message': message, 'details': gap.get('details') or []})
+
+    candidates = []
+    for key, group in grouped.items():
+        gap, verification = group['gap'], group['verification']
+        section = gap['title']
+        if verification:
+            metric = re.split(r'\s+in\s+|\s+has no\s+|\s+could not\s+', gap['error'], maxsplit=1, flags=re.I)[0]
+            category = f'Verify {metric} in {section}'[:160]
+            introduction = f'Verify source support in {section}. Verification is incomplete; this does not establish that the source is missing or the figure is wrong.'
+        else:
+            category = f"Review {gap.get('issue_kind') or 'source issue'} in {section}: {gap['error'].split(':', 1)[0]}"[:160]
+            introduction = f'Review the recorded {gap.get("issue_kind") or "source"} issue in {section} against the original source documents.'
+        candidates.append({'fingerprint': task_fingerprint('report source gap ' + json.dumps(key)),
+            'title': introduction + '\n\n' + '\n'.join('- ' + message for message in group['messages']),
+            'category': category, 'source_section': section, 'source_table_kind': 'report_source_gap',
+            'source_owner': '', 'source_assignee': '', 'source_status': 'Needs verification' if verification else 'Needs review',
+            'source_priority': '', 'source_references': group['references'], 'matched_canonical': False})
+    return candidates
+
+
+def suggestion_snapshot(markdown: str, deal: Deal):
+    candidates = merged_task_candidates(markdown, deal)
+    gaps = [item for item in candidates if item['source_table_kind'] == 'report_source_gap']
+    # Keep existing hashes unchanged for reports that have no recorded warnings.
+    content = markdown + ('\n' + json.dumps(gaps, sort_keys=True) if gaps else '')
+    return candidates, hashlib.sha256(content.encode('utf-8')).hexdigest()
 
 
 def _priority(value: str) -> str:
@@ -236,10 +296,10 @@ def _priority(value: str) -> str:
 
 @transaction.atomic
 def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> dict:
+    Deal.objects.select_for_update().get(pk=deal.pk)
     analysis = analysis or latest_task_analysis(deal)
     markdown = analysis_report(analysis, deal)
-    report_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-    candidates = merged_task_candidates(markdown)
+    candidates, report_hash = suggestion_snapshot(markdown, deal)
 
     TaskSuggestion.objects.filter(deal=deal, state=TaskSuggestionState.PENDING).exclude(
         report_hash=report_hash
@@ -251,6 +311,9 @@ def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> d
         fingerprint = candidate["fingerprint"]
         current_fingerprints.add(fingerprint)
         existing_task = Task.objects.filter(deal=deal, fingerprint=fingerprint).first()
+        prior = TaskSuggestion.objects.filter(deal=deal, fingerprint=fingerprint).order_by('-created_at', '-updated_at').first()
+        initial_state = TaskSuggestionState.ACCEPTED if existing_task else (
+            TaskSuggestionState.DISMISSED if prior and prior.state == TaskSuggestionState.DISMISSED else TaskSuggestionState.PENDING)
         persisted_candidate = {
             key: value for key, value in candidate.items()
             if key in {
@@ -267,7 +330,7 @@ def sync_deal_suggestions(deal: Deal, analysis: DealAnalysis | None = None) -> d
                 "analysis": analysis,
                 "analysis_version": analysis.version if analysis else None,
                 "task": existing_task,
-                "state": TaskSuggestionState.ACCEPTED if existing_task else TaskSuggestionState.PENDING,
+                "state": initial_state,
             },
         )
         if was_created:
@@ -302,20 +365,22 @@ def sync_latest_deal_suggestions(deal_id) -> dict:
 def ensure_latest_suggestions(deal: Deal) -> None:
     analysis = latest_task_analysis(deal)
     markdown = analysis_report(analysis, deal)
-    report_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    candidates, report_hash = suggestion_snapshot(markdown, deal)
     current = TaskSuggestion.objects.filter(deal=deal, report_hash=report_hash)
-    expected = {(candidate['fingerprint'], candidate['source_section']) for candidate in merged_task_candidates(markdown)}
+    expected = {(candidate['fingerprint'], candidate['source_section']) for candidate in candidates}
     stored = set(current.exclude(state=TaskSuggestionState.SUPERSEDED).values_list('fingerprint', 'source_section'))
     if expected != stored:
         sync_deal_suggestions(deal, analysis)
 
 
 def accepted_task_defaults(suggestion: TaskSuggestion) -> dict:
-    return {
+    defaults = {
         "deal": suggestion.deal,
         "title": concise_task_title(suggestion),
         "description": suggestion.title,
-        "priority": _priority(suggestion.source_priority),
         "origin": Task.Origin.ANALYSIS,
         "fingerprint": suggestion.fingerprint,
     }
+    if suggestion.source_priority.strip():
+        defaults['priority'] = _priority(suggestion.source_priority)
+    return defaults

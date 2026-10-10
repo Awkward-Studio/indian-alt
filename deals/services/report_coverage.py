@@ -4,6 +4,32 @@ from django.db.models import Q
 from ai_orchestrator.services.report_source_review import material_review_errors
 
 
+def recorded_report_gaps(deal):
+    """Return the saved section warnings used by the report source-gap card."""
+    parents = list(AIAuditLog.objects.filter(source_id=str(deal.id), source_metadata__queue_kind='report')
+        .filter(Q(source_metadata__queue_state__isnull=True) | ~Q(source_metadata__queue_state='cancelled'))
+        .order_by('-created_at').values_list('id', flat=True)[:10])
+    seen_sections, gaps = set(), []
+    attempts = AIAuditLog.objects.filter(source_type='vdr_report_section', status='COMPLETED',
+        source_metadata__vdr_parent_audit_id__in=[str(pk) for pk in parents]).only('id', 'source_metadata').order_by('-created_at')
+    for attempt in attempts:
+        metadata = attempt.source_metadata or {}
+        if metadata.get('report_section_outcome') in {'draft_ready', 'draft_ready_with_gaps', 'superseded'} or metadata.get('inference_state') == 'superseded':
+            continue
+        section = metadata.get('report_section')
+        if not section or section in seen_sections:
+            continue
+        seen_sections.add(section)
+        for index, issue in enumerate(metadata.get('report_validation_warnings') or []):
+            if not isinstance(issue, dict) or not str(issue.get('message') or '').strip():
+                continue
+            gaps.append({'source_type': 'report_validation', 'source_id': f'{attempt.pk}:{index}',
+                'title': section, 'error': issue['message'], 'status': 'needs_review',
+                'issue_kind': issue.get('kind'), 'confirmed': bool(issue.get('confirmed', False)),
+                'details': issue.get('details') or []})
+    return gaps
+
+
 def latest_review_feedback(deal):
     """Snapshot only the current run's latest completed review of each section."""
     parent = AIAuditLog.objects.filter(source_id=str(deal.id)).filter(

@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Max, Q
+from django.db.models import Case, IntegerField, Max, Q, Value, When
 from django.utils import timezone
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
@@ -221,10 +221,12 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["title", "category", "source_section", "deal__title"]
     ordering_fields = ["created_at", "deal__title", "source_section"]
-    ordering = ["deal__title", "source_section", "created_at"]
+    ordering = ["source_gap_rank", "deal__title", "source_section", "created_at"]
 
     def get_queryset(self):
-        queryset = TaskSuggestion.objects.select_related("deal", "analysis", "task")
+        queryset = TaskSuggestion.objects.select_related("deal", "analysis", "task").annotate(
+            source_gap_rank=Case(When(source_table_kind='report_source_gap', then=Value(0)),
+                default=Value(1), output_field=IntegerField()))
         params = self.request.query_params
         if params.get("deal"):
             deal = Deal.objects.filter(id=params["deal"]).first()
@@ -260,7 +262,7 @@ class TaskSuggestionViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer = TaskSerializer(data={key: value for key, value in request.data.items() if key in allowed}, partial=True)
                 serializer.is_valid(raise_exception=True)
                 defaults = {**accepted_task_defaults(suggestion), **serializer.validated_data}
-                defaults['position'] = (Task.objects.aggregate(max_position=Max('position'))['max_position'] or 0) + 1
+                defaults['position'] = 0 if suggestion.source_table_kind == 'report_source_gap' else (Task.objects.aggregate(max_position=Max('position'))['max_position'] or 0) + 1
                 task = Task.objects.create(**defaults, created_by=request.user.profile)
             suggestion.task = task
             suggestion.state = TaskSuggestionState.ACCEPTED
