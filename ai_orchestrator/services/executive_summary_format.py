@@ -30,6 +30,36 @@ SUBTABLE_HEADERS = {
     'Market sizing': ('Metric', 'Value', 'Scope / period'),
     'Sub-sector dynamics': ('Sub-sector', 'CAGR', 'Online share', 'Growth driver', 'Company play'),
 }
+EXECUTIVE_SUMMARY_REPORT_BASIS = '''Executive summary report sources v1:
+This is a summary of the ten other report sections. Their saved findings, numbers,
+units, fiscal periods, forecast status, risks and conclusions govern each summary block.
+Prefer the completed section from this run; otherwise use its latest saved report version.
+Do not independently substitute figures from another workbook, a partial period, an
+older draft or unrelated retrieval evidence. Keep reported contradictions and gaps.
+Required source mapping:
+Business overview and Customer traction: Company Details.
+Funding: Transaction Details.
+Promoter & key management: Promoter and Management Details.
+Key financials & metrics: Key Financials, including chart data and key metric values.
+Investment rationale: Investment Rationale.
+Key risks & mitigants: Risk Factors.
+Competitor benchmarking: Industry Overview and Transaction / Trading Multiples.
+Previous funding rounds & valuation: Transaction Details and Transaction / Trading Multiples.
+Industry dynamics: Industry Overview.
+Key questions for founders: Next Steps and the unresolved gates in Risk Factors.
+Key takeaways from calls: actual recorded calls summarized in Company Details,
+Promoter and Management Details or Industry Overview; otherwise Not provided.
+Similar companies we have seen: internal deal comparisons in Industry Overview and
+the supplied industry/sector plus semantic internal-deal records. Use their real stage,
+received date and recorded team view; never invent a passed or invested decision.
+Exit Considerations must inform the exit conditions and decision in Investment rationale.
+Recent saved competitor search and profile evidence may supplement the competition
+blocks, and current internal-deal retrieval may supply similar-company rows. Identify
+any conflict with the saved reports rather than silently changing the target's facts.
+Primary retrieval blocks supply source provenance and gap checks; they do not replace
+the corresponding report section's reporting basis. Preserve all thirteen presentation
+headings and every required table. Missing source values remain Not provided.
+'''
 EXECUTIVE_SUMMARY_FORMAT = '''Executive summary presentation format v1:
 Match ALL THREE pages of the supplied "3. PPT - 3.pptx". Keep the top heading
 ## Executive Summary. Use the following EXACT level-three headings, in this order:

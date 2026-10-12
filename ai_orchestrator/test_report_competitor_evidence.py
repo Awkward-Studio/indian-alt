@@ -30,6 +30,14 @@ class SavedCompetitorEvidenceTests(TestCase):
 
 
 class ExecutiveSummaryRewriteContextTests(SimpleTestCase):
+    def test_report_heading_wins_over_same_named_summary_subsection(self):
+        report = '## Executive Summary\n\n### Investment rationale\n\nBrief view\n\n## Company Details\n\nCompany\n\n## Investment Rationale\n\nFull investment report\n\n## Next Steps\n\nNext'
+        section, _, _ = AnalysisSectionRewriteService.locate_section(report, 'Investment Rationale')
+        self.assertEqual(section, '## Investment Rationale\n\nFull investment report')
+        replaced = AnalysisSectionRewriteService.replace_section(report, 'Investment Rationale', '## Investment Rationale\n\nUpdated full report')
+        self.assertIn('### Investment rationale\n\nBrief view', replaced)
+        self.assertIn('Updated full report', replaced)
+
     def test_rewrite_uses_the_complete_other_report_sections(self):
         report = '## Executive Summary\n\nOld summary\n\n## Company Details\n\n' + ('Middle evidence\n\n' * 3000) + '## Next Steps\n\nFinal gate'
         context = AnalysisSectionRewriteService._report_context(report, 'Executive Summary')

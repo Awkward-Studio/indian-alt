@@ -322,10 +322,14 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         from ai_orchestrator.services.report_financial_format import FINANCIAL_SOURCE_RULE
         user += FINANCIAL_SOURCE_RULE
     if section_title == 'Executive Summary':
-        from .executive_summary_format import EXECUTIVE_SUMMARY_FORMAT
+        from .executive_summary_format import EXECUTIVE_SUMMARY_FORMAT, EXECUTIVE_SUMMARY_REPORT_BASIS
         marker = 'Executive summary presentation format v1:'
         if marker not in user:
             user += '\n\n' + EXECUTIVE_SUMMARY_FORMAT
         if marker not in system:
             system += '\n\n' + EXECUTIVE_SUMMARY_FORMAT
+        if 'Executive summary report sources v1:' not in user:
+            user += '\n\n' + EXECUTIVE_SUMMARY_REPORT_BASIS
+        if 'Executive summary report sources v1:' not in system:
+            system += '\n\n' + EXECUTIVE_SUMMARY_REPORT_BASIS
     return system.rstrip(), user

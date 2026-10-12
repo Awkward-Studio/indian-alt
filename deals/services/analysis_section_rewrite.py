@@ -35,8 +35,11 @@ class AnalysisSectionRewriteService:
     def locate_section(cls, report: str, section_title: str) -> tuple[str, int, int]:
         title_key = cls._normalize_title(section_title)
         headings = list(cls.HEADING_RE.finditer(report or ""))
+        matching_levels = [len(heading.group(1)) for heading in headings
+                           if cls._normalize_title(heading.group(2)) == title_key]
+        target_level = min(matching_levels) if matching_levels else None
         for index, heading in enumerate(headings):
-            if cls._normalize_title(heading.group(2)) != title_key:
+            if cls._normalize_title(heading.group(2)) != title_key or len(heading.group(1)) != target_level:
                 continue
             level = len(heading.group(1))
             end = len(report)
@@ -79,8 +82,8 @@ class AnalysisSectionRewriteService:
         self.validation_warnings = []
         section_title = self.published_section_title(section_title) or section_title
         if section_title == 'Executive Summary':
-            from ai_orchestrator.services.executive_summary_format import EXECUTIVE_SUMMARY_FORMAT
-            instruction += '\n\n' + EXECUTIVE_SUMMARY_FORMAT
+            from ai_orchestrator.services.executive_summary_format import EXECUTIVE_SUMMARY_FORMAT, EXECUTIVE_SUMMARY_REPORT_BASIS
+            instruction += '\n\n' + EXECUTIVE_SUMMARY_FORMAT + '\n\n' + EXECUTIVE_SUMMARY_REPORT_BASIS
         table_only = rewrite_scope == 'financial_table'
         if rewrite_scope not in {'section', 'financial_table'} or (table_only and section_title != 'Key Financials'):
             raise ValueError('Table rewrites are available only for Key Financials.')
@@ -244,6 +247,13 @@ class AnalysisSectionRewriteService:
                 calculation_corrections=self.calculation_corrections,
                 validation_warnings=self.validation_warnings,
             )
+        if section_title == 'Executive Summary':
+            from deals.services.executive_summary_financials import align_summary_financials
+            try:
+                key_financials, _, _ = self.locate_section(full_report, 'Key Financials')
+            except ValueError:
+                key_financials = ''
+            rewritten = align_summary_financials(rewritten, key_financials)
         if table_only:
             from .financial_table_rewrite import merge_financial_table
             rewritten, _ = merge_financial_table(section_markdown, rewritten)

@@ -5,6 +5,14 @@ from ai_orchestrator.services.report_section_context import prior_section_contex
 
 
 class ExecutiveSummaryReportContextTests(SimpleTestCase):
+    def test_current_run_overrides_latest_report_and_missing_sections_fall_back(self):
+        latest = '## Company Details\n\nOld company\n\n## Next Steps\n\nSaved actions'
+        manifest = [{'title': 'Company Details', 'status': 'completed', 'content': '## Company Details\n\nCurrent company'}]
+        context = prior_section_context({'report_section_queue': manifest}, 'Executive Summary', fallback_report=latest)
+        self.assertIn('Current company', context)
+        self.assertIn('Saved actions', context)
+        self.assertNotIn('Old company', context)
+
     def test_summary_keeps_all_completed_sections_and_middle_paragraphs(self):
         manifest = []
         for title in IC_SECTION_TITLES:

@@ -2239,9 +2239,19 @@ def process_vdr_report_section(
         analysis, ready_docs, _, _ = _durable_report_foundation(
             deal, audit, allow_gaps=bool((audit.source_metadata or {}).get("allow_gaps")),
         )
-        from ai_orchestrator.services.report_section_context import prior_section_context
+        from ai_orchestrator.services.report_section_context import prior_section_context, completed_report_sections
         from ai_orchestrator.services.token_budget import estimate_tokens, report_evidence_budget
-        prior_context = prior_section_context(audit.source_metadata or {}, section_title)
+        fallback_report = ''
+        fallback_analysis = None
+        if section_title == 'Executive Summary':
+            for saved in deal.analyses.order_by('-version').only('id', 'version', 'analysis_json'):
+                payload = saved.analysis_json or {}
+                fallback_report = payload.get('analyst_report') or (payload.get('canonical_snapshot') or {}).get('analyst_report') or ''
+                if fallback_report:
+                    fallback_analysis = saved
+                    break
+        summary_reports = completed_report_sections(audit.source_metadata or {}, section_title, fallback_report=fallback_report)
+        prior_context = prior_section_context(audit.source_metadata or {}, section_title, fallback_report=fallback_report)
         from deals.services.report_coverage import format_review_feedback
         section_feedback = ((audit.source_metadata or {}).get('regeneration_feedback') or {}).get(section_title) or {}
         saved_feedback = format_review_feedback(section_feedback)
@@ -2317,6 +2327,12 @@ def process_vdr_report_section(
         retrieved = evidence_service.retrieve(section_title)
         context = str(retrieved.get("context") or "") if isinstance(retrieved, dict) else str(retrieved or "")
         evidence_metadata = retrieved.get("metadata") if isinstance(retrieved, dict) else None
+        if section_title == 'Executive Summary':
+            manifest = {item.get('title'): item for item in (audit.source_metadata or {}).get('report_section_queue', [])}
+            evidence_metadata = {**(evidence_metadata or {}), 'summary_report_sources': {
+                title: {'source': 'current_run' if manifest.get(title, {}).get('status') == 'completed' and not manifest[title].get('reused_from_analysis_id') else 'saved_report',
+                        'analysis_id': manifest.get(title, {}).get('reused_from_analysis_id') or (str(fallback_analysis.id) if fallback_analysis else None)}
+                for title in summary_reports}}
         citations = retrieved.get("citations") if isinstance(retrieved, dict) else None
         if not context.strip():
             raise ValueError(f"No evidence was retrieved for report section '{section_title}'.")
@@ -2354,6 +2370,18 @@ def process_vdr_report_section(
         )
         if not delivery_is_current(audit_log_id, task_id=task_id, generation=queue_generation, unit_key=section_title):
             return {"status": "stale", "reason": "Superseded VDR report delivery."}
+        if section_title == 'Executive Summary':
+            from deals.services.executive_summary_financials import align_summary_financials
+            key_financials = summary_reports.get('Key Financials', '')
+            section = align_summary_financials(section, key_financials)
+            generated_audit = AIAuditLog.objects.filter(source_type='vdr_report_section',
+                source_id=audit_log_id, source_metadata__report_section=section_title,
+                status='COMPLETED').order_by('-created_at').first()
+            if generated_audit:
+                generated_audit.parsed_json = {**(generated_audit.parsed_json or {}), '_normalized_section': section}
+                generated_audit.source_metadata = {**(generated_audit.source_metadata or {}),
+                    'financial_chart_basis': 'saved_key_financials_main_table'}
+                generated_audit.save(update_fields=['parsed_json', 'source_metadata'])
         if section_title == 'Key Financials':
             from deals.services.key_financials_profile import sync_section
             sync_section(deal, section, audit_log_id)

@@ -4,12 +4,20 @@ import re
 from ai_orchestrator.services.token_budget import estimate_tokens
 
 
-def prior_section_context(metadata: dict, title: str, *, max_tokens=6_000) -> str:
+def completed_report_sections(metadata: dict, title: str, *, fallback_report='') -> dict:
+    from ai_orchestrator.services.report_sections import ICReportSectionService
+    completed = ICReportSectionService._split(fallback_report) if title == 'Executive Summary' else {}
+    completed.update({item.get('title'): str(item.get('content') or '')
+        for item in metadata.get('report_section_queue') or []
+        if item.get('status') == 'completed' and item.get('content') and item.get('title') != title})
+    completed.pop(title, None)
+    return completed
+
+
+def prior_section_context(metadata: dict, title: str, *, max_tokens=6_000, fallback_report='') -> str:
     if title in {"Key Financials", "Transaction Details"}:
         return ""
-    completed = {item.get("title"): str(item.get("content") or "")
-        for item in metadata.get("report_section_queue") or []
-        if item.get("status") == "completed" and item.get("content") and item.get("title") != title}
+    completed = completed_report_sections(metadata, title, fallback_report=fallback_report)
     if not completed:
         return ""
     preferred = ["Key Financials", "Transaction Details", "Transaction / Trading Multiples"]
@@ -19,6 +27,11 @@ def prior_section_context(metadata: dict, title: str, *, max_tokens=6_000) -> st
               "Reuse their supported canonical values; put new analysis in this section's remit. "
               "These are analyst drafts, not new primary evidence. Cite claims using this request's "
               "supplied [Rnnn] evidence markers; never copy another section's citation numbers."]
+    if title == 'Executive Summary':
+        from .executive_summary_format import EXECUTIVE_SUMMARY_REPORT_BASIS
+        blocks = [EXECUTIVE_SUMMARY_REPORT_BASIS + '\n\nCompleted or latest saved report sections. '
+                  'Use these reports as the basis for the summary; cite their facts using matching '
+                  'current evidence markers rather than copying their old citation numbers.']
     for key in preferred:
         if key not in completed:
             continue

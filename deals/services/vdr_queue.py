@@ -132,6 +132,10 @@ def _next_unit(metadata: dict) -> tuple[str, str, dict] | None:
     else:
         for item in metadata.get("report_section_queue") or []:
             if item.get("status") in {"queued", "retrying", "recovering"}:
+                if item.get('title') == 'Executive Summary' and any(
+                    other.get('title') != 'Executive Summary' and other.get('status') not in {'completed', 'failed', 'cancelled'}
+                    for other in metadata.get('report_section_queue') or []):
+                    continue
                 return "section", str(item.get("title") or ""), item
     return None
 
@@ -413,7 +417,7 @@ def _next_report_batch(metadata: dict, *, available_slots: int | None = None) ->
     """Fill each free worker slot, prioritizing financial and transaction inputs."""
     priority = ["Key Financials", "Transaction Details", "Company Details", "Promoter and Management Details",
                 "Industry Overview", "Transaction / Trading Multiples", "Risk Factors", "Investment Rationale",
-                "Exit Considerations", "Executive Summary", "Next Steps"]
+                "Exit Considerations", "Next Steps", "Executive Summary"]
     by_title = {item.get("title"): item for item in metadata.get("report_section_queue") or []}
     priority.extend(title for title in by_title if title not in priority)
     capacity = _report_capacity()
@@ -421,7 +425,11 @@ def _next_report_batch(metadata: dict, *, available_slots: int | None = None) ->
     available = max(0, capacity - running)
     if available_slots is not None:
         available = min(available, max(0, available_slots))
-    return [by_title[t] for t in priority if t in by_title and str(by_title[t].get('status', 'queued')).lower() in {'queued', 'recovering'}][:available]
+    summary_ready = all(item.get('status') in {'completed', 'failed', 'cancelled'}
+                        for key, item in by_title.items() if key != 'Executive Summary')
+    return [by_title[t] for t in priority if t in by_title
+            and str(by_title[t].get('status', 'queued')).lower() in {'queued', 'recovering'}
+            and (t != 'Executive Summary' or summary_ready)][:available]
 
 
 def _delivery_owner(metadata: dict, unit_key: str) -> dict:

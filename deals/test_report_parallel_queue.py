@@ -81,4 +81,7 @@ class ParallelReportQueueTests(TestCase):
     def test_summary_and_actions_wait_for_substantive_sections(self):
         completed = set(IC_SECTION_TITLES) - {"Executive Summary", "Next Steps"}
         audit = self.make_job(completed=completed)
-        self.assertEqual([item["title"] for item in vdr_queue._next_report_batch(audit.source_metadata)], ["Executive Summary", "Next Steps"])
+        self.assertEqual([item["title"] for item in vdr_queue._next_report_batch(audit.source_metadata)], ["Next Steps"])
+        for item in audit.source_metadata['report_section_queue']:
+            if item['title'] == 'Next Steps': item['status'] = 'completed'
+        self.assertEqual([item['title'] for item in vdr_queue._next_report_batch(audit.source_metadata)], ['Executive Summary'])
