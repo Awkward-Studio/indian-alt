@@ -250,7 +250,7 @@ def higher_priority_work_waiting(
 
 
 def dispatch() -> dict:
-    """Finish the oldest report deal before dispatching the next deal."""
+    """Prioritize the oldest report, sharing spare slots across summary-only jobs."""
     from ai_orchestrator.models import AIAuditLog
     from deals.tasks import process_single_document_async, process_vdr_report_section, vdr_unit_completed
 
@@ -286,7 +286,13 @@ def dispatch() -> dict:
             running = sum(_running_report_sections(job.source_metadata or {}) for job in report_jobs)
             available = max(0, capacity - running)
             audit = None
-            for job in report_jobs[:1]:
+            dispatchable_jobs = report_jobs[:1]
+            if report_jobs and (report_jobs[0].source_metadata or {}).get('executive_summary_only'):
+                for following in report_jobs[1:]:
+                    if not (following.source_metadata or {}).get('executive_summary_only'):
+                        break
+                    dispatchable_jobs.append(following)
+            for job in dispatchable_jobs:
                 job_metadata = job.source_metadata or {}
                 if job_metadata.get('field_synthesis_required') and job_metadata.get('field_synthesis_status') != 'completed':
                     from deals.tasks import synthesize_vdr_report_deal

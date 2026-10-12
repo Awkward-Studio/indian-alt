@@ -8,8 +8,33 @@ from deals.models import Deal
 from deals.services import vdr_queue
 
 
-@override_settings(VDR_DURABLE_QUEUE_ENABLED=True, VDR_DURABLE_REPORT_CONCURRENCY=4)
+@override_settings(VDR_DURABLE_QUEUE_ENABLED=True, VDR_DURABLE_REPORT_CONCURRENCY=4, AI_INFERENCE_MAX_CONCURRENT_REQUESTS=4)
 class ParallelReportQueueTests(TestCase):
+    @override_settings(VDR_DURABLE_REPORT_CONCURRENCY=2, AI_INFERENCE_MAX_CONCURRENT_REQUESTS=2)
+    @patch('deals.services.vdr_queue._broadcast')
+    @patch('deals.services.vdr_queue._email_priority_busy', return_value=False)
+    @patch('deals.services.vdr_queue._high_priority_busy', return_value=False)
+    @patch('deals.tasks.process_vdr_report_section.apply_async')
+    def test_summary_only_jobs_fill_two_deals_without_exceeding_capacity(self, deliver, *_):
+        completed = set(IC_SECTION_TITLES) - {'Executive Summary'}
+        jobs = [self.make_job(completed=completed) for _ in range(3)]
+        for job in jobs:
+            job.source_metadata['executive_summary_only'] = True
+            job.save(update_fields=['source_metadata'])
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+        with self.captureOnCommitCallbacks(execute=True):
+            vdr_queue.dispatch()
+        self.assertEqual(deliver.call_count, 2)
+        self.assertEqual({call.kwargs['kwargs']['audit_log_id'] for call in deliver.call_args_list},
+                         {str(jobs[0].id), str(jobs[1].id)})
+        with self.captureOnCommitCallbacks(execute=True):
+            result = vdr_queue.dispatch()
+        self.assertEqual(result['status'], 'active')
+        self.assertEqual(deliver.call_count, 2)
+        jobs[2].refresh_from_db()
+        self.assertEqual(jobs[2].status, 'PENDING')
+
     def make_job(self, completed=()):
         deal = Deal.objects.create(title="Financial model test")
         return AIAuditLog.objects.create(source_type="deal_full_synthesis", source_id=str(deal.id),
