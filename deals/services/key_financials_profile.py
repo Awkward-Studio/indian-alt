@@ -85,6 +85,13 @@ def section_payload(section, source_id):
     return {'profile': {}, 'financial_statements': statements}, citations, evidence
 
 def sync_section(deal, section, source_id):
+    from deals.services.financial_snapshot import load_snapshot, project_snapshot
+    from ai_orchestrator.models import AIAuditLog
+    audit = AIAuditLog.objects.filter(source_id=str(source_id), source_type__in=['vdr_report_section','analysis_section_rewrite'], source_metadata__report_section='Key Financials').order_by('-created_at').first()
+    identity = (audit.source_metadata or {}).get('financial_snapshot_id') if audit else None
+    record = deal.financial_snapshots.filter(pk=identity).first() if identity else None
+    if record:
+        return project_snapshot(deal, load_snapshot(record.id))
     if '### Source gaps and calculation issues' in section or section_validation_warnings(source_id):
         return {'source': 'accepted_key_financials', 'source_audit_id': str(source_id), 'status': 'not_synced',
                 'warning': 'The draft was saved with unresolved source or calculation issues; its figures have not been promoted to the financial profile.'}

@@ -321,10 +321,12 @@ class ICReportSectionEvidenceService:
                 periods = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and
                     is_financial_period_label(label)]
                 named_periods = [(r,label) for r,label in periods if re.match(r'^(?:FY|CY|AY)\b|^(?:FY|CY|AY)\d',label,re.I)]
+                from deals.services.financial_snapshot import period_from_headers
+                column_headers = [(r, label) for r, _, label in graph.column_labels.get((sheet, column), []) if r < row and re.search(r'FY|CY|AY|Q[1-4]|H[12]|20\d{2}-\d{2}-\d{2}|actual|forecast|budget', label, re.I)]
+                resolved_period = period_from_headers([label for _, label in sorted(column_headers)[-4:]])
                 financial_cells[address] = {"value": value, "row_label": max(metric_labels)[1] if metric_labels else "",
                     "period": max(named_periods or periods)[1] if periods else "", "unit_labels": selected_units,
-                    'period_scope': 'monthly' if self._financial_period_scope_cache[unit_key] == 'monthly'
-                        and any(re.match(r'20\d{2}-\d{2}-\d{2}', label) for _, label in periods) else 'annual',
+                    'period_scope': resolved_period['scope'], 'resolved_period': resolved_period,
                     "number_format": cell.get("number_format") or "", "formula": graph.formula(cell)}
                 from .report_financial_format import prepared_display_values
                 prepared = prepared_display_values(financial_cells[address])
@@ -398,7 +400,7 @@ class ICReportSectionEvidenceService:
         source_counts: Counter[str] = Counter()
         seen_content: set[str] = set()
         used_tokens = 0
-        budget = int(token_budget or self.max_tokens)
+        budget = int(self.max_tokens if token_budget is None else token_budget)
 
         def add(chunk: DocumentChunk) -> bool:
             nonlocal used_tokens
@@ -454,6 +456,10 @@ class ICReportSectionEvidenceService:
                 f"{citation['locator']['cell_range']}]"
             )
         primary = citation.get('financial_cells') or {}
+        if metadata.get('chunk_kind') == 'spreadsheet_financial_statement_row':
+            # Unit conversions and full formula graphs are stored in citations;
+            # don't repeat them in every primary row's prompt representation.
+            primary = {address: {key:value for key,value in fact.items() if key in {'value','row_label','period','resolved_period','period_scope','unit_labels'}} for address,fact in primary.items()}
         facts = ('\nPrimary saved cell facts (this worksheet only; derived_display_values are exact application-computed '
                  'unit conversions of the saved values, not new source facts):\n' + json.dumps(primary, ensure_ascii=False)) if primary else ''
         from .report_financial_format import source_unit_conversion_notes
@@ -591,7 +597,49 @@ class ICReportSectionEvidenceService:
                 used_tokens += cost
         return additions, list(dict.fromkeys(notes))
 
+    def _primary_financial_chunks(self):
+        """Statement rows precede semantic summaries, across every source workbook."""
+        from deals.services.financial_snapshot import ALIASES, clean, PNL_KEYS
+        chunks = []
+        for document in self.documents:
+            graph = self._formula_graph(str(document.id))
+            if not graph:
+                continue
+            by_row = {}
+            for sheet, items in graph.by_sheet.items():
+                for address, cell in items:
+                    by_row.setdefault((sheet, int(re.search(r'\d+$', address)[0])), []).append((address, cell))
+            for (sheet, row), labels in graph.row_labels.items():
+                metrics = [ALIASES.get(clean(label)) for _, _, label in labels]
+                if not any(metric in PNL_KEYS for metric in metrics):
+                    continue
+                keys = by_row.get((sheet, row), [])
+                if not keys:
+                    continue
+                from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
+                first = min(coordinate_to_tuple(a)[1] for a,_ in keys)
+                last = max(coordinate_to_tuple(a)[1] for a,_ in keys)
+                location = '%s%d:%s%d' % (get_column_letter(first), row, get_column_letter(last), row)
+                chunk = SimpleNamespace(source_type='document', source_id=str(document.id),
+                    content='Primary financial statement cells. Preserve their source periods and units.\n' +
+                        '\n'.join('%s=%s' % (address, json.dumps(cell.get('cached_value') if graph.formula(cell) else cell.get('value'), default=str)) for address,cell in keys),
+                    metadata={'chunk_kind': 'spreadsheet_financial_statement_row', 'sheet_name': sheet,
+                        'row_start': row, 'row_end': row, 'column_start': get_column_letter(first), 'column_end': get_column_letter(last), 'cell_range': location})
+                is_statement = bool(re.fullmatch(r'P&L|PL|IS|Income Statement|Summary|Channel Mix', sheet, re.I))
+                revenue = 'revenue' in metrics
+                chunks.append((not is_statement, not revenue, str(document.id), sheet, row, chunk))
+        return [item[-1] for item in sorted(chunks, key=lambda item: item[:-1])]
+
     def retrieve(self, title: str) -> dict:
+        financial_snapshot = None
+        original_budget = self.max_tokens
+        if title == 'Key Financials' and getattr(self.deal, 'pk', None):
+            from deals.services.financial_snapshot import snapshot_for_deal, render_main_table
+            financial_snapshot = snapshot_for_deal(self.deal)
+            snapshot_citations = {}
+            table, _ = render_main_table(financial_snapshot, snapshot_citations)
+            reserve = estimate_tokens(table or '') + sum(estimate_tokens(json.dumps({'cell': c['snapshot_cell'], 'inputs': c['snapshot_facts']}, default=str)) for c in snapshot_citations.values()) + 2048
+            self.max_tokens = max(4000, original_budget - reserve)
         query = self._query(title)
         strategy = "hybrid_pgvector_fts"
         try:
@@ -630,10 +678,10 @@ class ICReportSectionEvidenceService:
             strategy = "ordered_index_fallback"
             candidates = self._fallback_chunks()
         if title == 'Key Financials':
-            candidates = [chunk for chunk in candidates if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim'}]
+            candidates = [chunk for chunk in candidates if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim', 'metric'}]
             if not candidates:
                 candidates = [chunk for chunk in self._fallback_chunks()
-                    if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim'}]
+                    if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim', 'metric'}]
 
         comparison = None
         if title == "Industry Overview":
@@ -661,7 +709,22 @@ class ICReportSectionEvidenceService:
         comparison_budget = min(16_000, int(self.max_tokens * 0.45)) if comparison and comparison["chunks"] else 0
         has_workbooks = any((getattr(d, "extraction_manifest", None) or {}).get("sheets") for d in self.documents)
         dependency_budget = min(16_384, int((self.max_tokens - comparison_budget) * 0.20)) if has_workbooks else 0
-        selected = self._select(candidates, token_budget=self.max_tokens - comparison_budget - dependency_budget)
+        primary_selected = []
+        pending_primary = []
+        if title == 'Key Financials':
+            primaries = self._primary_financial_chunks()
+            primary_budget = int((self.max_tokens - dependency_budget) * .60)
+            primary_used = 0
+            for chunk in primaries:
+                cost = estimate_tokens(self._format_chunk(chunk, rank=len(primary_selected)+1)) + 2
+                if primary_used + cost <= primary_budget:
+                    primary_selected.append(chunk); primary_used += cost
+                else:
+                    pending_primary.append({'document_id': str(chunk.source_id), 'sheet': chunk.metadata['sheet_name'], 'range': chunk.metadata['cell_range']})
+        else:
+            primary_used = 0
+        semantic = self._select(candidates, token_budget=self.max_tokens - comparison_budget - dependency_budget - primary_used)
+        selected = primary_selected + [chunk for chunk in semantic if self._identity(chunk) not in {self._identity(c) for c in primary_selected}]
         if not selected:
             raise ValueError(f"No indexed document chunks were available for report section '{title}'.")
         dependency_chunks, dependency_notes = self._formula_dependencies(selected, token_budget=dependency_budget)
@@ -739,6 +802,8 @@ class ICReportSectionEvidenceService:
             "context_budget_basis": "serialized_message",
             "formula_dependency_chunk_count": len(dependency_chunks),
             "formula_dependency_warnings": dependency_notes,
+            "primary_financial_chunk_count": len(primary_selected),
+            "pending_financial_chunks": pending_primary,
         }
         if comparison is not None:
             stats["our_deal_comparison"] = {
@@ -755,6 +820,11 @@ class ICReportSectionEvidenceService:
                     for chunk, _ in comparison_selected
                 }),
             }
+        if financial_snapshot:
+            stats['financial_snapshot_id'] = financial_snapshot['id']
+            stats['financial_coverage'] = financial_snapshot['coverage']
+            stats['financial_snapshot_reserve_tokens'] = original_budget - self.max_tokens
+        self.max_tokens = original_budget
         self.section_stats[title] = stats
         return {"context": context, "metadata": stats, "citations": citations}
 

@@ -9,11 +9,11 @@ from ai_orchestrator.services.report_financial_format import FINANCIAL_ROWS
 
 
 class ReportQualityTests(SimpleTestCase):
-    def test_financial_output_keeps_one_table_without_losing_values_units_or_citations(self):
+    def test_financial_output_preserves_supporting_tables_values_units_and_citations(self):
         main='| Metric (INR Mn) | FY25 |\n| --- | --- |\n'+'\n'.join(f'| {name} | Not provided |' for name in FINANCIAL_ROWS)
         extra='| Cash (INR Mn) | FY25 |\n| --- | --- |\n| Closing cash | 100 [1] |'
         normalized=ICReportSectionService._financial_tables_to_narrative(main+'\n\n'+extra)
-        self.assertEqual(normalized.count('| --- | --- |'),1)
+        self.assertEqual(normalized.count('| --- | --- |'),2)
         self.assertIn('Cash (INR Mn)',normalized)
         self.assertIn('100 [1]',normalized)
         self.assertIn('Closing cash',normalized)
@@ -249,7 +249,7 @@ class ReportQualityTests(SimpleTestCase):
     def test_authored_variable_heading_gets_financial_contract_by_stage(self):
         updated = upgrade_report_prompt("Analyst instructions", "## {{ section_title }}\n{{ content }}", section_title="Key Financials")
         self.assertIn("Key Financials table format:", updated[1])
-        self.assertIn("exactly one Markdown table", updated[0])
+        self.assertIn("exactly one main standardized P&L", updated[0])
         self.assertEqual(upgrade_report_prompt(*updated, section_title="Key Financials"), updated)
 
     def test_single_income_statement_has_exact_revenue_to_pat_order(self):
@@ -300,9 +300,9 @@ class ReportQualityTests(SimpleTestCase):
         self.assertEqual(ICReportSectionService._validated_spreadsheet_location("PL!B1:C1", citation), "PL!B1:C1")
         self.assertEqual(ICReportSectionService._validated_spreadsheet_location("PL!F20", citation), "")
 
-    def test_financial_prompt_owns_one_table_and_is_idempotent(self):
+    def test_financial_prompt_owns_one_main_statement_and_allows_supporting_tables(self):
         updated = upgrade_report_prompt("Analyst instructions", "- Begin with the exact heading: ## Key Financials\n{{ content }}")
-        self.assertIn("exactly one Markdown table", updated[0])
+        self.assertIn("exactly one main standardized P&L", updated[0])
         self.assertIn("Key Financials table format:", updated[1])
         self.assertEqual(upgrade_report_prompt(*updated), updated)
     def test_verified_source_wrappers_render_cleanly_in_tables(self):
@@ -351,3 +351,22 @@ class ReportPromptPublicationTests(TestCase):
         self.assertEqual(new.output_schema, old.output_schema)
         old.refresh_from_db()
         self.assertEqual(old.status, "archived")
+
+
+class SupportingFinancialTableTests(SimpleTestCase):
+    def test_upgrading_old_live_prompt_removes_supporting_table_prohibition(self):
+        system='Keep exactly one financial table and explain all supporting analyses in prose and bullets.'
+        user='- Begin with the exact heading: ## Key Financials\n{{ content }}\nUse exactly one table: the main Revenue-to-PAT statement. Do not create supplemental tables, repeated statements or tables of ratios or gaps.'
+        new_system,new_user=upgrade_report_prompt(system,user,section_title='Key Financials')
+        self.assertNotIn('Do not create supplemental tables',new_user)
+        self.assertNotIn('Keep exactly one financial table',new_system)
+        self.assertIn('supporting financial tables',new_user)
+
+    def test_derived_main_table_citations_ignore_supporting_revenue_rows(self):
+        values={name:'Not provided' for name in FINANCIAL_ROWS}
+        values.update({'Revenue':'100 [1]','Cost of Goods Sold':'60 [2]','Gross Profit':'40'})
+        main='| Metric (INR Mn) | FY25 Actual |\n| --- | --- |\n'+'\n'.join('| %s | %s |' % (name,values[name]) for name in FINANCIAL_ROWS)
+        supplemental='| Metric | FY25 |\n| --- | --- |\n| Revenue | 999 [3] |'
+        result=ICReportSectionService._cite_supported_financial_calculations(main+'\n\n'+supplemental,{1,2,3})
+        self.assertIn('| Gross Profit [1] [2] | 40 |',result)
+        self.assertIn(supplemental,result)

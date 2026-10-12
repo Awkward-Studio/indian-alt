@@ -214,6 +214,10 @@ INDEXED INTERNAL EVIDENCE:
 
     def extract(self, *, deal, parent_audit_log_id: str | None = None, use_accepted_report: bool = True) -> dict:
         from deals.services.key_financials_profile import latest_accepted_section, sync_section
+        if DealDocument.objects.filter(deal=deal).exclude(extraction_manifest={}).exists():
+            from deals.services.financial_snapshot import snapshot_for_deal, project_snapshot
+            snapshot = snapshot_for_deal(deal)
+            return project_snapshot(deal, snapshot)
         accepted = latest_accepted_section(deal) if use_accepted_report else None
         if accepted:
             return sync_section(deal, *accepted)

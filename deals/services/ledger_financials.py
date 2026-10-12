@@ -61,6 +61,15 @@ def render(value):
 
 
 def snapshot(statements):
+    from copy import copy
+    filtered = []
+    for statement in statements:
+        row = copy(statement)
+        row.data = {key:value for key,value in (statement.data or {}).items()
+            if not ((statement.provenance or {}).get('metrics', {}).get(key, {}).get('status'))
+            or (statement.provenance or {}).get('metrics', {}).get(key, {}).get('status') in {'supported','derived'}}
+        filtered.append(row)
+    statements = filtered
     # Once the target has a refreshed, primary-verified extraction, stale AI
     # rows from previous runs must not supply competing years or metrics.
     contract = 'primary-financial-fields-v2'

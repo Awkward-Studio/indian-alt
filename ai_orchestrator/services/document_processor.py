@@ -412,6 +412,10 @@ class DocumentProcessorService:
             # docproc itself was healthy. The read side retains the longer
             # extraction allowance and is kept alive by docproc heartbeats.
             timeout_val = (self.docproc_connect_timeout, self.docproc_timeout)
+            if os.path.splitext(filename)[1].lower() in {'.xlsx', '.xlsm', '.xltx', '.xltm'}:
+                batched = self._remote_spreadsheet_batches(file_content, filename, headers, timeout_val)
+                if batched is not None:
+                    return batched
             response = requests.post(
                 f"{self.docproc_url}/v2/extract/document",
                 headers=headers,
@@ -439,10 +443,112 @@ class DocumentProcessorService:
                 )
             response.raise_for_status()
             data = response.json()
+            if os.path.splitext(filename)[1].lower() == '.pdf':
+                data = self._retry_pdf_pages(file_content, filename, data, headers, timeout_val, hint, prompt)
             return self._normalize_remote_result(data, filename)
         except Exception as e:
             logger.warning("[DOC-PROC] Remote extraction failed for %s: %s", filename, e)
             return None
+
+    def _retry_pdf_pages(self, content, filename, data, headers, timeout, hint, prompt):
+        import json
+        from pathlib import Path
+        metadata = data.get('render_metadata') or {}
+        pending = sorted(set(metadata.get('pending_pages', []) + metadata.get('unreadable_pages', [])))
+        if not pending: return data
+        source_hash = hashlib.sha256(content).hexdigest()
+        root = Path(settings.FINANCIAL_EXTRACTION_ROOT) / (source_hash + '-pages')
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        manifest = dict(data.get('structured_data') or {})
+        pages = {p['page']: p for p in manifest.get('pages', [])}
+        for number in pending:
+            path = root / ('%06d.json' % number)
+            try:
+                if path.exists(): result = json.loads(path.read_text())
+                else:
+                    response = requests.post(self.docproc_url + '/v3/extract/pdf-page', headers=headers,
+                        json={'filename':filename,'content_base64':base64.b64encode(content).decode(),'start_page':number-1,'hint':hint,'prompt':prompt}, timeout=timeout)
+                    if response.status_code == 404: break
+                    response.raise_for_status();result=response.json()
+                    if (result.get('structured_data') or {}).get('content_sha256') != source_hash: raise ValueError('PDF source hash mismatch')
+                    if result.get('transcription_status') == 'complete':
+                        temp = path.with_suffix('.tmp')
+                        with temp.open('w') as out:
+                            os.chmod(temp,0o600);json.dump(result,out)
+                        temp.replace(path)
+                mapped = result.get('structured_data', {}).get('pages', [])
+                if not mapped:
+                    mapped = [{'page':number,'text':result.get('raw_extracted_text') or '', 'tables':[], 'status':result.get('transcription_status','unreadable'),'provenance':'ocr'}]
+                for page in mapped: pages[number] = {**page,'page':number}
+            except Exception:
+                pages.setdefault(number,{'page':number,'text':'','tables':[],'status':'unreadable'})
+        total = metadata.get('total_page_count') or manifest.get('total_page_count') or metadata.get('page_count',0)
+        unreadable = [n for n in range(1,total+1) if pages.get(n,{}).get('status') != 'complete']
+        if not pages: return data
+        ordered = [pages[n] for n in sorted(pages)]
+        text = '\n\n'.join('--- %s (PAGE %s) ---\n%s' % (filename,p['page'],p.get('text','')) for p in ordered if p.get('text'))
+        return {**data,'raw_extracted_text':text,'normalized_text':text,'transcription_status':'partial' if unreadable else 'complete',
+            'structured_data':{**manifest,'kind':'document_pages','content_sha256':source_hash,'total_page_count':total,'pages':ordered,'pending_pages':unreadable,'truncated':bool(unreadable)},
+            'render_metadata':{**metadata,'pending_pages':[],'unreadable_pages':unreadable,'page_count':len(ordered)}}
+
+    def _remote_spreadsheet_batches(self, content, filename, headers, timeout):
+        """Persist each private batch before advancing its cursor; resume on retry."""
+        import json
+        import fcntl
+        from pathlib import Path
+        from deals.services.document_artifacts import DocumentArtifactService
+        source_hash = hashlib.sha256(content).hexdigest()
+        root = Path(settings.FINANCIAL_EXTRACTION_ROOT) / source_hash
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = root / 'lock'
+        with lock_path.open('a') as lock:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            index_path = root / 'index.json'
+            index = json.loads(index_path.read_text()) if index_path.exists() else {'cursor': None, 'batches': [], 'complete': False}
+            while not index['complete']:
+                response = requests.post(self.docproc_url + '/v3/extract/spreadsheet-batch', headers=headers,
+                    json={'filename': filename, 'content_base64': base64.b64encode(content).decode(), 'cursor': index['cursor']}, timeout=timeout)
+                if response.status_code == 404 and not index['batches']:
+                    return None
+                response.raise_for_status()
+                batch = response.json(); manifest = batch.get('structured_data') or {}
+                if manifest.get('content_sha256') != source_hash:
+                    raise ValueError('Spreadsheet batch source hash mismatch')
+                cursor = manifest.get('next_cursor')
+                if manifest.get('truncated') and not cursor:
+                    raise ValueError('Incomplete spreadsheet batch has no resumable cursor')
+                if cursor is not None and cursor == index['cursor']:
+                    raise ValueError('Spreadsheet extraction cursor did not advance')
+                name = '%06d.json' % len(index['batches'])
+                def save(path, value):
+                    temp = path.with_suffix('.tmp')
+                    with temp.open('w') as out:
+                        os.chmod(temp, 0o600)
+                        json.dump(value, out, default=str)
+                        out.flush(); os.fsync(out.fileno())
+                    temp.replace(path)
+                save(root / name, batch)
+                index = {'cursor': cursor, 'batches': index['batches'] + [name], 'complete': cursor is None}
+                save(index_path, index)
+            sheets = {}; chunks = []; final = None
+            for name in index['batches']:
+                batch = json.loads((root / name).read_text()); manifest = batch['structured_data']; final = batch
+                for sheet in manifest['sheets']:
+                    if sheet['name'] not in sheets: sheets[sheet['name']] = {**sheet, 'cells': []}
+                    sheets[sheet['name']]['cells'].extend(sheet['cells'])
+                chunks.extend(manifest.get('chunks') or [])
+            manifest = {**final['structured_data'], 'sheets': list(sheets.values()), 'chunks': chunks, 'truncated': False, 'next_cursor': None,
+                'batch_count': len(index['batches']), 'nonempty_cell_count': sum(len(s['cells']) for s in sheets.values())}
+            expected = manifest.get('workbook', {}).get('sheet_order', [])
+            if set(expected) != set(sheets): raise ValueError('Spreadsheet sheet inventory did not reconcile')
+            for sheet in manifest['sheets']:
+                addresses = [c['coordinate'] for c in sheet['cells']]
+                if len(addresses) != len(set(addresses)): raise ValueError('Duplicate cell in spreadsheet batch inventory')
+            text = DocumentArtifactService.compact_spreadsheet_text(file_name=filename, manifest=manifest)
+            return self._normalize_remote_result({**final, 'raw_extracted_text': text, 'normalized_text': text, 'structured_data': manifest,
+                'quality_flags': ['spreadsheet_structured', 'raw_complete', 'artifact_backed', 'resumable_batches'],
+                'transcription_status': 'complete', 'render_metadata': {**final.get('render_metadata', {}), 'manifest_truncated': False, 'sheet_count': len(sheets), 'batch_count': len(index['batches'])}}, filename)
 
     @staticmethod
     def _normalize_remote_result(data: dict, filename: str) -> dict:

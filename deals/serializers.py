@@ -675,6 +675,7 @@ class DealDetailSerializer(DealSerializer):
     competitor_candidates = serializers.SerializerMethodField()
     report_status = serializers.SerializerMethodField()
     report_coverage = serializers.SerializerMethodField()
+    financial_coverage = serializers.SerializerMethodField()
 
     def get_file_tree(self, obj):
         from .services.folder_analysis import FolderAnalysisService
@@ -689,6 +690,10 @@ class DealDetailSerializer(DealSerializer):
 
     def get_report_status(self, obj):
         return report_status_for_deal(obj)
+
+    def get_financial_coverage(self, obj):
+        from .services.financial_snapshot import financial_coverage_for_deal
+        return financial_coverage_for_deal(obj)
 
     def get_report_coverage(self, obj):
         from .services.report_coverage import report_coverage_for_deal
@@ -708,7 +713,7 @@ class DealDetailSerializer(DealSerializer):
             'source_onedrive_id',
             'source_drive_id', 'source_email_id', 'processing_status', 'processing_error',
             'file_tree', 'vi_relations', 'competitor_candidates',
-            'report_status', 'report_coverage',
+            'report_status', 'report_coverage', 'financial_coverage',
             'field_provenance', 'can_manage_responsibility',
         )
         read_only_fields = ('id',)

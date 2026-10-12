@@ -172,7 +172,7 @@ FINANCIAL_DEPTH_GUIDANCE = (
     "permit. Quantify sensitivity magnitudes and explain what changes for the investment "
     "decision. Reconcile alternative source figures and adjusted versus reported earnings; "
     "do not merely list numbers or describe an uncalculated sensitivity. "
-    "Use exactly one table: the main Revenue-to-PAT statement. Every other financial finding, comparison, ratio, cash-flow bridge and sensitivity must be written in readable paragraphs or short bullets with its units, period, formula where useful, and source citations. Do not create supplemental tables, repeated statements or tables of ratios or gaps. These are coverage "
+    "Keep exactly one main Revenue-to-PAT statement. Use supporting tables to explain source comparisons, cash-flow bridges, working capital, ratios and sensitivities, with explicit units, periods and citations. Do not duplicate or replace the main statement. These are coverage "
     "and depth instructions, not a word-count acceptance gate. Table-only rewrites apply "
     "only the table requirements; full section generation must retain this analysis."
 )
@@ -250,6 +250,16 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         "Next Steps owns the consolidated action table in its specified twelve-column schema. "
         "The Executive Summary states the material approval gates.", system, flags=re.MULTILINE)
     is_financials = section_title == "Key Financials" or "## Key Financials" in user
+    if is_financials:
+        from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
+        def refresh_financial_format(text):
+            text = re.sub(r'Key Financials table format:\n.*?(?=\n\n|\Z)', lambda _: FINANCIAL_TABLE_INSTRUCTION.strip(), text, flags=re.S)
+            text = text.replace("Keep exactly one financial table and explain all supporting analyses in prose and bullets.", "Keep one main Revenue-to-PAT statement and allow separate supporting financial tables.")
+            text = text.replace("Use exactly one table: the main Revenue-to-PAT statement.", "Keep exactly one main Revenue-to-PAT statement; supporting tables are allowed.")
+            text = text.replace("Every other financial finding, comparison, ratio, cash-flow bridge and sensitivity must be written in readable paragraphs or short bullets", "Supporting financial findings, comparisons, ratios, cash-flow bridges and sensitivities may use tables, paragraphs or short bullets")
+            text = text.replace("Do not create supplemental tables, repeated statements or tables of ratios or gaps.", "Do not duplicate or replace the main Revenue-to-PAT statement.")
+            return text
+        system, user = refresh_financial_format(system), refresh_financial_format(user)
     if is_financials and "Key Financials table format:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_TABLE_INSTRUCTION
         user = user.replace(
@@ -303,7 +313,7 @@ def upgrade_report_prompt(system: str, user: str, *, section_title: str = "") ->
         user += "provided need no citation. Final check: the main statement contains exactly the 13 specified "
         user += "rows from Revenue to PAT, and verified markers inside every numeric row.\n"
     if is_financials:
-        system = system.replace("Split unrelated schedules into separate tables.", "Keep exactly one financial table and explain all supporting analyses in prose and bullets.")
+        system = system.replace("Keep exactly one financial table and explain all supporting analyses in prose and bullets.", "Keep one main Revenue-to-PAT statement and allow separate supporting financial tables.")
         user = user.replace("Build balance-sheet and working-capital schedules covering", "Analyze balance-sheet and working-capital details in prose and bullets, covering")
     if is_financials and "Financial bridge check:" not in user:
         from ai_orchestrator.services.report_financial_format import FINANCIAL_BRIDGE_RULE

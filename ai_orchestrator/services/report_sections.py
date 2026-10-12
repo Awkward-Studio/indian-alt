@@ -514,33 +514,7 @@ class ICReportSectionService:
 
     @classmethod
     def _financial_tables_to_narrative(cls, text):
-        """Keep the main statement; retain supplemental values and citations as bullets."""
-        from .report_financial_format import FINANCIAL_ROWS
-        blocks = list(re.finditer(r'^[ \t]*\|[^\n]*(?:\n[ \t]*\|[^\n]*)+', text, re.M))
-        tables = [block for block in blocks if len(block[0].splitlines()) >= 3
-            and cls._is_table_separator(block[0].strip().splitlines()[1])]
-        def labels(block):
-            return [re.sub(r'\[[^]]+\]', '', cls._plain_table_label(cls._table_cells(line)[0])).strip()
-                for line in block[0].strip().splitlines()[2:]]
-        main = next((block for block in tables if labels(block) == list(FINANCIAL_ROWS)), None)
-        main = main or next((block for block in tables if {'Revenue','PAT'}.issubset(labels(block))), None)
-        if main is None:
-            return text
-        for block in reversed(tables):
-            if block.start() == main.start():
-                continue
-            if block[0].strip() == main[0].strip():
-                replacement = ''
-            else:
-                lines = block[0].strip().splitlines()
-                headers = cls._table_cells(lines[0])
-                bullets = []
-                for line in lines[2:]:
-                    cells = cls._table_cells(line)
-                    details = '; '.join(f'{header}: {value}' for header,value in zip(headers[1:],cells[1:]))
-                    bullets.append(f'- **{cells[0]}:** {details}')
-                replacement = '\n**' + headers[0] + '**\n\n' + '\n'.join(bullets) + '\n'
-            text = text[:block.start()] + replacement + text[block.end():]
+        """Compatibility hook: preserve supporting financial tables verbatim."""
         return text
 
     @classmethod
@@ -609,6 +583,8 @@ class ICReportSectionService:
         if calculation_corrections is not None:
             calculation_corrections.extend(corrections)
         calculation_errors = report_calculation_errors(text)
+        from .report_calculations import growth_narrative_errors
+        calculation_errors.extend(growth_narrative_errors(text))
         warnings.extend({'kind': 'calculation', 'message': issue, 'confirmed':True} for issue in calculation_errors)
         grouped = {}
         for index, issue in enumerate(warnings):
@@ -726,7 +702,12 @@ class ICReportSectionService:
     def _cite_supported_financial_calculations(cls, text: str, verified: set[int]) -> str:
         """Attach input-row sources to an uncited derived row only when its arithmetic matches."""
         from .report_financial_format import FINANCIAL_ROWS,displayed_amount
-        lines=text.splitlines()
+        from deals.services.financial_table_rewrite import locate_main_financial_table
+        try:
+            main, start, end = locate_main_financial_table(text)
+        except ValueError:
+            return text
+        lines=main.splitlines()
         rows={}
         for index,line in enumerate(lines):
             if not line.strip().startswith('|') or cls._is_table_separator(line): continue
@@ -764,7 +745,7 @@ class ICReportSectionService:
                 if matched and has_values:
                     cells[0]+=' '+' '.join(f'[{n}]' for n in sorted(references))
                     lines[index]='| '+' | '.join(cells)+' |'
-        return '\n'.join(lines)
+        return text[:start] + '\n'.join(lines) + text[end:]
 
     @classmethod
     def _validate_financial_table(cls, text: str, *, verified_citation_numbers: set[int] | None = None, source_citations: list[dict] | None = None) -> list[str]:
@@ -880,6 +861,24 @@ class ICReportSectionService:
         force_regenerate: bool = False,
     ) -> str:
         from .report_financial_format import FINANCIAL_BASIS_RULE
+        financial_snapshot = None
+        snapshot_table = None
+        citations = dict(citations or {})
+        if title == 'Key Financials' and (evidence_metadata or {}).get('financial_snapshot_id'):
+            from deals.services.financial_snapshot import load_snapshot, render_main_table
+            financial_snapshot = load_snapshot(evidence_metadata['financial_snapshot_id'])
+            snapshot_table, snapshot_gaps = render_main_table(financial_snapshot, citations)
+            if snapshot_table:
+                evidence = ('Authoritative financial snapshot. Use this table and its reporting dimensions for all financial analysis. '
+                    'The application will preserve this table; do not assert that its supported amounts are absent.\n' + snapshot_table + '\n\n' + evidence)
+                # Synthetic blocks retain exact source IDs, locators and aggregation inputs.
+                for rank, citation in citations.items():
+                    if citation.get('snapshot_cell'):
+                        cell = citation['snapshot_cell']
+                        evidence += '\n\nRetrieval block R%03d | %s\n%s' % (int(rank), citation['reference'],
+                            json.dumps({'metric':cell['metric'],'period':cell['period']['key'],'status':cell['period']['status'],
+                                'value':cell['value'],'currency':cell['currency'],'basis':cell['basis'],'operation':(cell.get('calculation') or {}).get('operation'),
+                                'inputs':[{'value':f['value'],'period':f['period']['key'],'metric':f['metric'],'units':f['units'],'locator':f['locator']} for f in citation.get('snapshot_facts', [])]}))
         evidence = FINANCIAL_BASIS_RULE + '\n\n' + evidence
         model_data = analysis.get("deal_model_data") if isinstance(analysis.get("deal_model_data"), dict) else {}
         resolved_stage = cls._resolve_prompt_stage(title)
@@ -950,11 +949,12 @@ class ICReportSectionService:
                     "prompt_revision": revision_key,
                     "force_regenerate": bool(force_regenerate),
                     "generation_mode": "grounded_single_pass",
-                    "source_review_enabled": False,
+                    "source_review_enabled": bool(financial_snapshot),
                     "citation_validation_enabled": False,
                     "financial_source_validation_enabled": title == 'Key Financials',
                     "financial_validation_order": ['source_metric_and_period', 'currency_and_scale', 'arithmetic'] if title == 'Key Financials' else [],
                     "evidence_retrieval": evidence_metadata or {"strategy": "shared_context"},
+                    "financial_snapshot_id": financial_snapshot.get("id") if financial_snapshot else None,
                     **({
                         "vdr_parent_audit_id": str(source_id),
                         "vdr_dispatch_generation": int(vdr_dispatch_generation),
@@ -967,15 +967,35 @@ class ICReportSectionService:
         try:
             if isinstance(result, dict) and result.get('error'):
                 raise ReportSectionStructureError(f"Generation for '{title}' could not complete: {result['error']}")
+            raw_section = result.get("response") if isinstance(result, dict) else result
+            coverage_warnings = []
+            review_result = None
+            if financial_snapshot:
+                from deals.services.financial_snapshot import apply_snapshot_table
+                raw_section, coverage_warnings = apply_snapshot_table(raw_section, financial_snapshot, citations, prepared=(snapshot_table, snapshot_gaps) if snapshot_table else None)
+                try:
+                    from .report_source_review import review_section
+                    review_result = review_section(ai_service=ai_service, title=title, draft=raw_section,
+                        evidence=evidence, source_id=source_id, vdr_dispatch_generation=vdr_dispatch_generation)
+                    if review_result.get('findings') or review_result.get('coverage_gaps'):
+                        coverage_warnings.append({'kind': 'source_discrepancy' if review_result.get('status')=='issues_found' else 'verification', 'message': 'Financial source review found items requiring review.', 'details': review_result, 'confirmed':review_result.get('status')=='issues_found'})
+                except Exception as review_error:
+                    review_result={'status':'incomplete','failure_kind':'pipeline','error':str(review_error)}
+                    coverage_warnings.append({'kind': 'review_pipeline', 'message': 'Source review could not complete because of a pipeline or response-validation issue. This does not establish a financial error.', 'details': str(review_error), 'confirmed':False})
             section = cls._normalize_section(
                 title,
-                result.get("response") if isinstance(result, dict) else result,
+                raw_section,
                 citations=citations,
                 minimum_words=minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
                 calculation_corrections=calculation_corrections,
                 validation_warnings=validation_warnings,
             )
+            for warning in coverage_warnings:
+                details = warning.get('details') or []
+                if not isinstance(details, list): details = [details]
+                warning['details'] = [detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False, default=str) for detail in details]
+            validation_warnings.extend(coverage_warnings)
         except ReportSectionValidationError as exc:
             cls._mark_rejected_section_audit(
                 result.get("_audit_log_id") if isinstance(result, dict) else None, exc,
@@ -991,6 +1011,7 @@ class ICReportSectionService:
                         **(audit.source_metadata or {}),
                         'calculation_corrections': calculation_corrections,
                         'report_validation_warnings': validation_warnings,
+                        'financial_source_review': review_result,
                         'report_section_outcome': ('draft_ready_with_gaps' if validation_warnings else 'draft_ready') if source_type == 'vdr_report_section' else ('saved_with_gaps' if validation_warnings else 'accepted'),
                     }
                     audit.parsed_json = {**(audit.parsed_json or {}), '_normalized_section': section}

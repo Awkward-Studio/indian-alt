@@ -1422,3 +1422,62 @@ class SectorResearchAcquisition(models.Model):
         db_table = "sector_research_acquisition"
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["deal", "status"])]
+
+
+class FinancialExtractionRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='financial_extraction_runs')
+    document = models.ForeignKey(DealDocument, on_delete=models.PROTECT, related_name='financial_extraction_runs')
+    source_hash = models.CharField(max_length=64)
+    contract = models.CharField(max_length=80)
+    state = models.CharField(max_length=20)
+    inventory = models.JSONField(default=list)
+    issues = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['deal', 'document', 'source_hash', 'contract'], name='financial_run_source_unique')]
+
+
+class FinancialFact(models.Model):
+    id = models.CharField(primary_key=True, max_length=64)
+    run = models.ForeignKey(FinancialExtractionRun, on_delete=models.PROTECT, related_name='facts')
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class FinancialSnapshot(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='financial_snapshots')
+    fingerprint = models.CharField(max_length=64)
+    source_fingerprint = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['deal', 'fingerprint'], name='financial_snapshot_unique')]
+        ordering = ['-created_at']
+
+
+class FinancialReportRevision(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='financial_report_revisions')
+    analysis = models.ForeignKey(DealAnalysis, null=True, on_delete=models.PROTECT)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    before_hash = models.CharField(max_length=64)
+    after_hash = models.CharField(max_length=64)
+    before_report = models.TextField()
+    after_report = models.TextField()
+    snapshot = models.ForeignKey(FinancialSnapshot, null=True, on_delete=models.PROTECT)
+    validation = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class FinancialFactReview(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name='financial_fact_reviews')
+    fact = models.ForeignKey(FinancialFact, on_delete=models.PROTECT, related_name='reviews')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    mapping = models.JSONField(default=dict)
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)

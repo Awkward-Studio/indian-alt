@@ -4,6 +4,7 @@ import json
 import re
 
 from django.conf import settings
+from django.db import transaction
 
 from ai_orchestrator.prompt_contracts import IC_SECTION_TITLES
 from ai_orchestrator.services.ai_processor import AIProcessorService
@@ -467,14 +468,21 @@ class AnalysisSectionRewriteService:
         return "\n\n".join(blocks), citations
 
     @staticmethod
-    def persist(*, deal, full_report: str, version=None):
+    @transaction.atomic
+    def persist(*, deal, full_report: str, version=None, actor=None):
+        from deals.models import Deal
+        Deal.objects.select_for_update().get(pk=deal.pk)
         analysis = None
         if version not in (None, ""):
             analysis = deal.analyses.filter(version=int(version)).order_by("-created_at").first()
         if analysis is None:
             analysis = deal.latest_analysis
+        from deals.services.financial_snapshot import record_report_revision
+        before = ((analysis.analysis_json or {}).get('analyst_report') if analysis else deal.deal_summary) or ''
+        validation = record_report_revision(deal, analysis, before, full_report, actor=actor)
         if analysis is not None:
             payload = analysis.analysis_json if isinstance(analysis.analysis_json, dict) else {}
+            payload['financial_validation'] = validation
             payload["analyst_report"] = full_report
             snapshot = payload.get("canonical_snapshot")
             if isinstance(snapshot, dict):

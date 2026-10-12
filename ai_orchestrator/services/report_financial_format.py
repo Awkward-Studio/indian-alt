@@ -148,8 +148,8 @@ def prepared_display_values(fact: dict) -> dict:
 
 FINANCIAL_TABLE_INSTRUCTION = (
     "\n\nKey Financials table format:\n"
-    "- Include exactly one Markdown table in this section: the main P&L / "
-    "income statement. Put currency and scale in the first column header and the "
+    "- Include exactly one main standardized P&L / "
+    "income statement, and allow supporting financial tables. Put currency and scale in the first column header and the "
     "available historical and forecast periods across columns, clearly marked Actual "
     "or Forecast. State currency and scale explicitly, such as Metric (INR Cr, amounts) "
     "or Metric (USD million, amounts). Every row in this Revenue-to-PAT table is a "
@@ -173,7 +173,7 @@ FINANCIAL_TABLE_INSTRUCTION = (
     "dependencies, balance-sheet reconciliation and sensitivities in ### subsections "
     "with paragraphs and short bullets below the main statement. Show supported formulas and "
     "their cited inputs. Write source comparisons, cash flow, working capital, ratios and "
-    "sensitivities as narrative with explicit units, periods and citations. Do not add tables, "
+    "sensitivities in supporting tables or narrative with explicit units, periods and citations. Do not "
     "replace or duplicate the main Revenue-to-PAT statement; route actions to Next Steps. Keep all material "
     "analytical themes from the instructions above."
 )
@@ -287,6 +287,13 @@ def financial_source_errors(rows: list[list[str]], citations: list[dict], *, che
             for number in references:
                 citation = by_number.get(int(number), {})
                 workbook_references |= bool(re.search(r"\.(?:xlsx|xlsm|xlsb|xls)$", str(citation.get("title") or ""), re.I))
+                snapshot_cell = citation.get('snapshot_cell')
+                if snapshot_cell:
+                    from deals.services.financial_snapshot import verified_cell_value, PNL_KEYS
+                    expected_metric = PNL_KEYS[list(FINANCIAL_ROWS).index(metric)]
+                    verified = verified_cell_value(snapshot_cell, citation.get('snapshot_facts') or [])
+                    if verified is not None and snapshot_cell['metric'] == expected_metric and period(snapshot_cell['period']['key']) == period(rows[0][column]) and snapshot_cell['currency'] in table_currencies:
+                        candidates.append((verified / table_scale, 'verified snapshot inputs'))
                 facts = citation.get("financial_cells") or {}
                 location = citation.get("used_location") or citation.get("location") or ""
                 exact = re.search(r"!([A-Z]{1,3}\d+)(?::([A-Z]{1,3}\d+))?$", location)

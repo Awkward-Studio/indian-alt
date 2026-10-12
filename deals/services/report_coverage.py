@@ -29,8 +29,10 @@ def recorded_report_gaps(deal):
                 continue
             gaps.append({'source_type': 'report_validation', 'source_id': f'{attempt.pk}:{index}',
                 'title': section, 'error': issue['message'], 'status': 'needs_review',
-                'issue_kind': issue.get('kind'), 'confirmed': bool(issue.get('confirmed', False)),
+                'issue_kind': 'discrepancy' if issue.get('kind')=='source_discrepancy' else 'pipeline_review' if issue.get('kind')=='review_pipeline' else issue.get('kind'), 'confirmed': bool(issue.get('confirmed', False)),
                 'details': issue.get('details') or []})
+    from deals.services.financial_snapshot import financial_source_gaps
+    gaps.extend(financial_source_gaps(deal))
     return gaps
 
 

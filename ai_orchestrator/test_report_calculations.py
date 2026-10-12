@@ -88,3 +88,17 @@ class ReportCalculationTests(SimpleTestCase):
     def test_irr_propagates_rounded_proceeds_precision(self):
         self.assertEqual(report_calculation_errors('MOIC is 1.45 / 1 = 1.45x, and IRR is 9.8% over 4 years.'), [])
         self.assertTrue(report_calculation_errors('MOIC is 1.45 / 1 = 1.45x, and IRR is 11.8% over 4 years.'))
+
+
+class GrowthNarrativeTests(SimpleTestCase):
+    def test_wrong_cagr_and_growth_direction_are_detected_without_a_model(self):
+        from ai_orchestrator.services.report_calculations import growth_narrative_errors
+        errors=growth_narrative_errors('Revenue grows from INR 100 Mn in FY24 to INR 800 Mn in FY27. CAGR of approximately 50%.')
+        self.assertTrue(any('100.00%' in error for error in errors))
+        errors=growth_narrative_errors('Cash is projected to grow from INR 900 Mn in FY24 to INR 800 Mn in FY30.')
+        self.assertTrue(any('decrease' in error for error in errors))
+
+    def test_correct_cagr_and_incomparable_units_are_not_flagged(self):
+        from ai_orchestrator.services.report_calculations import growth_narrative_errors
+        self.assertEqual(growth_narrative_errors('Revenue grows from INR 100 Mn in FY24 to INR 800 Mn in FY27. CAGR of 100%.'),[])
+        self.assertEqual(growth_narrative_errors('Revenue grows from INR 10 Cr in FY24 to INR 100 Mn in FY27. CAGR of 10%.'),[])

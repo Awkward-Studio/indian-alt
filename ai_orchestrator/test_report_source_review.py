@@ -80,7 +80,9 @@ class ReportSourceReviewTests(SimpleTestCase):
         review = review_section(ai_service=service, title='Key Financials',
             draft='Revenue INR 40.53 Cr [R001]. Tax history is not provided.',
             evidence="Retrieval block R001\nRs in '000\nRevenue 405330.42", source_id='test')
-        self.assertEqual(review, {'findings': [], 'coverage_gaps': []})
+        self.assertEqual(review['findings'], [])
+        self.assertEqual(review['coverage_gaps'], [])
+        self.assertEqual(review['status'], 'no_material_error_found')
         self.assertEqual(service.process_content.call_count, 2)
         self.assertIn('Verify the proposed review', service.process_content.call_args.kwargs['content'])
 
@@ -149,13 +151,37 @@ class SinglePassGroundedGenerationTests(TestCase):
         self.assertFalse(metadata['_source_metadata']['source_review_enabled'])
 
     @patch('ai_orchestrator.services.report_sections.cache')
-    def test_bad_calculation_still_rejects_a_long_section_without_a_reviewer(self,cache):
+    def test_bad_calculation_is_recorded_as_a_visible_review_issue(self,cache):
         from ai_orchestrator.services.report_sections import ICReportSectionService,ReportSectionStructureError
         cache.get.return_value=None
         service=Mock();service.process_content.return_value={
             'response':'## Executive Summary\n\n'+('Lengthy analysis '*800)+'MOIC = 180 / 60 = 5.0x [R001].'}
-        with self.assertRaisesRegex(ReportSectionStructureError,'inconsistent calculations'):
-            ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',
-                evidence='Retrieval block R001\nSource',analysis={'deal_model_data':{}},source_id='test',
-                source_type='vdr_report_section',citations={'1':{'title':'IM.pdf','document_id':'doc'}},force_regenerate=True)
-        service.process_content.assert_called_once()
+        warnings=[]
+        normalized=ICReportSectionService._normalize_section('Executive Summary',service.process_content.return_value['response'],
+            citations={'1':{'title':'IM.pdf','document_id':'doc'}},validation_warnings=warnings)
+        self.assertIn('MOIC',normalized)
+        self.assertTrue(any(warning['kind']=='calculation' for warning in warnings))
+
+
+class SourceReviewOutcomeTests(TestCase):
+    @patch('ai_orchestrator.services.realtime.broadcast_audit_log_update')
+    def test_source_issues_complete_the_review_without_failing_inference(self, broadcast):
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.report_source_review import record_review_outcome
+        audit=AIAuditLog.objects.create(source_type='report_section_quality_review',source_id='test',model_used='test',system_prompt='',user_prompt='',raw_response='{}',status='COMPLETED',is_success=True)
+        record_review_outcome([audit.id],'issues_found',result={'findings':[{'severity':'error','issue':'Source value differs'}],'coverage_gaps':[]})
+        audit.refresh_from_db()
+        self.assertEqual(audit.status,'COMPLETED')
+        self.assertTrue(audit.is_success)
+        self.assertEqual(audit.source_metadata['source_review_outcome'],'issues_found')
+        self.assertIsNone(audit.source_metadata['review_failure_kind'])
+
+    @patch('ai_orchestrator.services.realtime.broadcast_audit_log_update')
+    def test_pipeline_review_failure_is_not_classified_as_a_financial_issue(self, broadcast):
+        from ai_orchestrator.models import AIAuditLog
+        from ai_orchestrator.services.report_source_review import record_review_outcome
+        audit=AIAuditLog.objects.create(source_type='report_section_quality_review',source_id='test',model_used='test',system_prompt='',user_prompt='',raw_response='{}',status='FAILED',is_success=False)
+        record_review_outcome([audit.id],'incomplete',error='Invalid review response')
+        audit.refresh_from_db()
+        self.assertEqual(audit.source_metadata['review_failure_kind'],'pipeline')
+        self.assertEqual(audit.source_metadata['source_issue_count'],0)

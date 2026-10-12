@@ -1,0 +1,79 @@
+services:
+  vllm-report-eval:
+    image: ${H100_EVAL_IMAGE:-vllm/vllm-openai:v0.17.0}
+    container_name: vllm-report-eval
+    restart: "no"
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    ipc: host
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/root/.cache/huggingface
+    command:
+      - --model
+      - ${H100_EVAL_MODEL:-Qwen/Qwen3.8-27B}
+      - --served-model-name
+      - ${H100_EVAL_MODEL:-Qwen/Qwen3.8-27B}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+      - --api-key
+      - ${H100_EVAL_API_KEY:?Set a private evaluation API key}
+      - --gpu-memory-utilization
+      - ${H100_EVAL_GPU_MEMORY_UTILIZATION:-0.85}
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - ${H100_EVAL_MAX_MODEL_LEN:-262144}
+      - --max-num-seqs
+      - "3"
+      - --reasoning-parser
+      - qwen3
+      - --language-model-only
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+
+  tei-embedding:
+    image: ${H100_EVAL_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:hopper-1.9}
+    container_name: tei-report-embedding
+    restart: "no"
+    runtime: nvidia
+    shm_size: 1g
+    ports:
+      - "127.0.0.1:8081:80"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    command:
+      - --model-id
+      - ${H100_EVAL_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "8192"
+      - --auto-truncate
+
+  tei-reranker:
+    image: ${H100_EVAL_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:hopper-1.9}
+    container_name: tei-report-reranker
+    restart: "no"
+    runtime: nvidia
+    shm_size: 1g
+    ports:
+      - "127.0.0.1:8082:80"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/vllm-cache/huggingface}:/data
+    command:
+      - --model-id
+      - ${H100_EVAL_RERANKER_MODEL:-BAAI/bge-reranker-base}
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "4096"
+      - --auto-truncate

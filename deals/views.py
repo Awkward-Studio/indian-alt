@@ -20,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import CharField, Count, DateTimeField, Exists, F, IntegerField, JSONField, OuterRef, Prefetch, Q, Subquery, Value
 from django.db.models.functions import Cast, Coalesce, Greatest, Trim
 from django.db.models.fields.json import KeyTextTransform
@@ -2016,6 +2017,84 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         serializer.save()
         return Response(serializer.data)
     
+    @action(detail=True, methods=['get'], url_path='financial-snapshot')
+    def financial_snapshot(self, request, pk=None):
+        deal = self.get_object()
+        record = deal.financial_snapshots.first()
+        if not record:
+            return Response({'coverage': {'status': 'unknown'}, 'cells': [], 'issues': [], 'snapshot_id': None})
+        return Response({**record.payload, 'snapshot_id': str(record.id), 'generated_at': record.created_at.isoformat()})
+
+    @action(detail=True, methods=['post'], url_path='financial-fact-review')
+    @transaction.atomic
+    def financial_fact_review(self, request, pk=None):
+        deal = self.get_object()
+        if not self._can_review_contradictions(request, deal):
+            return Response({'error':'Only deal-responsible analysts or administrators can review financial facts.'}, status=403)
+        from .models import FinancialFact, FinancialFactReview
+        from .services.financial_snapshot import snapshot_for_deal, period_from_headers, units_from_labels
+        Deal.objects.select_for_update().get(pk=deal.pk)
+        current = deal.financial_snapshots.first()
+        if not current or request.data.get('snapshot_id') != str(current.id):
+            return Response({'error':'Financial sources changed. Refresh before reviewing.'},status=409)
+        fact = FinancialFact.objects.filter(pk=request.data.get('fact_id'),run__deal=deal).select_related('run').first()
+        versions = {run['document_id']:run['source_hash'] for run in current.payload['runs']}
+        if not fact or versions.get(str(fact.run.document_id)) != fact.run.source_hash:
+            return Response({'error':'Fact is not in this source version.'},status=404)
+        reason = request.data.get('reason')
+        mapping = request.data.get('mapping')
+        if not isinstance(reason,str) or not reason.strip() or not isinstance(mapping,dict):
+            return Response({'error':'A mapping and review reason are required.'},status=400)
+        if set(mapping) - {'metric','period_header','unit_label','basis','entity','scenario'}:
+            return Response({'error':'Source values and formulas cannot be overwritten.'},status=400)
+        resolved = {}
+        if 'metric' in mapping:
+            if not isinstance(mapping['metric'],str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,79}', mapping['metric']):
+                return Response({'error':'Invalid metric key.'},status=400)
+            resolved['metric'] = mapping['metric']
+        for key in ['period_header','unit_label']:
+            if key in mapping and not isinstance(mapping[key],str): return Response({'error':'Invalid '+key},status=400)
+        if 'period_header' in mapping:
+            resolved['period'] = period_from_headers([mapping['period_header']])
+            if resolved['period']['scope']=='unknown': return Response({'error':'An explicit period is required.'},status=400)
+        if 'unit_label' in mapping:
+            resolved['units'] = units_from_labels([mapping['unit_label']])
+            if not resolved['units']['scale'] or not resolved['units']['currency']: return Response({'error':'Explicit currency and scale are required.'},status=400)
+        if 'basis' in mapping:
+            if mapping['basis'] not in {'standalone','consolidated','unknown'}: return Response({'error':'Invalid reporting basis.'},status=400)
+            resolved['basis'] = mapping['basis']
+        for key in ['entity','scenario']:
+            if key in mapping:
+                if not isinstance(mapping[key],str) or not mapping[key].strip() or len(mapping[key])>200: return Response({'error':'Invalid '+key},status=400)
+                resolved[key] = mapping[key]
+        review = FinancialFactReview.objects.create(deal=deal, fact=fact, actor=request.user, mapping=resolved, reason=reason.strip())
+        snapshot = snapshot_for_deal(deal)
+        return Response({'review_id':str(review.id),'snapshot_id':snapshot['id'],'coverage':snapshot['coverage']})
+
+    @action(detail=True, methods=['get'], url_path='financial-facts')
+    def financial_facts(self, request, pk=None):
+        deal = self.get_object()
+        from .models import FinancialFact
+        snapshot_id = request.query_params.get('snapshot_id')
+        records = deal.financial_snapshots.all()
+        try:
+            record = records.filter(pk=snapshot_id).first() if snapshot_id else records.first()
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'Invalid snapshot ID.'}, status=400)
+        if not record:
+            return Response({'count': 0, 'results': [], 'next': None})
+        sources = Q(pk__in=[])
+        for source in record.payload['runs']:
+            sources |= Q(run__document_id=source['document_id'], run__source_hash=source['source_hash'])
+        facts = FinancialFact.objects.filter(sources, run__deal=deal).order_by('id')
+        class FactPagination(PageNumberPagination):
+            page_size = 100
+            page_size_query_param = 'page_size'
+            max_page_size = 500
+        paginator = FactPagination()
+        page = paginator.paginate_queryset(facts, request, view=self)
+        return paginator.get_paginated_response([fact.payload for fact in page])
+
     @action(detail=True, methods=['get'])
     def heavy_fields(self, request, pk=None):
         """
@@ -2038,12 +2117,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         return Response(data)
 
     @action(detail=True, methods=['patch'])
+    @transaction.atomic
     def update_analysis_report(self, request, pk=None):
         """
         Persist analyst edits to a stored analysis report, or to deal_summary
         when the report is only the legacy fallback summary.
         """
         deal = self.get_object()
+        deal = Deal.objects.select_for_update().get(pk=deal.pk)
         report = request.data.get('report')
         if not isinstance(report, str):
             return Response({"error": "report must be a string"}, status=400)
@@ -2056,7 +2137,14 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
+        before_report = ((analysis.analysis_json or {}).get('analyst_report') if analysis else deal.deal_summary) or ''
+        expected_snapshot = request.data.get('expected_financial_snapshot_id')
+        current_snapshot = deal.financial_snapshots.first()
+        if expected_snapshot is not None and str(current_snapshot.id if current_snapshot else '') != str(expected_snapshot):
+            return Response({'error': 'Financial sources changed. Refresh before saving.'}, status=409)
         expected_hash = request.data.get('expected_report_sha256')
+        if current_snapshot and not expected_hash:
+            return Response({'error':'Refresh the report and send expected_report_sha256 before saving.'}, status=409)
         if expected_hash is not None:
             from deals.services.report_assembly import report_text_fingerprints
 
@@ -2094,8 +2182,16 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             from work_items.services import sync_deal_suggestions
             sync_deal_suggestions(deal, None)
 
+        from .services.financial_snapshot import record_report_revision
+        financial_validation = record_report_revision(deal, analysis, before_report, report, actor=request.user)
+        if analysis and financial_validation:
+            payload = dict(analysis.analysis_json or {})
+            payload['financial_validation'] = financial_validation
+            analysis.analysis_json = payload
+            analysis.save(update_fields=['analysis_json'])
         deal.refresh_from_db()
         return Response({
+            "financial_validation": financial_validation,
             "status": "saved",
             "deal_summary": deal.deal_summary,
             "current_analysis": deal.current_analysis,
@@ -2195,7 +2291,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                     )
                 rewritten = str(confirmation.get("section_markdown") or "").strip()
                 updated_report = rewrite_service.replace_section(full_report, section_title, rewritten)
-                rewrite_service.persist(deal=deal, full_report=updated_report, version=version)
+                rewrite_service.persist(deal=deal, full_report=updated_report, version=version, actor=request.user)
                 if confirmation.get('audit_log_id'):
                     applied_audit = AIAuditLog.objects.filter(pk=confirmation['audit_log_id'],
                         source_type='analysis_section_rewrite', source_id=str(deal.id)).first()
@@ -2907,23 +3003,24 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
 
         slots = []
         slot_warning = None
-        try:
-            parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
-            slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
-            api_key = getattr(settings, 'VLLM_API_KEY', '')
-            headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
-            slot_response = requests.get(slot_url, headers=headers, timeout=3)
-            slot_response.raise_for_status()
-            payload = slot_response.json()
-            slots = [
-                {
-                    key: slot.get(key)
-                    for key in ('id', 'id_task', 'is_processing', 'n_prompt_tokens', 'n_decoded', 'n_remain')
-                }
-                for slot in payload if isinstance(payload, list) and isinstance(slot, dict)
-            ]
-        except Exception as exc:
-            slot_warning = str(exc)
+        if getattr(settings, 'AI_SLOT_TRANSPORT_ENABLED', True):
+            try:
+                parsed = urlsplit(getattr(settings, 'VLLM_BASE_URL', ''))
+                slot_url = f'{parsed.scheme}://{parsed.netloc}/slots'
+                api_key = getattr(settings, 'VLLM_API_KEY', '')
+                headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+                slot_response = requests.get(slot_url, headers=headers, timeout=3)
+                slot_response.raise_for_status()
+                payload = slot_response.json()
+                slots = [
+                    {
+                        key: slot.get(key)
+                        for key in ('id', 'id_task', 'is_processing', 'n_prompt_tokens', 'n_decoded', 'n_remain')
+                    }
+                    for slot in payload if isinstance(payload, list) and isinstance(slot, dict)
+                ]
+            except Exception as exc:
+                slot_warning = str(exc)
 
         return Response({
             'deal_id': str(deal.id),

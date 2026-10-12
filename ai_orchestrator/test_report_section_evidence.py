@@ -88,7 +88,7 @@ class ICReportSectionEvidenceServiceTests(TestCase):
                 source_type="document",
                 source_id=source_id,
                 content=f"Unique evidence {index}: " + ("revenue EBITDA margin working capital " * 12),
-                metadata={"chunk_kind": "metric", "chunk_index": index},
+                metadata={"chunk_kind": "document_text", "chunk_index": index},
             ))
         embedding_service = MagicMock()
         embedding_service.search_global_chunks.return_value = chunks
@@ -193,7 +193,7 @@ class ICReportSectionEvidenceServiceTests(TestCase):
             source_type="document",
             source_id="doc-1",
             content="FY25 revenue was INR 100 crore.",
-            metadata={"chunk_kind": "metric", "page": 7},
+            metadata={"chunk_kind": "document_text", "page": 7},
         )
         embedding_service = MagicMock()
         embedding_service.search_global_chunks.return_value = [chunk]

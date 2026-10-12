@@ -99,3 +99,5 @@ coverage.xml
 .pytest_cache/
 data/
 private_email_evidence/
+
+private_financial_batches/

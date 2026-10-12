@@ -456,3 +456,6 @@ DATABASES = {
 # Venture Intelligence API
 VENTURE_INTELLIGENCE_API_KEY = config('VENTURE_INTELLIGENCE_API_KEY', default='')
 VENTURE_INTELLIGENCE_BASE_URL = config('VENTURE_INTELLIGENCE_BASE_URL', default='https://api-hub.ventureintelligence.com')
+
+# Private resumable extraction checkpoints must never be served through MEDIA_URL.
+FINANCIAL_EXTRACTION_ROOT = Path(config('FINANCIAL_EXTRACTION_ROOT', default=str(BASE_DIR / 'private_financial_batches')))

@@ -17,3 +17,9 @@ class ReportContextBudgetTests(SimpleTestCase):
         budget = report_evidence_budget(context_window=65536, input_budget=40960,
             output_budget=16384, evidence_budget=36000)
         self.assertEqual(budget, 20480)
+
+    def test_256k_budget_keeps_output_and_framing_reserves(self):
+        budget = report_evidence_budget(context_window=262144, input_budget=229376,
+            output_budget=16384, evidence_budget=212992)
+        self.assertEqual(budget, 212992)
+        self.assertLessEqual(budget + 24576 + 16384 + 4096, 262144)

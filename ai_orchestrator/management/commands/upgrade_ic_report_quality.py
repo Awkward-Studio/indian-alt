@@ -12,6 +12,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--apply", action="store_true")
+        parser.add_argument("--section", choices=list(IC_REPORT_SECTION_STAGE_KEYS))
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -22,6 +23,7 @@ class Command(BaseCommand):
         ))
         changed = 0
         for title, key in IC_REPORT_SECTION_STAGE_KEYS.items():
+            if options.get('section') and title != options['section']: continue
             resolved = PipelineRegistryService.resolve_stage("ic_report_generation", key)
             old = resolved.prompt_revision
             if not old:

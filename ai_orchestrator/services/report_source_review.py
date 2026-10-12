@@ -2,6 +2,7 @@
 import re
 import json
 import unicodedata
+from django.conf import settings
 from ai_orchestrator.services.report_financial_format import FINANCIAL_BASIS_RULE
 
 REVIEW_INSTRUCTIONS = '''Review the draft section against the primary retrieval blocks below.
@@ -139,20 +140,24 @@ def validate_verified_findings(findings, draft, evidence):
                 raise ValueError('Review verification did not quote its cited primary evidence.')
 
 
-def review_section(*,ai_service,title,draft,evidence,source_id,requirements="",vdr_dispatch_generation=None):
+def _perform_source_review(*,ai_service,title,draft,evidence,source_id,requirements="",vdr_dispatch_generation=None):
     packet=review_packet(title,draft,evidence,requirements)
+    from .report_calculations import growth_narrative_errors
+    arithmetic_checks = growth_narrative_errors(draft)
     # Keep every selected source block, but do not wrap the evidence (which
     # already contains saved-cell JSON) in another escaped JSON string.
     content='\n\n'.join([REVIEW_INSTRUCTIONS, 'Section: '+title,
         '<section_requirements>\n'+requirements+'\n</section_requirements>',
         '<draft_section>\n'+draft+'\n</draft_section>',
         '<primary_evidence>\n'+'\n\n'.join(packet['primary_evidence'])+'\n</primary_evidence>'])
+    if arithmetic_checks:
+        content += '\n<application_arithmetic_checks>\n' + '\n'.join(arithmetic_checks) + '\n</application_arithmetic_checks>\nThese are exact decimal checks of the stated operands and year span. They verify arithmetic only. Do not replace their calculated result with mental arithmetic; separately verify source inputs and reporting dimensions.'
     result=ai_service.process_content(content=content,skill_name=None,
         source_type='report_section_quality_review',source_id=str(source_id),metadata={
             'response_mode':'json','response_format':{'type':'json_object'},
             'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
-            'temperature':0.0,
-            'max_tokens':8192,'max_input_tokens':90_112,'max_input_chars':len(content)+1024,
+            'temperature':0.0,'request_timeout':int(getattr(settings,'EMAIL_REPORT_SECTION_TIMEOUT',1800)),
+            'max_tokens':8192,'max_input_tokens':min(int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 90112)), int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 131072)) - 12288),'max_input_chars':len(content)+1024,
             'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
             'context_label':f'Source review: {title}',
             '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
@@ -172,7 +177,7 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements="",v
         verification_metadata = {
             'response_mode':'json','response_format':{'type':'json_object'},
             'personality_only_system':True,'chat_template_kwargs':{'enable_thinking':False},
-            'temperature':0.0,'max_tokens':8192,'max_input_tokens':110_592,
+            'temperature':0.0,'request_timeout':int(getattr(settings,'EMAIL_REPORT_SECTION_TIMEOUT',1800)),'max_tokens':8192,'max_input_tokens':min(int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 90112)), int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 131072)) - 12288),
             'lossless_input':True,'enforce_context_budget':True,'include_audit_log_id':True,
             'context_label':f'Verify source review: {title}',
             '_source_metadata':{'report_section':title,'vdr_parent_audit_id':str(source_id),
@@ -204,3 +209,41 @@ def review_section(*,ai_service,title,draft,evidence,source_id,requirements="",v
             validate_verified_findings(findings, draft, packet['primary_evidence'])
         result = verified
     return {'findings':findings,'coverage_gaps':result['coverage_gaps']}
+
+
+def record_review_outcome(audit_ids, outcome, result=None, error=None):
+    """A completed review finding is not an inference failure."""
+    if not audit_ids: return
+    from ai_orchestrator.models import AIAuditLog
+    from django.utils import timezone
+    from ai_orchestrator.services.realtime import broadcast_audit_log_update
+    result = result or {}
+    for audit in AIAuditLog.objects.filter(pk__in=audit_ids):
+        audit.source_metadata = {**(audit.source_metadata or {}), 'source_review_outcome':outcome,
+            'source_issue_count':len(material_review_errors(result.get('findings',[]))),
+            'review_coverage_gap_count':len(result.get('coverage_gaps',[])),
+            'review_failure_kind':'pipeline' if outcome=='incomplete' else None,
+            'review_pipeline_error':str(error) if error else None}
+        if outcome!='incomplete':
+            audit.status='COMPLETED';audit.is_success=True;audit.error_message=''
+        audit.completed_at=audit.completed_at or timezone.now()
+        audit.save(update_fields=['source_metadata','status','is_success','error_message','completed_at'])
+        broadcast_audit_log_update(audit,event_type='terminal',done=True)
+
+
+def review_section(*,ai_service,title,draft,evidence,source_id,requirements="",vdr_dispatch_generation=None):
+    audit_ids=[]
+    class TrackedService:
+        def process_content(self, **kwargs):
+            result=ai_service.process_content(**kwargs)
+            if isinstance(result,dict) and result.get('_audit_log_id'): audit_ids.append(result['_audit_log_id'])
+            return result
+    try:
+        result=_perform_source_review(ai_service=TrackedService(),title=title,draft=draft,evidence=evidence,
+            source_id=source_id,requirements=requirements,vdr_dispatch_generation=vdr_dispatch_generation)
+    except Exception as error:
+        record_review_outcome(audit_ids,'incomplete',error=error)
+        raise
+    outcome='issues_found' if material_review_errors(result.get('findings',[])) or result.get('coverage_gaps') else 'no_material_error_found'
+    record_review_outcome(audit_ids,outcome,result=result)
+    return {**result,'status':outcome,'audit_ids':audit_ids}
