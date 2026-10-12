@@ -135,8 +135,9 @@ class SinglePassGroundedGenerationTests(TestCase):
     def test_h100_generation_uses_one_writer_call_and_no_source_reviewer(self,review,cache):
         from ai_orchestrator.services.report_sections import ICReportSectionService
         cache.get.return_value=None
+        from ai_orchestrator.test_executive_summary_format import fixture as executive_summary_fixture
         service=Mock();service.process_content.return_value={
-            'response':'## Executive Summary\n\n'+('Supported analysis '*700)+'[R001].'}
+            'response':executive_summary_fixture().replace('Source evidence not provided.',('Supported analysis '*700)+'[R001].',1)}
         result=ICReportSectionService._generate_section(ai_service=service,title='Executive Summary',
             evidence='Retrieval block R001\nPrimary source',analysis={'deal_model_data':{}},
             source_id='report-test',source_type='vdr_report_section',citations={'1':{'title':'IM.pdf','document_id':'doc'}},

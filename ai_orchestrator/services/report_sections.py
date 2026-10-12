@@ -38,7 +38,7 @@ class ReportSectionStructureError(ReportSectionValidationError):
 
 
 class ICReportSectionService:
-    CACHE_VERSION = "ic-report-sections-v15"
+    CACHE_VERSION = "ic-report-sections-v16"
     # Dense tabular sections need fewer prose words than narrative sections.
     # The configured minimum remains the baseline for essay-style sections.
     SECTION_MINIMUM_WORD_FACTORS = {
@@ -526,6 +526,7 @@ class ICReportSectionService:
         citations: dict | None = None,
         minimum_words: int = 0,
         strict_financial_table: bool = False,
+        strict_executive_summary: bool = False,
         calculation_corrections: list | None = None,
         validation_warnings: list | None = None,
     ) -> str:
@@ -552,6 +553,11 @@ class ICReportSectionService:
                 text = text[:len(target) + next_heading.start()]
         else:
             text = f"{target}\n\n{text}"
+        if strict_executive_summary and title == 'Executive Summary':
+            from .executive_summary_format import executive_summary_format_errors
+            errors = executive_summary_format_errors(text)
+            if errors:
+                raise ReportSectionStructureError(' '.join(errors))
         text = cls._strip_model_references(text)
         text, used_citations = cls._replace_internal_citations(text, citations)
         from ai_orchestrator.services.report_calculations import normalize_financial_notation
@@ -988,6 +994,7 @@ class ICReportSectionService:
                 citations=citations,
                 minimum_words=minimum_words,
                 strict_financial_table="Key Financials table format:" in revision.user_template,
+                strict_executive_summary="Executive summary presentation format v1:" in revision.user_template,
                 calculation_corrections=calculation_corrections,
                 validation_warnings=validation_warnings,
             )

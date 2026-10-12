@@ -1,4 +1,5 @@
 from unittest.mock import Mock, patch
+from ai_orchestrator.test_executive_summary_format import fixture as executive_summary_fixture
 
 from django.test import SimpleTestCase, TestCase, override_settings
 
@@ -234,8 +235,7 @@ class ICReportSectionServiceTests(TestCase):
         service = Mock()
         service.process_content.side_effect = lambda **kwargs: {
             "response": (
-                f"## {kwargs['metadata']['section_title']}"
-                "\n\nFresh report section with enough evidence-backed detail."
+                executive_summary_fixture().replace("Source evidence not provided.", "Fresh report section with enough evidence-backed detail.", 1) if kwargs['metadata']['section_title'] == "Executive Summary" else f"## {kwargs['metadata']['section_title']}\n\nFresh report section with enough evidence-backed detail."
             )
         }
 
@@ -303,7 +303,7 @@ class ICReportSectionServiceTests(TestCase):
         report_cache.get.return_value = "## Executive Summary\n\nPreviously cached report section."
         service = Mock()
         service.process_content.return_value = {
-            "response": "## Executive Summary\n\nFreshly generated report section with source-backed analysis."
+            "response": executive_summary_fixture().replace("Source evidence not provided.", "Freshly generated report section with source-backed analysis.", 1)
         }
 
         section = ICReportSectionService._generate_section(
@@ -331,7 +331,7 @@ class ICReportSectionServiceTests(TestCase):
         )
         service = Mock()
         service.process_content.return_value = {
-            "response": "## Executive Summary\n\nEvidence-backed content for the investment committee."
+            "response": executive_summary_fixture()
         }
 
         ICReportSectionService._generate_section(
@@ -372,7 +372,7 @@ class ICReportSectionServiceTests(TestCase):
         report_cache.get.return_value = None
         service = Mock()
         service.process_content.side_effect = lambda **kwargs: {
-            "response": f"## {kwargs['metadata']['section_title']}\n\nGenerated section with complete evidence-backed detail."
+            "response": executive_summary_fixture() if kwargs['metadata']['section_title'] == "Executive Summary" else f"## {kwargs['metadata']['section_title']}\n\nGenerated section with complete evidence-backed detail."
         }
 
         result = ICReportSectionService.complete(

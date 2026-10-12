@@ -78,6 +78,9 @@ class AnalysisSectionRewriteService:
     ) -> str:
         self.validation_warnings = []
         section_title = self.published_section_title(section_title) or section_title
+        if section_title == 'Executive Summary':
+            from ai_orchestrator.services.executive_summary_format import EXECUTIVE_SUMMARY_FORMAT
+            instruction += '\n\n' + EXECUTIVE_SUMMARY_FORMAT
         table_only = rewrite_scope == 'financial_table'
         if rewrite_scope not in {'section', 'financial_table'} or (table_only and section_title != 'Key Financials'):
             raise ValueError('Table rewrites are available only for Key Financials.')
@@ -231,12 +234,13 @@ class AnalysisSectionRewriteService:
         rewritten = rewritten.strip()
         if not rewritten:
             raise ValueError("AI did not return a rewritten section.")
-        if citations or table_only or section_title == 'Key Financials':
+        if citations or table_only or section_title in {'Key Financials', 'Executive Summary'}:
             from ai_orchestrator.services.report_sections import ICReportSectionService
             self.calculation_corrections = []
             rewritten = ICReportSectionService._normalize_section(
                 section_title, rewritten, citations=citations,
                 strict_financial_table=section_title == 'Key Financials',
+                strict_executive_summary=section_title == 'Executive Summary',
                 calculation_corrections=self.calculation_corrections,
                 validation_warnings=self.validation_warnings,
             )

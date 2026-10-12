@@ -262,3 +262,8 @@ Structured deal fields:
 Internal evidence:
 {{{{ content }}}}
 """
+
+# Executive Summary follows the supplied three-page investment presentation.
+from .executive_summary_format import EXECUTIVE_SUMMARY_FORMAT
+BULK3_SECTION_INSTRUCTIONS["Executive Summary"] = EXECUTIVE_SUMMARY_FORMAT
+IC_REPORT_SECTION_PRESENTATION["Executive Summary"] = "Follow Executive summary presentation format v1 exactly: all three pages, fixed headings, every specified table, and the two source-backed chart-data tables. Keep the investment judgment inside those regions."
