@@ -102,3 +102,7 @@ class GrowthNarrativeTests(SimpleTestCase):
         from ai_orchestrator.services.report_calculations import growth_narrative_errors
         self.assertEqual(growth_narrative_errors('Revenue grows from INR 100 Mn in FY24 to INR 800 Mn in FY27. CAGR of 100%.'),[])
         self.assertEqual(growth_narrative_errors('Revenue grows from INR 10 Cr in FY24 to INR 100 Mn in FY27. CAGR of 10%.'),[])
+
+    def test_mixed_currency_narrative_is_not_compared_without_fx(self):
+        from ai_orchestrator.services.report_calculations import growth_narrative_errors
+        self.assertEqual(growth_narrative_errors('Revenue grows from INR 100 Mn in FY24 to USD 10 Mn in FY27. CAGR of 20%.'),[])

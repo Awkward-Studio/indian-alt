@@ -202,19 +202,20 @@ def growth_narrative_errors(text):
     """Verify explicit from/to growth claims independently of writer and reviewer."""
     from .report_calculator import calculate
     errors=[]
-    amount=r'(?:INR|USD|EUR|GBP|₹)\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(Cr|crores?|Mn|million|lakh|thousand)?'
+    amount=r'(INR|USD|EUR|GBP|₹)\s*([-+]?\d[\d,]*(?:\.\d+)?)\s*(Cr|crores?|Mn|million|lakh|thousand)?'
     pair=re.compile(r'\bfrom\s+'+amount+r'[^\n]{0,100}?\bto\s+'+amount,re.I)
     for paragraph in str(text).split('\n\n'):
         plain=re.sub(r'\[R?\d+(?:@[^\]]+)?\]|[*_`]', '',paragraph)
         match=pair.search(plain)
         if not match:continue
-        first=Decimal(match[1].replace(',',''));last=Decimal(match[3].replace(',',''))
-        if (match[2] or '').casefold() != (match[4] or '').casefold():continue
+        first=Decimal(match[2].replace(',',''));last=Decimal(match[5].replace(',',''))
+        currencies=[value.upper().replace('₹','INR') for value in [match[1],match[4]]]
+        if currencies[0]!=currencies[1] or (match[3] or '').casefold() != (match[6] or '').casefold():continue
         prefix=plain[max(0,match.start()-100):match.start()]
         if last<first and re.search(r'grow|grew|increase|rise|rising',prefix,re.I):
-            errors.append('A stated increase from %s to %s is a decrease.' % (match[1],match[3]))
+            errors.append('A stated increase from %s to %s is a decrease.' % (match[2],match[5]))
         if last>first and re.search(r'decreas|declin|fall|fell',prefix,re.I):
-            errors.append('A stated decrease from %s to %s is an increase.' % (match[1],match[3]))
+            errors.append('A stated decrease from %s to %s is an increase.' % (match[2],match[5]))
         claimed=re.search(r'(?:CAGR|compound annual growth rate)(?:\s+of|\s+is)?\s*(?:approximately|about|~)?\s*([-+]?\d+(?:\.\d+)?)\s*%',plain,re.I)
         years=re.findall(r'\bFY\s*(20\d{2}|\d{2})',plain,re.I)
         if not claimed or len(years)<2 or first<=0 or last<=0:continue
@@ -222,5 +223,5 @@ def growth_narrative_errors(text):
         if count<=0:continue
         expected=Decimal(calculate('((%s / %s) ** (1 / %s) - 1) * 100' % (last,first,count)))
         if abs(expected-Decimal(claimed[1]))>tolerance(claimed[1]):
-            errors.append('CAGR from %s to %s over %s years is %.2f%%, not %s%%.' % (match[1],match[3],count,expected,claimed[1]))
+            errors.append('CAGR from %s to %s over %s years is %.2f%%, not %s%%.' % (match[2],match[5],count,expected,claimed[1]))
     return errors
