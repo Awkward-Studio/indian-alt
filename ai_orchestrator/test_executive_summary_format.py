@@ -32,6 +32,19 @@ class ExecutiveSummaryFormatTests(SimpleTestCase):
         errors = executive_summary_format_errors(fixture().replace('| Risk | Impact | Mitigant / diligence check |','| Risk | Mitigant | Impact |'))
         self.assertTrue(any('Key risks' in e for e in errors))
 
+    def test_hosted_metric_label_variations_preserve_units_and_values(self):
+        draft = fixture().replace('\n| Revenue |', '\n| **Revenue (INR Cr)** |').replace('\n| EBITDA margin |', '\n| EBITDA Margin (%) |')
+        self.assertEqual(executive_summary_format_errors(draft), [])
+        normalized = ICReportSectionService._normalize_section('Executive Summary', draft, strict_executive_summary=True)
+        self.assertIn('Revenue (INR Cr)', normalized)
+
+    def test_incorrect_financial_metric_and_column_shapes_still_fail(self):
+        for draft in [fixture().replace('\n| Revenue |', '\n| Gross profit |'),
+                      fixture().replace('| EBITDA margin | Not provided |', ''),
+                      fixture().replace('| Revenue | Not provided |', '| Revenue | Not provided | Extra |'),
+                      fixture().replace('\n| Revenue |', '\n| EBITDA margin |').replace('| EBITDA margin | Not provided |\n\n', '| Revenue | Not provided |\n\n')]:
+            self.assertTrue(any('exactly two metric rows' in error for error in executive_summary_format_errors(draft)))
+
     def test_generator_enforces_presentation_contract_instead_of_publishing_wrong_layout(self):
         with self.assertRaises(ReportSectionStructureError):
             ICReportSectionService._normalize_section('Executive Summary','Old prose summary without the required three presentation pages.',strict_executive_summary=True)

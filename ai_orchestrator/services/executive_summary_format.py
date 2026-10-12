@@ -115,6 +115,14 @@ def executive_summary_format_errors(markdown):
             errors.append(f'{title} contains a table row with missing or extra columns.')
     body = all_sections.get('Financial performance', '')
     rows = [cells(line) for line in body.splitlines() if line.strip().startswith('|')]
-    if len(rows) < 4 or rows[0][0] != 'Metric' or len(rows[0]) < 2 or [r[0] for r in rows[2:]] != ['Revenue', 'EBITDA margin'] or any(len(r) != len(rows[0]) for r in rows):
-        errors.append('Financial performance needs a Metric-by-period table with Revenue and EBITDA margin rows.')
+    # Models may qualify a metric with its unit or change capitalization. These
+    # labels still describe the chart's two axes; do not retry valid tables.
+    def metric_label(value):
+        return re.sub(r'\s*\([^()]*\)\s*$', '', value).strip().casefold()
+    labels = [metric_label(r[0]) for r in rows[2:]]
+    if len(rows) < 4 or rows[0][0].casefold() != 'metric' or len(rows[0]) < 2 or labels != ['revenue', 'ebitda margin'] or any(len(r) != len(rows[0]) for r in rows):
+        errors.append('Financial performance needs exactly two metric rows in order: Revenue, EBITDA margin. '
+                      'Use | Metric | <source period> | as the header and the same column count in every row. '
+                      'Capitalization and parenthesized units in metric labels are allowed. '
+                      'Observed metric rows: '+', '.join(r[0] for r in rows[2:])+'.')
     return errors
