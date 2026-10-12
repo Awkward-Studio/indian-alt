@@ -14,7 +14,7 @@ from .ocr import OCRService
 from .realtime import broadcast_audit_log_update, log_worker_event
 from .inference_queue import InferenceQueueLease
 from .runtime import AIRuntimeService
-from .token_budget import ContextBudgetExceeded, ModelOutputTruncated, estimate_tokens
+from .token_budget import ContextBudgetExceeded, ModelOutputTruncated, estimate_tokens, large_context_enabled, pipeline_input_budget
 from .pipeline_registry import PipelineRegistryService, RegistryValidationError
 from .search_provider import SearXNGProviderService
 from django.conf import settings
@@ -108,6 +108,12 @@ class AIProcessorService:
             task_id = None
         if task_id and not (metadata or {}).get("celery_task_id"):
             metadata = {**(metadata or {}), "celery_task_id": str(task_id)}
+
+        if large_context_enabled() and (metadata or {}).get('model_provider', 'vllm') != 'anthropic':
+            metadata = dict(metadata or {})
+            metadata.setdefault('max_input_tokens', pipeline_input_budget(int(metadata.get('max_tokens') or 8192)))
+            metadata['enforce_context_budget'] = True
+            metadata.setdefault('context_window_tokens', int(settings.CHAT_MODEL_CONTEXT_TOKENS))
 
         model_provider = (metadata or {}).get("model_provider", "vllm")
         if model_provider == "anthropic":

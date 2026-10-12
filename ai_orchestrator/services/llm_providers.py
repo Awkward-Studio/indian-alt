@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 import requests
 from django.conf import settings
-from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens, large_context_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ class VLLMProviderService:
             # Calculator continuations are new user turns. Keep Qwen's explicit
             # thinking control on that turn as well as on the initial request.
             self._apply_no_think_marker(body['messages'][-1:], payload)
-            if payload.get('_enforce_context_budget'):
+            if payload.get('_enforce_context_budget') or large_context_enabled():
                 window=int(getattr(settings,'CHAT_MODEL_CONTEXT_TOKENS',65536))
                 input_tokens=estimate_tokens(json.dumps(body,ensure_ascii=False))
                 output_tokens=int(body.get('max_tokens') or 8192)
@@ -341,7 +341,7 @@ class VLLMProviderService:
         if max_tokens:
             body["max_tokens"] = max_tokens
 
-        if payload.get("_enforce_context_budget"):
+        if payload.get("_enforce_context_budget") or large_context_enabled():
             # Count the complete request using a conservative token estimate.
             # The configured model window is tokens, not UTF-8 bytes.
             window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65536))

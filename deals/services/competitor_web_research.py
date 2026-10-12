@@ -17,6 +17,7 @@ from django.core.cache import cache
 from ai_orchestrator.services.llm_providers import VLLMProviderService
 from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
 from ai_orchestrator.services.runtime import AIRuntimeService
+from ai_orchestrator.services.token_budget import expanded_context_chars, large_context_enabled
 from ai_orchestrator.services.search_provider import SearXNGProviderService
 from deals.services.competitor_intelligence import competitor_names_from_payload
 
@@ -35,8 +36,8 @@ class CompetitorWebResearchService:
         self.page_fetch_workers = int(getattr(settings, "SEARXNG_PAGE_FETCH_WORKERS", 3) or 3)
         self.page_fetch_timeout = float(getattr(settings, "SEARXNG_PAGE_FETCH_TIMEOUT", 8) or 8)
         self.page_fetch_max_bytes = int(getattr(settings, "SEARXNG_PAGE_FETCH_MAX_BYTES", 1_000_000) or 1_000_000)
-        self.page_fetch_max_chars = int(getattr(settings, "SEARXNG_PAGE_FETCH_MAX_CHARS", 7_000) or 7_000)
-        self.evidence_max_chars = int(getattr(settings, "SEARXNG_EVIDENCE_MAX_CHARS", 18_000) or 18_000)
+        self.page_fetch_max_chars = max(64000, int(getattr(settings, "SEARXNG_PAGE_FETCH_MAX_CHARS", 7_000) or 7_000)) if large_context_enabled() else int(getattr(settings, "SEARXNG_PAGE_FETCH_MAX_CHARS", 7_000) or 7_000)
+        self.evidence_max_chars = expanded_context_chars(int(getattr(settings, "SEARXNG_EVIDENCE_MAX_CHARS", 18_000) or 18_000))
         self._tracking_context: dict[str, Any] = {}
         self._search_errors: dict[str, str] = {}
 

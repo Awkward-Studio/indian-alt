@@ -2,6 +2,7 @@ import re
 from bs4 import BeautifulSoup
 from typing import Optional, Dict, Any
 import logging
+from .token_budget import expanded_context_chars, large_context_enabled
 from ..models import AIPersonality, AISkill, AnalysisProtocol
 
 logger = logging.getLogger(__name__)
@@ -90,10 +91,10 @@ class PromptBuilderService:
         cleaned_content = content if lossless else PromptBuilderService.clean_html(content)
         # 180k chars keeps recall-oriented universal chat contexts intact while still
         # fitting within the configured large-context inference budget.
-        max_chars = int((metadata or {}).get("max_input_chars") or 180000)
+        max_chars = int((metadata or {}).get("max_input_chars") or expanded_context_chars(180000))
         if not lossless and len(cleaned_content) > max_chars:
-            head_chars = min(100000, max_chars * 5 // 8)
-            tail_chars = min(60000, max_chars * 3 // 8)
+            head_chars = (max_chars - 128) * 5 // 8 if large_context_enabled() else min(100000, max_chars * 5 // 8)
+            tail_chars = (max_chars - 128) * 3 // 8 if large_context_enabled() else min(60000, max_chars * 3 // 8)
             cleaned_content = (
                 cleaned_content[:head_chars]
                 + "\n\n[... TRUNCATED DUE TO CONTEXT LIMITS ...]\n\n"

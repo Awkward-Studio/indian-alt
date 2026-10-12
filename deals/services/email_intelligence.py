@@ -6,6 +6,7 @@ from banks.models import Bank
 from contacts.models import Contact
 from deals.models import Deal
 from ai_orchestrator.services.ai_processor import AIProcessorService
+from ai_orchestrator.services.token_budget import expanded_context_chars
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class EmailIntelligenceService:
         # published skill revision, and audit record remain in sync.
         try:
             result = AIProcessorService().process_content(
-                content=thread_context[:10000],
+                content=thread_context[:expanded_context_chars(10000)],
                 skill_name="deal_routing",
                 source_type="email_routing",
                 source_id=str(root_email.id),

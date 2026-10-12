@@ -2,6 +2,28 @@ from __future__ import annotations
 
 import re
 import json
+from django.conf import settings
+
+
+def large_context_enabled() -> bool:
+    return getattr(settings, 'AI_INFERENCE_TARGET', '') == 'h100'
+
+
+def pipeline_input_budget(output_tokens: int = 16384) -> int:
+    """Reserve response and request framing inside the selected model window."""
+    window = int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 65536))
+    configured = int(getattr(settings, 'AI_PIPELINE_INPUT_TOKENS', 229376))
+    return max(1000, min(configured, window - int(output_tokens) - 4096))
+
+
+def pipeline_evidence_budget(output_tokens: int = 16384) -> int:
+    return max(1000, pipeline_input_budget(output_tokens) - 16384)
+
+
+def expanded_context_chars(legacy_limit: int) -> int:
+    # Character caps bound retrieval work; the provider checks actual estimated
+    # tokens of the complete request, including history and instructions.
+    return pipeline_evidence_budget() * 2 if large_context_enabled() else legacy_limit
 
 
 class ContextBudgetExceeded(ValueError):

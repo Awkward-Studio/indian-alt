@@ -14,10 +14,10 @@ Source reviews complete with `issues_found` or `no_material_error_found`. Infere
 | Complete report input allowance | 229376 |
 | Maximum retrieved evidence | 212992 |
 | Report output allowance | 16384 |
-| Application and worker concurrency | 3 |
+| Application and worker concurrency | 2 |
 | llama.cpp slot transport | Disabled |
 
-Retrieval reserves additional space for the deterministic statement and its source inputs. Context includes input and output; 256K is not an unrestricted 256K prompt. vLLM may queue one of three long requests when GPU cache capacity is occupied. The report reviewer and verification passes use the same configured long-input budget.
+Retrieval reserves additional space for the deterministic statement and its source inputs. Context includes input and output; 256K is not an unrestricted 256K prompt. vLLM may queue a long request when GPU cache capacity is occupied. The report reviewer and verification passes use the same configured long-input budget.
 
 ## Operations
 
@@ -47,3 +47,5 @@ Spreadsheet extraction supports source-hash-checked, resumable private batches; 
 The pilot cohort was recovered from the ten deal reports produced on 8 October 2026: Aavishkar Strips, Biofics, Finagg, Posidex, Rosier Foods, Shipdelight, ShowroomB2B, Trefoil Packaging, Uolo, and Zouk. Private source fixtures and exploratory model outputs are retained outside Git. Shared regressions cover native units, annual dates on mixed monthly/annual sheets, missing quarter coverage, revenue classification, tax classification, source conflicts, immutable snapshots, supplementary tables, and vLLM status polling.
 
 Source-backed table completeness is separate from narrative review. A correct table does not establish that growth claims, financial interpretations, or source comparisons in prose are correct.
+
+H100 pipelines share a 229376-token input ceiling, reduced when a larger output allowance needs room. Chat evidence and uploads, field synthesis, financial profiles, email decisions and document extraction use expanded budgets. Report evidence reserves space for instructions and calculator continuations. Every H100 text request is checked against the complete 262144-token model window; oversized requests raise an explicit budget error. T4 retains its smaller profile.

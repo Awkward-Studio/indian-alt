@@ -361,7 +361,8 @@ class DealFieldSynthesisServiceTests(TestCase):
             t4 = DealFieldSynthesisService._pack_contexts(items, phase='map', instructions='', item_key='items')
         self.assertLess(len(h100), len(t4))
         self.assertEqual([item['id'] for batch in h100 for item in json.loads(batch)['items']], list(range(8)))
-        self.assertTrue(all(len(batch) <= 144000 and estimate_tokens(batch) <= 60000 for batch in h100))
+        max_chars, max_tokens = DealFieldSynthesisService._context_limits()
+        self.assertTrue(all(len(batch) <= max_chars and estimate_tokens(batch) <= max_tokens for batch in h100))
 
     def test_candidate_batches_drop_transport_and_scratch_fields(self):
         candidate = self._synthesis_result()

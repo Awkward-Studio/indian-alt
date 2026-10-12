@@ -18,7 +18,7 @@ from ai_orchestrator.models import AIAuditLog
 from ai_orchestrator.prompt_contracts import DEAL_FIELD_SYNTHESIS_JSON_SCHEMA
 from ai_orchestrator.services.ai_processor import AIProcessorService
 from ai_orchestrator.services.embedding_processor import EmbeddingService
-from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens
+from ai_orchestrator.services.token_budget import ContextBudgetExceeded, estimate_tokens, large_context_enabled, pipeline_evidence_budget, expanded_context_chars
 from deals.models import AnalysisKind, Deal, DealAnalysis, DealDocument, DealFieldProvenance
 from deals.services.deal_creation import DealCreationService
 from deals.services.document_artifacts import DocumentArtifactService
@@ -45,11 +45,10 @@ class DealFieldSynthesisService:
 
     @classmethod
     def _context_limits(cls) -> tuple[int, int]:
-        # Scale map/merge batches for the selected larger window, while
-        # retaining room for the skill, existing deal, schema and response.
-        window = int(getattr(settings, "CHAT_MODEL_CONTEXT_TOKENS", 65536))
-        scale = min(2.0, max(1.0, window / 65536)) if getattr(settings, "AI_INFERENCE_TARGET", "") == "h100" else 1.0
-        return int(cls.MAX_CONTEXT_CHARS * scale), int(cls.MAX_CONTEXT_TOKENS * scale)
+        if large_context_enabled():
+            tokens = pipeline_evidence_budget(cls.MAX_OUTPUT_TOKENS)
+            return tokens * 2, tokens
+        return cls.MAX_CONTEXT_CHARS, cls.MAX_CONTEXT_TOKENS
 
     @classmethod
     def _is_placeholder_title(cls, title: str | None, document_titles: set[str]) -> bool:
@@ -148,8 +147,8 @@ class DealFieldSynthesisService:
             "document_type": document.document_type,
             "transcription_status": document.transcription_status,
             "artifact": artifact,
-            "text_excerpt": text[:cls.TEXT_PER_DOCUMENT],
-            "text_truncated": len(text) > cls.TEXT_PER_DOCUMENT,
+            "text_excerpt": text[:expanded_context_chars(cls.TEXT_PER_DOCUMENT)],
+            "text_truncated": len(text) > expanded_context_chars(cls.TEXT_PER_DOCUMENT),
         }
 
     @classmethod

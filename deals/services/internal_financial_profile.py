@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ai_orchestrator.services.token_budget import pipeline_input_budget, pipeline_evidence_budget, large_context_enabled
+
 from copy import deepcopy
 import re
 from typing import Any
@@ -232,7 +234,7 @@ INDEXED INTERNAL EVIDENCE:
             documents=documents,
             candidate_limit=320,
             max_chunks=240,
-            max_tokens=min(60_000, int(getattr(settings, 'CHAT_MODEL_CONTEXT_TOKENS', 65536)) - 20000) if getattr(settings, 'AI_INFERENCE_TARGET', '') == 'h100' else 36_000,
+            max_tokens=pipeline_evidence_budget(12000) if large_context_enabled() else 36_000,
             min_chunks_per_document=4,
         ).retrieve("Key Financials")
         citations = {
@@ -251,7 +253,7 @@ INDEXED INTERNAL EVIDENCE:
                 "chat_template_kwargs": {"enable_thinking": False},
                 "lossless_input": True,
                 "temperature": 0.0,
-                "max_input_tokens": 48_000,
+                "max_input_tokens": pipeline_input_budget(12000) if large_context_enabled() else 48_000,
                 "max_tokens": 12_000,
                 "enforce_context_budget": True,
                 "serialize_inference": True,

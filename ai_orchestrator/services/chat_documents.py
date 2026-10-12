@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 from deals.services.document_artifacts import DocumentArtifactService
+from .token_budget import expanded_context_chars
 
 
 def requests_deal_context(message: str) -> bool:
@@ -108,7 +109,7 @@ class ChatDocumentEvidenceService:
                 f"{json.dumps(payload, default=str, ensure_ascii=True, indent=2)}"
             )
         context = "\n\n".join(sections)
-        return context[: cls.MAX_CONTEXT_CHARS], len(sections)
+        return context[: expanded_context_chars(cls.MAX_CONTEXT_CHARS)], len(sections)
 
     @classmethod
     def public_metadata(cls, document: dict[str, Any]) -> dict[str, Any]:

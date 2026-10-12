@@ -296,6 +296,7 @@ CELERY_WORKER_ENABLE_SOFT_SHUTDOWN_ON_IDLE = True
 
 # Total Local AI window, including prompt, template reserve, and completion.
 CHAT_MODEL_CONTEXT_TOKENS = config('CHAT_MODEL_CONTEXT_TOKENS', default=65536, cast=int)
+AI_PIPELINE_INPUT_TOKENS = config('AI_PIPELINE_INPUT_TOKENS', default=229376, cast=int)
 
 # Enable unified email processing and evidence extraction.
 EMAIL_INGESTION_ENABLED = config('EMAIL_INGESTION_ENABLED', default=True, cast=bool)

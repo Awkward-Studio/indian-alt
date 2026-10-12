@@ -16,6 +16,8 @@ from .services.realtime import broadcast_ai_stream_delta, broadcast_audit_log_up
 
 logger = logging.getLogger(__name__)
 
+from .services.token_budget import large_context_enabled, pipeline_input_budget, expanded_context_chars
+
 CHAT_HISTORY_MESSAGE_LIMIT = 8
 CHAT_HISTORY_CHAR_LIMIT = 12000
 
@@ -78,11 +80,11 @@ def _citations_used_in_response(citations: list[dict], response: str) -> list[di
 def _build_history_context(conversation: AIConversation) -> tuple[str, int, int]:
     previous_messages = list(
         AIMessage.objects.filter(conversation=conversation)
-        .order_by('-created_at')[1 : CHAT_HISTORY_MESSAGE_LIMIT + 1]
+        .order_by('-created_at')[1 : (64 if large_context_enabled() else CHAT_HISTORY_MESSAGE_LIMIT) + 1]
     )
 
     entries = [f"{msg.role.upper()}: {msg.content}\n" for msg in reversed(previous_messages)]
-    while entries and sum(len(entry) for entry in entries) > CHAT_HISTORY_CHAR_LIMIT:
+    while entries and sum(len(entry) for entry in entries) > (65536 if large_context_enabled() else CHAT_HISTORY_CHAR_LIMIT):
         entries.pop(0)
 
     history_context = "".join(entries)
@@ -460,7 +462,7 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
             task_metadata['personality_only_system'] = True
             task_metadata['prompt_template_override'] = PromptCatalogService.get('deal_chat_conversational')
             task_metadata['max_tokens'] = 4096
-            task_metadata['max_input_tokens'] = 11000
+            task_metadata['max_input_tokens'] = pipeline_input_budget(4096) if large_context_enabled() else 11000
             if document_count:
                 # Evidence has already been reduced; never slice away its sources.
                 task_metadata.pop('max_input_tokens', None)

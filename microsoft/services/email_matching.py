@@ -4,6 +4,7 @@ import re
 from difflib import SequenceMatcher
 
 from django.conf import settings
+from ai_orchestrator.services.token_budget import expanded_context_chars
 from django.db.models import Q
 from microsoft.models import Email
 from .email_contributions import normalize
@@ -98,8 +99,8 @@ class EmailDecisionService:
         source_text = bounded.get(field) if field else None
         serialized = json.dumps(bounded, ensure_ascii=False)
         if (
-            len(serialized.encode('utf-8')) <= cls.MAX_DECISION_INPUT_BYTES
-            and len(str(source_text or '').encode('utf-8')) <= cls.MAX_SOURCE_INPUT_BYTES
+            len(serialized.encode('utf-8')) <= expanded_context_chars(cls.MAX_DECISION_INPUT_BYTES)
+            and len(str(source_text or '').encode('utf-8')) <= expanded_context_chars(cls.MAX_SOURCE_INPUT_BYTES)
         ):
             return bounded
 
@@ -121,7 +122,7 @@ class EmailDecisionService:
             question,
         )
         bounded[field] = reduced
-        if len(json.dumps(bounded, ensure_ascii=False).encode('utf-8')) > cls.MAX_DECISION_INPUT_BYTES:
+        if len(json.dumps(bounded, ensure_ascii=False).encode('utf-8')) > expanded_context_chars(cls.MAX_DECISION_INPUT_BYTES):
             raise ValueError('Reduced email decision input still exceeds the safe model context budget.')
         return bounded
 

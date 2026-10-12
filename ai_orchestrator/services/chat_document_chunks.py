@@ -1,6 +1,8 @@
 """Question-focused map/reduce over all retained upload text, on Local AI only."""
 from __future__ import annotations
 
+from .token_budget import expanded_context_chars
+
 import hashlib
 import json
 from django.core.cache import cache
@@ -49,8 +51,8 @@ class ChatDocumentChunkService:
         self.model = model or AIRuntimeService.get_text_model(AIRuntimeService.get_default_personality())
         self.progress = progress or (lambda message: None)
         self.cache_scope = cache_scope
-        self.chunk_bytes = int(chunk_bytes or self.CHUNK_BYTES)
-        self.final_bytes = int(final_bytes or self.FINAL_BYTES)
+        self.chunk_bytes = int(chunk_bytes or expanded_context_chars(self.CHUNK_BYTES))
+        self.final_bytes = int(final_bytes or expanded_context_chars(self.FINAL_BYTES))
         self.cache_ttl = int(cache_ttl or 3600)
         self.evidence_system_prompt = evidence_system_prompt
         # Most callers use the conservative 900-token default. A caller can
