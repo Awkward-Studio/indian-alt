@@ -94,6 +94,7 @@ class IndustryDealComparisonService:
         # Business-model text shapes the semantic query. Industry is never a DB filter.
         fields = [
             str(self.deal.title or ""), str(self.deal.sector or ""),
+            str(self.deal.industry or ""),
             str(self.deal.company_details or "")[:700],
             str(self.deal.deal_summary or "")[:700],
         ]
@@ -181,7 +182,7 @@ class IndustryDealComparisonService:
             and not cls._BOILERPLATE_CONTENT.search(content)
         )
 
-    def retrieve(self, query: str) -> dict:
+    def retrieve(self, query: str, *, use_taxonomy: bool = False) -> dict:
         linked = self._linked_deals()
         profile = self._target_profile()
         queries = [
@@ -207,6 +208,22 @@ class IndustryDealComparisonService:
                     continue
                 item = ranked.setdefault(str(chunk.id), {"chunk": chunk, "score": 0.0})
                 item["score"] += 1 / (60 + rank)
+
+        if use_taxonomy:
+            taxonomy = Q()
+            for field in ('industry', 'sector'):
+                value = str(getattr(self.deal, field, '') or '').strip()
+                if value:
+                    taxonomy |= Q(**{field+'__iexact': value})
+            matched = set(str(pk) for pk in Deal.objects.filter(taxonomy).exclude(pk=self.deal.pk)
+                          .values_list('pk', flat=True)) if taxonomy else set()
+            if matched:
+                for rank, chunk in enumerate(self._search(queries[0], limit=self.MAX_RANKED_CHUNKS_PER_QUERY,
+                        deal_ids=sorted(matched), source_types=['document']), 1):
+                    if chunk.source_type != 'document' or str(chunk.deal_id) not in matched:
+                        continue
+                    item = ranked.setdefault(str(chunk.id), {'chunk': chunk, 'score': 0.0})
+                    item['score'] += 1 / (50 + rank)
 
         # Linked competitors get a scoped pass when larger document collections
         # dominate the global result set.
@@ -258,6 +275,18 @@ class IndustryDealComparisonService:
                 "title": f"{document.deal.title}: {document.title}",
                 "url": document.file_url or source_metadata.get("source_url") or "",
                 "source_type": "document",
+                "internal_deal_record": {
+                    "deal_id": deal_id, "company": document.deal.title,
+                    "industry": document.deal.industry, "sector": document.deal.sector,
+                    "received_at": str(document.deal.received_at) if document.deal.received_at else None,
+                    "recorded_at": document.deal.created_at.isoformat(),
+                    "deal_status": document.deal.deal_status,
+                    "business_proposal_stage": document.deal.business_proposal_stage,
+                    "ic_stage": document.deal.ic_stage,
+                    "team_comments": document.deal.comments,
+                    "rejection_reason": document.deal.rejection_reason,
+                    "reasons_for_passing": document.deal.reasons_for_passing,
+                },
             }
             eligible.append(chunk)
 

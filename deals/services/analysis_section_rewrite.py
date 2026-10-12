@@ -269,6 +269,9 @@ class AnalysisSectionRewriteService:
 
     @classmethod
     def _report_context(cls, report: str, section_title: str, max_chars: int = 12_000) -> str:
+        if section_title == 'Executive Summary':
+            _section, start, end = cls.locate_section(report, section_title)
+            return report[:start].rstrip() + '\n\n' + report[end:].lstrip()
         if len(report or "") <= max_chars:
             return report
         _section, start, end = cls.locate_section(report, section_title)

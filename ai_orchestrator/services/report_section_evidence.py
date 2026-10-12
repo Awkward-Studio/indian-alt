@@ -640,6 +640,11 @@ class ICReportSectionEvidenceService:
             table, _ = render_main_table(financial_snapshot, snapshot_citations)
             reserve = estimate_tokens(table or '') + sum(estimate_tokens(json.dumps({'cell': c['snapshot_cell'], 'inputs': c['snapshot_facts']}, default=str)) for c in snapshot_citations.values()) + 2048
             self.max_tokens = max(4000, original_budget - reserve)
+        from .report_competitor_evidence import saved_competitor_blocks
+        competitor_blocks = saved_competitor_blocks(self.deal, title,
+            max_tokens=min(12_000, int(self.max_tokens * 0.20)))
+        competitor_reserve = sum(estimate_tokens(block['text']) + 160 for block in competitor_blocks)
+        self.max_tokens -= competitor_reserve
         query = self._query(title)
         strategy = "hybrid_pgvector_fts"
         try:
@@ -684,7 +689,7 @@ class ICReportSectionEvidenceService:
                     if (chunk.metadata or {}).get('chunk_kind') not in {'table_summary', 'claim', 'metric'}]
 
         comparison = None
-        if title == "Industry Overview":
+        if title == 'Industry Overview' or (title == 'Executive Summary' and getattr(self.deal, 'pk', None)):
             from ai_orchestrator.services.industry_deal_comparison import IndustryDealComparisonService
 
             try:
@@ -704,7 +709,7 @@ class ICReportSectionEvidenceService:
                 )
             comparison = IndustryDealComparisonService(
                 deal=self.deal, embedding_service=self.embedding_service
-            ).retrieve(comparison_query)
+            ).retrieve(comparison_query, use_taxonomy=title == 'Executive Summary')
 
         comparison_budget = min(16_000, int(self.max_tokens * 0.45)) if comparison and comparison["chunks"] else 0
         has_workbooks = any((getattr(d, "extraction_manifest", None) or {}).get("sheets") for d in self.documents)
@@ -774,6 +779,11 @@ class ICReportSectionEvidenceService:
                     f"Peer company: {company} | Database relationship: {info['relationship']}\n"
                     + self._format_chunk(chunk, rank=rank)
                 )
+                if title == 'Executive Summary' and info.get('internal_deal_record'):
+                    block += ('\nInternal deal record for the Similar companies we have seen table. '
+                              'Use received_at as the seen date when supplied; recorded_at is only the system record date. '
+                              'Use recorded status and team comments for Our view; do not invent an investment decision.\n'
+                              + json.dumps(info['internal_deal_record'], ensure_ascii=False))
                 cost = estimate_tokens(block) + 2
                 if cost > remaining:
                     continue
@@ -789,6 +799,13 @@ class ICReportSectionEvidenceService:
                     "from the target deal.\n\n"
                     + "\n\n".join(block for _, block in comparison_selected)
                 )
+        for item in competitor_blocks:
+            rank = len(citations) + 1
+            context += (f"\n\nRetrieval block R{rank:03d} | Citation marker: [R{rank:03d}] | "
+                        f"Document: {item['title']} | Location: {item['location']}\n{item['text']}")
+            citations[str(rank)] = {'rank': rank, 'document_id': item['source_id'],
+                'title': item['title'], 'url': self._safe_http_url(item['url']),
+                'location': item['location'], 'locator': {}}
         source_counts = Counter(str(chunk.source_id) for chunk in selected)
         stats = {
             "strategy": strategy,
@@ -798,12 +815,14 @@ class ICReportSectionEvidenceService:
             "selected_document_ids": list(source_counts),
             "supplemented_document_ids": supplemented_document_ids,
             "estimated_context_tokens": estimate_tokens(context),
-            "context_budget_tokens": self.max_tokens,
+            "context_budget_tokens": self.max_tokens + competitor_reserve,
             "context_budget_basis": "serialized_message",
             "formula_dependency_chunk_count": len(dependency_chunks),
             "formula_dependency_warnings": dependency_notes,
             "primary_financial_chunk_count": len(primary_selected),
             "pending_financial_chunks": pending_primary,
+            "saved_competitor_block_count": len(competitor_blocks),
+            "saved_competitor_context_tokens": competitor_reserve,
         }
         if comparison is not None:
             stats["our_deal_comparison"] = {

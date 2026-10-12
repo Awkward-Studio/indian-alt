@@ -13,6 +13,17 @@ from deals.models import Deal, DealDocument, DealRelationshipContext
 
 
 class IndustryDealComparisonTests(TestCase):
+    def test_summary_combines_sector_and_industry_matches_with_semantic_search(self):
+        embedding = MagicMock()
+        embedding.search_global_chunks.return_value = [self.competitor_chunk, self.peer_chunk]
+        result = IndustryDealComparisonService(deal=self.target, embedding_service=embedding).retrieve('similar internal deals', use_taxonomy=True)
+        scoped = [call.kwargs.get('deal_ids') for call in embedding.search_global_chunks.call_args_list]
+        self.assertTrue(any(ids and str(self.peer.id) in ids for ids in scoped))
+        self.assertNotIn('deal_ids', embedding.search_global_chunks.call_args_list[0].kwargs)
+        record = result['source_info'][str(self.peer_doc.id)]['internal_deal_record']
+        self.assertEqual(record['sector'], 'Food')
+        self.assertEqual(record['deal_status'], self.peer.deal_status)
+
     @classmethod
     def setUpTestData(cls):
         PipelineRegistryService.ensure_report_pipeline_defaults()
