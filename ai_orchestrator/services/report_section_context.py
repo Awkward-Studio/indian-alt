@@ -24,12 +24,13 @@ def prior_section_context(metadata: dict, title: str, *, max_tokens=6_000) -> st
             continue
         body = re.split(r"^###\s+Citations\s*$", completed[key], maxsplit=1, flags=re.M)[0]
         body = re.sub(r"\[\d+\]", "", body)
-        # Financial/transaction schedules govern numbers; prose summaries plus
-        # final unresolved issues keep the remaining section drafts bounded.
-        if key not in {"Key Financials", "Transaction Details", "Transaction / Trading Multiples"}:
+        # Executive Summary needs every completed report in full. Its caller
+        # reserves this context before allocating primary-evidence tokens.
+        # Other sections receive bounded reconciliation excerpts.
+        if title != 'Executive Summary' and key not in {"Key Financials", "Transaction Details", "Transaction / Trading Multiples"}:
             paragraphs = body.split("\n\n")
             body = "\n\n".join(paragraphs[:3] + paragraphs[-3:]) if len(paragraphs) > 6 else body
-        if estimate_tokens("\n\n".join([*blocks, body])) > max_tokens:
+        if title != 'Executive Summary' and estimate_tokens("\n\n".join([*blocks, body])) > max_tokens:
             # Keep whole blocks; never truncate a financial table in mid-row.
             summary = "\n\n".join(body.split("\n\n")[:2])
             if estimate_tokens("\n\n".join([*blocks, summary])) <= max_tokens:
