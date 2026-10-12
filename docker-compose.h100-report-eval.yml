@@ -29,7 +29,7 @@ services:
       - --max-model-len
       - ${H100_EVAL_MAX_MODEL_LEN:-262144}
       - --max-num-seqs
-      - "3"
+      - "2"
       - --reasoning-parser
       - qwen3
       - --language-model-only
