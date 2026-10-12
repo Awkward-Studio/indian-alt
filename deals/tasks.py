@@ -2270,10 +2270,23 @@ def process_vdr_report_section(
             if previous_attempt and previous_attempt.raw_response:
                 draft = re.split(r"^###\s+Citations\s*$", previous_attempt.raw_response or "", maxsplit=1, flags=re.M)[0]
                 draft = re.sub(r"\[(?:R\d+(?:@[^]\n]+)?|\d+)\]", "", draft)
-                retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis previous draft is a starting point, not verified evidence. Correct it using the review feedback and current primary evidence. Re-check every claim against the current retrieval blocks and replace its citations. Preserve supported analysis, correct errors, address coverage gaps and expand only where necessary."
+                incomplete_summary = False
+                if section_title == 'Executive Summary':
+                    from ai_orchestrator.services.executive_summary_format import executive_summary_format_errors
+                    incomplete_summary = any('thirteen presentation headings' in error
+                                             for error in executive_summary_format_errors(draft))
+                if not incomplete_summary:
+                    retry_draft = "\n\n<draft_to_expand>\n" + draft + "\n</draft_to_expand>\nThis previous draft is a starting point, not verified evidence. Correct it using the review feedback and current primary evidence. Re-check every claim against the current retrieval blocks and replace its citations. Preserve supported analysis, correct errors, address coverage gaps and expand only where necessary."
         retry_corrections = ""
         if previous_attempt and previous_attempt.error_message:
             error = previous_attempt.error_message[:8000]
+            if section_title == 'Executive Summary':
+                from ai_orchestrator.services.executive_summary_format import executive_summary_format_errors, executive_summary_output_skeleton
+                precise_errors = executive_summary_format_errors(previous_attempt.raw_response or '')
+                error = '\n'.join(precise_errors)[:8000] or error
+                retry_corrections += ('\n\nRegenerate the complete summary from the ten corresponding report sections. '
+                    'A previous response with missing presentation blocks is omitted as a draft. Cover all thirteen blocks in '
+                    'the following exact structure, including every final-page table.\n'+executive_summary_output_skeleton())
             retry_corrections += ("\n\n<required_draft_corrections>\nThe supplied draft is rejected, not an approved answer. "
                 "Apply this correction before returning a complete replacement: " + error +
                 "\nPreserve supported content, but do not return unchanged text that still has this defect. ")

@@ -886,6 +886,13 @@ class ICReportSectionService:
                                 'value':cell['value'],'currency':cell['currency'],'basis':cell['basis'],'operation':(cell.get('calculation') or {}).get('operation'),
                                 'inputs':[{'value':f['value'],'period':f['period']['key'],'metric':f['metric'],'units':f['units'],'locator':f['locator']} for f in citation.get('snapshot_facts', [])]}))
         evidence = FINANCIAL_BASIS_RULE + '\n\n' + evidence
+        if title == 'Executive Summary':
+            from .executive_summary_format import executive_summary_output_skeleton
+            evidence += ('\n\nRequired complete output structure. Fill every block and required table below '
+                'from the corresponding report sections. Budget space for all three presentation pages. '
+                'Do not stop after industry market sizing; finish founder questions, calls and similar internal deals. '
+                'Keep early blocks compact enough to finish every later block. Never return a partial table or partial word.\n\n'
+                + executive_summary_output_skeleton())
         model_data = analysis.get("deal_model_data") if isinstance(analysis.get("deal_model_data"), dict) else {}
         resolved_stage = cls._resolve_prompt_stage(title)
         revision = resolved_stage.prompt_revision

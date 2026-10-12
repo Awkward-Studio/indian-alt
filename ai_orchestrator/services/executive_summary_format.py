@@ -117,16 +117,34 @@ market sizes from the reference deck. Cite material factual claims and numeric c
 using the supplied [Rnnn] markers. Keep references in the normal report sources footer.
 '''
 
+def executive_summary_output_skeleton():
+    lines = ['## Executive Summary']
+    for title in EXECUTIVE_SUMMARY_HEADINGS:
+        lines.append('### '+title)
+        if title == 'Key financials & metrics':
+            lines.extend(['#### Financial performance', '#### Key metrics'])
+        elif title == 'Industry dynamics':
+            lines.extend(['#### Market size by sub-sector', '#### Market sizing', '#### Sub-sector dynamics'])
+    return '\n\n'.join(lines)
+
 
 def executive_summary_format_errors(markdown):
     headings = re.findall(r'^### (.+?)\s*$', markdown, re.M)
     headings = [h for h in headings if h.casefold() not in {'sources', 'sources and references', 'references', 'citations'}]
-    if tuple(headings) != EXECUTIVE_SUMMARY_HEADINGS:
-        return ['Executive Summary must use the exact thirteen presentation headings in the required order.']
     errors = []
+    if tuple(headings) != EXECUTIVE_SUMMARY_HEADINGS:
+        missing = [title for title in EXECUTIVE_SUMMARY_HEADINGS if title not in headings]
+        unexpected = [title for title in headings if title not in EXECUTIVE_SUMMARY_HEADINGS]
+        errors.append('Executive Summary must use the exact thirteen presentation headings in the required order. '
+                      'Missing headings: '+('; '.join(missing) or 'none')+'. '
+                      'Unexpected headings: '+('; '.join(unexpected) or 'none')+'. '
+                      'Required order: '+'; '.join(EXECUTIVE_SUMMARY_HEADINGS)+'. '
+                      'Return all three presentation pages, including the complete Industry dynamics block and all founder, call and internal-comparison tables.')
     subheadings = re.findall(r'^#### (.+?)\s*$', markdown, re.M)
     if subheadings != ['Financial performance', 'Key metrics', 'Market size by sub-sector', 'Market sizing', 'Sub-sector dynamics']:
-        errors.append('Use only the five specified financial and industry subheadings in their required order.')
+        errors.append('Use these five financial and industry subheadings in this order: '
+                      'Financial performance; Key metrics; Market size by sub-sector; Market sizing; Sub-sector dynamics. '
+                      'Observed: '+'; '.join(subheadings)+'.')
     all_sections = {}
     for level in (3, 4):
         matches = list(re.finditer(r'^'+('#' * level)+r' (.+?)\s*$', markdown, re.M))

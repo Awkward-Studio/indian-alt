@@ -24,6 +24,14 @@ def fixture():
 
 
 class ExecutiveSummaryFormatTests(SimpleTestCase):
+    def test_incomplete_industry_response_identifies_each_missing_final_page_block(self):
+        incomplete = fixture().split('#### Market sizing')[0]+'| Phygit'
+        errors = executive_summary_format_errors(incomplete)
+        for heading in ['Key questions for founders', 'Key takeaways from calls', 'Similar companies we have seen in the space']:
+            self.assertIn(heading, errors[0])
+        self.assertIn('Missing headings:', errors[0])
+        self.assertTrue(any('Market sizing' in error and 'Sub-sector dynamics' in error for error in errors))
+
     def test_all_three_pages_and_required_tables_accept_missing_source_data(self):
         self.assertEqual(executive_summary_format_errors(fixture()), [])
 
