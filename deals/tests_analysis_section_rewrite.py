@@ -33,6 +33,13 @@ Customer concentration requires diligence.
 
 
 class AnalysisSectionReplacementTests(SimpleTestCase):
+    def test_selection_offset_rejects_ambiguous_or_title_matches(self):
+        section = "## Company Details\n\nFirst passage. Another passage."
+        self.assertEqual(AnalysisSectionRewriteService.selection_offset(section, "First"), section.index("First"))
+        for text in ("passage", "Company Details", "Not here"):
+            with self.assertRaises(ValueError):
+                AnalysisSectionRewriteService.selection_offset(section, text)
+
     def test_legacy_section_titles_resolve_to_published_prompts(self):
         self.assertEqual(
             AnalysisSectionRewriteService.published_section_title("4. Industry Overview"),
@@ -62,6 +69,10 @@ class AnalysisSectionReplacementTests(SimpleTestCase):
 
 class PersistedAnalysisSectionRewriteTests(TestCase):
     def setUp(self):
+        for method, fallback in (("_get_embedding", None), ("_model_rerank_chunks", [])):
+            mocked = patch(f"ai_orchestrator.services.embedding_processor.EmbeddingService.{method}", return_value=fallback)
+            mocked.start()
+            self.addCleanup(mocked.stop)
         PipelineRegistryService.ensure_report_pipeline_defaults()
         self.user = User.objects.create_user(username="rewrite-admin", password="test", is_staff=True)
         self.client = APIClient()
@@ -76,6 +87,81 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
                 "canonical_snapshot": {"analyst_report": REPORT},
             },
         )
+
+    def test_selection_confirmation_preserves_every_other_character_and_rejects_stale_preview(self):
+        import hashlib
+        from django.core import signing
+
+        raw = "\n" + REPORT.replace("\n## Key Financials", "\n\n\n## Key Financials") + "\n  \n"
+        self.analysis.analysis_json = {"analyst_report": raw, "canonical_snapshot": {"analyst_report": raw}}
+        self.analysis.save(update_fields=["analysis_json"])
+        section, _, _ = AnalysisSectionRewriteService.locate_section(raw, "Company Details")
+        text = "Legacy company description."
+        replacement = "New company description."
+        patch_data = AnalysisSectionRewriteService.selection_patch(
+            raw, "Company Details", text, section.replace(text, replacement),
+        )
+        token = signing.dumps({"deal_id": str(self.deal.id), "version": "1",
+            "report_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "selection_patch": patch_data}, salt="analysis-section-rewrite")
+        url = f"/api/deals/{self.deal.id}/update_analysis_report/"
+        response = self.client.patch(url, {"selection_confirmation_token": token,
+            "report": "The client cannot replace anything else."}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.analysis.refresh_from_db()
+        self.assertEqual(self.analysis.analysis_json["analyst_report"], raw.replace(text, replacement))
+        self.assertEqual(self.analysis.analysis_json["canonical_snapshot"]["analyst_report"], raw.replace(text, replacement))
+        self.assertEqual(self.client.patch(url, {"selection_confirmation_token": token}, format="json").status_code, 409)
+
+    def test_fresh_context_pool_reads_each_deal_source_and_excludes_other_deals(self):
+        from deals.services.rewrite_evidence import ranked_rewrite_evidence
+        from microsoft.models import Email, EmailAccount
+
+        account = EmailAccount.objects.create(email="rewrite-test@example.com")
+        Email.objects.create(email_account=account, deal=self.deal, graph_id="new-thread",
+            subject="New signed contracts", body_text="The new customer signed a three-year revenue contract.")
+        Email.objects.create(email_account=account, graph_id="unlinked-thread",
+            subject="Unlinked correspondence", body_text="This email is outside the deal.")
+        DealDocument.objects.create(deal=self.deal, title="Public Domain News Research - New",
+            normalized_text="A public announcement confirms a new competitor entered the market.")
+        DealDocument.objects.create(deal=self.deal, title="New diligence memo",
+            normalized_text="The diligence team validated the contract value.")
+        self.deal.competitor_candidates = [{"name": "Peer Co", "evidence_urls": ["https://example.com/peer"],
+                                           "description": "Peer Co entered the same market."}]
+        self.deal.save(update_fields=["competitor_candidates"])
+
+        evidence = ranked_rewrite_evidence(self.deal, "Recent market competition and signed customer contracts")
+        self.assertEqual({item.kind for item in evidence}, {"Email", "Company news", "Deal document", "Competitor"})
+        self.assertNotIn("outside the deal", " ".join(item.content for item in evidence))
+
+    @patch("deals.services.rewrite_evidence.ranked_rewrite_evidence")
+    def test_selected_rewrite_uses_fresh_evidence_and_preserves_other_text(self, evidence):
+        from types import SimpleNamespace
+        evidence.return_value = [
+            SimpleNamespace(kind=kind, source_id=str(index), title=f"Updated {kind}",
+                content=f"New {kind} evidence", url="", location="")
+            for index, kind in enumerate(("Company news", "Competitor", "Email", "Deal document"))
+        ]
+        ai = MagicMock()
+        ai.process_content.return_value = {"response": "Updated company description. [R003]"}
+        full_report = REPORT + "\n" + "Later report context. " * 1000
+        section, _, _ = AnalysisSectionRewriteService.locate_section(full_report, "Company Details")
+        rewritten = AnalysisSectionRewriteService(ai).rewrite(
+            deal=self.deal, section_title="Company Details", section_markdown=section,
+            instruction="Include newly received evidence", full_report=full_report,
+            rewrite_scope="selection", selected_text="Legacy company description.",
+        )
+        self.assertTrue(rewritten.startswith("## Company Details\n\nUpdated company description."))
+        self.assertIn("Email", rewritten)
+        metadata = ai.process_content.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["full_report"], full_report)
+        self.assertEqual(metadata["selected_text"], "Legacy company description.")
+        self.assertEqual(metadata["pipeline_key"], "ic_report_generation")
+        prompt = AIProcessorService._append_section_rewrite_request("Published section rules", metadata)
+        self.assertIn("Published section rules", prompt)
+        self.assertIn(full_report, prompt)
+        for item in evidence.return_value:
+            self.assertIn(item.content, ai.process_content.call_args.kwargs["content"])
 
     def test_rewrite_adds_analyst_request_after_published_section_prompt(self):
         published = PipelineRegistryService.resolve_stage(
@@ -180,7 +266,7 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         self.assertIn("RELEVANT INDEXED COMPANY NEWS EVIDENCE", prompt)
         self.assertIn(document.title, prompt)
         self.assertIn("INR 42 Cr in FY24", prompt)
-        self.assertEqual(search_chunks.call_count, 2)
+        self.assertEqual(search_chunks.call_count, 3)
 
     @patch("deals.tasks.rewrite_analysis_section_async.apply_async")
     def test_api_queues_audited_rewrite_then_persists_confirmed_preview(self, queue_rewrite):
@@ -424,7 +510,9 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         self.assertEqual(call["metadata"]["rewrite_instruction"], "Explain the FY26 change.")
         self.assertIn("Project Monsoon", call["metadata"]["model_data_json"])
         self.assertIn("FY26 revenue INR 128 Cr", call["content"])
-        evidence_class.return_value.retrieve.assert_called_once_with("Key Financials")
+        evidence_class.return_value.retrieve.assert_called_once()
+        self.assertEqual(evidence_class.return_value.retrieve.call_args.args, ("Key Financials",))
+        self.assertIn("FY25 revenue", evidence_class.return_value.retrieve.call_args.kwargs["rewrite_query"])
 
     def test_rewrite_prompt_retrieves_attached_deal_document_evidence(self):
         document = DealDocument.objects.create(

@@ -2126,7 +2126,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         deal = self.get_object()
         deal = Deal.objects.select_for_update().get(pk=deal.pk)
         report = request.data.get('report')
-        if not isinstance(report, str):
+        selection_token = request.data.get('selection_confirmation_token')
+        if not isinstance(report, str) and not selection_token:
             return Response({"error": "report must be a string"}, status=400)
 
         version = request.data.get('version')
@@ -2137,13 +2138,36 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"error": "version must be a number"}, status=400)
 
-        before_report = ((analysis.analysis_json or {}).get('analyst_report') if analysis else deal.deal_summary) or ''
+        if selection_token:
+            import hashlib
+            from django.core import signing
+            from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
+
+            try:
+                signed = signing.loads(selection_token, salt="analysis-section-rewrite", max_age=3600)
+                patch = signed.get("selection_patch")
+                if signed.get("deal_id") != str(deal.id) or not isinstance(patch, dict):
+                    raise signing.BadSignature
+                analysis, source = AnalysisSectionRewriteService.selection_report(deal, signed.get("version"))
+                digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                if signed.get("report_sha256") != digest:
+                    raise ValueError("The report changed after the preview. Select the passage again.")
+                start, end = patch["start"], patch["end"]
+                report = source[:start] + patch["replacement"] + source[end:]
+            except (signing.BadSignature, TypeError):
+                return Response({"error": "The selection preview is invalid or expired."}, status=400)
+            except ValueError as exc:
+                return Response({"error": str(exc)}, status=409)
+
+        before_report = source if selection_token else (
+            ((analysis.analysis_json or {}).get('analyst_report') if analysis else deal.deal_summary) or ''
+        )
         expected_snapshot = request.data.get('expected_financial_snapshot_id')
         current_snapshot = deal.financial_snapshots.first()
         if expected_snapshot is not None and str(current_snapshot.id if current_snapshot else '') != str(expected_snapshot):
             return Response({'error': 'Financial sources changed. Refresh before saving.'}, status=409)
         expected_hash = request.data.get('expected_report_sha256')
-        if current_snapshot and not expected_hash:
+        if current_snapshot and not expected_hash and not selection_token:
             return Response({'error':'Refresh the report and send expected_report_sha256 before saving.'}, status=409)
         if expected_hash is not None:
             from deals.services.report_assembly import report_text_fingerprints
@@ -2210,7 +2234,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
         instruction = request.data.get('instruction')
         full_report = request.data.get('full_report')
         rewrite_scope = request.data.get('rewrite_scope', 'section')
-        if rewrite_scope not in ('section', 'financial_table'):
+        if rewrite_scope not in ('section', 'financial_table', 'selection'):
             return Response({'error': 'Invalid rewrite_scope.'}, status=400)
         if rewrite_scope == 'financial_table':
             from deals.services.analysis_section_rewrite import AnalysisSectionRewriteService
@@ -2289,6 +2313,8 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                         {"error": "The report or section changed after the preview. Generate a new rewrite preview."},
                         status=status.HTTP_409_CONFLICT,
                     )
+                if confirmation.get("selection_patch"):
+                    return Response({"error": "Save selection previews through update_analysis_report."}, status=400)
                 rewritten = str(confirmation.get("section_markdown") or "").strip()
                 updated_report = rewrite_service.replace_section(full_report, section_title, rewritten)
                 rewrite_service.persist(deal=deal, full_report=updated_report, version=version, actor=request.user)
@@ -2311,6 +2337,18 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
             from ai_orchestrator.services.bulk_prompt_contracts import IC_REPORT_SECTION_STAGE_KEYS
             from ai_orchestrator.services.pipeline_registry import PipelineRegistryService
             from .tasks import rewrite_analysis_section_async
+
+            selected_text = request.data.get("selected_text")
+            if rewrite_scope == "selection":
+                if not isinstance(selected_text, str) or not selected_text.strip() or len(selected_text) > 8000:
+                    return Response({"error": "Select up to 8,000 characters to rewrite."}, status=400)
+                try:
+                    analysis, full_report = rewrite_service.selection_report(deal, version)
+                    version = analysis.version if analysis else None
+                    section_markdown, _, _ = rewrite_service.locate_section(full_report, section_title)
+                    rewrite_service.selection_offset(section_markdown, selected_text)
+                except ValueError as exc:
+                    return Response({"error": str(exc)}, status=400)
 
             known_title = rewrite_service.published_section_title(section_title)
             pipeline_key = "ic_report_generation" if known_title else "analysis_support"
@@ -2353,6 +2391,7 @@ class DealViewSet(ErrorHandlingMixin, viewsets.ModelViewSet):
                         "audit_log_id": str(audit.id),
                         "use_review_feedback": bool(request.data.get('use_review_feedback', True)),
                         "rewrite_scope": rewrite_scope,
+                        **({"selected_text": selected_text} if rewrite_scope == "selection" else {}),
                     },
                     queue="high_priority", task_id=task_id,
                 )

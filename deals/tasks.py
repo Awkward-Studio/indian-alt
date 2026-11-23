@@ -48,6 +48,7 @@ def rewrite_analysis_section_async(
     audit_log_id: str,
     use_review_feedback: bool = True,
     rewrite_scope: str = 'section',
+    selected_text: str = '',
 ):
     """Generate a reviewable section draft using its published IC prompt."""
     from django.core import signing
@@ -71,6 +72,11 @@ def rewrite_analysis_section_async(
             celery_task_id=str(self.request.id),
             use_review_feedback=use_review_feedback,
             rewrite_scope=rewrite_scope,
+            **({"selected_text": selected_text} if selected_text else {}),
+        )
+        selection_patch = (
+            rewrite_service.selection_patch(full_report, section_title, selected_text, rewritten)
+            if rewrite_scope == "selection" else None
         )
         confirmation_token = signing.dumps(
             {
@@ -80,6 +86,7 @@ def rewrite_analysis_section_async(
                 "report_sha256": hashlib.sha256(full_report.encode("utf-8")).hexdigest(),
                 "section_markdown": rewritten,
                 "audit_log_id": str(audit.pk),
+                **({"selection_patch": selection_patch} if selection_patch else {}),
             },
             salt="analysis-section-rewrite",
             compress=True,

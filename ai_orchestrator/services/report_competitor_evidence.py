@@ -10,7 +10,7 @@ COMPETITOR_SECTIONS = {'Executive Summary', 'Industry Overview',
 
 
 def saved_competitor_blocks(deal, title, *, max_tokens):
-    if title not in COMPETITOR_SECTIONS:
+    if title is not None and title not in COMPETITOR_SECTIONS:
         return []
     blocks = []
     used = 0

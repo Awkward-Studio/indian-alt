@@ -5,6 +5,8 @@ from django.test import SimpleTestCase
 
 from ai_orchestrator.services.chat_scope import (
     ChatScopeValidationError,
+    attach_report_excerpt,
+    ensure_private_report_chat,
     internal_citation,
     normalize_web_citation,
     parse_chat_scope,
@@ -55,6 +57,28 @@ class ChatScopeContractTests(SimpleTestCase):
                     "document_ids": [str(uuid4())],
                 }
             )
+
+    def test_report_excerpt_is_quoted_with_its_source(self):
+        message = attach_report_excerpt(
+            "What drove growth?",
+            {"title": "Key Financials · V2", "text": "Revenue: 120\nEBITDA: 30"},
+        )
+        self.assertEqual(
+            message,
+            "What drove growth?\n\nReport excerpt (Key Financials · V2):\n> Revenue: 120\n> EBITDA: 30",
+        )
+
+    def test_report_excerpt_validates_the_total_message_budget(self):
+        with self.assertRaisesRegex(ChatScopeValidationError, "12,000"):
+            attach_report_excerpt("x" * 5000, {"title": "Report", "text": "x" * 8000})
+        with self.assertRaisesRegex(ChatScopeValidationError, "8,000"):
+            attach_report_excerpt("Question", {"title": "Report", "text": "x" * 8001})
+
+    def test_report_chat_requires_local_ai_without_web_search(self):
+        ensure_private_report_chat(parse_chat_scope({}))
+        for request in ({"model_provider": "anthropic"}, {"web_search_enabled": True}):
+            with self.assertRaisesRegex(ChatScopeValidationError, "Local AI"):
+                ensure_private_report_chat(parse_chat_scope(request))
 
     def test_internal_and_web_citations_are_structured(self):
         transcript = internal_citation(

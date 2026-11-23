@@ -75,6 +75,31 @@ def parse_chat_scope(data: dict[str, Any]) -> ChatScope:
     return scope
 
 
+
+def attach_report_excerpt(question: str, value: Any) -> str:
+    """Quote client-selected report text as evidence for the current question."""
+    if not isinstance(value, dict):
+        raise ChatScopeValidationError("report_excerpt must be an object.")
+    title = value.get("title")
+    text = value.get("text")
+    if not isinstance(title, str) or not title.strip() or len(title) > 200:
+        raise ChatScopeValidationError("Provide a report section title of up to 200 characters.")
+    if not isinstance(text, str) or not text.strip() or len(text) > 8000:
+        raise ChatScopeValidationError("Select up to 8,000 characters from the report.")
+    title = " ".join(title.split())
+    normalized_text = text.strip().replace("\r\n", "\n").replace("\r", "\n")
+    quoted = "\n".join(f"> {line}" for line in normalized_text.split("\n"))
+    message = f"{question}\n\nReport excerpt ({title}):\n{quoted}"
+    if len(message) > 12000:
+        raise ChatScopeValidationError("Shorten your question or report excerpt to fit 12,000 characters.")
+    return message
+
+
+def ensure_private_report_chat(scope: ChatScope) -> None:
+    if scope.model_provider != "vllm" or scope.web_search_enabled:
+        raise ChatScopeValidationError("Report excerpts require Local AI with web search off.")
+
+
 def internal_citation(chunk: dict[str, Any]) -> dict[str, Any]:
     metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
     source_type = str(chunk.get("source_type") or "")

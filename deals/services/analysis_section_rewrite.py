@@ -64,6 +64,37 @@ class AnalysisSectionRewriteService:
         suffix = report[end:].lstrip()
         return "\n\n".join(part for part in (prefix, rewritten, suffix) if part).strip() + "\n"
 
+    @staticmethod
+    def selection_offset(section: str, selected_text: str) -> int:
+        start = section.find(selected_text)
+        if not selected_text or start < 0 or section.find(selected_text, start + 1) >= 0:
+            raise ValueError("Select a passage that matches the report Markdown once. For repeated or formatted text, use the section editor.")
+        if start < len(section.split("\n", 1)[0]):
+            raise ValueError("Select report content below the section heading.")
+        return start
+
+    @staticmethod
+    def selection_report(deal, version):
+        """Get the exact stored Markdown for the current report."""
+        analysis = deal.latest_analysis
+        if version not in (None, "") and (not analysis or int(version) != analysis.version):
+            raise ValueError("The report version changed. Select the passage again in the latest report.")
+        payload = analysis.analysis_json or {} if analysis else {}
+        snapshot = payload.get("canonical_snapshot")
+        canonical = snapshot.get("analyst_report") if isinstance(snapshot, dict) else None
+        return analysis, canonical or payload.get("analyst_report") or deal.deal_summary or ""
+
+    @classmethod
+    def selection_patch(cls, report, section_title, selected_text, draft):
+        section, section_start, _ = cls.locate_section(report, section_title)
+        offset = cls.selection_offset(section, selected_text)
+        prefix, suffix = section[:offset], section[offset + len(selected_text):]
+        replacement_end = len(draft) - len(suffix)
+        if not draft.startswith(prefix) or not draft.endswith(suffix) or replacement_end <= offset:
+            raise ValueError("The draft changed content outside the selected passage.")
+        return {"start": section_start + offset, "end": section_start + offset + len(selected_text),
+                "replacement": draft[offset:replacement_end]}
+
     def rewrite(
         self,
         *,
@@ -78,14 +109,16 @@ class AnalysisSectionRewriteService:
         celery_task_id: str | None = None,
         use_review_feedback: bool = True,
         rewrite_scope: str = 'section',
+        selected_text: str = '',
     ) -> str:
         self.validation_warnings = []
         section_title = self.published_section_title(section_title) or section_title
-        if section_title == 'Executive Summary':
+        selection_only = rewrite_scope == 'selection'
+        if section_title == 'Executive Summary' and not selection_only:
             from ai_orchestrator.services.executive_summary_format import EXECUTIVE_SUMMARY_FORMAT, EXECUTIVE_SUMMARY_REPORT_BASIS
             instruction += '\n\n' + EXECUTIVE_SUMMARY_FORMAT + '\n\n' + EXECUTIVE_SUMMARY_REPORT_BASIS
         table_only = rewrite_scope == 'financial_table'
-        if rewrite_scope not in {'section', 'financial_table'} or (table_only and section_title != 'Key Financials'):
+        if rewrite_scope not in {'section', 'financial_table', 'selection'} or (table_only and section_title != 'Key Financials'):
             raise ValueError('Table rewrites are available only for Key Financials.')
         if table_only:
             from .financial_table_rewrite import locate_main_financial_table
@@ -102,16 +135,22 @@ class AnalysisSectionRewriteService:
                 'Current main table:\n' + current_table
             )
         published_section = section_title in IC_SECTION_TITLES
-        evidence_scope = self._requested_evidence_scope(instruction)
+        if selection_only and not published_section:
+            instruction += "\n\nReturn only the replacement for this passage:\n" + selected_text
+        selection_start = self.selection_offset(section_markdown, selected_text) if selection_only else None
+        evidence_query = "\n".join((section_title, instruction[:4000], (selected_text or section_markdown)[:2400]))
         from deals.services.report_coverage import latest_review_feedback, format_review_feedback
         review_feedback = (latest_review_feedback(deal).get(section_title) or {}) if use_review_feedback else {}
         feedback_text = format_review_feedback(review_feedback)
         if feedback_text:
             instruction += '\n\n'+feedback_text
         from ai_orchestrator.services.report_financial_format import FINANCIAL_BASIS_RULE
+        report_context = full_report if selection_only else self._report_context(full_report, section_title)
         prompt_parts = [FINANCIAL_BASIS_RULE]
         citations = {}
         evidence_metadata = None
+        from deals.services.rewrite_evidence import ranked_rewrite_evidence
+        fresh_evidence = ranked_rewrite_evidence(deal, evidence_query)
         if published_section:
             from ai_orchestrator.services.report_section_evidence import ICReportSectionEvidenceService
             from ai_orchestrator.services.token_budget import report_evidence_budget
@@ -126,8 +165,9 @@ class AnalysisSectionRewriteService:
                             input_budget=int(getattr(settings, 'VDR_REPORT_SECTION_INPUT_TOKENS', 40960)),
                             output_budget=int(getattr(settings, 'VDR_REPORT_SECTION_MAX_TOKENS', 16384)),
                             evidence_budget=int(getattr(settings, 'VDR_REPORT_SECTION_EVIDENCE_TOKENS', 36000)),
-                            extra_context=FINANCIAL_BASIS_RULE+instruction+section_markdown+self._report_context(full_report, section_title)),
-                    ).retrieve(section_title)
+                            extra_context=FINANCIAL_BASIS_RULE+instruction+section_markdown+report_context
+                            + "".join(item.content for item in fresh_evidence)),
+                    ).retrieve(section_title, rewrite_query=evidence_query)
                 except ValueError as exc:
                     if "No indexed document chunks were available" not in str(exc):
                         raise
@@ -137,7 +177,6 @@ class AnalysisSectionRewriteService:
                     citations = dict(retrieved.get("citations") or {})
                     evidence_metadata = retrieved.get("metadata")
 
-        evidence_query = f"{section_title}\n{instruction}"
         document_context, document_citations = self._document_context(
             deal=deal, document_ids=document_ids, query=evidence_query,
             start_rank=len(citations) + 1,
@@ -145,11 +184,11 @@ class AnalysisSectionRewriteService:
         citations.update(document_citations)
         meeting_context, meeting_citations = self._meeting_context(
             deal=deal, query=evidence_query, start_rank=len(citations) + 1,
-        ) if evidence_scope in {"all", "meetings", "meetings_and_news"} else ("", {})
+        )
         citations.update(meeting_citations)
         news_context, news_citations = self._news_context(
             deal=deal, query=evidence_query, start_rank=len(citations) + 1,
-        ) if evidence_scope in {"all", "news", "meetings_and_news"} else ("", {})
+        )
         citations.update(news_citations)
         if document_context:
             prompt_parts.append(f"[ATTACHED DEAL DOCUMENTS CONTEXT]\n{document_context}")
@@ -157,6 +196,14 @@ class AnalysisSectionRewriteService:
             prompt_parts.append(f"[RELEVANT INDEXED MEETING EVIDENCE]\n{meeting_context}")
         if news_context:
             prompt_parts.append(f"[RELEVANT INDEXED COMPANY NEWS EVIDENCE]\n{news_context}")
+        if fresh_evidence:
+            blocks = []
+            for item in fresh_evidence:
+                rank = len(citations) + 1
+                blocks.append(f"Citation marker: [R{rank:03d}] | {item.kind}: {item.title} | {item.location}\n{item.content}")
+                citations[str(rank)] = self._extra_citation(rank=rank, source_id=item.source_id,
+                    title=f"{item.kind}: {item.title}", url=item.url, location=item.location)
+            prompt_parts.append("[RECENT AND RELEVANT DEAL EVIDENCE]\n" + "\n\n".join(blocks))
         content = "\n\n".join(prompt_parts)
 
         analysis = (
@@ -208,8 +255,9 @@ class AnalysisSectionRewriteService:
                 "instruction": instruction,
                 "rewrite_instruction": instruction if published_section else None,
                 "rewrite_scope": rewrite_scope,
+                "selected_text": selected_text,
                 "section_markdown": section_markdown,
-                "full_report": self._report_context(full_report, section_title),
+                "full_report": report_context,
                 "minimum_words": f"{minimum_words:,}",
                 "target_words": f"{max(minimum_words, int(getattr(settings, 'VDR_REPORT_SECTION_TARGET_WORDS', 2500)), int(getattr(settings, 'VDR_KEY_FINANCIALS_TARGET_WORDS', 4500)) if section_title == 'Key Financials' and not table_only else 0):,}",
                 "model_data_json": json.dumps(model_data, ensure_ascii=False, default=str),
@@ -237,6 +285,25 @@ class AnalysisSectionRewriteService:
         rewritten = rewritten.strip()
         if not rewritten:
             raise ValueError("AI did not return a rewritten section.")
+        if selection_only:
+            if self.HEADING_RE.search(rewritten) or ("\n" not in selected_text and "\n" in rewritten):
+                raise ValueError("The rewrite returned extra sections or lines. Try a more focused selection.")
+            from ai_orchestrator.services.report_sections import ICReportSectionService
+
+            def inline_source(match):
+                rank = next((value for key, value in match.groupdict().items() if key != "locator" and value), "")
+                source = citations.get(str(int(rank))) if rank else None
+                return ICReportSectionService._render_inline_citation(source) if source else ""
+
+            rewritten = ICReportSectionService.INTERNAL_CITATION_PATTERN.sub(inline_source, rewritten).strip()
+            if not rewritten:
+                raise ValueError("AI did not return a replacement passage.")
+            line_start = section_markdown.rfind("\n", 0, selection_start) + 1
+            line_end = section_markdown.find("\n", selection_start + len(selected_text))
+            containing_line = section_markdown[line_start:] if line_end == -1 else section_markdown[line_start:line_end]
+            if containing_line.lstrip().startswith("|") and rewritten.count("|") != selected_text.count("|"):
+                raise ValueError("The rewrite would change the table structure.")
+            return section_markdown[:selection_start] + rewritten + section_markdown[selection_start + len(selected_text):]
         if citations or table_only or section_title in {'Key Financials', 'Executive Summary'}:
             from ai_orchestrator.services.report_sections import ICReportSectionService
             self.calculation_corrections = []
@@ -263,19 +330,6 @@ class AnalysisSectionRewriteService:
                 for message in report_calculation_errors(rewritten))
             self.table_calculation_warnings = '\n'.join(issue['message'] for issue in self.validation_warnings)
         return rewritten
-
-    @staticmethod
-    def _requested_evidence_scope(instruction: str) -> str:
-        text = str(instruction or "").casefold()
-        meetings = bool(re.search(r"\b(meeting|meetings|meeting notes?|management call|management calls)\b", text))
-        news = bool(re.search(r"\b(news|web research|public domain|public-domain|press coverage|media coverage)\b", text))
-        if meetings and news:
-            return "meetings_and_news"
-        if meetings:
-            return "meetings"
-        if news:
-            return "news"
-        return "all"
 
     @classmethod
     def _report_context(cls, report: str, section_title: str, max_chars: int = 12_000) -> str:
@@ -456,7 +510,7 @@ class AnalysisSectionRewriteService:
                             deal=deal,
                             source_type="document",
                             source_id=source_id,
-                        ).order_by("chunk_index")[:limit]
+                        ).order_by("metadata__chunk_index", "id")[:limit]
                     )
 
             if chunks:

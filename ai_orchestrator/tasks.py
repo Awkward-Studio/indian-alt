@@ -239,6 +239,11 @@ def generate_chat_response_async(self, conversation_id: str, user_message: str, 
         ai_service = AIProcessorService()
         history_context, history_messages_used, history_chars_used = _build_history_context(conversation)
         web_search_enabled = bool((metadata or {}).get("web_search_enabled", False))
+        uses_external_services = web_search_enabled or (metadata or {}).get("model_provider") == "anthropic"
+        if uses_external_services and AIMessage.objects.filter(
+            conversation=conversation, applied_filters__report_excerpt=True,
+        ).exists():
+            raise ValueError("Report excerpts require Local AI with web search off.")
         document_count = 0
         
         if skill_name == 'universal_chat':

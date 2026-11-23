@@ -32,7 +32,13 @@ from .serializers import (
     AISkillSerializer,
 )
 from .services.ai_processor import AIProcessorService
-from .services.chat_scope import ChatScopeValidationError, internal_citation, parse_chat_scope
+from .services.chat_scope import (
+    ChatScopeValidationError,
+    attach_report_excerpt,
+    ensure_private_report_chat,
+    internal_citation,
+    parse_chat_scope,
+)
 from .services.embedding_processor import EmbeddingService
 from .services.flow_config import UniversalChatFlowService
 from .services.realtime import broadcast_audit_log_update
@@ -1140,6 +1146,9 @@ class AIConversationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = AIConversation.objects.filter(user=self.request.user)
+        search = self.request.query_params.get("search", "").strip()
+        if self.action == "list" and search:
+            qs = qs.filter(Q(title__icontains=search) | Q(metadata__deal_title__icontains=search))
         kind = self.request.query_params.get("kind")
         if kind == "universal_chat":
             return qs.exclude(metadata__kind="deal_chat")
@@ -1269,8 +1278,12 @@ class DealChatView(APIView):
         user_message = user_message.strip()
         try:
             deal = Deal.objects.get(id=deal_id)
+            report_excerpt = request.data.get("report_excerpt")
             try:
                 scope = parse_chat_scope(request.data)
+                if report_excerpt is not None:
+                    ensure_private_report_chat(scope)
+                    user_message = attach_report_excerpt(user_message, report_excerpt)
             except ChatScopeValidationError as exc:
                 return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1350,6 +1363,11 @@ class DealChatView(APIView):
                         {"error": "This conversation belongs to a different chat context."},
                         status=status.HTTP_409_CONFLICT,
                     )
+                if conversation_metadata.get("has_report_excerpt"):
+                    try:
+                        ensure_private_report_chat(scope)
+                    except ChatScopeValidationError as exc:
+                        return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             else:
                 conversation = AIConversation.objects.create(
                     user=request.user,
@@ -1397,6 +1415,7 @@ class DealChatView(APIView):
                     "web_search_enabled": scope.web_search_enabled,
                     "selected_document_ids": scope.document_ids,
                     "selected_transcript_ids": scope.transcript_ids,
+                    **({"report_excerpt": True} if report_excerpt is not None else {}),
                 },
             )
 
@@ -1407,6 +1426,8 @@ class DealChatView(APIView):
             conversation.metadata['kind'] = 'deal_chat'
             conversation.metadata['deal_id'] = str(deal.id)
             conversation.metadata['deal_title'] = deal.title
+            if report_excerpt is not None:
+                conversation.metadata["has_report_excerpt"] = True
             conversation.save(update_fields=['metadata'])
 
             task_info: Dict[str, Any] = {}

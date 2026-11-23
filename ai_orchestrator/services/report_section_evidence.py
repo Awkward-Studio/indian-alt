@@ -630,7 +630,7 @@ class ICReportSectionEvidenceService:
                 chunks.append((not is_statement, not revenue, str(document.id), sheet, row, chunk))
         return [item[-1] for item in sorted(chunks, key=lambda item: item[:-1])]
 
-    def retrieve(self, title: str) -> dict:
+    def retrieve(self, title: str, *, rewrite_query: str = "") -> dict:
         financial_snapshot = None
         original_budget = self.max_tokens
         if title == 'Key Financials' and getattr(self.deal, 'pk', None):
@@ -646,6 +646,8 @@ class ICReportSectionEvidenceService:
         competitor_reserve = sum(estimate_tokens(block['text']) + 160 for block in competitor_blocks)
         self.max_tokens -= competitor_reserve
         query = self._query(title)
+        if rewrite_query:
+            query += f"\nAnalyst rewrite focus: {rewrite_query}"
         strategy = "hybrid_pgvector_fts"
         try:
             candidates = self.embedding_service.search_global_chunks(
