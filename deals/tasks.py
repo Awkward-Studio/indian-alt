@@ -4542,10 +4542,11 @@ def fetch_competitors_async_task(deal_id: str, instruction: str = "", existing_c
                 for item in persisted_competitors
                 if _competitor_result_key(item) not in {"name:", "cin:"}
             }
+            saved_at = timezone.now().isoformat()
             for competitor in competitors:
                 key = _competitor_result_key(competitor)
                 if key not in persisted_keys:
-                    persisted_competitors.append(competitor)
+                    persisted_competitors.append({**competitor, "saved_at": saved_at})
                     persisted_keys.add(key)
             locked_deal.competitor_candidates = persisted_competitors
             locked_deal.updated_at = timezone.now()

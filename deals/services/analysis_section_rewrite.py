@@ -197,13 +197,27 @@ class AnalysisSectionRewriteService:
         if news_context:
             prompt_parts.append(f"[RELEVANT INDEXED COMPANY NEWS EVIDENCE]\n{news_context}")
         if fresh_evidence:
-            blocks = []
+            latest_blocks, ranked_blocks = [], []
             for item in fresh_evidence:
                 rank = len(citations) + 1
-                blocks.append(f"Citation marker: [R{rank:03d}] | {item.kind}: {item.title} | {item.location}\n{item.content}")
+                available_at = getattr(item, "available_at", "")
+                date_label = available_at[:10]
+                detail = [f"Citation marker: [R{rank:03d}]", f"{item.kind}: {item.title}"]
+                if item.location and item.location != date_label:
+                    detail.append(item.location)
+                if date_label:
+                    detail.append(f"Available: {date_label}")
+                block = " | ".join(detail) + "\n" + item.content
+                (latest_blocks if getattr(item, "latest", False) else ranked_blocks).append(block)
                 citations[str(rank)] = self._extra_citation(rank=rank, source_id=item.source_id,
                     title=f"{item.kind}: {item.title}", url=item.url, location=item.location)
-            prompt_parts.append("[RECENT AND RELEVANT DEAL EVIDENCE]\n" + "\n\n".join(blocks))
+            if latest_blocks:
+                prompt_parts.insert(1, "[LATEST AVAILABLE DEAL EVIDENCE]\n"
+                    "Check each recent update for relevance. Prefer newer verified facts when they supersede older ones. "
+                    "Compare reporting periods and source authority before resolving a conflict.\n\n"
+                    + "\n\n".join(latest_blocks))
+            if ranked_blocks:
+                prompt_parts.append("[ADDITIONAL RELEVANCE-RANKED DEAL EVIDENCE]\n" + "\n\n".join(ranked_blocks))
         content = "\n\n".join(prompt_parts)
 
         analysis = (

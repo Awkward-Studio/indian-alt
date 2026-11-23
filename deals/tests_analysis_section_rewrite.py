@@ -33,6 +33,27 @@ Customer concentration requires diligence.
 
 
 class AnalysisSectionReplacementTests(SimpleTestCase):
+    def test_recent_evidence_survives_low_relevance_and_long_excerpts(self):
+        from ai_orchestrator.services.token_budget import estimate_message_tokens
+        from deals.services.rewrite_evidence import RewriteEvidence, _select_rewrite_evidence
+
+        kinds = ("Company news", "Competitor", "Deal document", "Email")
+        older = [RewriteEvidence(kind=kind, source_id=f"old-{kind}", title=f"Old {kind}",
+            content="Strong match from an older source.", location="", url="",
+            metadata={"chunk_index": 0}, available_at="2026-01-01") for kind in kinds]
+        newest = [RewriteEvidence(kind=kind, source_id=f"new-{kind}", title=f"New {kind}",
+            content="Newly available evidence. " * 200, location="", url="",
+            metadata={"chunk_index": 0}, available_at="2026-11-23") for kind in kinds]
+
+        selected = _select_rewrite_evidence(older + newest, older + newest, max_tokens=5000)
+
+        self.assertEqual([item.source_id for item in selected[:4]], [item.source_id for item in newest])
+        self.assertTrue(all(item.latest and item.content.endswith("…") for item in selected[:4]))
+        self.assertTrue(all(item in selected[4:] for item in older))
+        cost = sum(estimate_message_tokens(item.content) + estimate_message_tokens(item.title + item.location) + 120
+                   for item in selected)
+        self.assertLessEqual(cost, 5000)
+
     def test_selection_offset_rejects_ambiguous_or_title_matches(self):
         section = "## Company Details\n\nFirst passage. Another passage."
         self.assertEqual(AnalysisSectionRewriteService.selection_offset(section, "First"), section.index("First"))
@@ -139,7 +160,8 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         from types import SimpleNamespace
         evidence.return_value = [
             SimpleNamespace(kind=kind, source_id=str(index), title=f"Updated {kind}",
-                content=f"New {kind} evidence", url="", location="")
+                content=f"New {kind} evidence", url="", location="",
+                latest=True, available_at="2026-11-23T00:00:00+00:00")
             for index, kind in enumerate(("Company news", "Competitor", "Email", "Deal document"))
         ]
         ai = MagicMock()
@@ -160,8 +182,11 @@ class PersistedAnalysisSectionRewriteTests(TestCase):
         prompt = AIProcessorService._append_section_rewrite_request("Published section rules", metadata)
         self.assertIn("Published section rules", prompt)
         self.assertIn(full_report, prompt)
+        context = ai.process_content.call_args.kwargs["content"]
+        self.assertIn("[LATEST AVAILABLE DEAL EVIDENCE]", context)
+        self.assertIn("Available: 2026-11-23", context)
         for item in evidence.return_value:
-            self.assertIn(item.content, ai.process_content.call_args.kwargs["content"])
+            self.assertIn(item.content, context)
 
     def test_rewrite_adds_analyst_request_after_published_section_prompt(self):
         published = PipelineRegistryService.resolve_stage(
